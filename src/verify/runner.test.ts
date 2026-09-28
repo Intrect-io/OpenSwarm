@@ -1,10 +1,17 @@
 import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VerifyCommand } from './manifest.js';
-import { runVerify } from './runner.js';
+import {
+  buildVerifyToolchainPath,
+  CLONE_TIMEOUT_MS,
+  gitTimeoutMsFor,
+  runVerify,
+  VERIFY_ALLOWED_DEPENDENCY_DIRS,
+  VERIFY_TOOLCHAIN_PATH_PREFIXES,
+} from './runner.js';
 
 let root: string;
 let repo: string;
@@ -675,12 +682,51 @@ describe('runVerify', () => {
 });
 
 describe('git timeout budgets (AGT-4416)', () => {
-  it('gives the sandbox clone ten minutes and every other git call the 30 s default', async () => {
-    const { CLONE_TIMEOUT_MS, gitTimeoutMsFor } = await import('./runner.js');
+  it('gives the sandbox clone ten minutes and every other git call the 30 s default', () => {
     expect(CLONE_TIMEOUT_MS).toBe(10 * 60_000);
     expect(gitTimeoutMsFor(['clone', '--quiet', '--no-hardlinks', '--no-checkout', '/src', '/dst'])).toBe(CLONE_TIMEOUT_MS);
     for (const args of [['rev-parse', 'HEAD'], ['checkout', '--quiet', '--detach', 'abc'], ['worktree', 'add', '--detach', '/x', 'abc'], ['merge-base', 'HEAD', 'main']]) {
       expect(gitTimeoutMsFor(args)).toBe(30_000);
     }
+  });
+});
+
+describe('buildVerifyToolchainPath', () => {
+  it('keeps project bins and the read-only toolchain prefixes, dropping the rest of the host PATH', () => {
+    const path = buildVerifyToolchainPath(
+      ['/usr/bin', '/home/user/.local/bin', '/opt/homebrew/bin', '/tmp/evil/bin'].join(':'),
+      '/repo',
+      '/repo/packages/api',
+    );
+    const parts = path.split(':');
+    for (const prefix of VERIFY_TOOLCHAIN_PATH_PREFIXES) expect(parts).toContain(prefix);
+    expect(parts).toContain('/repo/node_modules/.bin');
+    expect(parts).toContain('/repo/packages/api/node_modules/.bin');
+    expect(parts).not.toContain('/home/user/.local/bin');
+    expect(parts).not.toContain('/tmp/evil/bin');
+    expect(VERIFY_ALLOWED_DEPENDENCY_DIRS.has('node_modules')).toBe(true);
+  });
+
+  it('puts project dependency bins ahead of the system prefixes', () => {
+    const parts = buildVerifyToolchainPath('/usr/bin', '/repo').split(':');
+    expect(parts.indexOf('/repo/node_modules/.bin')).toBeLessThan(parts.indexOf('/usr/bin'));
+  });
+
+  it('preserves nvm/fnm-style version-manager bin directories', () => {
+    const path = buildVerifyToolchainPath('/home/user/.nvm/versions/node/v22.0.0/bin:/usr/bin', '/repo');
+    expect(path.split(':')).toContain('/home/user/.nvm/versions/node/v22.0.0/bin');
+  });
+
+  it('keeps the running interpreter bin ahead of the generic system prefixes', () => {
+    const parts = buildVerifyToolchainPath('/usr/bin', '/repo').split(':');
+    expect(parts).toContain(dirname(process.execPath));
+    // A different major node lives in /usr/local/bin on this host; the sandbox
+    // must reach the daemon's own interpreter first.
+    expect(parts.indexOf(dirname(process.execPath))).toBeLessThan(parts.indexOf('/usr/bin'));
+  });
+
+  it('keeps a project venv bin directory', () => {
+    const path = buildVerifyToolchainPath('/repo/.venv-verify/bin:/usr/bin', '/repo');
+    expect(path.split(':')).toContain('/repo/.venv-verify/bin');
   });
 });

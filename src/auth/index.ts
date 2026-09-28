@@ -7,6 +7,7 @@ export {
   runOAuthPkceFlow,
   loginAndSaveProfile,
   DEFAULT_OPENAI_CLIENT_ID,
+  isLoopbackRemote,
   type OAuthFlowResult,
   type OAuthFlowOptions,
 } from './oauthPkce.js';

@@ -4,6 +4,7 @@
 // ============================================
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { randomBytes, createHash } from 'node:crypto';
 import { AuthProfileStore, type AuthProfile } from './oauthStore.js';
 import { openBrowser } from './openBrowser.js';
@@ -25,6 +26,26 @@ const PROFILE_KEY = 'openai-gpt:default';
 // Override with `--client-id` or the OPENAI_CLIENT_ID env var if needed.
 export const DEFAULT_OPENAI_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const OAUTH_ORIGINATOR = 'openswarm';
+
+/**
+ * Accept only the advertised loopback callback forms: IPv4 127.0.0.1 and IPv6
+ * ::1 (including the IPv4-mapped ::ffff:127.0.0.1 form Node reports when a
+ * dual-stack socket receives an IPv4 connection). Any other remote address is
+ * rejected so the callback server cannot be driven from off-host.
+ *
+ * The OpenAI redirect_uri stays `http://localhost:<port>/auth/callback` (the
+ * registered client value); browsers may still connect via ::1 or 127.0.0.1.
+ */
+export function isLoopbackRemote(address: string | undefined): boolean {
+  if (!address) return false;
+  const family = isIP(address);
+  if (family === 4) return address === '127.0.0.1';
+  if (family === 6) {
+    const lower = address.toLowerCase();
+    return lower === '::1' || lower === '::ffff:127.0.0.1';
+  }
+  return false;
+}
 
 // PKCE helpers
 
@@ -110,6 +131,12 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
       if (settlement.settled) {
         res.writeHead(400);
         res.end();
+        return;
+      }
+
+      if (!isLoopbackRemote(req.socket.remoteAddress)) {
+        res.writeHead(403);
+        res.end('Forbidden');
         return;
       }
 
@@ -236,6 +263,10 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
       }
     });
 
+    // Bound to the IPv4 loopback, not 'localhost': listen('localhost') resolves
+    // the name ONCE and binds whichever family wins (measured on macOS: ::1
+    // only, so 127.0.0.1 clients get ECONNREFUSED). isLoopbackRemote still
+    // accepts the IPv6 and IPv4-mapped forms so a dual-stack bind stays correct.
     server.listen(port, '127.0.0.1', () => {
       console.log(`[Auth] Callback server listening on http://127.0.0.1:${port}`);
       console.log(`[Auth] 브라우저에서 OpenAI 로그인 페이지를 엽니다...`);

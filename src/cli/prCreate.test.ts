@@ -107,26 +107,22 @@ describe('createPrFromCwd (INT-3282)', () => {
     expect(title).toBe('fix: the thing');
   });
 
-  it('default currentBranch/hasDirtyOrAhead shell out to git when not injected', async () => {
+  it('default currentBranch refuses a dirty working tree before publishing', async () => {
     execImpl
       .mockResolvedValueOnce({ stdout: 'feat/ship\n', stderr: '' }) // rev-parse --abbrev-ref HEAD
-      .mockResolvedValueOnce({ stdout: ' M src/x.ts\n', stderr: '' }) // status --porcelain (dirty)
-      .mockResolvedValueOnce({ stdout: 'chore: wip\n', stderr: '' }); // log -1 --pretty=%s
+      .mockResolvedValueOnce({ stdout: ' M src/x.ts\n', stderr: '' }); // status --porcelain (dirty)
     const commitAndCreate = vi.fn(async () => 'https://example.com/pr/2');
-    const result = await createPrFromCwd({ fix: false }, { commitAndCreate });
-    expect(result.url).toContain('/pr/2');
-    expect(commitAndCreate).toHaveBeenCalledWith(
-      expect.objectContaining({ branchName: 'feat/ship' }),
-      'chore: wip',
-      'local',
-      expect.any(String),
+    await expect(createPrFromCwd({ fix: false }, { commitAndCreate })).rejects.toThrow(
+      /Uncommitted changes/,
     );
+    expect(commitAndCreate).not.toHaveBeenCalled();
   });
 
-  it('default hasDirtyOrAhead falls back to rev-list ahead-count when the tree is clean', async () => {
+  it('default path counts commits when the tree is clean and the branch is published', async () => {
     execImpl
-      .mockResolvedValueOnce({ stdout: 'feat/ship\n', stderr: '' }) // rev-parse
+      .mockResolvedValueOnce({ stdout: 'feat/ship\n', stderr: '' }) // rev-parse --abbrev-ref HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' }) // status --porcelain (clean)
+      .mockResolvedValueOnce({ stdout: 'origin/feat/ship\n', stderr: '' }) // rev-parse @{u}
       .mockResolvedValueOnce({ stdout: '2\n', stderr: '' }) // rev-list --count @{u}..HEAD
       .mockResolvedValueOnce({ stdout: 'chore: wip\n', stderr: '' }); // log -1 --pretty=%s
     const commitAndCreate = vi.fn(async () => 'https://example.com/pr/3');
@@ -134,13 +130,28 @@ describe('createPrFromCwd (INT-3282)', () => {
     expect(result.url).toContain('/pr/3');
   });
 
-  it('default hasDirtyOrAhead treats a clean tree with no upstream and no commits as nothing to publish', async () => {
+  it('fails clearly when the feature branch has no upstream', async () => {
     execImpl
-      .mockResolvedValueOnce({ stdout: 'feat/ship\n', stderr: '' }) // rev-parse
+      .mockResolvedValueOnce({ stdout: 'feat/ship\n', stderr: '' }) // rev-parse --abbrev-ref HEAD
       .mockResolvedValueOnce({ stdout: '', stderr: '' }) // status --porcelain (clean)
-      .mockRejectedValueOnce(new Error('no upstream')) // rev-list fails (no @{u})
-      .mockResolvedValueOnce({ stdout: '', stderr: '' }); // log --oneline -1 (nothing)
+      .mockRejectedValueOnce(new Error('no upstream')); // rev-parse @{u}
     const commitAndCreate = vi.fn(async () => 'https://example.com/pr/4');
-    await expect(createPrFromCwd({ fix: false }, { commitAndCreate })).rejects.toThrow(/Nothing to publish/);
+    await expect(createPrFromCwd({ fix: false }, { commitAndCreate })).rejects.toThrow(
+      /no upstream/i,
+    );
+    expect(commitAndCreate).not.toHaveBeenCalled();
+  });
+
+  it('fails clearly when the tree is clean but not ahead of upstream', async () => {
+    execImpl
+      .mockResolvedValueOnce({ stdout: 'feat/ship\n', stderr: '' }) // rev-parse --abbrev-ref HEAD
+      .mockResolvedValueOnce({ stdout: '', stderr: '' }) // status --porcelain (clean)
+      .mockResolvedValueOnce({ stdout: 'origin/feat/ship\n', stderr: '' }) // rev-parse @{u}
+      .mockResolvedValueOnce({ stdout: '0\n', stderr: '' }); // rev-list --count @{u}..HEAD
+    const commitAndCreate = vi.fn(async () => 'https://example.com/pr/5');
+    await expect(createPrFromCwd({ fix: false }, { commitAndCreate })).rejects.toThrow(
+      /Nothing to publish/,
+    );
+    expect(commitAndCreate).not.toHaveBeenCalled();
   });
 });

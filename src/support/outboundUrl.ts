@@ -74,8 +74,16 @@ export function isPrivateIp(address: string): boolean {
   return false;
 }
 
+interface ResolvedAddress { address: string; family: number }
+
+export interface ResolvedPublicHttpUrl {
+  url: URL;
+  /** Addresses validated in the same lookup the socket must use — prevents DNS rebinding. */
+  addresses: ResolvedAddress[];
+}
+
 /** Resolve and reject destinations that can reach the local machine or a private network. */
-export async function assertPublicHttpUrl(value: string): Promise<URL> {
+export async function resolvePublicHttpUrl(value: string): Promise<ResolvedPublicHttpUrl> {
   const url = new URL(value);
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Only HTTP(S) URLs are allowed');
   if (url.username || url.password) throw new Error('Webhook URLs must not contain userinfo');
@@ -83,18 +91,37 @@ export async function assertPublicHttpUrl(value: string): Promise<URL> {
   if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local') || hostname.endsWith('.internal')) {
     throw new Error('Private network destinations are not allowed');
   }
-  if (isIP(hostname)) {
+  const literalFamily = isIP(hostname);
+  if (literalFamily) {
     if (isPrivateIp(hostname)) throw new Error('Private network destinations are not allowed');
-    return url;
+    return { url, addresses: [{ address: hostname, family: literalFamily }] };
   }
   const addresses = await lookup(hostname, { all: true, verbatim: true });
   if (addresses.length === 0 || addresses.some(({ address }) => isPrivateIp(address))) {
     throw new Error('Private network destinations are not allowed');
   }
-  return url;
+  return { url, addresses };
 }
 
-interface ResolvedAddress { address: string; family: number }
+/** Resolve and reject destinations that can reach the local machine or a private network. */
+export async function assertPublicHttpUrl(value: string): Promise<URL> {
+  return (await resolvePublicHttpUrl(value)).url;
+}
+
+/** Lookup hook that returns only the pre-validated addresses — no second DNS round-trip. */
+export function createPinnedPublicLookup(addresses: readonly ResolvedAddress[]) {
+  return function pinnedPublicLookup(
+    _hostname: string,
+    options: { all?: boolean } | undefined,
+    callback: (error: Error | null, addresses: ResolvedAddress[] | string, family?: number) => void,
+  ): void {
+    if (addresses.length === 0 || addresses.some(({ address }) => isPrivateIp(address))) {
+      return callback(new Error('Private network destinations are not allowed'), '', 0);
+    }
+    if (options?.all) return callback(null, [...addresses]);
+    callback(null, addresses[0].address, addresses[0].family);
+  };
+}
 
 /** Injectable so the callback contract below can be tested without real DNS. */
 export type DnsAllResolver = (
@@ -129,13 +156,6 @@ export function createPublicLookup(resolve: DnsAllResolver = lookupCallback as u
   };
 }
 
-let sharedPublicAgent: Agent | undefined;
-
-function publicNetworkAgent(): Agent {
-  sharedPublicAgent ??= new Agent({ connect: { lookup: createPublicLookup() } });
-  return sharedPublicAgent;
-}
-
 /**
  * Fetch that refuses private destinations before connecting and pins the
  * resolved address, so a rebinding answer cannot move the socket after the
@@ -144,15 +164,28 @@ function publicNetworkAgent(): Agent {
  * undici's own `fetch` is required: a dispatcher built from the npm `undici`
  * package is rejected by the copy of undici bundled inside Node's global
  * `fetch` ("invalid onError method"), which would fail every request.
+ *
+ * The connect-time lookup returns the same addresses `resolvePublicHttpUrl`
+ * already validated — a second DNS answer cannot steer the socket onto a
+ * different (still-"public") host after the check. Notification webhooks and
+ * other outbound callers therefore connect only to the validated public address.
  */
 export async function publicFetch(url: string | URL, init: RequestInit = {}): Promise<Response> {
-  const validated = await assertPublicHttpUrl(String(url));
-  // undici's Response is spec-compatible with the global one; the DOM lib types
-  // are structurally distinct, so cross the boundary once, here.
-  return undiciFetch(validated.toString(), {
-    ...(init as Record<string, unknown>),
-    dispatcher: publicNetworkAgent(),
-  } as never) as unknown as Response;
+  const { url: validated, addresses } = await resolvePublicHttpUrl(String(url));
+  // Per-request dispatcher, not a shared one: the pinned lookup is bound to this
+  // call's validated addresses and must not outlive it.
+  const agent = new Agent({ connect: { lookup: createPinnedPublicLookup(addresses) } });
+  try {
+    // undici's Response is spec-compatible with the global one; the DOM lib types
+    // are structurally distinct, so cross the boundary once, here. `close()` is
+    // graceful — it lets the body finish streaming before the socket goes away.
+    return await undiciFetch(validated.toString(), {
+      ...(init as Record<string, unknown>),
+      dispatcher: agent,
+    } as never) as unknown as Response;
+  } finally {
+    void agent.close();
+  }
 }
 
 /** Cheap configuration-time check; send-time validation also resolves DNS. */

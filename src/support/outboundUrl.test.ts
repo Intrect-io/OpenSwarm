@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createPublicLookup, isPrivateIp, type DnsAllResolver } from './outboundUrl.js';
+import {
+  createPinnedPublicLookup,
+  createPublicLookup,
+  isPrivateIp,
+  type DnsAllResolver,
+} from './outboundUrl.js';
 
 function resolverReturning(addresses: Array<{ address: string; family: number }>): DnsAllResolver {
   return (_hostname, _options, callback) => callback(null, addresses);
@@ -40,6 +45,43 @@ describe('createPublicLookup callback contract', () => {
 
   it('refuses the connection when the name resolves to nothing', () => {
     const lookup = createPublicLookup(resolverReturning([]));
+    let error: Error | null = null;
+    lookup('empty.example', { all: true }, (err) => { error = err; });
+    expect(error).toBeInstanceOf(Error);
+  });
+});
+
+/**
+ * The connect-time hook publicFetch installs. It answers from the addresses
+ * resolvePublicHttpUrl already validated instead of re-resolving, so a second
+ * DNS answer cannot move the socket after the check (rebinding).
+ */
+describe('createPinnedPublicLookup', () => {
+  it('answers both callback shapes from the pinned set without a DNS round-trip', () => {
+    const addresses = [{ address: '93.184.216.34', family: 4 }];
+    const lookup = createPinnedPublicLookup(addresses);
+    const seen: unknown[] = [];
+    lookup('example.com', { all: true }, (...args) => seen.push(args));
+    lookup('example.com', {}, (...args) => seen.push(args));
+    expect(seen).toEqual([
+      [null, addresses],
+      [null, '93.184.216.34', 4],
+    ]);
+  });
+
+  it('refuses when the pinned set includes a private address', () => {
+    const lookup = createPinnedPublicLookup([
+      { address: '93.184.216.34', family: 4 },
+      { address: '127.0.0.1', family: 4 },
+    ]);
+    let error: Error | null = null;
+    lookup('rebind.example', { all: true }, (err) => { error = err; });
+    expect(error).toBeInstanceOf(Error);
+    expect((error as unknown as Error).message).toBe('Private network destinations are not allowed');
+  });
+
+  it('refuses an empty pinned set', () => {
+    const lookup = createPinnedPublicLookup([]);
     let error: Error | null = null;
     lookup('empty.example', { all: true }, (err) => { error = err; });
     expect(error).toBeInstanceOf(Error);

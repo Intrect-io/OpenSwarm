@@ -58,6 +58,69 @@ describe('redirect method rewriting', () => {
     expect(second.method).toBe('POST');
     expect(second.body).toBeTruthy();
   });
+
+  it('cancels the redirect response body before following the next hop', async () => {
+    const cancel = vi.fn(async () => {});
+    let calls = 0;
+    const f = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return {
+          status: 302,
+          ok: false,
+          statusText: 'Found',
+          headers: new Headers({ location: 'https://example.com/next' }),
+          body: { cancel },
+          arrayBuffer: async () => new ArrayBuffer(0),
+        } as unknown as Response;
+      }
+      return new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } });
+    });
+    vi.stubGlobal('fetch', f);
+    await webFetch('https://example.com/start');
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(f).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('redirect destination validation', () => {
+  it('refuses to forward credentials or a request body across origins', async () => {
+    const f = vi.fn(async () =>
+      new Response(null, { status: 302, headers: { location: 'https://evil.example/collect' } }),
+    );
+    vi.stubGlobal('fetch', f);
+    vi.stubEnv('TAVILY_KEY', 'secret-key');
+    const out = await webSearch('q', 1);
+    expect(out).toContain('Search failed');
+    expect(out).toMatch(/credentials or request body across origins/i);
+    // Only the first hop — never followed the cross-origin Location.
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a non-http(s) redirect Location before following', async () => {
+    const f = vi.fn(async () =>
+      new Response(null, { status: 302, headers: { location: 'file:///etc/passwd' } }),
+    );
+    vi.stubGlobal('fetch', f);
+    const out = await webFetch('https://example.com/start');
+    expect(out).toMatch(/Refusing redirect to non-http/i);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a same-origin redirect that carries a request body', async () => {
+    let calls = 0;
+    const f = vi.fn(async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(null, { status: 307, headers: { location: 'https://api.tavily.com/next' } })
+        : new Response(JSON.stringify({ results: [] }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', f);
+    vi.stubEnv('TAVILY_KEY', 'k');
+    const out = await webSearch('q', 1);
+    expect(out).toContain('No results');
+    expect(f).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('webFetch', () => {

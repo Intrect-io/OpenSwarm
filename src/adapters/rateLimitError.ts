@@ -60,6 +60,12 @@ const RATE_LIMIT_SUBSTRINGS: readonly string[] = [
   'purchase more credits',      // codex CLI stdout error event
   'exceeded your current quota',// OpenAI insufficient_quota human message
   'too many requests',          // HTTP 429 standard reason (local/lmstudio/others)
+  'rate limit exceeded',        // OpenRouter/OpenAI 429 prose ("Rate limit exceeded: 1000 requests per 1 day")
+  // local/lmstudio 429 body ("server is overloaded"). Deliberately NOT the bare
+  // word "overloaded": Anthropic/OpenRouter report a 529 capacity blip with that
+  // exact single word, and that is an infra backoff, not a scheduler pause —
+  // matching it here would re-bucket every 529 ahead of isInfraError.
+  'server is overloaded',
 ];
 
 // Regex signatures that need structure (co-occurrence / numeric context) to stay
@@ -110,6 +116,23 @@ export function parseResetsAtFromBody(text: string): number | undefined {
   return m ? parseInt(m[1], 10) : undefined;
 }
 
+/**
+ * RFC 7231 §7.1.3: Retry-After is either 1*DIGIT delta-seconds or an HTTP-date.
+ * Returns seconds-from-now when parseable; undefined when the value is unusable.
+ */
+export function parseRetryAfterSeconds(value: string): number | undefined {
+  const trimmed = value.trim();
+  // Delta-seconds must be the entire token — parseInt("Fri, …") is NaN, but
+  // parseInt("60xyz") would silently accept a prefix, so require /^\d+$/.
+  if (/^\d+$/.test(trimmed)) {
+    const delta = parseInt(trimmed, 10);
+    return Number.isFinite(delta) ? delta : undefined;
+  }
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isFinite(dateMs)) return undefined;
+  return Math.max(0, Math.floor(dateMs / 1000) - Math.floor(Date.now() / 1000));
+}
+
 /** Pull a unix reset timestamp (seconds) out of headers or a JSON body, if present. */
 function extractResetsAt(headers: Headers | undefined, body: string): number | undefined {
   const fromHeader = (k: string): number | undefined => {
@@ -119,7 +142,7 @@ function extractResetsAt(headers: Headers | undefined, body: string): number | u
   };
   // Only headers/fields that are genuinely UNIX-epoch seconds or seconds-from-now:
   //  - x-codex-primary-reset-at: epoch seconds
-  //  - Retry-After: seconds-from-now (→ convert to epoch)
+  //  - Retry-After: seconds-from-now (→ convert to epoch) OR an HTTP-date
   //  - body "resets_at": epoch seconds
   // Deliberately NOT x-ratelimit-reset-requests/-tokens: OpenAI returns those as
   // DURATION strings ("1s", "6ms", "2m59s"), not epoch — parseInt would yield a
@@ -127,8 +150,13 @@ function extractResetsAt(headers: Headers | undefined, body: string): number | u
   // 60s default, which is correct rather than wrong. (INT-2520 review)
   const codexReset = fromHeader('x-codex-primary-reset-at');
   if (codexReset != null) return codexReset;
-  const retryAfter = fromHeader('retry-after');
-  if (retryAfter != null) return Math.floor(Date.now() / 1000) + retryAfter;
+  const retryAfter = headers?.get('retry-after');
+  if (retryAfter != null) {
+    // RFC 7231 §7.1.3 via parseRetryAfterSeconds (delta-seconds or HTTP-date).
+    // Convert seconds-from-now → absolute epoch for RateLimitError.resetsAt.
+    const seconds = parseRetryAfterSeconds(retryAfter);
+    if (seconds != null) return Math.floor(Date.now() / 1000) + seconds;
+  }
   return parseResetsAtFromBody(body);
 }
 
@@ -201,7 +229,16 @@ export function classifyLimitResponse(headers: Headers | undefined, body: string
     return Number.isFinite(n) ? n : undefined;
   };
   const usedPercent = num('x-codex-primary-used-percent');
-  const retryAfterSeconds = num('retry-after');
+  // Retry-After is RFC 7231 delta-seconds OR an HTTP-date; parseInt on a date
+  // yields NaN and silently drops the server's wait. Fall back to the codex
+  // absolute reset epoch, converted to seconds-from-now. (AGT-3442)
+  let retryAfterSeconds: number | undefined;
+  const retryAfterHeader = headers?.get('retry-after');
+  if (retryAfterHeader != null) retryAfterSeconds = parseRetryAfterSeconds(retryAfterHeader);
+  if (retryAfterSeconds == null) {
+    const resetAt = num('x-codex-primary-reset-at');
+    if (resetAt != null) retryAfterSeconds = Math.max(0, resetAt - Math.floor(Date.now() / 1000));
+  }
   const lower = body.toLowerCase();
   const quota =
     QUOTA_EXHAUSTED_SUBSTRINGS.some((s) => lower.includes(s)) ||

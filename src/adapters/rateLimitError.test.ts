@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { classifyLimitResponse, detectRateLimit, rateLimitFromCodexHeaders, rateLimitFromHttpResponse, matchesRateLimitMessage, RateLimitError } from './rateLimitError.js';
+import { classifyLimitResponse, detectRateLimit, parseRetryAfterSeconds, rateLimitFromCodexHeaders, rateLimitFromHttpResponse, matchesRateLimitMessage, RateLimitError } from './rateLimitError.js';
 import { resolveLimitResponse, throttleWaitMs } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { runAgenticLoop } from './agenticLoop.js';
@@ -21,6 +21,9 @@ describe('per-provider usage-limit recognition (INT-2520 audit)', () => {
     ['OpenRouter 402 relaying upstream BYOK balance',
       '{"error":{"message":"Provider returned error","code":402,"metadata":{"raw":"{\\"code\\":402,\\"msg\\":\\"insufficient balance\\"}","provider_name":"AtlasCloud","is_byok":true}}}'],
     ['HTTP 429 too many requests (local)', 'Local API error (429): Too Many Requests'],
+    ['OpenRouter 429 prose', 'Rate limit exceeded: 1000 requests per 1 day'],
+    ['local 429 overloaded', '{"error":"Too Many Requests: server is overloaded"}'],
+    ['local overloaded body', '{"error":"server is overloaded"}'],
   ];
   for (const [name, output] of REAL_LIMIT_OUTPUTS) {
     it(`detects: ${name}`, () => {
@@ -42,6 +45,9 @@ describe('per-provider usage-limit recognition (INT-2520 audit)', () => {
       // anchored on the provider's JSON key rather than added as a bare substring.
       "throw new Error('Insufficient balance') // wallet guard",
       'if (res.status === 402) throw new Error("Insufficient balance for this transfer");',
+      // A 529 capacity blip is a single word, and it must stay an infra backoff:
+      // matching the bare word here would make every overload pause the scheduler.
+      'Anthropic API error: overloaded',
     ];
     for (const b of benign) {
       expect(matchesRateLimitMessage(b)).toBe(false);
@@ -376,6 +382,55 @@ describe('resolveLimitResponse gating (INT-2907)', () => {
     await expect(
       resolveLimitResponse('openrouter', 402, new Headers(), body, state()),
     ).rejects.toBeInstanceOf(RateLimitError);
+  });
+});
+
+describe('Retry-After parsing (AGT-3442)', () => {
+  it('parses delta-seconds and HTTP-date Retry-After values', () => {
+    expect(parseRetryAfterSeconds('120')).toBe(120);
+    expect(parseRetryAfterSeconds(' 45 ')).toBe(45);
+    // Prefix digits must not silently win over a malformed token.
+    expect(parseRetryAfterSeconds('60xyz')).toBeUndefined();
+    expect(parseRetryAfterSeconds('not-a-date')).toBeUndefined();
+
+    const future = new Date(Date.now() + 180_000);
+    const before = Math.floor(Date.now() / 1000);
+    const seconds = parseRetryAfterSeconds(future.toUTCString());
+    const after = Math.floor(Date.now() / 1000);
+    expect(seconds).toBeDefined();
+    const expected = Math.floor(future.getTime() / 1000);
+    expect(seconds!).toBeGreaterThanOrEqual(expected - after);
+    expect(seconds!).toBeLessThanOrEqual(expected - before);
+  });
+
+  it('surfaces an HTTP-date Retry-After as seconds-from-now via classifyLimitResponse', () => {
+    // Relative future date so the assertion does not rot as wall-clock moves.
+    const future = new Date(Date.now() + 120_000);
+    const headers = new Headers({ 'retry-after': future.toUTCString() });
+    const before = Math.floor(Date.now() / 1000);
+    const result = classifyLimitResponse(headers, '{}');
+    const after = Math.floor(Date.now() / 1000);
+    expect(result.quota).toBe(false); // no quota-exhausted body signature
+    const expected = Math.floor(future.getTime() / 1000);
+    expect(result.retryAfterSeconds!).toBeGreaterThanOrEqual(expected - after);
+    expect(result.retryAfterSeconds!).toBeLessThanOrEqual(expected - before);
+  });
+
+  it('rejects an unusable Retry-After instead of inventing a wait', () => {
+    // A date-shaped-but-invalid token must not become a NaN/0-second pause.
+    expect(classifyLimitResponse(new Headers({ 'retry-after': 'Fri, 99 Foo 9999' }), '').retryAfterSeconds)
+      .toBeUndefined();
+  });
+
+  it('sets RateLimitError.resetsAt from an HTTP-date Retry-After on a 429', () => {
+    const future = new Date(Date.now() + 300_000);
+    const headers = new Headers({ 'retry-after': future.toUTCString() });
+    const err = rateLimitFromHttpResponse(429, headers, '{"error":"rate limit"}');
+    expect(err).toBeInstanceOf(RateLimitError);
+    const expected = Math.floor(future.getTime() / 1000);
+    // ±1s: parseRetryAfterSeconds and extractResetsAt each sample Date.now().
+    expect(err!.resetsAt).toBeGreaterThanOrEqual(expected - 1);
+    expect(err!.resetsAt).toBeLessThanOrEqual(expected + 1);
   });
 });
 

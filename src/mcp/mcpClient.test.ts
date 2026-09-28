@@ -11,6 +11,7 @@ import {
   initMcpTools,
   callMcpTool,
   withDeadline,
+  sanitizeInputSchema,
 } from './mcpClient.js';
 import type { ToolDefinition } from '../adapters/tools.js';
 
@@ -414,5 +415,37 @@ describe('withDeadline', () => {
     await vi.advanceTimersByTimeAsync(25);
     await assertion;
     vi.useRealTimers();
+  });
+});
+
+describe('sanitizeInputSchema bounds', () => {
+  it('keeps a small object schema', () => {
+    const schema = { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] };
+    expect(sanitizeInputSchema(schema)).toEqual(schema);
+  });
+
+  it('replaces an oversized serialized schema with the empty object schema', () => {
+    const properties: Record<string, unknown> = {};
+    for (let i = 0; i < 40; i++) {
+      properties[`field_${i}`] = { type: 'string', description: 'x'.repeat(500) };
+    }
+    const out = sanitizeInputSchema({ type: 'object', properties });
+    expect(out).toEqual({ type: 'object', properties: {} });
+  });
+
+  it('counts nested declarations, not just top-level keys', () => {
+    const properties: Record<string, unknown> = {};
+    for (let i = 0; i < 60; i++) properties[`p${i}`] = { type: 'string' };
+    const deep: Record<string, unknown> = {};
+    for (let i = 0; i < 5; i++) deep[`d${i}`] = { type: 'string' };
+    properties.nested = { type: 'object', properties: deep };
+    // 61 top-level keys are inside the cap on their own; the nested declarations
+    // take the total past it, which a top-level-keys-only count would miss.
+    expect(sanitizeInputSchema({ type: 'object', properties })).toEqual({ type: 'object', properties: {} });
+  });
+
+  it('rejects non-object root types', () => {
+    expect(sanitizeInputSchema({ type: 'string' })).toEqual({ type: 'object', properties: {} });
+    expect(sanitizeInputSchema(null)).toEqual({ type: 'object', properties: {} });
   });
 });

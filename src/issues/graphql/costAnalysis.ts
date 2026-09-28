@@ -22,12 +22,25 @@ export const BULK_REGISTER_ENTITIES_COST = 500;
 export const AUTO_LINK_MEMORIES_COST = 500;
 
 /**
+ * Registry CRUD mutations: bounded single-row writes. Priced below a bulk
+ * register so a single-entity edit is never mistaken for a bulk write, but
+ * high enough that aliasing them multiplies past the limit quickly — alias and
+ * fragment spread are the multiplication vector this table defends against.
+ */
+export const REGISTER_ENTITY_COST = 100;
+
+/**
  * 뮤테이션 루트 최상위 필드의 실행 대표 비용 매핑.
  * (DoD 명칭: FIELD_COSTS — 뮤테이션/쿼리 루트 필드 비용 테이블)
  */
 export const FIELD_COSTS: Record<string, number> = {
   bulkRegisterEntities: BULK_REGISTER_ENTITIES_COST,
   autoLinkMemories: AUTO_LINK_MEMORIES_COST,
+  registerEntity: REGISTER_ENTITY_COST,
+  updateEntity: 80,
+  removeEntity: 80,
+  addEntityRelation: 60,
+  removeEntityRelation: 60,
 };
 
 /** 기본 쿼리 비용 상한 */

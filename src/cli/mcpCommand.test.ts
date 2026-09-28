@@ -28,6 +28,31 @@ describe('parseServerSpec (INT-1953)', () => {
   it('throws when nothing usable is given', () => {
     expect(() => parseServerSpec(undefined, [])).toThrow();
   });
+  it('rejects an unknown preset name before persistence (AGT-3442)', () => {
+    expect(() => parseServerSpec(undefined, [], 'not-a-real-preset')).toThrow(/unknown preset/);
+  });
+  it('rejects a malformed http(s) URL before persistence (AGT-3442)', () => {
+    expect(() => parseServerSpec('https://exa mple.com/mcp', [])).toThrow(/invalid server URL/);
+  });
+  it('rejects an empty server name before persistence (AGT-3442)', () => {
+    expect(() => addServer({ mcpServers: {} }, '  ', { command: 'x' })).toThrow(/non-empty server name/);
+  });
+  it('does not write the registry when add validation fails (AGT-3442)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcpcmd-'));
+    const path = join(dir, 'mcp.json');
+    try {
+      expect(() =>
+        runMcpCommand('add', 'bad', ['https://exa mple.com/mcp'], { path }),
+      ).toThrow(/invalid server URL/);
+      expect(existsSync(path)).toBe(false);
+      expect(() =>
+        runMcpCommand('add', 'bad', [], { preset: 'not-a-real-preset', path }),
+      ).toThrow(/unknown preset/);
+      expect(existsSync(path)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('addServer / removeServer / formatServerList', () => {

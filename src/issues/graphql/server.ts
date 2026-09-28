@@ -4,7 +4,14 @@
 // Purpose: graphql-yoga 서버, 기존 HTTP 서버에 통합
 // ============================================
 
-import { createSchema, createYoga } from 'graphql-yoga';
+import { createSchema, createYoga, type Plugin } from 'graphql-yoga';
+import {
+  GraphQLError,
+  type ASTVisitor,
+  type ValidationContext,
+  type ValidationRule,
+} from 'graphql';
+import type { OnValidateEventPayload } from '@envelop/types';
 import { typeDefs } from './typeDefs.js';
 import { resolvers } from './resolvers.js';
 import { registryTypeDefs } from '../../registry/graphql/typeDefs.js';
@@ -15,6 +22,12 @@ import { useQueryCostAnalysis } from './costAnalysis.js';
 
 const CORS_METHODS = 'GET, POST, OPTIONS';
 const CORS_HEADERS = 'Content-Type, Authorization, X-OpenSwarm-GraphQL-Token';
+
+/** Depth / fan-out / alias / weighted-cost caps for untrusted GraphQL documents. */
+export const GRAPHQL_MAX_DEPTH = 12;
+export const GRAPHQL_MAX_FIELD_COUNT = 120;
+export const GRAPHQL_MAX_ALIAS_COUNT = 40;
+export const GRAPHQL_MAX_COST = 250;
 
 function isAllowedOrigin(origin: string): boolean {
   let url: URL;
@@ -38,7 +51,9 @@ function isAllowedOrigin(origin: string): boolean {
 
 function applyCors(req: IncomingMessage, res: ServerResponse): boolean {
   const origin = req.headers.origin;
-  if (origin && isAllowedOrigin(origin)) {
+  if (!origin) return false;
+
+  if (isAllowedOrigin(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', CORS_METHODS);
@@ -47,7 +62,7 @@ function applyCors(req: IncomingMessage, res: ServerResponse): boolean {
 
   if (req.method !== 'OPTIONS') return false;
 
-  res.writeHead(origin && !isAllowedOrigin(origin) ? 403 : 204);
+  res.writeHead(isAllowedOrigin(origin) ? 204 : 403);
   res.end();
   return true;
 }
@@ -98,13 +113,88 @@ export function isGraphQLTransportAuthorized(req: IncomingMessage): boolean {
   return hasValidToken({ authorization, token });
 }
 
+/**
+ * Reject documents that nest, fan out, or alias themselves into an unbounded
+ * execution cost before any resolver runs. Complements the mutation-priced
+ * check in costAnalysis: that one multiplies alias/fragment spreads of known
+ * expensive mutations, this one caps the shape itself (depth, field count,
+ * alias count, depth-weighted cost) so an unknown-but-deep document fails too.
+ */
+export function createGraphQLCostRule(limits: {
+  maxDepth?: number;
+  maxFieldCount?: number;
+  maxAliasCount?: number;
+  maxCost?: number;
+} = {}): ValidationRule {
+  const maxDepth = limits.maxDepth ?? GRAPHQL_MAX_DEPTH;
+  const maxFieldCount = limits.maxFieldCount ?? GRAPHQL_MAX_FIELD_COUNT;
+  const maxAliasCount = limits.maxAliasCount ?? GRAPHQL_MAX_ALIAS_COUNT;
+  const maxCost = limits.maxCost ?? GRAPHQL_MAX_COST;
+
+  return function GraphQLCostRule(context: ValidationContext): ASTVisitor {
+    let depth = 0;
+    let fieldCount = 0;
+    let aliasCount = 0;
+    let cost = 0;
+
+    return {
+      Field: {
+        enter(node) {
+          depth += 1;
+          fieldCount += 1;
+          if (node.alias) aliasCount += 1;
+          // Deeper fields cost more so nested selection sets hit the budget first.
+          cost += depth;
+
+          if (depth > maxDepth) {
+            context.reportError(new GraphQLError(`Query exceeds maximum depth of ${maxDepth}`, { nodes: [node] }));
+          }
+          if (fieldCount > maxFieldCount) {
+            context.reportError(new GraphQLError(`Query exceeds maximum field count of ${maxFieldCount}`, { nodes: [node] }));
+          }
+          if (aliasCount > maxAliasCount) {
+            context.reportError(new GraphQLError(`Query exceeds maximum alias count of ${maxAliasCount}`, { nodes: [node] }));
+          }
+          if (cost > maxCost) {
+            context.reportError(new GraphQLError(`Query exceeds maximum execution cost of ${maxCost}`, { nodes: [node] }));
+          }
+        },
+        leave() {
+          depth -= 1;
+        },
+      },
+      // Fragment fields are counted when the fragment definition itself is walked.
+      FragmentDefinition: {
+        enter() {
+          depth = 0;
+        },
+      },
+    };
+  };
+}
+
+/**
+ * Yoga plugin that installs the shape caps on every validated document. Typed
+ * against Yoga's own Plugin so the `onValidate` payload stays checked: the
+ * `addValidationRule` argument is `any` upstream, and an untyped destructure
+ * would let a rename in the hook payload pass silently.
+ */
+const costRulePlugin: Plugin = {
+  onValidate({ addValidationRule }: OnValidateEventPayload<Record<string, unknown>>) {
+    addValidationRule(createGraphQLCostRule());
+  },
+};
+
 // GraphQL Yoga 인스턴스 생성 (이슈 + 코드 레지스트리 스키마 머지)
 const yoga = createYoga({
   schema: createSchema({
     typeDefs: [typeDefs, registryTypeDefs],
     resolvers: [resolvers, registryResolvers],
   }),
-  plugins: [useQueryCostAnalysis()],
+  plugins: [
+    useQueryCostAnalysis(),
+    costRulePlugin,
+  ],
   graphqlEndpoint: '/graphql',
   cors: false,
   logging: {
@@ -138,11 +228,13 @@ export async function handleGraphQL(
 }
 
 /**
- * GraphQL 경로 매칭 여부
+ * Exact GraphQL endpoint match — path-prefix forms like `/graphql/admin` or
+ * `/graphqlfoo` must not reach the Yoga handler.
  */
 export function isGraphQLRequest(url: string | undefined): boolean {
   if (!url) return false;
-  return url.startsWith('/graphql');
+  const path = url.split(/[?#]/, 1)[0] ?? '';
+  return path === '/graphql';
 }
 
 export { yoga };
