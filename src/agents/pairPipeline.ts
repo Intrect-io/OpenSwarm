@@ -337,6 +337,12 @@ export class PairPipeline extends EventEmitter {
         // Coding stages run without a turn ceiling unless configured (AGT-4388).
         maxTurns: this.config.roles?.tester?.maxTurns ?? UNBOUNDED_TURNS,
         adapterName: this.config.roles?.tester?.adapter,
+        // Declarative role scope travels with the role, like maxTurns above. The
+        // loop applies it last, so it can only narrow the exposed set. (RoleConfig)
+        toolAllow: this.config.roles?.tester?.tools?.allow,
+        toolDeny: this.config.roles?.tester?.tools?.deny,
+        // Task/jobProfile effort wins; the role's own declared effort is the floor.
+        reasoningEffort: effortForTask(this.config, context.task) ?? this.config.roles?.tester?.effort,
       }),
     });
     return testerResult;
@@ -470,7 +476,14 @@ export class PairPipeline extends EventEmitter {
             // Read-only stages below keep their adapter defaults. (AGT-4388)
             maxTurns: this.config.roles?.worker?.maxTurns ?? UNBOUNDED_TURNS,
             adapterName: this.config.roles?.worker?.adapter,
-            reasoningEffort: overrides?.reasoningEffort ?? effortForTask(this.config, context.task),
+            // Declarative role scope travels with the role, like maxTurns above;
+            // the loop applies it last so it can only narrow. (RoleConfig.tools)
+            toolAllow: this.config.roles?.worker?.tools?.allow,
+            toolDeny: this.config.roles?.worker?.tools?.deny,
+            // Precedence mirrors model resolution: an explicit per-run override
+            // (escalation) wins, then the task's jobProfile effort, then the
+            // role's own declared effort. (RoleConfig.effort)
+            reasoningEffort: overrides?.reasoningEffort ?? effortForTask(this.config, context.task) ?? this.config.roles?.worker?.effort,
             bashTimeoutMs: await workerAgent.resolveWorkerBashTimeout(context.projectPath, overrides?.reasoningEffort ?? effortForTask(this.config, context.task)), // INT-2415
             sandbox: this.config.workerSandbox,
             // No-edit guard (re-applied from stranded feat/v0.7.0 commit 2eea3bc):
@@ -604,6 +617,9 @@ export class PairPipeline extends EventEmitter {
             model: compatibleStageModel(this.config, 'documenter', this.config.roles?.documenter?.model),
             maxTurns: this.config.roles?.documenter?.maxTurns,
             adapterName: this.config.roles?.documenter?.adapter,
+            toolAllow: this.config.roles?.documenter?.tools?.allow,
+            toolDeny: this.config.roles?.documenter?.tools?.deny,
+            reasoningEffort: effortForTask(this.config, context.task) ?? this.config.roles?.documenter?.effort,
           });
           context.documenterResult = result as DocumenterResult;
           break;
@@ -621,6 +637,9 @@ export class PairPipeline extends EventEmitter {
             model: compatibleStageModel(this.config, 'auditor', this.config.roles?.auditor?.model),
             maxTurns: this.config.roles?.auditor?.maxTurns,
             adapterName: this.config.roles?.auditor?.adapter,
+            toolAllow: this.config.roles?.auditor?.tools?.allow,
+            toolDeny: this.config.roles?.auditor?.tools?.deny,
+            reasoningEffort: effortForTask(this.config, context.task) ?? this.config.roles?.auditor?.effort,
           });
           context.auditorResult = result as AuditorResult;
           break;
@@ -638,6 +657,9 @@ export class PairPipeline extends EventEmitter {
             model: compatibleStageModel(this.config, 'skill-documenter', this.config.roles?.['skill-documenter']?.model),
             maxTurns: this.config.roles?.['skill-documenter']?.maxTurns,
             adapterName: this.config.roles?.['skill-documenter']?.adapter,
+            toolAllow: this.config.roles?.['skill-documenter']?.tools?.allow,
+            toolDeny: this.config.roles?.['skill-documenter']?.tools?.deny,
+            reasoningEffort: effortForTask(this.config, context.task) ?? this.config.roles?.['skill-documenter']?.effort,
           });
           context.skillDocumenterResult = result as SkillDocumenterResult;
           break;
@@ -875,7 +897,10 @@ export class PairPipeline extends EventEmitter {
         workerCfg: this.config.roles?.worker,
         iteration: context.currentIteration,
         baseModel: modelForTask(this.config, 'worker', context.task),
-        baseEffort: effortForTask(this.config, context.task),
+        // The role's declared effort is part of the floor, not just the profile's:
+        // the retry rung takes a MAX, so omitting it lowered a role asking for
+        // `high` down to `medium` on the first retry.
+        baseEffort: effortForTask(this.config, context.task) ?? this.config.roles?.worker?.effort,
         signalEscalation: context.workerEscalation,
         taskId: taskEventKey(context.task),
         taskPrefix: context.taskPrefix,
@@ -886,7 +911,7 @@ export class PairPipeline extends EventEmitter {
         draftAnalysis: this.config.draftAnalysis,
         iteration: context.currentIteration,
         feedbackSource: context.feedbackSource,
-        effort: effortForTask(this.config, context.task),
+        effort: effortForTask(this.config, context.task) ?? this.config.roles?.worker?.effort,
         config: this.config.roles?.worker?.fanout,
       });
       context.workerFanoutDecision = fanoutDecision;
@@ -1162,7 +1187,7 @@ export class PairPipeline extends EventEmitter {
               workerCfg: this.config.roles?.worker,
               currentIteration: context.currentIteration,
               currentModel: modelForTask(this.config, 'worker', context.task),
-              currentEffort: effortForTask(this.config, context.task),
+              currentEffort: effortForTask(this.config, context.task) ?? this.config.roles?.worker?.effort,
             });
           }
           context.reviewResult = {
@@ -1307,7 +1332,7 @@ export class PairPipeline extends EventEmitter {
                   workerCfg: this.config.roles?.worker,
                   currentIteration: context.currentIteration,
                   currentModel: modelForTask(this.config, 'worker', context.task),
-                  currentEffort: effortForTask(this.config, context.task),
+                  currentEffort: effortForTask(this.config, context.task) ?? this.config.roles?.worker?.effort,
                 })
               : undefined;
             if (escalation) {

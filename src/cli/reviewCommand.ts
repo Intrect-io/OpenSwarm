@@ -395,6 +395,8 @@ export interface ReviewCommandOptions {
   model?: string;
   /** Ledger/telemetry attribution for the reviewer's calls (default: untagged). */
   processContext?: ProcessContext;
+  /** Resolved `advisor` role (see advisorRole.ts). Absent = the pass does not run. */
+  advisor?: { model?: string; timeoutMs?: number };
 }
 
 /**
@@ -572,6 +574,34 @@ export async function runReviewCommand(
   } finally {
     progress?.stop();
   }
+
+  // The advisor is a SECOND model asked only what this review missed. It runs
+  // before dedupe so its findings are deduped against history like any other,
+  // and its decision can only tighten the gate (see reviewAdvisor.ts). A
+  // disabled / unresolvable advisor returns undefined here and costs nothing.
+  const advisorConfig = opts.advisor;
+  if (advisorConfig) {
+    const { runReviewAdvisor } = await import('../agents/reviewAdvisor.js');
+    const advisement = await runReviewAdvisor({
+      projectPath: cwd,
+      diff: await defaultGetDiff(cwd, opts.base).catch(() => undefined),
+      changeSummary: `- **Files changed (${changed.length}):** ${changed.join(', ')}`,
+      reviewer: result,
+      model: advisorConfig.model,
+      timeoutMs: advisorConfig.timeoutMs,
+    });
+    if (advisement.ran) {
+      log(
+        advisement.disagreement
+          ? `Advisor: ${advisement.disagreement}`
+          : 'Advisor: agreed, no missed findings.',
+      );
+    } else {
+      log('Advisor: produced no usable verdict — review stands unchanged.');
+    }
+    result = advisement.result;
+  }
+
   const deduped = dedupeReviewActions(result, history.records, history.currentHashes);
   result = deduped.review;
   if (deduped.removed > 0) log(`Suppressed ${deduped.removed} duplicate follow-up(s) already recorded for unchanged code.`);

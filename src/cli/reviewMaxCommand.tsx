@@ -27,6 +27,7 @@ import {
   type AuditRun,
   type AuditSummary,
 } from './reviewAudit.js';
+import type { AdvisorRole } from './advisorRole.js';
 import {
   runFixVerifyLoop,
   fixTargets,
@@ -125,6 +126,8 @@ export interface ReviewMaxOptions {
   learn?: boolean;
   /** Disable the default-on CodeQL audit gate. */
   securityAudit?: boolean;
+  /** Resolved `advisor` role (advisorRole.ts). Absent = the pass does not run. */
+  advisor?: AdvisorRole;
 }
 
 export interface ReviewMaxCommandResult {
@@ -420,6 +423,10 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
   const concurrency = positiveIntegerOption(opts.concurrency, 4, '--concurrency');
   const maxFilesPerArea = positiveIntegerOption(opts.maxFilesPerArea, 12, '--max-files-per-area');
 
+  // The `advisor` role, resolved once per run. Absent (disabled / unreadable
+  // config) means `runMaxReview` skips the pass entirely — see RunMaxReviewOptions.
+  const advisor = opts.advisor;
+
   let files: string[];
   try {
     files = listSourceFiles(cwd);
@@ -555,6 +562,7 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
         maxTurns: opts.maxTurns,
         timeoutMs: opts.timeoutMs,
         priorReviewContextByArea,
+        advisor,
       },
       {
         onProgress: (e) => {
@@ -586,6 +594,7 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
           maxTurns: opts.maxTurns,
           timeoutMs: opts.timeoutMs,
           priorReviewContextByArea,
+          advisor,
         },
         {
           onProgress: (e) => {
@@ -700,6 +709,7 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
           maxDurationMs: 2 * 60 * 60 * 1000,
           repositoryContext,
           priorReviewContextByArea,
+          advisor,
         },
         {
           verify: async () => {

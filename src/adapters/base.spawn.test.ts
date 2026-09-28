@@ -533,6 +533,36 @@ describe('delegated-CLI capability guards', () => {
     ).rejects.toThrow(/cannot withhold shell access/);
   });
 
+  it('warns that a role tool allow/deny list is inert on a delegated CLI, without failing the run', async () => {
+    // The delegated CLI owns its own tools, so the list cannot be enforced here.
+    // Warning (not throwing) keeps existing claude/codex configs running while
+    // making sure a fence nobody applies is never silent. (AGT-4444 class)
+    const warns: string[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation((line: unknown) => { warns.push(String(line)); });
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 311,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
+      kill: vi.fn(),
+    });
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        proc.stdout.end('ok');
+        proc.emit('close', 0);
+      });
+      return proc;
+    });
+    try {
+      await expect(spawnCli(delegated(), {
+        prompt: 'p', cwd: process.cwd(), toolAllow: ['read_file'], toolDeny: ['scratch_*'],
+      })).resolves.toMatchObject({ stdout: 'ok' });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(warns.join('\n')).toContain('the role tool allow/deny list');
+  });
+
   it('does not construct or spawn a delegated fake CLI in strict mode, even with HOME credentials', async () => {
     const buildCommand = vi.fn(() => ({ command: 'fake-codex', args: [] }));
     const adapter = { ...delegated(), name: 'fake-codex', buildCommand } satisfies CliAdapter;

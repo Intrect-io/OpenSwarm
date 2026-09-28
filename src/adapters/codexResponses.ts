@@ -417,6 +417,8 @@ export class CodexResponsesAdapter implements CliAdapter {
       webTools: options.webTools,
       memoryTools: options.memoryTools,
       shellTools: options.shellTools,
+      toolAllow: options.toolAllow,
+      toolDeny: options.toolDeny,
       filesystemTools: options.filesystemTools,
       diagnosticsTool: options.diagnosticsTool,
       mcpTools: options.mcpTools,

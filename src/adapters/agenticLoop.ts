@@ -203,6 +203,16 @@ export interface AgenticLoopOptions {
   /** Expose search_memory (default true). Disabled for isolated/temp repo benchmarks. */
   memoryTools?: boolean;
   /**
+   * Declarative per-role tool scope (RoleConfig.tools), naming BUILT-IN tools.
+   * `toolAllow` keeps only the names it lists; `toolDeny` then removes names from
+   * what remains, a trailing `*` standing for a prefix (`scratch_*`). Both run over
+   * the built-ins left by the readOnly/shell/web rules, so they only ever NARROW —
+   * `allow` cannot resurrect `bash` on a readOnly run. MCP and coordination tools
+   * keep their own flags; the narrowed set is also the dispatch allow-list.
+   */
+  toolAllow?: string[];
+  toolDeny?: string[];
+  /**
    * Run whose scratchpad `scratch_write`/`scratch_read` address (AGT-4459).
    * Absent means no scratchpad: the two tools are withheld from the model and
    * refused if it emits them anyway. Notes are the only thing an agent writes
@@ -288,6 +298,33 @@ export interface AgenticLoopResult {
 // ============ 에이전틱 루프 ============
 
 /**
+ * Apply a role's declarative `tools.allow` / `tools.deny` (RoleConfig) to the
+ * built-in tools the readOnly / scratch / shell / web filters have already shaped.
+ *
+ * It runs LAST and only removes entries — an allow-list cannot resurrect a tool an
+ * earlier rule withheld (a `bash` in `allow` stays hidden on a readOnly run), and
+ * `deny` follows `allow`, so the two cannot contradict each other. A `deny` entry
+ * ending in `*` matches by prefix (`scratch_*`), how the scratch tools are
+ * addressed as a family.
+ */
+function applyRoleToolScope(
+  tools: ToolDefinition[],
+  toolAllow?: string[],
+  toolDeny?: string[],
+): ToolDefinition[] {
+  let scoped = tools;
+  if (toolAllow && toolAllow.length > 0) {
+    const allowed = new Set(toolAllow);
+    scoped = scoped.filter((tool) => allowed.has(tool.function.name));
+  }
+  return toolDeny && toolDeny.length > 0
+    ? scoped.filter((tool) => !toolDeny.some((denied) => denied.endsWith('*')
+        ? tool.function.name.startsWith(denied.slice(0, -1))
+        : tool.function.name === denied))
+    : scoped;
+}
+
+/**
  * 에이전틱 도구 루프 실행
  *
  * 흐름:
@@ -359,6 +396,8 @@ async function runAgenticLoopInner(
     bashTimeoutMs,
     webTools = true,
     memoryTools = true,
+    toolAllow,
+    toolDeny,
     scratchpadRunId,
     shellTools: requestedShellTools = true,
     sandboxExecutorSessionFactory,
@@ -444,23 +483,31 @@ async function runAgenticLoopInner(
   const visibleBaseTools = readOnly
     ? shellFilteredTools.filter((t) => !['write_file', 'edit_file', 'bash', 'remember'].includes(t.function.name))
     : shellFilteredTools;
-  const tools = enableTools
+  const builtinTools = enableTools
     ? [
         ...visibleBaseTools,
         ...(filesystemTools && applyPatch && editFormat === 'json' && !readOnly ? [APPLY_PATCH_TOOL] : []),
         // Not in readOnly: it spawns compiler subprocesses, matching bash's exclusion.
         ...(filesystemTools && diagnosticsTool && !readOnly && shellTools ? [DIAGNOSTICS_TOOL] : []),
-        // Both are withheld in readOnly. A read-only run exists because the
-        // material under inspection is untrusted, and a fetch is an outbound
-        // channel for anything the agent can read — the provider credential
-        // included. MCP servers are withheld for the mirror reason: OpenSwarm's
-        // own memory server exposes writes, so injected content could leave
-        // something behind for a later run. (INT-3189)
+        // Also withheld in readOnly: the material under inspection is untrusted,
+        // and a fetch is an outbound channel for anything the agent can read —
+        // the provider credential included. (INT-3189)
         ...(webTools && !readOnly ? WEB_TOOL_DEFINITIONS : []),
+      ]
+    : [];
+  // MCP and coordination tools keep their own flags; the role list names built-ins.
+  // MCP is withheld in readOnly for the mirror reason: our memory server exposes
+  // writes, so injected content could leave something behind. (INT-3189)
+  const externalTools = enableTools
+    ? [
         ...(readOnly ? [] : humanSurfaceFilteredMcp.tools),
         ...(readOnly || !coordinationContext ? [] : COORDINATION_TOOL_DEFINITIONS),
       ]
     : [];
+  // The role's declared scope goes LAST, over the built-ins every rule above has
+  // already shaped, so it intersects with them instead of overriding one — see
+  // applyRoleToolScope. `allowedToolNames` below is built from the same result.
+  const tools = [...applyRoleToolScope(builtinTools, toolAllow, toolDeny), ...externalTools];
   // The provider-visible schema is not an enforcement boundary. Carry the
   // exact same set into dispatch so a hidden tool call cannot reach a globally
   // registered MCP route (or another built-in withheld for this run).

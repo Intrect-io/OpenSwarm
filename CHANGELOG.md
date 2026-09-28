@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`advisor` role: a second, independent review of the same diff.** Ported from the harness agent patterns. A separate, independently-prompted model is asked one narrow question — *what concrete defects did the reviewer miss?* — and its only permitted effect is to make the gate **more** cautious: it may append concrete findings the reviewer did not report and raise severity, but the merged decision is the max rank of the two (`approve < revise < reject`), so an advisor `approve` can never soften a reviewer `revise`/`reject`, and a raised severity with no concrete finding is discarded. Any error, timeout, empty, or unparseable output fails **open** — `ran: false`, the reviewer's result untouched, no exit code changed. `review`, `review --max` (per area), and the `--fix` re-review loop all run it before dedupe, so its findings are deduped against history like any other. Disabled by default (a second paid call per review), configured under `autonomous.defaultRoles.advisor`; its model must come from a different family than the reviewer's or it is a second identical opinion.
+- **Declarative per-role subagent settings: `tools` and `effort`.** Each role (`worker`/`reviewer`/`advisor`/…) may declare `tools.allow` / `tools.deny` and `effort`. An allow-list can only **narrow** the role's default tool set — it can never grant a tool the role would not otherwise have, so a misconfiguration cannot hand a read-only reviewer `bash`. `deny` is applied after `allow` (deny wins) and supports a trailing `*` (`scratch_*`). `effort` selects the native-loop reasoning level for the stage.
+
 ## 0.24.3 — 2026-09-28
 
 ### Added

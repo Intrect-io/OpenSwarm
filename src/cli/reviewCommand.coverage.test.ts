@@ -53,6 +53,14 @@ vi.mock('../agents/reviewer.js', () => ({
   runReviewer: runReviewerMock,
 }));
 
+// The advisor is a second model on the same diff; it is injected here so the
+// integration (does reviewCommand actually route the merged result, and does a
+// disabled advisor cost nothing) is asserted without a provider.
+const runReviewAdvisorMock = vi.fn();
+vi.mock('../agents/reviewAdvisor.js', () => ({
+  runReviewAdvisor: runReviewAdvisorMock,
+}));
+
 // Default review-command coverage must not write repository-local history into
 // the OpenSwarm checkout running the test suite.
 const loadReviewHistoryMock = vi.fn(async () => ({ records: [], legacyExcerpts: [] }));
@@ -538,5 +546,63 @@ describe('runReviewCommand default deps (no injected review/getBranch/log/fileFo
     } finally {
       Object.defineProperty(process.stderr, 'isTTY', { value: originalIsTTY, configurable: true });
     }
+  });
+});
+
+// The advisor is a second, independent review of the same diff. Its only
+// permitted effect is to make the gate MORE cautious (see reviewAdvisor.ts), so
+// these two assertions are the ones that matter at the CLI boundary: the merged
+// result is what the command reports, and a disabled advisor is a no-op.
+describe('runReviewCommand advisor integration', () => {
+  const approved: ReviewResult = { decision: 'approve', feedback: 'looks fine', issues: [] };
+
+  it('replaces the reported result with the advisor-merged one and forwards the model/timeout', async () => {
+    runReviewAdvisorMock.mockResolvedValueOnce({
+      ran: true,
+      decision: 'revise',
+      additionalIssues: ['unbounded buffer in src/x.ts'],
+      disagreement: 'reviewer=approve advisor=revise: raised severity with 1 finding(s) the reviewer missed',
+      result: {
+        decision: 'revise',
+        feedback: 'looks fine\n\n[advisor] Raised approve → revise on a missed defect',
+        issues: ['unbounded buffer in src/x.ts'],
+      },
+    });
+    const logs: string[] = [];
+    const result = await runReviewCommand(
+      { advisor: { model: 'z-ai/glm-5.2', timeoutMs: 45_000 } },
+      {
+        getChangedFiles: async () => ['src/x.ts'],
+        review: async () => approved,
+        saveHistory: async () => undefined,
+        startProgress: () => null,
+        log: (l) => logs.push(l),
+      },
+    );
+    expect(runReviewAdvisorMock).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewer: approved, model: 'z-ai/glm-5.2', timeoutMs: 45_000 }),
+    );
+    // The advisor may only tighten: the reported verdict is the merged one.
+    expect(result.decision).toBe('revise');
+    expect(result.issues).toContain('unbounded buffer in src/x.ts');
+    expect(logs.join('\n')).toContain('Advisor:');
+  });
+
+  it('does not call the advisor at all when no advisor role was resolved', async () => {
+    const result = await runReviewCommand(
+      {},
+      {
+        getChangedFiles: async () => ['src/x.ts'],
+        review: async () => approved,
+        saveHistory: async () => undefined,
+        startProgress: () => null,
+        log: () => {},
+      },
+    );
+    expect(runReviewAdvisorMock).not.toHaveBeenCalled();
+    // Untouched reviewer result — a disabled advisor costs nothing and changes
+    // nothing. (`recommendedActions` is normalised by the post-review dedupe
+    // pass, not by the advisor, so assert the fields the advisor would touch.)
+    expect(result).toMatchObject({ decision: 'approve', feedback: 'looks fine', issues: [] });
   });
 });

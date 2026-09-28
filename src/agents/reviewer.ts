@@ -32,6 +32,14 @@ export interface ReviewerOptions {
   processContext?: ProcessContext;
   /** Reasoning effort from a jobProfile (codex-responses: low|medium|high). */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /**
+   * Declarative per-role tool scope (RoleConfig.tools). Applied to the fully
+   * composed tool set at the end of the loop's assembly, so it can only narrow
+   * what this run already exposes — an allow-list naming `bash` stays withheld
+   * on the read-only reviewer.
+   */
+  toolAllow?: string[];
+  toolDeny?: string[];
   /** Execution-grounded definition of done to hard-gate on (INT-1914). */
   completionCriteria?: string[];
   /**
@@ -371,6 +379,8 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
         + reviewerCoordinationGuidance(options.coordinationContext, options.readOnly)
         + (options.instructionCapsule?.text ?? ''),
       reasoningEffort: options.reasoningEffort,
+      toolAllow: options.toolAllow,
+      toolDeny: options.toolDeny,
       mcpTools: options.mcpTools,
       onLog: options.onLog,
       onToken: options.onToken,
