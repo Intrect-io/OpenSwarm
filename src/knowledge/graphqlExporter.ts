@@ -239,6 +239,9 @@ export interface RepoSnapshot {
   projectName: string;
   projectPath: string;
   scannedAt: string;
+  /** True when scan limits truncated the graph this snapshot was built from. */
+  incomplete: boolean;
+  incompleteReasons: string[];
 
   project: {
     totalModules: number;
@@ -348,6 +351,8 @@ export function buildSnapshot(graph: KnowledgeGraph, projectPath: string): RepoS
     projectName,
     projectPath,
     scannedAt: new Date(graph.scannedAt).toISOString(),
+    incomplete: graph.incomplete,
+    incompleteReasons: graph.incompleteReasons,
 
     project: {
       totalModules: summary.totalModules,

@@ -131,4 +131,28 @@ describe('isPrivateIp IPv6 canonicalization', () => {
   ])('still allows %s (%s)', (address) => {
     expect(isPrivateIp(address)).toBe(false);
   });
+
+  // The notification guard listed the RFC 5737 documentation blocks while this
+  // shared predicate let them through, so the same address read as private at
+  // one boundary and public at the other. Both IPv4 literals and their
+  // IPv4-mapped spellings have to agree. (AGT-3432)
+  it.each([
+    ['198.51.100.1', 'TEST-NET-2, literal'],
+    ['198.51.100.254', 'TEST-NET-2, last host'],
+    ['203.0.113.1', 'TEST-NET-3, literal'],
+    ['203.0.113.254', 'TEST-NET-3, last host'],
+    ['::ffff:c633:6401', 'TEST-NET-2 mapped'],
+    ['::ffff:cb00:7101', 'TEST-NET-3 mapped'],
+  ])('rejects %s (%s)', (address) => {
+    expect(isPrivateIp(address)).toBe(true);
+  });
+
+  it.each([
+    ['198.51.99.1', 'one below TEST-NET-2'],
+    ['198.51.101.1', 'one above TEST-NET-2'],
+    ['203.0.112.1', 'one below TEST-NET-3'],
+    ['203.0.114.1', 'one above TEST-NET-3'],
+  ])('still allows %s (%s)', (address) => {
+    expect(isPrivateIp(address)).toBe(false);
+  });
 });

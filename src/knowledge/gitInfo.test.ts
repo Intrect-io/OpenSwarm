@@ -22,7 +22,10 @@ import { enrichWithGitInfo } from './gitInfo.js';
  * that terminates the format, and there is NO empty token between commits.
  */
 const RS = '\x1e';
-const commit = (ts: number, files: string[]) => [`${RS}${ts}`, ...files.map((f) => `\n${f}`)].join('\0');
+// Only the FIRST name of each commit carries the format-terminating newline;
+// later names are emitted bare (verified against real `git log -z` output).
+const commit = (ts: number, files: string[]) =>
+  [`${RS}${ts}`, ...files.map((f, i) => (i === 0 ? `\n${f}` : f))].join('\0');
 
 describe('parseNulDelimitedChurnOutput', () => {
   it('counts a numeric filename as a file, never as a commit boundary', () => {
@@ -63,6 +66,18 @@ describe('parseNulDelimitedChurnOutput', () => {
   it('ignores git output with no churn (empty and whitespace-only)', () => {
     expect(parseNulDelimitedChurnOutput('').size).toBe(0);
     expect(parseNulDelimitedChurnOutput('\0\0').size).toBe(0);
+  });
+
+  it('keeps a later path that genuinely begins with a newline', () => {
+    // Verified real output: only the first name after a record is newline-prefixed,
+    // so '\nsecond.ts' here is a real path and must NOT lose its newline.
+    const churns = parseNulDelimitedChurnOutput(
+      `${RS}1700000000\0\n\tfirst.ts\0\nsecond.ts\0${RS}1700000000\0\nsrc/a.ts\0`,
+    );
+
+    expect(new Set(churns.keys())).toEqual(new Set(['\nsecond.ts', '\tfirst.ts', 'src/a.ts']));
+    expect(churns.get('\nsecond.ts')?.commitCount).toBe(1);
+    expect(churns.has('second.ts')).toBe(false);
   });
 });
 

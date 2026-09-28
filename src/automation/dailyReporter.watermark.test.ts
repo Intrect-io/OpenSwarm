@@ -61,24 +61,32 @@ describe('daily reporter watermark', () => {
     expect(team).toHaveBeenCalledTimes(1);
     expect(JSON.parse(readFileSync(watermarkFile, 'utf8'))).toEqual({
       date: new Date().toISOString().slice(0, 10),
+      publishedProjectIds: ['project-1'],
+      complete: true,
     });
   });
 
-  it('retries after a partial failure because no watermark is written', async () => {
+  it('retries after a partial failure because the day is not marked complete', async () => {
     testState.postStatusUpdate
       // Both attempts in the first run fail: the bounded retry is one extra
-      // attempt inside that run, so a persistent failure still leaves the
-      // watermark unadvanced and the window is retried on the next run.
+      // attempt inside that run, so a persistent failure still leaves the day
+      // incomplete and the window is retried on the next run.
       .mockRejectedValueOnce(new Error('temporary Linear failure'))
       .mockRejectedValueOnce(new Error('temporary Linear failure'))
       .mockResolvedValueOnce(undefined);
     configureReporter();
 
     await generateDailyReports();
+    // Nothing was published, so there is not even a record to write: a watermark
+    // is only ever persisted after a publish actually happened.
     expect(existsSync(watermarkFile)).toBe(false);
 
     await generateDailyReports();
     expect(testState.postStatusUpdate).toHaveBeenCalledTimes(3);
-    expect(existsSync(watermarkFile)).toBe(true);
+    expect(JSON.parse(readFileSync(watermarkFile, 'utf8'))).toEqual({
+      date: new Date().toISOString().slice(0, 10),
+      publishedProjectIds: ['project-1'],
+      complete: true,
+    });
   });
 });

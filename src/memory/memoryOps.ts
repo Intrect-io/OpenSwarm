@@ -14,6 +14,7 @@ import {
   searchMemory,
   calculateFreshness,
   safeParseMetadata,
+  vectorAsNumberArray,
   logWork,
   withMemoryWriteRetry,
   type MemoryType,
@@ -448,14 +449,28 @@ export async function cleanupExpired(): Promise<number> {
 // Maintenance
 const CONSOLIDATION_SIMILARITY = 0.85;  // Duplicate detection threshold
 
+/** One similarity group: a seed anchor plus the records that joined it. */
+interface ConsolidationGroup {
+  /** Scan position of the seed — restores the order the old all-pairs scan reported. */
+  seedOrder: number;
+  /** The seed's vector: the anchor every member is compared against. */
+  seedVector: number[];
+  members: Array<{ id: string; score: number; order: number }>;
+}
+
 /**
  * Consolidate duplicate/similar memories.
  *
- * Reads the complete table in pages: the previous single `.limit(10000)` vector
- * query both capped the scan and let vector ranking decide which rows were
- * eligible for merging. Runs under the in-process mutation lock like every
- * other read-modify-write op here, so concurrent revise/consolidate cannot
- * overwrite each other's metadata.
+ * Records are grouped by the fields the similarity rule requires to be equal
+ * (`type`, `repo`) and compared only inside their own group, so the traversal is
+ * no longer every record against every other while the write lock is held.
+ * Buckets hold only ids, scores, and one vector per group anchor — the kept row
+ * is re-read by id when it is updated.
+ *
+ * Grouping matches the previous all-pairs scan exactly, which matters because
+ * cosine similarity is not transitive: in scan order the first record of a group
+ * becomes its seed and later records join the *earliest* seed they match, so the
+ * anchor stays the seed rather than whichever member currently scores highest.
  */
 export async function consolidateMemories(): Promise<{
   merged: number;
@@ -467,76 +482,83 @@ export async function consolidateMemories(): Promise<{
       const table = getTable();
       if (!table) return { merged: 0, groups: [] };
 
+      // Read the complete table: the previous single `.limit(10000)` vector
+      // query both capped the scan and let vector ranking decide which rows were
+      // eligible for merging.
       const allMemories = await fetchAllTableRows(table);
-      const validMemories = allMemories.filter((r) => r.id !== 'init');
 
-      const merged: string[] = [];
-      const groups: Array<{ kept: string; merged: string[] }> = [];
-      const updatedKept: any[] = [];
+      const buckets = new Map<string, ConsolidationGroup[]>();
+      let scanOrder = 0;
 
-      // Find similar memory groups
-      for (let i = 0; i < validMemories.length; i++) {
-        const m1 = validMemories[i];
-        if (merged.includes(m1.id)) continue;
+      for (const record of allMemories) {
+        if (record.id === 'init') continue;
 
-        const similarGroup: any[] = [m1];
+        const order = scanOrder++;
+        const key = `${String(record.type)}\u0000${String(record.repo)}`;
+        const groups = buckets.get(key) ?? [];
+        if (groups.length === 0) buckets.set(key, groups);
 
-        for (let j = i + 1; j < validMemories.length; j++) {
-          const m2 = validMemories[j];
-          if (merged.includes(m2.id)) continue;
-          if (m1.type !== m2.type || m1.repo !== m2.repo) continue;
+        // Stored vectors arrive as Arrow vectors; comparing one read as a JS
+        // array scores NaN, which matches nothing.
+        const vector = vectorAsNumberArray(record.vector);
+        let group = groups.find((candidate) =>
+          cosineSimilarity(vector, candidate.seedVector) >= CONSOLIDATION_SIMILARITY);
 
-          // Calculate cosine similarity
-          const similarity = cosineSimilarity(m1.vector, m2.vector);
-
-          if (similarity >= CONSOLIDATION_SIMILARITY) {
-            similarGroup.push(m2);
-            merged.push(m2.id);
-          }
+        if (!group) {
+          group = { seedOrder: order, seedVector: vector, members: [] };
+          groups.push(group);
         }
+        // importance * confidence, as before; ties keep the earlier record.
+        group.members.push({
+          id: String(record.id),
+          score: (record.importance ?? 0.5) * (record.confidence ?? 0.5),
+          order,
+        });
+      }
 
-        // Merge if group has duplicates
-        if (similarGroup.length > 1) {
-          // Keep the one with highest importance * confidence
-          similarGroup.sort((a, b) =>
-            (b.importance ?? 0.5) * (b.confidence ?? 0.5) -
-            (a.importance ?? 0.5) * (a.confidence ?? 0.5)
-          );
+      const duplicateGroups = [...buckets.values()]
+        .flat()
+        .filter((group) => group.members.length > 1)
+        .sort((a, b) => a.seedOrder - b.seedOrder);
 
-          const kept = similarGroup[0];
-          const toMerge = similarGroup.slice(1);
+      const groups: Array<{ kept: string; merged: string[] }> = [];
+      const mergedIds: string[] = [];
+
+      for (const group of duplicateGroups) {
+        // Keep the one with highest importance * confidence
+        const [kept, ...toMerge] = [...group.members].sort((a, b) => b.score - a.score || a.order - b.order);
+        const mergedHere = toMerge.map((member) => member.id);
+
+        mergedIds.push(...mergedHere);
+        groups.push({ kept: kept.id, merged: mergedHere });
+
+        console.log(`[Memory] Consolidated ${mergedHere.length} duplicates into ${kept.id}`);
+      }
+
+      if (mergedIds.length > 0) {
+        for (const { kept, merged } of groups) {
+          const record = await loadMemoryById(table, kept);
+          if (!record) continue;
 
           // Boost kept memory
-          kept.confidence = Math.min(1, (kept.confidence ?? 0.7) + 0.05 * toMerge.length);
-          const meta = safeParseMetadata(kept.metadata);
-          kept.metadata = JSON.stringify({
+          record.confidence = Math.min(1, (record.confidence ?? 0.7) + 0.05 * merged.length);
+          const meta = safeParseMetadata(record.metadata);
+          record.metadata = JSON.stringify({
             ...meta,
             consolidatedFrom: [
               ...(Array.isArray(meta.consolidatedFrom) ? meta.consolidatedFrom : []),
-              ...toMerge.map((m: any) => m.id),
+              ...merged,
             ].slice(-MAX_MEMORY_REVISIONS),
           });
-          updatedKept.push(kept);
 
-          groups.push({
-            kept: kept.id,
-            merged: toMerge.map((m: any) => m.id),
-          });
-
-          console.log(`[Memory] Consolidated ${toMerge.length} duplicates into ${kept.id}`);
-        }
-      }
-
-      if (merged.length > 0) {
-        for (const record of updatedKept) {
           await updateMemoryRecord(table, record);
         }
-        await deleteMemoryIds(table, merged);
+        await deleteMemoryIds(table, mergedIds);
 
-        console.log(`[Memory] Consolidation complete: ${merged.length} memories merged`);
+        console.log(`[Memory] Consolidation complete: ${mergedIds.length} memories merged`);
       }
 
-      return { merged: merged.length, groups };
+      return { merged: mergedIds.length, groups };
     });
   } catch (error) {
     console.error('[Memory] Consolidation error:', error);

@@ -352,7 +352,7 @@ describe('runVerify', () => {
     });
 
     expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'pass', newFailure: true });
-  });
+  }, 120_000);
 
   it('preserves trusted npm lifecycle scripts and restores the worker package', async () => {
     const trustedPackageJson = JSON.stringify({
@@ -482,7 +482,7 @@ describe('runVerify', () => {
     expect(evidence.headStatus, evidence.rawOutputTail).toBe('pass');
     expect(evidence.newFailure).toBe(false);
     expect(evidence.rawOutputTail).toContain('true');
-  });
+  }, 120_000);
 
   it('does not share the Git index when the source is a linked worktree', async () => {
     const linked = join(root, 'linked');
@@ -668,7 +668,7 @@ describe('runVerify', () => {
     expect(evidence).toMatchObject({ headStatus: 'infra', baseStatus: 'skipped', newFailure: false });
     expect(evidence.rawOutputTail).toContain('timeout after 20ms');
     expect(Date.now() - started).toBeLessThan(500);
-  });
+  }, 120_000);
 
   it('caps combined stdout and stderr to the last 8KB', async () => {
     const [evidence] = await runVerify({

@@ -18,12 +18,23 @@ let reportInFlight: Promise<void> | null = null;
 // Project path mapping (projectId → projectPath) for knowledge graph metrics
 let projectPathMapping = new Map<string, string>();
 
-// Watermark file — persisted only after a fully successful report generation.
-// A crash or partial failure leaves the previous watermark intact so the next
-// run can retry the same window.
+// Watermark file — records which projects have had their status update
+// published for a given day. It is only ever written after a publish actually
+// happened, so a crash or an outright generation failure leaves the previous
+// record intact. `complete` flips to true once every active project has been
+// published; only then does a later run of the same day skip outright.
 const WATERMARK_FILE = join(homedir(), '.openswarm', 'daily-reporter-watermark.json');
 
-function readWatermark(): string | null {
+interface DailyWatermark {
+  /** Day (UTC, YYYY-MM-DD) this record describes. */
+  date: string;
+  /** Project ids whose status update was already published for `date`. */
+  publishedProjectIds: string[];
+  /** True once every active project was published for `date`. */
+  complete: boolean;
+}
+
+function readWatermark(): DailyWatermark | null {
   try {
     if (!existsSync(WATERMARK_FILE)) return null;
     const parsed = JSON.parse(readFileSync(WATERMARK_FILE, 'utf8')) as unknown;
@@ -33,7 +44,16 @@ function readWatermark(): string | null {
       'date' in parsed &&
       typeof parsed.date === 'string'
     ) {
-      return parsed.date;
+      const ids = 'publishedProjectIds' in parsed ? parsed.publishedProjectIds : undefined;
+      return {
+        date: parsed.date,
+        publishedProjectIds: Array.isArray(ids)
+          ? ids.filter((id): id is string => typeof id === 'string')
+          : [],
+        // Records written before per-project progress existed only ever landed
+        // after a fully successful day, so a missing flag still means complete.
+        complete: !('complete' in parsed) || parsed.complete === true,
+      };
     }
   } catch {
     // A corrupt watermark must never suppress a report.
@@ -41,12 +61,12 @@ function readWatermark(): string | null {
   return null;
 }
 
-function writeWatermark(date: string): void {
+function writeWatermark(date: string, publishedProjectIds: string[], complete: boolean): void {
   const dir = dirname(WATERMARK_FILE);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   // Atomic: write to temp then rename so a crash never corrupts the watermark.
   const tmp = WATERMARK_FILE + '.tmp';
-  writeFileSync(tmp, JSON.stringify({ date }), 'utf8');
+  writeFileSync(tmp, JSON.stringify({ date, publishedProjectIds, complete }), 'utf8');
   renameSync(tmp, WATERMARK_FILE);
 }
 
@@ -120,9 +140,10 @@ export function stopDailyReporter(): void {
 }
 
 /**
- * Generate daily status reports for all active projects.
- * Watermark is persisted ONLY after all reports succeed; failed projects get
- * one bounded retry so a transient Linear error is not reported as a failure.
+ * Generate daily status reports for all active projects
+ * Per-project progress is persisted as each update is published, so a retry
+ * republishes only the projects that failed; the day is marked complete once
+ * every project succeeded.
  */
 export async function generateDailyReports(): Promise<void> {
   if (!linearClient || !teamId) {
@@ -131,14 +152,20 @@ export async function generateDailyReports(): Promise<void> {
   }
 
   const today = new Date().toISOString().slice(0, 10);
-  if (readWatermark() === today) {
+  const watermark = readWatermark();
+  if (watermark?.date === today && watermark.complete) {
     console.log(`[DailyReporter] Reports already completed for ${today}, skipping`);
     return;
   }
+  // Publications already durably recorded for today — a retry must not
+  // republish a project whose status update already landed in Linear.
+  const alreadyPublished =
+    watermark?.date === today ? new Set(watermark.publishedProjectIds) : new Set<string>();
 
   console.log('[DailyReporter] Generating daily reports...');
 
   try {
+    // Fetch all active projects from Linear
     const team = await linearClient.team(teamId);
     if (!team) {
       console.warn('[DailyReporter] Team not found');
@@ -160,63 +187,72 @@ export async function generateDailyReports(): Promise<void> {
 
     console.log(`[DailyReporter] Found ${activeProjects.length} active projects`);
 
-    // Track per-project publication outcome so retries target only failed projects
-    const projectResults: { id: string; name: string; ok: boolean }[] = [];
+    // Generate status update for each project
+    const failed: Project[] = [];
+    let successCount = 0;
+    const publishedProjectIds = new Set(alreadyPublished);
 
     for (const project of activeProjects) {
+      if (alreadyPublished.has(project.id)) {
+        console.log(`[DailyReporter] Skipping "${project.name}" — already published for ${today}`);
+        continue;
+      }
+      const projectPath = projectPathMapping.get(project.id);
       try {
-        const projectPath = projectPathMapping.get(project.id);
         await postStatusUpdate(project.id, project.name, projectPath);
-        projectResults.push({ id: project.id, name: project.name, ok: true });
       } catch (err) {
         console.error(`[DailyReporter] Failed to post update for "${project.name}":`, err);
-        projectResults.push({ id: project.id, name: project.name, ok: false });
+        failed.push(project);
+        continue;
       }
+      successCount++;
+      // Record the publication immediately: if a later project fails, the
+      // retry skips this one instead of posting a duplicate Linear update.
+      // A persistence error here is not a publish failure — it escapes to the
+      // outer handler so the run stops instead of publishing unrecorded work.
+      publishedProjectIds.add(project.id);
+      writeWatermark(today, [...publishedProjectIds], false);
     }
 
-    const successCount = projectResults.filter(r => r.ok).length;
-    const failCount = projectResults.filter(r => !r.ok).length;
-    const failedProjects = projectResults.filter(r => !r.ok).map(r => r.name);
+    console.log(
+      `[DailyReporter] Reports completed: ${successCount} success, ${failed.length} failed` +
+        (alreadyPublished.size > 0 ? `, ${alreadyPublished.size} already published` : ''),
+    );
 
-    console.log(`[DailyReporter] Reports completed: ${successCount} success, ${failCount} failed`);
-
-    // Retry only failed projects (up to 1 retry each)
-    if (failCount > 0) {
-      console.log(`[DailyReporter] Retrying ${failCount} failed project(s): ${failedProjects.join(', ')}`);
-      for (const result of projectResults) {
-        if (!result.ok) {
-          try {
-            const projectPath = projectPathMapping.get(result.id);
-            await postStatusUpdate(result.id, result.name, projectPath);
-            result.ok = true;
-            console.log(`[DailyReporter] Retry succeeded for "${result.name}"`);
-          } catch (err) {
-            console.error(`[DailyReporter] Retry also failed for "${result.name}":`, err);
-          }
+    // Retry only failed projects (up to 1 retry each) so a transient Linear
+    // error is not reported as a failure. A retry that succeeds is recorded
+    // durably like any other publication.
+    const stillFailed: Project[] = [];
+    if (failed.length > 0) {
+      console.log(`[DailyReporter] Retrying ${failed.length} failed project(s): ${failed.map(p => p.name).join(', ')}`);
+      for (const project of failed) {
+        try {
+          const projectPath = projectPathMapping.get(project.id);
+          await postStatusUpdate(project.id, project.name, projectPath);
+          successCount++;
+          publishedProjectIds.add(project.id);
+          writeWatermark(today, [...publishedProjectIds], false);
+          console.log(`[DailyReporter] Retry succeeded for "${project.name}"`);
+        } catch (err) {
+          console.error(`[DailyReporter] Retry also failed for "${project.name}":`, err);
+          stillFailed.push(project);
         }
       }
     }
 
-    // Outcome counts must reflect post-retry state so Discord/summary stay accurate.
-    const finalSuccessCount = projectResults.filter(r => r.ok).length;
-    const finalFailCount = projectResults.filter(r => !r.ok).length;
-    if (finalSuccessCount !== successCount || finalFailCount !== failCount) {
-      console.log(`[DailyReporter] After retry: ${finalSuccessCount} success, ${finalFailCount} failed`);
-    }
-
-    // Only persist watermark when EVERY project succeeded (after the retry pass).
-    // A remaining failure keeps the previous watermark so the next run retries
-    // the same window instead of skipping it.
-    if (finalFailCount === 0) {
-      writeWatermark(today);
+    // Only mark the day complete when EVERY project has been published.
+    // If any failed, the record keeps the projects that succeeded so the next
+    // run retries only the failed ones instead of republishing all of them.
+    if (stillFailed.length === 0) {
+      writeWatermark(today, [...publishedProjectIds], true);
       console.log(`[DailyReporter] Watermark persisted: ${today}`);
     } else {
-      console.warn(`[DailyReporter] ${finalFailCount} report(s) failed — watermark NOT updated`);
+      console.warn(`[DailyReporter] ${stillFailed.length} report(s) failed — watermark NOT completed`);
     }
 
     // Send summary to Discord
-    if (discordReporter && finalSuccessCount > 0) {
-      await sendDiscordSummary(activeProjects.length, finalSuccessCount, finalFailCount);
+    if (discordReporter && successCount > 0) {
+      await sendDiscordSummary(activeProjects.length, successCount, stillFailed.length);
     }
   } catch (error) {
     console.error('[DailyReporter] Failed to generate reports:', error);

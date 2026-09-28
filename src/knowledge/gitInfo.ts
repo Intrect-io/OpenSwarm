@@ -65,6 +65,7 @@ const CHURN_TIMESTAMP_SENTINEL = '\x1e';
 export function parseNulDelimitedChurnOutput(output: string): Map<string, FileChurn> {
   const churns = new Map<string, FileChurn>();
   let currentTimestamp = 0;
+  let separatorPending = false;
 
   for (const token of output.split('\0')) {
     if (!token) continue;
@@ -72,10 +73,15 @@ export function parseNulDelimitedChurnOutput(output: string): Map<string, FileCh
     if (token.startsWith(CHURN_TIMESTAMP_SENTINEL)) {
       const trimmed = token.slice(CHURN_TIMESTAMP_SENTINEL.length).trim();
       currentTimestamp = /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) * 1000 : 0;
+      separatorPending = true;
       continue;
     }
 
-    const filePath = token.startsWith('\n') ? token.slice(1) : token;
+    // Only the FIRST name after a commit record carries git's format-terminating
+    // newline. Stripping it unconditionally would corrupt a later path that
+    // genuinely begins with a newline ('\nmid.ts' → 'mid.ts').
+    const filePath = separatorPending && token.startsWith('\n') ? token.slice(1) : token;
+    separatorPending = false;
     if (!filePath) continue;
     const existing = churns.get(filePath);
     if (existing) {
@@ -175,32 +181,29 @@ export async function getRecentlyChangedFiles(
   sinceTimestamp: number,
 ): Promise<string[]> {
   const files = new Set<string>();
-  try {
-    const sinceDate = new Date(sinceTimestamp).toISOString();
-    const committed = await runGitCommand(projectPath, [
-      'log',
-      `--since=${sinceDate}`,
-      '--name-only',
-      '--format=',
-    ]);
-    for (const line of committed.split('\n')) {
-      const trimmed = line.trim();
-      if (trimmed) files.add(trimmed);
-    }
 
-    const untracked = await runGitCommand(projectPath, [
-      'ls-files',
-      '--others',
-      '--exclude-standard',
-      '-z',
-    ]);
-    for (const token of untracked.split('\0')) {
-      const trimmed = token.trim();
-      if (trimmed) files.add(trimmed);
+  // Every query is NUL-delimited and tokens are taken verbatim: git paths may
+  // contain newlines, and trimming would corrupt leading/trailing-space names.
+  const collect = async (args: string[]): Promise<void> => {
+    try {
+      for (const token of (await runGitCommand(projectPath, args)).split('\0')) {
+        if (token) files.add(token);
+      }
+    } catch {
+      // One failing query (a repo without commits, a non-repo path) must not
+      // discard the results of the others.
     }
+  };
 
-    return Array.from(files);
-  } catch {
-    return [];
-  }
+  const sinceDate = new Date(sinceTimestamp).toISOString();
+  // `--format=` omits the commit header, so no separator token precedes the
+  // first path of each commit.
+  await collect(['log', `--since=${sinceDate}`, '--name-only', '--format=', '-z']);
+  // Staged-but-uncommitted and not-yet-staged edits are invisible to `git log`
+  // but still need an incremental refresh (AGT-3490).
+  await collect(['diff', '--cached', '--name-only', '-z']);
+  await collect(['diff', '--name-only', '-z']);
+  await collect(['ls-files', '--others', '--exclude-standard', '-z']);
+
+  return Array.from(files);
 }

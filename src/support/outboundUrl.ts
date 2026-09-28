@@ -6,11 +6,17 @@ import { Agent, fetch as undiciFetch } from 'undici';
 function isPrivateIpv4(address: string): boolean {
   const parts = address.split('.').map(Number);
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true;
-  const [a, b] = parts;
+  const [a, b, c] = parts;
   return a === 0 || a === 10 || a === 127 ||
     (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && (b === 0 || b === 168)) ||
     (a === 198 && (b === 18 || b === 19)) ||
+    // TEST-NET-2 (198.51.100.0/24) and TEST-NET-3 (203.0.113.0/24), RFC 5737:
+    // documentation ranges that are never globally routed. The notification
+    // guard listed them while this shared predicate let them through, so the
+    // two disagreed about the same address; both now reject them. (AGT-3432)
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
     (a === 100 && b >= 64 && b <= 127) || a >= 224;
 }
 

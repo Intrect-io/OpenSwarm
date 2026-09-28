@@ -19,6 +19,9 @@ export class KnowledgeGraph {
   readonly projectSlug: string;
   readonly projectPath: string;
   scannedAt: number = 0;
+  /** True when a scan/update limit truncated this graph (see incompleteReasons). */
+  incomplete: boolean = false;
+  incompleteReasons: string[] = [];
 
   constructor(projectSlug: string, projectPath: string) {
     this.projectSlug = projectSlug;
@@ -276,12 +279,17 @@ export class KnowledgeGraph {
       nodes: this.getAllNodes(),
       edges: this.getAllEdges(),
       summary: this.buildSummary(),
+      incomplete: this.incomplete,
+      incompleteReasons: this.incompleteReasons,
     };
   }
 
   static deserialize(data: SerializedGraph): KnowledgeGraph {
     const graph = new KnowledgeGraph(data.projectSlug, data.projectPath);
     graph.scannedAt = data.scannedAt;
+    // Absent in graphs persisted before scan limits were surfaced (AGT-3490).
+    graph.incomplete = data.incomplete ?? false;
+    graph.incompleteReasons = data.incompleteReasons ?? [];
     for (const node of data.nodes) {
       graph.addNode(node);
     }

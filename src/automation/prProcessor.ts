@@ -16,6 +16,11 @@ import { z } from 'zod';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { safeConsole as console } from '../support/safeLog.js';
 import { withFreshReviewLock } from './freshReviewLock.js';
+import { withPRProcessLease } from './prProcessLease.js';
+import { isReviewBotComment, getActiveCriticalComments, type PRIssueComment } from './prReviewComments.js';
+
+export { isReviewBotComment, getActiveCriticalComments };
+export type { PRIssueComment };
 const execFileAsync = promisify(execFile);
 /** Safe git command execution (no shell) */
 async function gitExec(cwd: string, ...args: string[]): Promise<string> {
@@ -40,35 +45,9 @@ async function ghRepoView(cwd: string, remoteUrl: string): Promise<string> {
   return stdout.trim();
 }
 
-export type PRIssueComment = {
-  author: string;
-  body: string;
-  createdAt: string;
-};
-
 type AutoStash = {
   hash: string;
 };
-
-const CRITICAL_COMMENT_KEYWORDS = ['🔴', 'critical', '버그', 'bug', '수정 필요', 'must fix', '필수', 'required'];
-
-/**
- * Bare substring matching on 'bug'/'critical'/'required' also fires inside
- * "debug", "bugfix", "prerequisite" — words with no bearing on whether a
- * comment is actionable review feedback. Word-boundary matching for the
- * single-token ASCII keywords fixes that without touching the multi-word
- * phrase or the Korean/emoji tokens, where `\b` isn't meaningful.
- */
-function matchesCriticalKeyword(bodyLower: string): boolean {
-  return CRITICAL_COMMENT_KEYWORDS.some((keyword) => {
-    const kw = keyword.toLowerCase();
-    return /^[a-z]+$/.test(kw) ? new RegExp(`\\b${kw}\\b`).test(bodyLower) : bodyLower.includes(kw);
-  });
-}
-const FEEDBACK_ADDRESSED_MARKERS = [
-  'Review feedback addressed',
-  'Auto-fix completed - CI passing',
-];
 
 function parseStashList(output: string): Array<{ hash: string; ref: string; subject: string }> {
   return output
@@ -107,43 +86,6 @@ async function restoreAutoStash(cwd: string, stash: AutoStash | null): Promise<v
   } catch (err) {
     console.error(`[PRProcessor] Failed to restore auto-stash ${stash.hash}:`, err);
   }
-}
-
-/** Known AI review-bot author name fragments. Codex comments were previously
- * invisible to critical-comment detection because this check only matched
- * "claude" — the `claude-review` action was the only bot in mind when it was
- * written, so a repo also running a Codex-based review action never had its
- * feedback picked up here at all. */
-const REVIEW_BOT_AUTHOR_FRAGMENTS = ['claude', 'codex'];
-
-export function isReviewBotComment(comment: PRIssueComment): boolean {
-  const author = comment.author.toLowerCase();
-  // Exact bare name (e.g. a PAT-based integration posting as "codex"), or a
-  // GitHub App/bot account (GitHub always suffixes those "[bot]") whose name
-  // contains the fragment. Plain substring matching without the [bot] anchor
-  // would also treat a human account that merely contains "claude"/"codex" in
-  // its username as an automated reviewer.
-  return REVIEW_BOT_AUTHOR_FRAGMENTS.some((fragment) =>
-    author === fragment || (author.endsWith('[bot]') && author.includes(fragment)));
-}
-
-export function getActiveCriticalComments(comments: PRIssueComment[]): PRIssueComment[] {
-  const lastAddressedAt = comments.reduce<number | null>((latest, comment) => {
-    if (!FEEDBACK_ADDRESSED_MARKERS.some((marker) => comment.body.includes(marker))) {
-      return latest;
-    }
-    const createdAt = new Date(comment.createdAt).getTime();
-    if (Number.isNaN(createdAt)) return latest;
-    return latest === null || createdAt > latest ? createdAt : latest;
-  }, null);
-
-  return comments.filter((comment) => {
-    const createdAt = new Date(comment.createdAt).getTime();
-    if (lastAddressedAt !== null && (!Number.isNaN(createdAt) && createdAt <= lastAddressedAt)) {
-      return false;
-    }
-    return isReviewBotComment(comment) && matchesCriticalKeyword(comment.body.toLowerCase());
-  });
 }
 
 import {
@@ -320,7 +262,12 @@ export class PRProcessor {
   /**
    * One-shot fix for a single PR (CLI `openswarm pr fix` / `pr watch`).
    * Skips cron cooldown and multi-repo scanning — runs processPR directly.
-   * (INT-3282)
+   *
+   * Takes the cross-process lease first: two invocations — `pr watch` reviewing
+   * a list while another `pr fix` runs, or two CLI calls — check out
+   * `pr.branch` in ONE checkout and push to the same branch, so one stashes the
+   * other's work in progress, or publishes a commit whose tests never ran on
+   * the tree it was based on. (AGT-3468, INT-3282)
    */
   async fixOne(
     pr: PRInfo,
@@ -340,13 +287,15 @@ export class PRProcessor {
       integrationBaselines: {},
       updatedAt: new Date().toISOString(),
     };
-    await this.processPR(pr, projectPath, state, key);
-    const entry = state.prs[key];
-    return {
-      success: entry?.status === 'completed',
-      error: entry?.lastError,
-      iterations: entry?.iterations ?? 0,
-    };
+    return withPRProcessLease(projectPath, key, async () => {
+      await this.processPR(pr, projectPath, state, key);
+      const entry = state.prs[key];
+      return {
+        success: entry?.status === 'completed',
+        error: entry?.lastError,
+        iterations: entry?.iterations ?? 0,
+      };
+    });
   }
 
   /**

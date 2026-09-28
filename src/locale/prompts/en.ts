@@ -33,7 +33,13 @@ export function escapePromptData(value: string): string {
     .replaceAll('```', '`\\`\\`');
 }
 
-function promptDataBlock(value: string): string {
+/**
+ * Bounded, fence-escaped untrusted-data block. Exported for agent modules whose
+ * prompts are not locale templates (the documenter's, for one) so they wrap
+ * untrusted task/report text in the same marker the reviewer prompt uses
+ * instead of growing a second, weaker escaping copy. (AGT-3466)
+ */
+export function promptDataBlock(value: string): string {
   const quoted = escapePromptData(value)
     .split('\n')
     .map(line => `> ${line}`)

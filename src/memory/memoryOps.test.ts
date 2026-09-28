@@ -10,6 +10,9 @@ vi.mock('./memoryCore.js', () => ({
   EMBEDDING_DIM: 4,
   PERMANENT_EXPIRY: Number.MAX_SAFE_INTEGER,
   normalizeRecords: (records: any[]) => records,
+  // Identity, because this file's fixtures already hand over plain arrays. The
+  // Arrow-vector coercion is exercised against a real store elsewhere.
+  vectorAsNumberArray: (vector: unknown) => vector,
   initDatabase: vi.fn(async () => {}),
   embedPassage: vi.fn(async () => [0.1, 0.2, 0.3, 0.4]),
   fetchAllTableRows: async () => [...state.records.values()].map((r) => ({ ...r })),
