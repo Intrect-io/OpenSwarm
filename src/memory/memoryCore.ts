@@ -5,9 +5,10 @@
  */
 import { connect, Table, Connection } from '@lancedb/lancedb';
 import { pipeline, env as transformersEnv, type FeatureExtractionPipeline } from '@huggingface/transformers';
-import { resolve } from 'path';
+import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { c, status } from '../support/colors.js';
+import { withFileLock } from '../support/fileLock.js';
 import { safeConsole as console } from '../support/safeLog.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -418,6 +419,24 @@ export async function getMemoryIdsByDerivedFrom(derivedFrom: string, limit = 100
 }
 
 /**
+ * Cross-process lock serializing memory table mutations (writes and, in
+ * compaction, the build-then-swap that replaces the table).
+ *
+ * {@link withMemoryWriteLock} only orders writers inside one process. The
+ * competing writers that motivated the retry below are separate `openswarm`
+ * processes sharing one on-disk Lance table, which an in-process chain cannot
+ * see; this lock is what makes compaction and a writer exclude each other.
+ */
+export function crossProcessMemoryMutationLockPath(): string {
+  return process.env.OPENSWARM_MEMORY_MUTATION_LOCK
+    ?? join(homedir(), '.openswarm', 'memory-mutation.lock');
+}
+
+export async function withCrossProcessMemoryMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+  return withFileLock(crossProcessMemoryMutationLockPath(), operation, { timeoutMs: 120_000 });
+}
+
+/**
  * Retry a Lance write (add/update/delete) on optimistic-concurrency conflict.
  *
  * Lance commits are optimistic: concurrent writers race for the table version and
@@ -429,13 +448,16 @@ export async function getMemoryIdsByDerivedFrom(derivedFrom: string, limit = 100
  * jitter to desynchronize the competing writers. Appends and predicated
  * update/delete are safe to re-run: Lance re-commits against the latest version on
  * each attempt, so a retry is not a double-apply.
+ *
+ * Each attempt also runs under {@link withCrossProcessMemoryMutationLock}, so a compaction
+ * cannot swap the table out from under a write mid-retry.
  */
 export async function withMemoryWriteRetry<T>(op: () => Promise<T>, label = 'write'): Promise<T> {
   return withMemoryWriteLock(async () => {
     const MAX_ATTEMPTS = 8;
     for (let attempt = 1; ; attempt++) {
       try {
-        return await op();
+        return await withCrossProcessMemoryMutationLock(() => op());
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         // Keep this matcher tight to genuine optimistic-concurrency conflicts. "Too

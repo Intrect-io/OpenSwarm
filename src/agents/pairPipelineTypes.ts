@@ -209,6 +209,10 @@ export interface PipelineContext {
   verifiedBlocker?: string;
   /** The reviewer's verdict on a blocker claim, kept for cost accounting. */
   blockerReview?: ReviewResult;
+  /** Abort signal for this run — set per run() so concurrent runs do not share it. */
+  abortSignal?: AbortSignal;
+  /** Per-run stuck detector — never share across concurrent run() calls. */
+  stuckDetector?: import('../support/stuckDetector.js').StuckDetector;
 }
 
 export type PipelineEventType = 'stage:start' | 'stage:complete' | 'stage:fail' | 'iteration:start' | 'iteration:complete' | 'iteration:fail' | 'pipeline:complete' | 'pipeline:fail' | 'fanout:gate' | 'halt';

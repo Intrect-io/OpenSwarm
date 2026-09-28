@@ -304,7 +304,17 @@ function withStoreLock<T>(operation: () => T): T {
           const currentOwner = readStoreLockOwner(lockPath);
           const sameLock = currentMtimeMs === judgedMtimeMs
             && currentOwner?.token === owner?.token;
-          if (sameLock) unlinkSync(lockPath);
+          if (sameLock) {
+            try {
+              unlinkSync(lockPath);
+            } catch (unlinkError) {
+              const code = (unlinkError as NodeJS.ErrnoException).code;
+              // Another reclaim raced (ENOENT) or claim markers make a dir lock
+              // non-empty (ENOTEMPTY) — retry the acquire loop instead of
+              // failing the whole store write.
+              if (code !== 'ENOENT' && code !== 'ENOTEMPTY') throw unlinkError;
+            }
+          }
           continue;
         }
       } catch (statError) {
@@ -558,6 +568,43 @@ export function markTaskInProgress(
       branchName: patch.branchName,
       worktreePath: patch.worktreePath,
     },
+  });
+}
+
+/**
+ * Claim a task for execution in one locked read-modify-write, or return null
+ * when another actor already holds it.
+ *
+ * `markTaskInProgress` alone is not an admission check: two runners (or two
+ * daemon instances sharing one state file) both read `backlog`, both write
+ * `in_progress`, and the same issue is executed twice. Deciding and writing
+ * under one store lock is what makes the claim exclusive.
+ */
+export function tryClaimTaskAdmission(
+  issueId: string,
+  patch: Parameters<typeof markTaskInProgress>[1] = {},
+): OpenSwarmTaskState | null {
+  return withStoreLock(() => {
+    const store = ensureStoreLoaded();
+    if (store.tasks[issueId]?.execution.status === 'in_progress') return null;
+    const result = upsertTaskStateUnlocked(issueId, {
+      issueIdentifier: patch.issueIdentifier,
+      title: patch.title,
+      projectId: patch.projectId,
+      projectName: patch.projectName,
+      linearState: patch.linearState ?? 'In Progress',
+      execution: {
+        status: 'in_progress',
+        blockedReason: undefined,
+        retryCount: 0,
+        lastSessionId: patch.sessionId,
+      },
+      worktree: {
+        branchName: patch.branchName,
+        worktreePath: patch.worktreePath,
+      },
+    });
+    return result;
   });
 }
 

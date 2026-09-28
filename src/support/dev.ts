@@ -190,11 +190,31 @@ export async function runDevTask(
 
   activeTasks.set(taskId, devTask);
 
+  // Completion is delivered by exactly one of close/error, and cancelTask does
+  // not remove the entry, so a second run for the same repo cannot be started
+  // while the SIGTERM'd child is still shutting down (a new run's entry would
+  // otherwise be deleted, and its onComplete fired, by the old child's close).
+  let finalized = false;
+  const finalize = (resultText: string, code: number | null): void => {
+    if (finalized) return;
+    finalized = true;
+    activeTasks.delete(taskId);
+    try {
+      onComplete?.(resultText, code);
+    } catch (callbackError) {
+      console.error(`[Dev] onComplete failed for ${taskId}:`, callbackError);
+    }
+  };
+
   // Collect stdout
   claudeProcess.stdout?.on('data', (data: Buffer) => {
     const chunk = data.toString();
     devTask.output += chunk;
-    onProgress?.(chunk);
+    try {
+      onProgress?.(chunk);
+    } catch (callbackError) {
+      console.error(`[Dev] onProgress failed for ${taskId}:`, callbackError);
+    }
   });
 
   // Collect stderr
@@ -226,20 +246,18 @@ export async function runDevTask(
       // Generate report file
       const duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
       generateReport(devTask, code, duration);
-    } catch (err) {
-      console.error(`[Dev] close-handler reporting failed for ${taskId}:`, err);
+    } catch (reportError) {
+      // Reporting must not decide whether the task is finalized.
+      console.error(`[Dev] close-handler reporting failed for ${taskId}:`, reportError);
     } finally {
-      // Cleanup must run even when reporting throws
-      onComplete?.(resultText, code);
-      activeTasks.delete(taskId);
+      finalize(resultText, code);
     }
   });
 
   // Handle errors
   claudeProcess.on('error', (err) => {
     devTask.output += `\nError: ${err.message}`;
-    onComplete?.(devTask.output, -1);
-    activeTasks.delete(taskId);
+    finalize(devTask.output, -1);
   });
 
   return { taskId, path };
@@ -265,8 +283,13 @@ export function cancelTask(taskId: string): boolean {
   const task = activeTasks.get(taskId);
   if (!task) return false;
 
-  task.process.kill('SIGTERM');
-  activeTasks.delete(taskId);
+  try {
+    task.process.kill('SIGTERM');
+  } catch {
+    // Already gone; the close handler still finalizes and frees the slot.
+  }
+  // The entry stays until 'close' — getActiveTasks must not advertise the repo
+  // as free while the SIGTERM'd child is still running.
   return true;
 }
 

@@ -3,6 +3,7 @@
 // Worker → Reviewer → Tester → Documenter pipeline
 // ============================================
 import { EventEmitter } from 'node:events';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { taskAttributionKey, taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import { rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 import { scratchNotesSection, workerScratchpadRunId } from './workerScratchpad.js';
@@ -107,20 +108,26 @@ import { reviewWorkerBlocker } from './workerBlockerReview.js';
  * rather than an inline assignment so the loop's later reads are not narrowed
  * to `undefined`.
  */
+type RunControl = { signal?: AbortSignal; stuck: StuckDetector };
+
 function dropStaleTestVerdict(context: { testerResult?: TesterResult }): void {
   context.testerResult = undefined;
 }
 
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
+  /** Fallback for callers outside run(); each run() installs a fresh control via AsyncLocalStorage. */
   private stuckDetector: StuckDetector;
-  /** Set per run() — aborts the pipeline + in-flight adapter call on cancel/disable. */
-  private abortSignal?: AbortSignal;
+  /** Per-run abort + stuck controls — never share across concurrent run() calls. */
+  private static runControl = new AsyncLocalStorage<RunControl>();
   /** Cache of adapter default models (heavy: OAuth + live catalog) keyed by adapter name. (INT-2393) */
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
   /** Throw if this run has been cancelled. Called at iteration/stage boundaries. */
   private throwIfAborted(): void {
-    if (this.abortSignal?.aborted) throw new PipelineCancelledError();
+    if (PairPipeline.runControl.getStore()?.signal?.aborted) throw new PipelineCancelledError();
+  }
+  private getStuck(): StuckDetector {
+    return PairPipeline.runControl.getStore()?.stuck ?? this.stuckDetector;
   }
 
   constructor(config: PipelineConfig) {
@@ -153,13 +160,13 @@ export class PairPipeline extends EventEmitter {
    * On failure at any stage, returns to Worker (up to maxIterations)
    */
   async run(task: TaskItem, projectPath: string, opts?: { signal?: AbortSignal }): Promise<PipelineResult> {
+    // A fresh detector per run: two run() calls on one instance must not share
+    // the per-run identity that runControl exists to keep separate.
+    const stuckDetector = createStuckDetector({ sameErrorRepeat: 3, revisionLoop: 4 });
+    return PairPipeline.runControl.run({ signal: opts?.signal, stuck: stuckDetector }, async () => {
     const startTime = Date.now();
     const stages: StageResult[] = [];
     const maxIterations = this.config.maxIterations ?? 3;
-    this.abortSignal = opts?.signal;
-
-    // Reset stuck detector (new pipeline run)
-    this.stuckDetector.reset();
 
     // Ensure repo graph snapshot exists (first-time scan if needed)
     if (!hasRepoSnapshot(projectPath)) {
@@ -193,6 +200,8 @@ export class PairPipeline extends EventEmitter {
       currentIteration: 0,
       taskPrefix,
       reflection: createReflectionState(),
+      abortSignal: opts?.signal,
+      stuckDetector,
     };
     try {
       if (this.config.verify?.enabled) try {
@@ -247,7 +256,7 @@ export class PairPipeline extends EventEmitter {
     } catch (error) {
       // Cancellation (project disable / manual stop) is not a failure — surface it
       // as 'cancelled' so the scheduler doesn't count it failed or trigger a retry.
-      const cancelled = error instanceof PipelineCancelledError || !!this.abortSignal?.aborted;
+      const cancelled = error instanceof PipelineCancelledError || !!PairPipeline.runControl.getStore()?.signal?.aborted;
       // A 429/usage-limit propagates up here from any stage (worker/reviewer/…).
       // Surface it as its own finalStatus so the runner pauses until quota resets
       // instead of counting a failure and spamming Linear comments. (INT-1906)
@@ -294,6 +303,7 @@ export class PairPipeline extends EventEmitter {
         },
       };
     }
+    });
   }
   /**
    * Worker에 주입할 코드 컨텍스트 수집
@@ -308,7 +318,7 @@ export class PairPipeline extends EventEmitter {
   private async runPostSuccessStage(stage: PipelineStage, context: PipelineContext, stages: StageResult[]): Promise<void> {
     try { stages.push(await this.runStage(stage, context)); }
     catch (err) {
-      if (err instanceof PipelineCancelledError || this.abortSignal?.aborted) throw err;
+      if (err instanceof PipelineCancelledError || PairPipeline.runControl.getStore()?.signal?.aborted) throw err;
       safeConsole.warn(`[${context.taskPrefix}] ${stage} skipped (non-blocking failure): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -489,7 +499,7 @@ export class PairPipeline extends EventEmitter {
             onLog,
             processContext: { taskId: taskAttributionKey(context.task), stage: 'worker' },
             workerContext,
-            signal: this.abortSignal,
+            signal: PairPipeline.runControl.getStore()?.signal,
             instructionCapsule: this.config.instructionCapsule,
             mcpTools: this.config.roleMcpTools?.worker,
             adapterRouting: this.config.adapterRouting,
@@ -557,7 +567,7 @@ export class PairPipeline extends EventEmitter {
           // scaffolded task was getting LESS review — exactly the wrong incentive. The
           // completion-criteria hard gate is the real check now.
           const reviewerOptions = await buildReviewerStageOptions({
-            config: this.config, context, prefix, overrides, abortSignal: this.abortSignal,
+            config: this.config, context, prefix, overrides, abortSignal: PairPipeline.runControl.getStore()?.signal,
           });
 
           safeConsole.log(`[${prefix}] Running full review...`);
@@ -845,7 +855,7 @@ export class PairPipeline extends EventEmitter {
       await captureBeforeIteration(context);
 
       // Stuck detection check (before iteration starts)
-      const stuckCheck = this.stuckDetector.check();
+      const stuckCheck = this.getStuck().check();
       if (stuckCheck.isStuck) {
         context.stuckReason = stuckCheck.reason;
         safeConsole.error(`[${context.taskPrefix}] STUCK DETECTED: ${stuckCheck.reason}`);
@@ -902,7 +912,7 @@ export class PairPipeline extends EventEmitter {
       stages.push(workerResult);
 
       // Record Worker result in stuck detector
-      this.stuckDetector.addEntry({
+      this.getStuck().addEntry({
         stage: 'worker',
         success: workerResult.success,
         output: (workerResult.result as WorkerResult).summary,
@@ -954,7 +964,7 @@ export class PairPipeline extends EventEmitter {
         if (detail?.startsWith('worker-scope:')) context.repeatedScopeRejection = detail;
         // A no-edit stop with a stated reason is a claim about the task: put it
         // to the reviewer once instead of retrying blind (AGT-4535).
-        const blocker = await reviewWorkerBlocker(this.config, context, failedWorker, this.abortSignal);
+        const blocker = await reviewWorkerBlocker(this.config, context, failedWorker, PairPipeline.runControl.getStore()?.signal);
         if (blocker?.confirmed) {
           agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
           this.emit('halt', { confidence: failedWorker.confidencePercent ?? 0, haltReason: blocker.reason, sessionId: context.session.id, iteration: context.currentIteration, context });
@@ -1269,7 +1279,7 @@ export class PairPipeline extends EventEmitter {
         const decision = (reviewerResult.result as ReviewResult).decision;
 
         // Record Reviewer result in stuck detector
-        this.stuckDetector.addEntry({
+        this.getStuck().addEntry({
           stage: 'reviewer',
           success: reviewerResult.success,
           decision: decision,

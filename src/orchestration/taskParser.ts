@@ -6,6 +6,9 @@
 import { basename, isAbsolute, relative, resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
+import { z } from 'zod';
+import { withFileLock } from '../support/fileLock.js';
+import { atomicWriteFile } from '../support/atomicFile.js';
 import { WorkflowConfig, WorkflowStep } from './workflow.js';
 
 // Types
@@ -622,6 +625,53 @@ function subtasksToWorkflow(
 
 const PARSED_TASKS_DIR = resolve(homedir(), '.openswarm/parsed-tasks');
 
+const SubtaskSchema = z.object({
+  id: z.string(),
+  order: z.number(),
+  title: z.string(),
+  description: z.string(),
+  prompt: z.string(),
+  dependsOn: z.array(z.string()),
+  type: z.enum(['analysis', 'implementation', 'test', 'review', 'documentation']),
+  optional: z.boolean(),
+});
+
+const WorkflowConfigSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().optional(),
+  projectPath: z.string(),
+  steps: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    prompt: z.string(),
+    dependsOn: z.array(z.string()).optional(),
+    onFailure: z.enum(['rollback', 'retry', 'skip', 'abort', 'notify']).optional(),
+  }).passthrough()),
+  onFailure: z.enum(['rollback', 'retry', 'skip', 'abort', 'notify']).optional(),
+  trigger: z.object({}).passthrough().optional(),
+  linearIssue: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+}).passthrough();
+
+const ParsedTaskSchema = z.object({
+  original: z.object({
+    id: z.string(),
+    title: z.string(),
+    description: z.string(),
+  }),
+  analysis: z.object({
+    type: z.enum(['bug_fix', 'feature', 'refactor', 'docs', 'test', 'ci_cd', 'investigation', 'unknown']),
+    complexity: z.enum(['simple', 'medium', 'complex']),
+    estimatedSteps: z.number(),
+    requiresHumanReview: z.boolean(),
+    risks: z.array(z.string()),
+  }),
+  subtasks: z.array(SubtaskSchema),
+  workflow: WorkflowConfigSchema,
+  parsedAt: z.number(),
+});
+
 function parsedTaskFilePath(issueId: string): string {
   if (
     !issueId ||
@@ -648,9 +698,12 @@ function parsedTaskFilePath(issueId: string): string {
  * Save parsed result
  */
 export async function saveParsedTask(parsed: ParsedTask): Promise<void> {
+  const validated = ParsedTaskSchema.parse(parsed);
   await fs.mkdir(PARSED_TASKS_DIR, { recursive: true });
-  const filePath = parsedTaskFilePath(parsed.original.id);
-  await fs.writeFile(filePath, JSON.stringify(parsed, null, 2));
+  const filePath = parsedTaskFilePath(validated.original.id);
+  await withFileLock(filePath + '.lock', async () => {
+    await atomicWriteFile(filePath, JSON.stringify(validated, null, 2));
+  });
 }
 
 /**
@@ -660,7 +713,9 @@ export async function loadParsedTask(issueId: string): Promise<ParsedTask | null
   try {
     const filePath = parsedTaskFilePath(issueId);
     const content = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(content);
+    const parsed = ParsedTaskSchema.safeParse(JSON.parse(content));
+    if (!parsed.success) return null;
+    return parsed.data as ParsedTask;
   } catch {
     return null;
   }

@@ -12,6 +12,7 @@ import {
   readFileSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -88,8 +89,28 @@ function rotateOne(logPath: string, maxBytes: number, generations: number): bool
 
       // launchd opens stdout/stderr before Node starts. Truncating the already
       // opened descriptor keeps that inode (and inherited descriptors) valid.
-      ftruncateSync(activeFd, 0);
-      fsyncSync(activeFd);
+      // If truncate/fsync fails after the archive rename, restore the active
+      // log from the staged `.1` so the rotation does not leave an empty file
+      // while the only copy of the data sits in an incomplete commit.
+      try {
+        ftruncateSync(activeFd, 0);
+        fsyncSync(activeFd);
+      } catch (commitError) {
+        try {
+          // activeFd's offset may still sit at the pre-truncate EOF (readFileSync
+          // above advanced it); write at absolute position 0 or restore is sparse.
+          const archived = readFileSync(`${logPath}.1`);
+          ftruncateSync(activeFd, 0);
+          writeSync(activeFd, archived, 0, archived.byteLength, 0);
+          fsyncSync(activeFd);
+        } catch (restoreError) {
+          throw new AggregateError(
+            [commitError, restoreError],
+            `Log rotation commit failed and restore from ${logPath}.1 also failed`,
+          );
+        }
+        throw commitError;
+      }
       return true;
     } catch (error) {
       safeUnlink(temporary);
