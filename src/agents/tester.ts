@@ -12,6 +12,12 @@ import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
 import type { VerifyEvidence } from '../verify/runner.js';
+import {
+  PROMPT_FEEDBACK_LIMIT,
+  PROMPT_FAILED_TESTS_LIMIT,
+  PROMPT_SUGGESTIONS_LIMIT,
+  truncate,
+} from '../support/outputBudget.js';
 
 // Types
 
@@ -356,7 +362,8 @@ export function formatTestReport(result: TesterResult): string {
 }
 
 /**
- * Convert Tester result to Worker feedback
+ * Convert Tester result to Worker feedback.
+ * Enforces aggregate bounds on feedback to prevent prompt bloat.
  */
 export function buildTestFixPrompt(result: TesterResult): string {
   const lines: string[] = [];
@@ -368,21 +375,32 @@ export function buildTestFixPrompt(result: TesterResult): string {
   if (result.failedTests && result.failedTests.length > 0) {
     lines.push('');
     lines.push('### Failed Tests:');
-    for (let i = 0; i < result.failedTests.length; i++) {
-      lines.push(`${i + 1}. \`${result.failedTests[i]}\``);
+    const shown = result.failedTests.slice(0, PROMPT_FAILED_TESTS_LIMIT);
+    for (let i = 0; i < shown.length; i++) {
+      lines.push(`${i + 1}. \`${truncate(shown[i], 200)}\``);
+    }
+    if (result.failedTests.length > PROMPT_FAILED_TESTS_LIMIT) {
+      lines.push(`… +${result.failedTests.length - PROMPT_FAILED_TESTS_LIMIT} more`);
     }
   }
 
   if (result.suggestions && result.suggestions.length > 0) {
     lines.push('');
     lines.push('### Fix Suggestions:');
-    for (let i = 0; i < result.suggestions.length; i++) {
-      lines.push(`${i + 1}. ${result.suggestions[i]}`);
+    const shown = result.suggestions.slice(0, PROMPT_SUGGESTIONS_LIMIT);
+    for (let i = 0; i < shown.length; i++) {
+      lines.push(`${i + 1}. ${truncate(shown[i], 300)}`);
+    }
+    if (result.suggestions.length > PROMPT_SUGGESTIONS_LIMIT) {
+      lines.push(`… +${result.suggestions.length - PROMPT_SUGGESTIONS_LIMIT} more`);
     }
   }
 
   lines.push('');
   lines.push('Fix the above test failures.');
 
-  return lines.join('\n');
+  const full = lines.join('\n');
+  return full.length > PROMPT_FEEDBACK_LIMIT
+    ? `${full.slice(0, PROMPT_FEEDBACK_LIMIT - 1)}…`
+    : full;
 }

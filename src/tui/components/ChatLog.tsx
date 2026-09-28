@@ -12,7 +12,7 @@ import type { ChatLine } from '../chatModel.js';
 import { renderMarkdown } from '../markdown.js';
 import { theme, ICON } from '../theme.js';
 import { WorkingIndicator } from './WorkingIndicator.js';
-import { sanitizeTerminalText } from '../sanitize.js';
+import { sanitizeAndBoundTerminalText } from '../sanitize.js';
 
 const ROLE_COLOR: Record<ChatLine['role'], string> = {
   user: theme.user,
@@ -35,13 +35,24 @@ const ROLE_ICON: Record<ChatLine['role'], string> = {
 // message renders in full once committed to history. (INT-2014 / INT-2013)
 const STREAM_TAIL_LINES = 14;
 
+export const MAX_LINE_WIDTH = 120;
+
+function truncateLine(text: string): string {
+  if (!text) return '';
+  return text.length <= MAX_LINE_WIDTH ? text : text.slice(0, MAX_LINE_WIDTH) + '...';
+}
+
 function tailLines(text: string, n: number): string {
   const lines = text.split('\n');
   return lines.length <= n ? text : `…\n${lines.slice(-n).join('\n')}`;
 }
 
 function Message({ line }: { line: ChatLine }) {
-  const safeContent = sanitizeTerminalText(line.content);
+  // Bound lines + total payload before markdown so hostile content cannot blow the frame.
+  const safeContent = sanitizeAndBoundTerminalText(line.content)
+    .split('\n')
+    .map(truncateLine)
+    .join('\n');
   const body = line.role === 'assistant' ? renderMarkdown(safeContent) : safeContent;
   return (
     <Box flexDirection="column" marginBottom={1}>
@@ -75,10 +86,21 @@ export function ChatLog({ history, streaming, activity = [], busy, maxMessages =
         <Box flexDirection="column">
           <Text color={theme.assistant} bold>{`${ICON.assistant} ${ROLE_LABEL.assistant}`}</Text>
           <Box flexDirection="column" paddingLeft={2}>
-            {activity.slice(-5).map((line, i) => (
-              <Text key={i} color={theme.dim}>{`${ICON.tool} ${sanitizeTerminalText(line)}`}</Text>
-            ))}
-            {streaming ? <Text>{tailLines(sanitizeTerminalText(streaming), STREAM_TAIL_LINES)}</Text> : null}
+            {activity.slice(-5).map((line, i) => {
+              const safeLine = truncateLine(sanitizeAndBoundTerminalText(line));
+              return (
+                <Text key={i} color={theme.dim}>{`${ICON.tool} ${safeLine}`}</Text>
+              );
+            })}
+            {streaming ? (
+              <Text>{tailLines(
+                sanitizeAndBoundTerminalText(streaming)
+                  .split('\n')
+                  .map(truncateLine)
+                  .join('\n'),
+                STREAM_TAIL_LINES,
+              )}</Text>
+            ) : null}
             {busy ? <WorkingIndicator /> : null}
           </Box>
         </Box>

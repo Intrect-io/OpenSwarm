@@ -14,8 +14,16 @@ import { initLocale } from '../locale/index.js';
 import { expandPath } from '../core/config.js';
 import { startProgressHeartbeat, type ReviewProgress } from '../cli/reviewProgress.js';
 import { status } from '../support/colors.js';
-import { sanitizeTerminalText } from '../tui/sanitize.js';
+import { sanitizeTerminalText, sanitizeAndBoundTerminalText, MAX_RENDERED_LINE_LENGTH } from '../tui/sanitize.js';
 import { safeConsole as console } from '../support/safeLog.js';
+import {
+  CLI_FEEDBACK_LINES,
+  CLI_STDERR_LINE_LIMIT,
+  PROMPT_FEEDBACK_LIMIT,
+  flattenToSingleLine,
+  sanitizeException,
+  truncate,
+} from '../support/outputBudget.js';
 
 // Types
 
@@ -33,7 +41,29 @@ export interface CliRunOptions {
 
 // Helpers
 
-// expandPath imported from core/config.ts (with resolveRelative=true for CLI paths)
+/**
+ * Ceiling for one raw provider/adapter string before it reaches the sanitizer.
+ * Adapters can return unbounded stdout, and sanitizeTerminalText walks the
+ * whole string; bounding first keeps the scan itself cheap.
+ */
+export const MAX_LINE_CHARS = 1_048_576;
+/** How many changed files the CLI result summary lists before "+N more". */
+export const MAX_FILES_SHOWN = 5;
+
+function truncateRaw(raw: string, max: number = MAX_LINE_CHARS): string {
+  return raw.length <= max ? raw : `${raw.slice(0, max)}... [truncated]`;
+}
+
+function boundDiagnosticName(name: string): string {
+  const clean = sanitizeTerminalText(truncateRaw(name)).replace(/\s+/g, ' ').trim();
+  if (clean.length <= 80) return clean || '(unknown)';
+  return `${clean.slice(0, 77)}...`;
+}
+
+/** One-line diagnostic: bound the raw input, sanitize, then clamp to a rendered line. */
+function boundVerboseLine(text: string): string {
+  return sanitizeAndBoundTerminalText(truncateRaw(text).replace(/\r\n|\n|\r/g, ' ')).slice(0, MAX_RENDERED_LINE_LENGTH);
+}
 
 /** Check if the configured/default adapter can run before starting the pipeline */
 async function checkDefaultAdapter(): Promise<boolean> {
@@ -168,24 +198,24 @@ export async function runCli(options: CliRunOptions): Promise<void> {
   };
 
   pipeline.on('stage:start', ({ stage }: { stage: string }) => {
-    stage = sanitizeTerminalText(stage);
-    if (liveSpinner) heartbeat = startProgressHeartbeat(`${stage}…`, { write: (s) => process.stdout.write(s) });
-    else process.stdout.write(`  ~ ${stage}...\n`);
+    const safeStage = boundDiagnosticName(stage);
+    if (liveSpinner) heartbeat = startProgressHeartbeat(`${safeStage}…`, { write: (s) => process.stdout.write(s) });
+    else process.stdout.write(`  ~ ${safeStage}...\n`);
   });
 
   pipeline.on('stage:complete', ({ stage, result }: { stage: string; result: { success: boolean; duration: number } }) => {
-    stage = sanitizeTerminalText(stage);
+    const safeStage = boundDiagnosticName(stage);
     stopHeartbeat();
     const duration = (result.duration / 1000).toFixed(1);
-    const line = `${stage} (${duration}s)`;
+    const line = `${safeStage} (${duration}s)`;
     process.stdout.write(`  ${result.success ? status.ok(line) : status.err(line)}\n`);
   });
 
   pipeline.on('stage:fail', ({ stage, result }: { stage: string; result: { duration: number } }) => {
-    stage = sanitizeTerminalText(stage);
+    const safeStage = boundDiagnosticName(stage);
     stopHeartbeat();
     const duration = (result.duration / 1000).toFixed(1);
-    process.stdout.write(`  ${status.err(`${stage} (${duration}s) FAILED`)}\n`);
+    process.stdout.write(`  ${status.err(`${safeStage} (${duration}s) FAILED`)}\n`);
   });
 
   pipeline.on('iteration:start', ({ iteration, maxIterations }: { iteration: number; maxIterations: number }) => {
@@ -197,19 +227,19 @@ export async function runCli(options: CliRunOptions): Promise<void> {
   // 8.5. Verbose event listeners
   if (options.verbose) {
     pipeline.on('log', ({ line }: { line: string }) => {
-      console.log(`  ${sanitizeTerminalText(line)}`);
+      console.log(`  ${boundVerboseLine(line)}`);
     });
 
     pipeline.on('halt', ({ reason, sessionId }: { reason: string; sessionId: string }) => {
-      console.log(`  [verbose] HALT: ${sanitizeTerminalText(reason)} (session: ${sanitizeTerminalText(sessionId)})`);
+      console.log(`  [verbose] HALT: ${boundVerboseLine(reason)} (session: ${boundDiagnosticName(sessionId)})`);
     });
 
     pipeline.on('stuck', ({ sessionId, iteration }: { sessionId: string; iteration: number }) => {
-      console.log(`  [verbose] STUCK detected at iteration ${iteration} (session: ${sanitizeTerminalText(sessionId)})`);
+      console.log(`  [verbose] STUCK detected at iteration ${iteration} (session: ${boundDiagnosticName(sessionId)})`);
     });
 
     pipeline.on('iteration:fail', ({ iteration, reason }: { iteration: number; reason?: string }) => {
-      console.log(`  [verbose] Iteration ${iteration} failed${reason ? `: ${sanitizeTerminalText(reason)}` : ''}`);
+      console.log(`  [verbose] Iteration ${iteration} failed${reason ? `: ${boundVerboseLine(reason)}` : ''}`);
     });
 
     pipeline.on('iteration:complete', ({ iteration }: { iteration: number }) => {
@@ -223,7 +253,7 @@ export async function runCli(options: CliRunOptions): Promise<void> {
     result = await pipeline.run(task, projectPath);
   } catch (error) {
     stopHeartbeat();
-    console.error('\n  Pipeline execution failed:', error instanceof Error ? error.message : error);
+    console.error('\n  Pipeline execution failed:', sanitizeException(error));
     process.exitCode = 1;
     return;
   }
@@ -269,19 +299,24 @@ function printResult(result: PipelineResult): void {
 
   console.log('  ======================================');
 
-  // Summary
+  // Summary — sanitize + bound untrusted pipeline content
   if (result.workerResult?.summary) {
-    console.log(`  Summary: ${sanitizeTerminalText(result.workerResult.summary)}`);
+    const summary = truncate(
+      flattenToSingleLine(sanitizeTerminalText(truncateRaw(result.workerResult.summary))),
+      CLI_STDERR_LINE_LIMIT,
+    );
+    console.log(`  Summary: ${summary}`);
   }
 
   // Files changed
   if (result.workerResult?.filesChanged && result.workerResult.filesChanged.length > 0) {
     const files = result.workerResult.filesChanged;
-    if (files.length <= 5) {
-      console.log(`  Files:   ${files.map(sanitizeTerminalText).join(', ')}`);
-    } else {
-      console.log(`  Files:   ${files.slice(0, 5).join(', ')} +${files.length - 5} more`);
-    }
+    const shown = files.slice(0, MAX_FILES_SHOWN).map(boundDiagnosticName);
+    console.log(
+      files.length <= MAX_FILES_SHOWN
+        ? `  Files:   ${shown.join(', ')}`
+        : `  Files:   ${shown.join(', ')} +${files.length - MAX_FILES_SHOWN} more`,
+    );
   }
 
   // Cost and duration
@@ -292,13 +327,14 @@ function printResult(result: PipelineResult): void {
   parts.push(`Duration: ${formatDuration(result.totalDuration)}`);
   console.log(`  ${parts.join(' | ')}`);
 
-  // Reviewer feedback on failure
+  // Reviewer feedback on failure — per-line + aggregate budget
   if (!result.success && result.reviewResult?.feedback) {
     console.log('');
     console.log('  Feedback:');
-    const lines = result.reviewResult.feedback.split('\n').slice(0, 5);
+    const bounded = truncate(sanitizeTerminalText(truncateRaw(result.reviewResult.feedback)), PROMPT_FEEDBACK_LIMIT);
+    const lines = bounded.split('\n').slice(0, CLI_FEEDBACK_LINES);
     for (const line of lines) {
-      console.log(`    ${line}`);
+      console.log(`    ${truncate(flattenToSingleLine(line), CLI_STDERR_LINE_LIMIT)}`);
     }
   }
 

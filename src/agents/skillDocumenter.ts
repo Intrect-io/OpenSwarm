@@ -9,6 +9,7 @@ import { getAdapter, spawnCli } from '../adapters/index.js';
 import { type CostInfo, extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
+import { boundedMessageContent } from '../support/outputBudget.js';
 
 // Types
 
@@ -239,6 +240,10 @@ function extractErrorMessage(text: string): string {
 
 // Formatting
 
+/**
+ * Format skill documenter report as a Discord message.
+ * Enforces Discord message content limits to prevent payload rejection.
+ */
 export function formatSkillDocReport(result: SkillDocumenterResult): string {
   const statusEmoji = result.success ? '📄' : '❌';
   const lines: string[] = [];
@@ -257,5 +262,5 @@ export function formatSkillDocReport(result: SkillDocumenterResult): string {
     lines.push(`**Error:** ${result.error}`);
   }
 
-  return lines.join('\n');
+  return boundedMessageContent(lines.join('\n'));
 }

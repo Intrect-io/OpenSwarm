@@ -7,6 +7,7 @@ import {
   chatToResponsesInput,
   toolsToResponsesTools,
   reduceResponsesEvents,
+  createResponsesReducer,
   resolveReasoningEffort,
   selectDefaultCodexResponseModel,
 } from './codexResponses.js';
@@ -319,6 +320,44 @@ describe('reduceResponsesEvents', () => {
       },
     });
     expect(res.usage).toEqual({ prompt_tokens: 42, completion_tokens: 7, total_tokens: 49, cached_tokens: 0 });
+  });
+
+  it('reduces a 10k-event stream and matches the batch reducer', () => {
+    const EVENT_COUNT = 10_000;
+    const expected = Array.from({ length: EVENT_COUNT }, (_, i) => String(i % 10)).join('');
+
+    // Production streaming path: feed events one-at-a-time. Nothing but the
+    // final response state is retained — there is no event-history array on this
+    // path at all, which is the property that keeps memory flat on long streams.
+    const reducer = createResponsesReducer();
+    for (let i = 0; i < EVENT_COUNT; i += 1) {
+      reducer.handle({ type: 'response.output_text.delta', delta: String(i % 10) });
+    }
+    reducer.handle({
+      type: 'response.completed',
+      response: { usage: { input_tokens: 3, output_tokens: EVENT_COUNT } },
+    });
+    const res = reducer.finish();
+
+    expect(res.choices[0].message.content).toBe(expected);
+    expect(res.choices[0].message.content).toHaveLength(EVENT_COUNT);
+    expect(res.choices[0].finish_reason).toBe('stop');
+    expect(res.usage).toEqual({
+      prompt_tokens: 3,
+      completion_tokens: EVENT_COUNT,
+      total_tokens: 3 + EVENT_COUNT,
+      cached_tokens: 0,
+    });
+
+    // The batch wrapper must produce byte-identical output for large streams.
+    expect(
+      reduceResponsesEvents(
+        Array.from({ length: EVENT_COUNT }, (_, i) => ({
+          type: 'response.output_text.delta' as const,
+          delta: String(i % 10),
+        })),
+      ).choices[0].message.content,
+    ).toBe(expected);
   });
 });
 

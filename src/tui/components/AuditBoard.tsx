@@ -13,6 +13,7 @@ import type { AuditArea, AuditProgress } from '../../cli/reviewAudit.js';
 import type { FixProgress } from '../../cli/reviewFixPass.js';
 import type { ReviewResult } from '../../agents/agentPair.js';
 import { sanitizeTerminalText } from '../sanitize.js';
+import { flattenToSingleLine, TUI_LOG_LINE_LIMIT } from '../../support/outputBudget.js';
 
 type AreaStatus = {
   status: 'pending' | 'running' | 'done' | 'error';
@@ -30,6 +31,11 @@ export interface AuditBoardProps {
 }
 
 const truncate = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
+
+/** Flatten + sanitize + truncate so multiline tool logs can't blow past the row. */
+function displayLog(value: string, max: number): string {
+  return truncate(flattenToSingleLine(sanitizeTerminalText(value)), Math.min(max, TUI_LOG_LINE_LIMIT));
+}
 
 export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: AuditBoardProps) {
   const [statuses, setStatuses] = useState<Record<string, AreaStatus>>(() =>
@@ -88,7 +94,7 @@ export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: Audit
           {'  '}
           <Spinner />
           {` ${sanitizeTerminalText(label)}`}
-          {s.lastLog ? `  ${truncate(sanitizeTerminalText(s.lastLog), 48)}` : ''}
+          {s.lastLog ? `  ${displayLog(s.lastLog, 48)}` : ''}
         </Text>
       ))}
       {/* Failures carry the reason they failed. Showing only the counter left the
@@ -96,7 +102,7 @@ export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: Audit
       {errored.map(([label, s]) => (
         <Text key={label} color={theme.warn}>
           {`  ${ICON.warn} ${sanitizeTerminalText(label)}`}
-          {s.lastLog ? `  ${truncate(sanitizeTerminalText(s.lastLog), 64)}` : ''}
+          {s.lastLog ? `  ${displayLog(s.lastLog, 64)}` : ''}
         </Text>
       ))}
       <Text color={theme.dim}>

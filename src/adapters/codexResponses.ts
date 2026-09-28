@@ -146,10 +146,26 @@ interface SseEvent {
 }
 
 /**
- * Reduce parsed Responses SSE events → a chat-completions-shaped response.
- * Exported so the SSE→chat mapping is unit-testable without a live stream.
+ * Ceiling for the undecoded SSE line buffer. A provider that never emits a
+ * newline (or a proxy that streams a huge single frame) would otherwise grow
+ * this string without bound; keeping only the newest bytes lets parsing
+ * continue instead of aborting the stream.
  */
-export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
+export const MAX_FRAME_LENGTH = 64 * 1024;
+/** Ceiling for buffered reasoning-summary text awaiting a newline. */
+export const MAX_REASONING_BUF = 64 * 1024;
+
+/**
+ * Incremental reducer for parsed Responses SSE events → a chat-completions-shaped
+ * response. Retains only the state needed for the final response (accumulated
+ * text, open tool calls, usage) — never the parsed event history — so memory
+ * stays bounded on large streams. consumeResponsesStream feeds events one at a
+ * time; reduceResponsesEvents wraps this for unit tests.
+ */
+export function createResponsesReducer(): {
+  handle: (ev: SseEvent) => void;
+  finish: () => ChatLikeResponse;
+} {
   let text = '';
   // Keyed by the streaming item id; the emitted tool-call id is the call_id so it
   // round-trips back as `function_call_output.call_id` on the next turn.
@@ -157,7 +173,7 @@ export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
   let usage: ChatLikeResponse['usage'];
   const getOnlyCall = () => calls.size === 1 ? calls.values().next().value : undefined;
 
-  for (const ev of events) {
+  const handle = (ev: SseEvent): void => {
     switch (ev.type) {
       case 'response.output_text.delta':
         if (ev.delta) text += ev.delta;
@@ -197,27 +213,43 @@ export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
         break;
       }
     }
-  }
-
-  const toolCalls: ApiToolCallShape[] = [...calls.values()].map((c) => ({
-    id: c.callId,
-    type: 'function',
-    function: { name: c.name, arguments: c.args },
-  }));
-
-  return {
-    choices: [
-      {
-        message: {
-          role: 'assistant',
-          content: text || null,
-          tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-        },
-        finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
-      },
-    ],
-    usage,
   };
+
+  const finish = (): ChatLikeResponse => {
+    const toolCalls: ApiToolCallShape[] = [...calls.values()].map((c) => ({
+      id: c.callId,
+      type: 'function',
+      function: { name: c.name, arguments: c.args },
+    }));
+
+    return {
+      choices: [
+        {
+          message: {
+            role: 'assistant',
+            content: text || null,
+            tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+          },
+          finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop',
+        },
+      ],
+      usage,
+    };
+  };
+
+  return { handle, finish };
+}
+
+/**
+ * Reduce a pre-collected list of parsed Responses SSE events → a chat-shaped
+ * response. Thin wrapper over the incremental reducer, kept for unit tests;
+ * the streaming path feeds createResponsesReducer directly so it never retains
+ * the full event history.
+ */
+export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
+  const reducer = createResponsesReducer();
+  for (const ev of events) reducer.handle(ev);
+  return reducer.finish();
 }
 
 /** Parse a `data: {json}` SSE line into an event, or null for keep-alives/[DONE]. */
@@ -243,7 +275,9 @@ async function consumeResponsesStream(
   onToken?: (delta: string) => void,
   onReasoning?: (line: string) => void,
 ): Promise<ChatLikeResponse> {
-  const events: SseEvent[] = [];
+  // Events are reduced incrementally as they arrive; the full parsed history is
+  // never retained, so memory stays bounded on very large streams.
+  const reducer = createResponsesReducer();
   const reader = res.body?.getReader();
   if (!reader) throw new Error('Codex responses: empty stream body');
 
@@ -265,7 +299,7 @@ async function consumeResponsesStream(
   };
   const handle = (ev: SseEvent | null) => {
     if (!ev) return;
-    events.push(ev);
+    reducer.handle(ev);
     if (ev.type === 'response.incomplete') {
       terminalError = `Responses stream incomplete${ev.response?.incomplete_details?.reason ? `: ${ev.response.incomplete_details.reason}` : ''}`;
     } else if (ev.type === 'response.failed') {
@@ -274,6 +308,7 @@ async function consumeResponsesStream(
     if (onToken && ev.type === 'response.output_text.delta' && ev.delta) onToken(ev.delta);
     if (onReasoning && ev.type === 'response.reasoning_summary_text.delta' && ev.delta) {
       reasoningBuf += ev.delta;
+      if (reasoningBuf.length > MAX_REASONING_BUF) reasoningBuf = reasoningBuf.slice(-MAX_REASONING_BUF);
       flushReasoning(false);
     }
     // End of a summary part → flush whatever partial line remains.
@@ -285,6 +320,9 @@ async function consumeResponsesStream(
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
+    // A frame that never terminates would grow the buffer without bound; keep the
+    // newest bytes so a following newline still yields a parseable event.
+    if (buffer.length > MAX_FRAME_LENGTH) buffer = buffer.slice(-MAX_FRAME_LENGTH);
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
     for (const line of lines) handle(parseSseLine(line));
@@ -294,7 +332,7 @@ async function consumeResponsesStream(
 
   if (terminalError) throw new Error(terminalError);
 
-  return reduceResponsesEvents(events);
+  return reducer.finish();
 }
 
 // ---- Adapter ----
