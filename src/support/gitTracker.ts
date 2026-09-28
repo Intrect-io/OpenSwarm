@@ -313,6 +313,10 @@ function runGitCommand(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Pr
     let stdout = '';
     let stderr = '';
     let settled = false;
+    // Streaming UTF-8 decoders: state is kept across chunks so a multibyte
+    // character split at a chunk boundary is not corrupted (unlike data.toString()).
+    const stdoutDecoder = new TextDecoder('utf-8');
+    const stderrDecoder = new TextDecoder('utf-8');
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true; // claim settlement before the late close/error handlers run
@@ -320,12 +324,15 @@ function runGitCommand(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Pr
       reject(new Error(`git ${args.join(' ')} timed out after ${GIT_CMD_TIMEOUT_MS}ms`));
     }, GIT_CMD_TIMEOUT_MS);
 
-    proc.stdout.on('data', (data) => { stdout += data.toString(); });
-    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+    proc.stdout.on('data', (data) => { stdout += stdoutDecoder.decode(data, { stream: true }); });
+    proc.stderr.on('data', (data) => { stderr += stderrDecoder.decode(data, { stream: true }); });
 
     proc.on('close', (code) => {
       settled = true;
       clearTimeout(timer);
+      // Flush any remaining bytes held by the decoders (truncated final multibyte char)
+      stdout += stdoutDecoder.decode();
+      stderr += stderrDecoder.decode();
       if (code === 0) {
         resolve(stdout);
       } else {
