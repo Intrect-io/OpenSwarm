@@ -84,7 +84,7 @@ Admission under `unknownScopeAdmission: admit` (default, vela):
 
 - **vela compose는 이미지 태그를 pin한다.** `docker build`만으로는 recreate 안 됨. `docker-compose.yml`의 `openswarm:vela-YYYYMMDD-HHMM-amd64`를 바꾸고 `up -d --no-deps openswarm`.
 - **`vela-build.sh <sha>`는 `origin/main`만 fetch한다.** PR SHA는 `builds/4e8ba24`에서 `git fetch origin <branch>` 먼저.
-- **PR SHA를 돌리는 동안 `.last-deployed-sha`는 `origin/main` tip을 유지**하지 않으면 autodeploy cron이 main으로 롤백한다.
+- **PR SHA를 돌리는 동안 `.last-built-sha`는 `origin/main` tip을 유지**하지 않으면 autodeploy cron이 main으로 롤백한다.
 - **`unknownScopeAdmission: admit`를 heartbeat만 바꾸고 claim 게이트를 안 바꾸면** 큐에는 들어가고 `claimRun`이 null — 슬롯이 다시 빈다.
 - **`isActionableLinearState(state)` 헬퍼 기본은 Backlog park.** 엔진/config 기본은 `includeBacklog: true`. `undefined`를 spread하면 DEFAULT true를 덮는다 — constructor가 `?? true`로 고정한다.
 - **AGT-4155 park loop**: Linear `In Progress`만으로 park를 열면 claim→exec→park가 heartbeat마다 돈다. 지금은 `idle_fill`이 의도적으로 연다 (싼 모델이 빈 슬롯을 씹도록). `serialize`/질문 대기를 되살릴 때 이 루프를 다시 열지 말 것.
