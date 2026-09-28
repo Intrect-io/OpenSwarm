@@ -75,6 +75,24 @@ describe('AuditBoard (INT-2006)', () => {
     expect(f).toContain('codex timeout after 300000ms');
   });
 
+  it('flattens multiline progress logs before truncating', async () => {
+    const events = new EventEmitter();
+    const r = render(<AuditBoard areas={areas} concurrency={2} events={events} />);
+    await act(tick);
+    await act(async () => {
+      events.emit('progress', { type: 'start', label: 'src/a', done: 0, total: 2 });
+      events.emit('progress', {
+        type: 'log',
+        label: 'src/a',
+        line: 'first line\nsecond line\nthird line that is quite long',
+      });
+      await tick();
+    });
+    const f = r.lastFrame()!;
+    expect(f).toContain('first line second line');
+    expect(f).not.toMatch(/first line\nsecond line/);
+  });
+
   it('renders fix-pass progress with edited file tally', async () => {
     const events = new EventEmitter();
     const r = render(<AuditBoard areas={areas} concurrency={2} events={events} mode="fix" />);

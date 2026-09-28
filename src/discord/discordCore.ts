@@ -12,6 +12,8 @@ import {
   Message,
   EmbedBuilder,
   ThreadChannel,
+  type MessageCreateOptions,
+  type MessageReplyOptions,
 } from 'discord.js';
 import fs from 'node:fs/promises';
 import { correlationIdFromHint } from '../coordination/answerHint.js';
@@ -27,6 +29,18 @@ import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 // Handler module (for routing)
 import { handlePair } from './discordPair.js';
+
+/** Externally supplied content must never trigger Discord mention parsing. */
+const DISABLED_MENTIONS = { parse: [] as const };
+
+function withDisabledMentions(
+  payload: string | MessageCreateOptions | MessageReplyOptions,
+): MessageCreateOptions | MessageReplyOptions {
+  if (typeof payload === 'string') {
+    return { content: payload, allowedMentions: DISABLED_MENTIONS };
+  }
+  return { ...payload, allowedMentions: DISABLED_MENTIONS };
+}
 
 export let client: Client | null = null;
 export let reportChannelId: string = '';
@@ -397,9 +411,9 @@ async function tryAnswerByReply(msg: Message): Promise<boolean> {
   if (!answer) return false;
   const { answerHumanQuestion } = await import('../coordination/humanQuestions.js');
   const result = await answerHumanQuestion(correlationId, answer, `discord:${msg.author.id}`);
-  await msg.reply(result.accepted
+  await msg.reply(withDisabledMentions(result.accepted
     ? `Answer accepted for ${correlationId}.`
-    : `Answer not accepted: ${result.reason}`);
+    : `Answer not accepted: ${result.reason}`));
   return true;
 }
 
@@ -436,11 +450,11 @@ async function handleMessage(msg: Message): Promise<void> {
 
   // Access control: fail-closed (deny if no allowed users configured)
   if (ALLOWED_USER_IDS.length === 0) {
-    await msg.reply('⛔ Access denied: DISCORD_ALLOWED_USERS not configured.');
+    await msg.reply(withDisabledMentions('⛔ Access denied: DISCORD_ALLOWED_USERS not configured.'));
     return;
   }
   if (!ALLOWED_USER_IDS.includes(msg.author.id)) {
-    await msg.reply('⛔ Access denied: unauthorized user.');
+    await msg.reply(withDisabledMentions('⛔ Access denied: unauthorized user.'));
     return;
   }
 
@@ -452,12 +466,14 @@ async function handleMessage(msg: Message): Promise<void> {
         const correlationId = args.shift();
         const answer = args.join(' ').trim();
         if (!correlationId || !answer) {
-          await msg.reply('Usage: !answer <correlation-id> <answer>');
+          await msg.reply(withDisabledMentions('Usage: !answer <correlation-id> <answer>'));
           break;
         }
         const { answerHumanQuestion } = await import('../coordination/humanQuestions.js');
         const result = await answerHumanQuestion(correlationId, answer, `discord:${msg.author.id}`);
-        await msg.reply(result.accepted ? `Answer accepted for ${correlationId}.` : `Answer not accepted: ${result.reason}`);
+        await msg.reply(withDisabledMentions(
+          result.accepted ? `Answer accepted for ${correlationId}.` : `Answer not accepted: ${result.reason}`,
+        ));
         break;
       }
       case 'status':
@@ -551,11 +567,13 @@ async function handleMessage(msg: Message): Promise<void> {
         break;
 
       default:
-        await msg.reply(t('discord.errors.unknownCommand', { command }));
+        await msg.reply(withDisabledMentions(t('discord.errors.unknownCommand', { command })));
     }
   } catch (err) {
     console.error('Command error:', err);
-    await msg.reply(t('discord.errors.commandError', { error: err instanceof Error ? err.message : String(err) }));
+    await msg.reply(withDisabledMentions(
+      t('discord.errors.commandError', { error: err instanceof Error ? err.message : String(err) }),
+    ));
   }
 }
 
@@ -563,7 +581,7 @@ async function handleMessage(msg: Message): Promise<void> {
  * !help - Show help
  */
 async function handleHelp(msg: Message): Promise<void> {
-  await msg.reply(t('discord.help'));
+  await msg.reply(withDisabledMentions(t('discord.help')));
 }
 
 /**
@@ -617,7 +635,7 @@ export async function reportEvent(event: SwarmEvent): Promise<void> {
   }
 
   try {
-    await channel.send({ embeds: [embed] });
+    await channel.send(withDisabledMentions({ embeds: [embed] }));
   } catch (err) {
     console.error('[Discord] Report event send failed:', err);
   }
@@ -696,10 +714,10 @@ export async function sendToChannel(content: string | { embeds: EmbedBuilder[] }
 
     if (typeof content === 'string' && content.length > DISCORD_MESSAGE_CHUNK) {
       for (const chunk of chunkForDiscord(content, DISCORD_MESSAGE_CHUNK)) {
-        await channel.send(chunk);
+        await channel.send(withDisabledMentions(chunk));
       }
     } else {
-      await channel.send(content);
+      await channel.send(withDisabledMentions(content));
     }
   } catch (err) {
     console.error('[Discord] Send to channel failed:', err);
@@ -785,10 +803,10 @@ export async function sendToThread(threadId: string, content: string | EmbedBuil
     if (typeof content === 'string') {
       const chunks = content.length > DISCORD_MESSAGE_CHUNK ? splitForDiscord(content, DISCORD_MESSAGE_CHUNK) : [content];
       for (const chunk of chunks) {
-        await thread.send(chunk);
+        await thread.send(withDisabledMentions(chunk));
       }
     } else {
-      await thread.send({ embeds: [content] });
+      await thread.send(withDisabledMentions({ embeds: [content] }));
     }
   } catch (err) {
     console.error('[Discord] Send to thread failed:', err);
@@ -878,12 +896,12 @@ export async function handleChat(msg: Message): Promise<void> {
     if (toolCalls.length > 0) {
       const toolSummary = toolCalls.slice(0, 10).map(tc => `• ${tc}`).join('\n');
       const toolMsg = `🔧 **${t('discord.toolCalls', { n: toolCalls.length })}**\n${toolSummary}${toolCalls.length > 10 ? `\n... ${t('common.moreItems', { n: toolCalls.length - 10 })}` : ''}`;
-      await msg.reply(toolMsg);
+      await msg.reply(withDisabledMentions(toolMsg));
     }
 
     const chunks = splitMessage(response, 2000);
     for (const chunk of chunks) {
-      await msg.reply(chunk);
+      await msg.reply(withDisabledMentions(chunk));
     }
 
     await saveChatHistory({
@@ -900,7 +918,7 @@ export async function handleChat(msg: Message): Promise<void> {
   } catch (err) {
     if (typingInterval) clearInterval(typingInterval);
     console.error('[OpenSwarm] Error:', err);
-    await msg.reply(t('discord.chatError'));
+    await msg.reply(withDisabledMentions(t('discord.chatError')));
   }
 }
 

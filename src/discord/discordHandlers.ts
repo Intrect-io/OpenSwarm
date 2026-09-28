@@ -25,16 +25,25 @@ import {
   pairModeConfig,
   formatTimeAgo,
 } from './discordCore.js';
+import {
+  enforceAggregateBudget,
+  safeAddField,
+  safeSetDescription,
+  safeSetFooter,
+  safeSetTitle,
+  truncateField,
+  EMBED_LIMITS,
+} from './embedUtils.js';
+import { genericUserError, paginateEmbedFields } from '../support/outputBudget.js';
 import { t, getDateLocale } from '../locale/index.js';
 
 /**
  * Helper: Reply with Embed for consistent Discord UI
  */
 async function replyWithEmbed(msg: Message, content: string, color: number = 0x00ff41): Promise<void> {
-  const embed = new EmbedBuilder()
-    .setDescription(content)
-    .setColor(color)
-    .setTimestamp();
+  let embed = new EmbedBuilder().setColor(color).setTimestamp();
+  embed = safeSetDescription(embed, content);
+  embed = enforceAggregateBudget(embed);
   await msg.reply({ embeds: [embed] });
 }
 
@@ -54,10 +63,10 @@ export async function handleStatus(msg: Message, sessionName?: string): Promise<
     return;
   }
 
-  const embed = new EmbedBuilder()
-    .setTitle(t('discord.status.title'))
+  let embed = new EmbedBuilder()
     .setColor(0x00ae86)
     .setTimestamp();
+  embed = safeSetTitle(embed, t('discord.status.title'));
 
   for (const status of statuses) {
     const stateEmoji = {
@@ -75,13 +84,15 @@ export async function handleStatus(msg: Message, sessionName?: string): Promise<
       ? `\n🕐 ${t('discord.status.lastHeartbeat', { time: formatTimeAgo(status.lastHeartbeat) })}`
       : '';
 
-    embed.addFields({
-      name: `${stateEmoji} ${status.name}`,
-      value: `${t('discord.status.stateLabel', { state: status.state })}${issueInfo}${lastHB}`,
-      inline: false,
-    });
+    embed = safeAddField(
+      embed,
+      `${stateEmoji} ${status.name}`,
+      `${t('discord.status.stateLabel', { state: status.state })}${issueInfo}${lastHB}`,
+      false,
+    );
   }
 
+  embed = enforceAggregateBudget(embed);
   await msg.reply({ embeds: [embed] });
 }
 
@@ -169,58 +180,60 @@ export async function handleIssues(msg: Message, sessionName?: string): Promise<
       'Backlog': 0x95a5a6,
     };
 
-    // Pagination (max 10 per embed)
-    const ITEMS_PER_PAGE = 10;
-    const totalPages = Math.ceil(issues.length / ITEMS_PER_PAGE);
+    // Build every issue field, then page by the Discord field + aggregate value
+    // budgets. Fixed 10-per-page paging sized pages by item count only, so a
+    // page of long titles could still exceed the embed's 6000-char ceiling.
+    const allFields = issues.map((issue) => {
+      const priority = priorityEmoji[issue.priority as keyof typeof priorityEmoji] ?? '⚪';
+      const stateEmoji = {
+        'Todo': '📝',
+        'In Progress': '⚙️',
+        'In Review': '👀',
+        'Done': '✅',
+        'Backlog': '📦',
+      }[issue.state] ?? '📋';
 
-    const embeds: EmbedBuilder[] = [];
+      let value = `${priority} **${issue.identifier}**: ${issue.title}\n`;
+      value += `${stateEmoji} ${issue.state}`;
 
-    for (let page = 0; page < totalPages; page++) {
-      const startIdx = page * ITEMS_PER_PAGE;
-      const endIdx = Math.min(startIdx + ITEMS_PER_PAGE, issues.length);
-      const pageIssues = issues.slice(startIdx, endIdx);
-
-      const embed = new EmbedBuilder()
-        .setTitle(sessionName
-          ? t('discord.issues.sessionIssues', { session: sessionName })
-          : t('discord.issues.myIssues')
-        )
-        .setColor(stateColor[pageIssues[0]?.state as keyof typeof stateColor] ?? 0x3498db)
-        .setTimestamp();
-
-      if (totalPages > 1) {
-        embed.setFooter({ text: t('discord.issues.page', { current: page + 1, total: totalPages }) });
+      if (issue.project) {
+        value += ` · ${issue.project.name}`;
       }
 
-      const fields = pageIssues.map((issue) => {
-        const priority = priorityEmoji[issue.priority as keyof typeof priorityEmoji] ?? '⚪';
-        const stateEmoji = {
-          'Todo': '📝',
-          'In Progress': '⚙️',
-          'In Review': '👀',
-          'Done': '✅',
-          'Backlog': '📦',
-        }[issue.state] ?? '📋';
+      if (issue.labels && issue.labels.length > 0) {
+        value += `\n🏷️ ${issue.labels.join(', ')}`;
+      }
 
-        let value = `${priority} **${issue.identifier}**: ${issue.title}\n`;
-        value += `${stateEmoji} ${issue.state}`;
+      return { name: '\u200b', value, inline: false };
+    });
 
-        if (issue.project) {
-          value += ` · ${issue.project.name}`;
-        }
+    const fieldPages = paginateEmbedFields(allFields);
+    const embeds: EmbedBuilder[] = [];
 
-        if (issue.labels && issue.labels.length > 0) {
-          value += `\n🏷️ ${issue.labels.join(', ')}`;
-        }
+    // paginateEmbedFields returns contiguous slices of allFields, so walking a
+    // cursor alongside each page recovers that page's first issue for its color.
+    let cursor = 0;
+    for (let page = 0; page < fieldPages.length; page++) {
+      const pageColor = stateColor[issues[cursor]?.state as keyof typeof stateColor] ?? 0x3498db;
+      cursor += fieldPages[page].length;
 
-        return {
-          name: `\u200b`,
-          value,
-          inline: false,
-        };
-      });
+      let embed = new EmbedBuilder()
+        .setColor(pageColor)
+        .setTimestamp();
+      embed = safeSetTitle(embed, sessionName
+        ? t('discord.issues.sessionIssues', { session: sessionName })
+        : t('discord.issues.myIssues')
+      );
 
-      embed.addFields(...fields);
+      if (fieldPages.length > 1) {
+        embed = safeSetFooter(embed, t('discord.issues.page', { current: page + 1, total: fieldPages.length }));
+      }
+
+      for (const field of fieldPages[page]) {
+        embed = safeAddField(embed, field.name, field.value, field.inline ?? false);
+      }
+
+      embed = enforceAggregateBudget(embed);
       embeds.push(embed);
     }
 
@@ -240,8 +253,9 @@ export async function handleIssues(msg: Message, sessionName?: string): Promise<
       }
     }
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    await replyWithEmbed(msg, t('discord.issues.fetchError', { error: errorMsg }), 0xff0000);
+    // Raw exception text is operator-facing; Discord users get a bounded generic reply.
+    console.error('[Discord] issues fetch failed:', error);
+    await replyWithEmbed(msg, t('discord.issues.fetchError', { error: genericUserError(error) }), 0xff0000);
   }
 }
 
@@ -280,21 +294,14 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
       'Backlog': 0x95a5a6,
     };
 
-    const embed = new EmbedBuilder()
-      .setTitle(`${issue.identifier}: ${issue.title}`)
+    let embed = new EmbedBuilder()
       .setColor(stateColor[issue.state as keyof typeof stateColor] ?? 0x3498db)
       .setTimestamp();
+    embed = safeSetTitle(embed, `${issue.identifier}: ${issue.title}`);
 
     // Description
     if (issue.description) {
-      const desc = issue.description.length > 1024
-        ? issue.description.slice(0, 1021) + '...'
-        : issue.description;
-      embed.addFields({
-        name: '📝 Description',
-        value: desc,
-        inline: false,
-      });
+      embed = safeAddField(embed, '📝 Description', issue.description, false);
     }
 
     // State, priority, project
@@ -317,18 +324,12 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
       infoValue += `\n🏷️ ${t('discord.issues.labelsLabel', { labels: issue.labels.join(', ') })}`;
     }
 
-    embed.addFields({
-      name: '📊 Details',
-      value: infoValue,
-      inline: false,
-    });
+    embed = safeAddField(embed, '📊 Details', infoValue, false);
 
     // Show comments
     if (issue.comments && issue.comments.length > 0) {
       const commentSummary = issue.comments.slice(0, 3).map((comment, idx) => {
-        const preview = comment.body.length > 100
-          ? comment.body.slice(0, 97) + '...'
-          : comment.body;
+        const preview = truncateField(comment.body, 100, true);
         const createdAt = new Date(comment.createdAt).toLocaleDateString(getDateLocale());
         return `${idx + 1}. ${preview}\n   _${createdAt}_`;
       }).join('\n\n');
@@ -337,23 +338,21 @@ export async function handleIssue(msg: Message, issueId: string): Promise<void> 
         ? `${commentSummary}\n\n_+${issue.comments.length - 3} more..._`
         : commentSummary;
 
-      embed.addFields({
-        name: `💬 ${t('discord.issues.commentsCount', { count: issue.comments.length })}`,
-        value: commentValue,
-        inline: false,
-      });
+      embed = safeAddField(
+        embed,
+        `💬 ${t('discord.issues.commentsCount', { count: issue.comments.length })}`,
+        commentValue,
+        false,
+      );
     } else {
-      embed.addFields({
-        name: '💬 Comments',
-        value: t('discord.issue.noComments'),
-        inline: false,
-      });
+      embed = safeAddField(embed, '💬 Comments', t('discord.issue.noComments'), false);
     }
 
+    embed = enforceAggregateBudget(embed);
     await msg.reply({ embeds: [embed] });
   } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    await replyWithEmbed(msg, t('discord.issue.fetchError', { error: errorMsg }), 0xff0000);
+    console.error('[Discord] issue fetch failed:', error);
+    await replyWithEmbed(msg, t('discord.issue.fetchError', { error: genericUserError(error) }), 0xff0000);
   }
 }
 
@@ -541,35 +540,29 @@ export async function handleDev(msg: Message, args: string[]): Promise<void> {
 export async function handleRepos(msg: Message): Promise<void> {
   const repos = dev.listKnownRepos();
 
-  const embed = new EmbedBuilder()
-    .setTitle(t('discord.repos.title'))
-    .setColor(0x00ae86)
-    .setDescription(t('discord.repos.description'));
+  let embed = new EmbedBuilder().setColor(0x00ae86);
+  embed = safeSetTitle(embed, t('discord.repos.title'));
+  embed = safeSetDescription(embed, t('discord.repos.description'));
 
   const available = repos.filter(r => r.exists);
   const unavailable = repos.filter(r => !r.exists);
 
   if (available.length > 0) {
-    embed.addFields({
-      name: `✅ ${t('discord.repos.available')}`,
-      value: available.map(r => `\`${r.alias}\` → ${r.path}`).join('\n'),
-      inline: false,
-    });
+    const value = available
+      .map(r => `\`${truncateField(r.alias, 64)}\` → ${truncateField(r.path, 200)}`)
+      .join('\n');
+    embed = safeAddField(embed, `✅ ${t('discord.repos.available')}`, value);
   }
 
   if (unavailable.length > 0) {
-    embed.addFields({
-      name: `❌ ${t('discord.repos.unavailable')}`,
-      value: unavailable.map(r => `\`${r.alias}\` → ${r.path}`).join('\n'),
-      inline: false,
-    });
+    const value = unavailable
+      .map(r => `\`${truncateField(r.alias, 64)}\` → ${truncateField(r.path, 200)}`)
+      .join('\n');
+    embed = safeAddField(embed, `❌ ${t('discord.repos.unavailable')}`, value);
   }
 
-  embed.addFields({
-    name: `💡 ${t('discord.repos.tip')}`,
-    value: t('discord.repos.tipContent'),
-    inline: false,
-  });
+  embed = safeAddField(embed, `💡 ${t('discord.repos.tip')}`, t('discord.repos.tipContent'));
+  embed = enforceAggregateBudget(embed);
 
   await msg.reply({ embeds: [embed] });
 }
@@ -585,20 +578,20 @@ export async function handleTasks(msg: Message): Promise<void> {
     return;
   }
 
-  const embed = new EmbedBuilder()
-    .setTitle(t('discord.tasks.title'))
-    .setColor(0xffaa00);
+  let embed = new EmbedBuilder().setColor(0xffaa00);
+  embed = safeSetTitle(embed, t('discord.tasks.title'));
 
-  for (const task of tasks) {
+  for (const task of tasks.slice(0, EMBED_LIMITS.MAX_FIELDS - 1)) {
     const elapsed = Math.floor((Date.now() - task.startedAt) / 1000);
-    embed.addFields({
-      name: `${task.repo}`,
-      value: `ID: \`${task.taskId}\`\n${t('discord.tasks.path', { path: task.path })}\n${t('discord.tasks.requester', { user: task.requestedBy })}\n${t('discord.tasks.elapsed', { seconds: elapsed })}`,
-      inline: false,
-    });
+    embed = safeAddField(
+      embed,
+      `${task.repo}`,
+      `ID: \`${task.taskId}\`\n${t('discord.tasks.path', { path: task.path })}\n${t('discord.tasks.requester', { user: task.requestedBy })}\n${t('discord.tasks.elapsed', { seconds: elapsed })}`,
+    );
   }
 
-  embed.setFooter({ text: t('discord.tasks.cancelHint') });
+  embed = safeSetFooter(embed, t('discord.tasks.cancelHint'));
+  embed = enforceAggregateBudget(embed);
 
   await msg.reply({ embeds: [embed] });
 }
@@ -631,18 +624,18 @@ export async function handleLimits(msg: Message): Promise<void> {
 
   const progressBar = '█'.repeat(used) + '░'.repeat(remaining);
 
-  const embed = new EmbedBuilder()
-    .setTitle(t('discord.limits.title'))
+  let embed = new EmbedBuilder()
     .setColor(remaining > 3 ? 0x00ae86 : remaining > 0 ? 0xffaa00 : 0xff0000)
-    .addFields(
-      {
-        name: t('discord.limits.issueCreation'),
-        value: `${progressBar} ${used}/${total}\n${t('discord.limits.remaining', { n: remaining })}`,
-        inline: false,
-      }
-    )
-    .setFooter({ text: t('discord.limits.resetNote') })
     .setTimestamp();
+  embed = safeSetTitle(embed, t('discord.limits.title'));
+  embed = safeAddField(
+    embed,
+    t('discord.limits.issueCreation'),
+    `${progressBar} ${used}/${total}\n${t('discord.limits.remaining', { n: remaining })}`,
+    false,
+  );
+  embed = safeSetFooter(embed, t('discord.limits.resetNote'));
+  embed = enforceAggregateBudget(embed);
 
   await msg.reply({ embeds: [embed] });
 }
@@ -658,11 +651,10 @@ export async function handleSchedule(msg: Message, args: string[]): Promise<void
     const schedules = await scheduler.listSchedules();
     const formatted = scheduler.formatScheduleList(schedules);
 
-    const embed = new EmbedBuilder()
-      .setTitle(t('discord.schedule.title'))
-      .setDescription(formatted)
-      .setColor(0x00ae86)
-      .setTimestamp();
+    let embed = new EmbedBuilder().setColor(0x00ae86).setTimestamp();
+    embed = safeSetTitle(embed, t('discord.schedule.title'));
+    embed = safeSetDescription(embed, formatted);
+    embed = enforceAggregateBudget(embed);
 
     await msg.reply({ embeds: [embed] });
     return;
@@ -720,7 +712,8 @@ export async function handleSchedule(msg: Message, args: string[]): Promise<void
       const job = await scheduler.addSchedule(name, projectPath, prompt, interval, msg.author.username);
       await msg.reply(`✅ ${t('discord.schedule.addSuccess', { name: job.name, schedule: job.schedule })}`);
     } catch (err) {
-      await msg.reply(`❌ ${t('discord.schedule.addFailed', { error: err instanceof Error ? err.message : String(err) })}`);
+      console.error('[Discord] schedule add failed:', err);
+      await msg.reply(`❌ ${t('discord.schedule.addFailed', { error: genericUserError(err) })}`);
     }
     return;
   }
@@ -761,12 +754,13 @@ export async function handleCodex(msg: Message, args: string[]): Promise<void> {
       return;
     }
 
-    const embed = new EmbedBuilder()
-      .setTitle(t('discord.codex.title'))
-      .setDescription(recent.join('\n'))
+    let embed = new EmbedBuilder()
       .setColor(0x9b59b6)
-      .setFooter({ text: t('discord.codex.pathLabel', { path: codex.getCodexPath() }) })
       .setTimestamp();
+    embed = safeSetTitle(embed, t('discord.codex.title'));
+    embed = safeSetDescription(embed, recent.join('\n'));
+    embed = safeSetFooter(embed, t('discord.codex.pathLabel', { path: codex.getCodexPath() }));
+    embed = enforceAggregateBudget(embed);
 
     await msg.reply({ embeds: [embed] });
     return;
@@ -800,7 +794,8 @@ export async function handleCodex(msg: Message, args: string[]): Promise<void> {
 
       await msg.reply(`✅ ${t('discord.codex.saveSuccess', { path: summaryPath })}`);
     } catch (err) {
-      await msg.reply(`❌ ${t('discord.codex.saveFailed', { error: err instanceof Error ? err.message : String(err) })}`);
+      console.error('[Discord] codex save failed:', err);
+      await msg.reply(`❌ ${t('discord.codex.saveFailed', { error: genericUserError(err) })}`);
     }
     return;
   }
@@ -829,24 +824,24 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
       const runner = autonomous.getRunner();
       const stats = runner.getStats();
 
-      const embed = new EmbedBuilder()
-        .setTitle(t('discord.auto.title'))
+      let embed = new EmbedBuilder()
         .setColor(stats.isRunning ? 0x00AE86 : 0x95A5A6)
-        .addFields(
-          { name: t('discord.auto.statusLabel'), value: stats.isRunning ? `✅ ${t('discord.auto.statusRunning')}` : `⏹️ ${t('discord.auto.statusStopped')}`, inline: true },
-          { name: t('discord.auto.completedFailed'), value: `${stats.engineStats.totalCompleted}/${stats.engineStats.totalFailed}`, inline: true },
-          { name: t('discord.auto.pendingApprovalLabel'), value: stats.pendingApproval ? `⏳ ${t('discord.auto.pendingApproval')}` : t('discord.auto.noPending'), inline: true },
-        )
         .setTimestamp();
+      embed = safeSetTitle(embed, t('discord.auto.title'));
+      embed = safeAddField(embed, t('discord.auto.statusLabel'), stats.isRunning ? `✅ ${t('discord.auto.statusRunning')}` : `⏹️ ${t('discord.auto.statusStopped')}`, true);
+      embed = safeAddField(embed, t('discord.auto.completedFailed'), `${stats.engineStats.totalCompleted}/${stats.engineStats.totalFailed}`, true);
+      embed = safeAddField(embed, t('discord.auto.pendingApprovalLabel'), stats.pendingApproval ? `⏳ ${t('discord.auto.pendingApproval')}` : t('discord.auto.noPending'), true);
 
       if (stats.lastHeartbeat > 0) {
-        embed.addFields({
-          name: t('discord.auto.lastHeartbeatLabel'),
-          value: new Date(stats.lastHeartbeat).toLocaleString(getDateLocale()),
-          inline: false,
-        });
+        embed = safeAddField(
+          embed,
+          t('discord.auto.lastHeartbeatLabel'),
+          new Date(stats.lastHeartbeat).toLocaleString(getDateLocale()),
+          false,
+        );
       }
 
+      embed = enforceAggregateBudget(embed);
       await msg.reply({ embeds: [embed] });
     } catch {
       await msg.reply(t('discord.auto.notInitialized'));
@@ -924,7 +919,8 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
         : `✅ ${t('discord.auto.startedSolo')}`;
       await msg.reply(startMsg);
     } catch (err) {
-      await msg.reply(`❌ ${t('discord.errors.startFailed', { error: err instanceof Error ? err.message : String(err) })}`);
+      console.error('[Discord] autonomous start failed:', err);
+      await msg.reply(`❌ ${t('discord.errors.startFailed', { error: genericUserError(err) })}`);
     }
     return;
   }

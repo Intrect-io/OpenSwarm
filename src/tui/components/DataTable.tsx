@@ -4,11 +4,17 @@ import { Box, Text } from 'ink';
 import { displayWidth, truncateLine } from '../../cli/reviewProgress.js';
 import type { Table } from '../monitorRows.js';
 import { sanitizeTerminalText } from '../sanitize.js';
+import { flattenToSingleLine } from '../../support/outputBudget.js';
 
 export interface DataTableProps extends Table {
   empty?: string;
   maxCellWidth?: number;
   terminalWidth?: number;
+}
+
+/** Normalize untrusted cell text to a single display line before width clipping. */
+function toDisplayCell(value: string): string {
+  return flattenToSingleLine(sanitizeTerminalText(value));
 }
 
 export function DataTable({ columns, rows, empty, maxCellWidth = 28, terminalWidth }: DataTableProps) {
@@ -18,7 +24,7 @@ export function DataTable({ columns, rows, empty, maxCellWidth = 28, terminalWid
   const visibleColumnCount = terminalWidth
     ? Math.max(1, Math.min(columns.length, terminalWidth))
     : columns.length;
-  const rawColumns = columns.slice(0, visibleColumnCount).map(sanitizeTerminalText);
+  const rawColumns = columns.slice(0, visibleColumnCount).map(toDisplayCell);
   const separatorWidth = terminalWidth && visibleColumnCount > 1
     ? Math.max(0, Math.min(2, Math.floor((terminalWidth - visibleColumnCount) / (visibleColumnCount - 1))))
     : 2;
@@ -31,7 +37,7 @@ export function DataTable({ columns, rows, empty, maxCellWidth = 28, terminalWid
     : maxCellWidth;
   const clip = (value: string) => truncateLine(value, cellWidth);
   const clippedColumns = rawColumns.map(clip);
-  const clippedRows = rows.map((row) => rawColumns.map((_, i) => clip(sanitizeTerminalText(row[i] ?? ''))));
+  const clippedRows = rows.map((row) => rawColumns.map((_, i) => clip(toDisplayCell(row[i] ?? ''))));
   const widths = clippedColumns.map((c, i) =>
     Math.max(displayWidth(c), ...clippedRows.map((r) => displayWidth(r[i] ?? ''))),
   );

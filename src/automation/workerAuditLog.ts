@@ -9,21 +9,29 @@
 
 import type { WorkerResult } from '../agents/agentPair.js';
 import { formatAutomationComment, type CommentSection } from '../linear/format.js';
+import {
+  AUDIT_FILES_MAX,
+  AUDIT_COMMANDS_MAX,
+  AUDIT_SUMMARY_CAP,
+  AUDIT_GOAL_CAP,
+  AUDIT_ENTRY_CAP,
+  truncate,
+} from '../support/outputBudget.js';
 
 /** Caps so a chatty agent can't post a multi-MB comment. */
-const MAX_FILES = 20;
-const MAX_COMMANDS = 12;
-const SUMMARY_CAP = 600;
-const GOAL_CAP = 400;
+const MAX_FILES = AUDIT_FILES_MAX;
+const MAX_COMMANDS = AUDIT_COMMANDS_MAX;
+const SUMMARY_CAP = AUDIT_SUMMARY_CAP;
+const GOAL_CAP = AUDIT_GOAL_CAP;
 
 function cap(s: string | undefined, n: number): string {
   if (!s) return '';
-  const trimmed = s.trim();
-  return trimmed.length > n ? `${trimmed.slice(0, n - 1)}…` : trimmed;
+  return truncate(s.trim(), n);
 }
 
 function inlineCode(s: string): string {
-  return `\`${s.replaceAll('`', '\\`')}\``;
+  // Cap individual entry length before wrapping so a single path/command can't blow the comment.
+  return `\`${truncate(s, AUDIT_ENTRY_CAP).replaceAll('`', '\\`')}\``;
 }
 
 /** Render a list as inline code, capped, with an "+N more" suffix when truncated. */

@@ -6,6 +6,16 @@
 import { EmbedBuilder } from 'discord.js';
 import type { PipelineResult } from './pairPipeline.js';
 import { formatCost } from '../support/costTracker.js';
+import {
+  boundedFieldValue,
+  boundedDescription,
+  boundedMessageContent,
+  PIPELINE_EMBED_FIELD_VALUE_LIMIT,
+  PIPELINE_FAILED_TESTS_PREVIEW,
+  DISCORD_EMBED_FIELDS_PER_EMBED,
+  DISCORD_EMBED_AGGREGATE_VALUE_LIMIT,
+  truncate,
+} from '../support/outputBudget.js';
 
 /** Format epoch ms to HH:MM:SS local time string */
 function formatTimestamp(epochMs: number): string {
@@ -46,7 +56,7 @@ export function formatPipelineResult(result: PipelineResult): string {
       lines.push(parts.join(' | '));
     }
     if (ctx.taskTitle) {
-      lines.push(`📋 ${ctx.taskTitle}`);
+      lines.push(`📋 ${truncate(ctx.taskTitle, 200)}`);
     }
     lines.push('');
   }
@@ -70,11 +80,12 @@ export function formatPipelineResult(result: PipelineResult): string {
     lines.push(`  ${emoji} ${stage.stage} (${duration}s) @ ${time}`);
   }
 
-  return lines.join('\n');
+  return boundedMessageContent(lines.join('\n'));
 }
 
 /**
- * Format pipeline result as a Discord Embed
+ * Format pipeline result as a Discord Embed.
+ * Enforces per-field and aggregate embed budgets to prevent payload rejection.
  */
 export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder {
   const statusConfig = {
@@ -95,18 +106,33 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     .setColor(statusConfig.color)
     .setTimestamp();
 
-  // Task context
+  // Task context (bounded description)
   if (result.taskContext) {
     const ctx = result.taskContext;
     const displayName = ctx.projectName
       || (ctx.projectPath ? ctx.projectPath.split('/').pop() || '' : '');
 
     if (displayName && ctx.issueIdentifier) {
-      embed.setDescription(`📁 **${displayName}** | 🔖 ${ctx.issueIdentifier}\n${ctx.taskTitle || ''}`);
+      embed.setDescription(
+        boundedDescription(`📁 **${displayName}** | 🔖 ${ctx.issueIdentifier}\n${ctx.taskTitle || ''}`),
+      );
     } else if (ctx.taskTitle) {
-      embed.setDescription(ctx.taskTitle);
+      embed.setDescription(boundedDescription(ctx.taskTitle));
     }
   }
+
+  // Track aggregate field value length to stay within embed budget
+  let aggregateValueLength = 0;
+
+  const tryAddField = (name: string, value: string, inline = false): boolean => {
+    const bounded = boundedFieldValue(value, PIPELINE_EMBED_FIELD_VALUE_LIMIT);
+    const newTotal = aggregateValueLength + bounded.length;
+    if (newTotal > DISCORD_EMBED_AGGREGATE_VALUE_LIMIT) return false;
+    if (embed.data.fields && embed.data.fields.length >= DISCORD_EMBED_FIELDS_PER_EMBED) return false;
+    embed.addFields({ name, value: bounded, inline });
+    aggregateValueLength = newTotal;
+    return true;
+  };
 
   // Summary stats
   const durationStr = (result.totalDuration / 1000).toFixed(1) + 's';
@@ -114,11 +140,9 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     ? `$${result.totalCost.costUsd.toFixed(4)} (${formatCost(result.totalCost)})`
     : 'N/A';
 
-  embed.addFields(
-    { name: '🔄 Iterations', value: result.iterations.toString(), inline: true },
-    { name: '⏱️ Duration', value: durationStr, inline: true },
-    { name: '💰 Cost', value: costStr, inline: true },
-  );
+  tryAddField('🔄 Iterations', result.iterations.toString(), true);
+  tryAddField('⏱️ Duration', durationStr, true);
+  tryAddField('💰 Cost', costStr, true);
 
   // Stages
   const stagesStr = result.stages
@@ -130,7 +154,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     })
     .join('\n') || 'No stages';
 
-  embed.addFields({ name: '📊 Stages', value: stagesStr, inline: false });
+  tryAddField('📊 Stages', stagesStr, false);
 
   // Worker result
   if (result.workerResult) {
@@ -150,7 +174,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     }
 
     if (workerValue) {
-      embed.addFields({ name: '🔨 Worker', value: workerValue, inline: false });
+      tryAddField('🔨 Worker', workerValue, false);
     }
   }
 
@@ -168,7 +192,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
       reviewValue += `\n\n**Issues found:** ${review.issues.length}`;
     }
 
-    embed.addFields({ name: '✅ Reviewer', value: reviewValue, inline: false });
+    tryAddField('✅ Reviewer', reviewValue, false);
   }
 
   // Tester result
@@ -184,19 +208,19 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     }
 
     if (test.testsFailed > 0 && test.failedTests && test.failedTests.length > 0) {
-      const failedStr = test.failedTests.slice(0, 2).map(t => `❌ ${t}`).join('\n');
+      const failedStr = test.failedTests.slice(0, PIPELINE_FAILED_TESTS_PREVIEW).map(t => `❌ ${t}`).join('\n');
       testValue += `\n\n${failedStr}`;
-      if (test.failedTests.length > 2) {
-        testValue += `\n... +${test.failedTests.length - 2} more`;
+      if (test.failedTests.length > PIPELINE_FAILED_TESTS_PREVIEW) {
+        testValue += `\n... +${test.failedTests.length - PIPELINE_FAILED_TESTS_PREVIEW} more`;
       }
     }
 
-    embed.addFields({ name: '🧪 Tests', value: testValue, inline: false });
+    tryAddField('🧪 Tests', testValue, false);
   }
 
   // PR URL
   if (result.prUrl) {
-    embed.addFields({ name: '🔗 Pull Request', value: `[View PR](${result.prUrl})`, inline: false });
+    tryAddField('🔗 Pull Request', `[View PR](${result.prUrl})`, false);
   }
 
   // Footer

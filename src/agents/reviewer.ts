@@ -16,6 +16,7 @@ import type { VerifyEvidence } from '../verify/runner.js';
 import { renderVerifyEvidence } from './verificationEvidence.js';
 import type { InstructionCapsule } from './instructionCapsule.js';
 import { COORDINATION_GUIDANCE_PROMPT, type CoordinationToolContext } from '../coordination/coordinationTools.js';
+import { boundedMessageContent } from '../support/outputBudget.js';
 
 // Types
 
@@ -410,7 +411,8 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
 // Formatting
 
 /**
- * Format Reviewer result as a Discord message
+ * Format Reviewer result as a Discord message.
+ * Enforces Discord message content limits to prevent payload rejection.
  */
 export function formatReviewFeedback(result: ReviewResult): string {
   const decisionEmoji = {
@@ -447,7 +449,7 @@ export function formatReviewFeedback(result: ReviewResult): string {
     }
   }
 
-  return lines.join('\n');
+  return boundedMessageContent(lines.join('\n'));
 }
 
 /**
