@@ -12,6 +12,7 @@ vi.mock('./memoryCore.js', () => ({
   normalizeRecords: (records: any[]) => records,
   initDatabase: vi.fn(async () => {}),
   embedPassage: vi.fn(async () => [0.1, 0.2, 0.3, 0.4]),
+  fetchAllTableRows: async () => [...state.records.values()].map((r) => ({ ...r })),
   getTable: () => ({
     query: () => ({
       where: (pred: string) => ({
