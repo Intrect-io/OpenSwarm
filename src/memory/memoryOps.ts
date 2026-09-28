@@ -5,11 +5,11 @@
  * Core types, save, search are in memoryCore.ts.
  */
 import {
-  EMBEDDING_DIM,
   PERMANENT_EXPIRY,
   normalizeRecords,
   initDatabase,
   embedPassage,
+  fetchAllTableRows,
   getTable,
   searchMemory,
   calculateFreshness,
@@ -24,6 +24,9 @@ import { embeddingTextFor } from './embeddingConfig.js';
 
 type MemoryTable = NonNullable<ReturnType<typeof getTable>>;
 const MAX_MEMORY_REVISIONS = 20;
+
+/** Rows deleted per Lance commit while sweeping expired records. */
+const PAGE_SIZE = 10_000;
 
 /**
  * In-process queue that serializes full read-modify-write memory mutations.
@@ -395,7 +398,15 @@ function formatDate(timestamp: number): string {
 }
 
 /**
- * Clean up expired memories
+ * Clean up expired memories.
+ *
+ * Scans the whole table in fixed-offset pages and then deletes the expired
+ * rows in bounded batches; the previous single `.limit(10_000)` silently left
+ * the remainder of larger stores behind. Deleting only after the scan
+ * completes keeps the page offsets stable — deleting mid-scan shifts every
+ * later row and makes the cursor skip records. The sweep runs inside
+ * withMemoryWriteRetry so a concurrent writer that wins a version race
+ * retries it instead of failing part-way; deletes are idempotent.
  */
 export async function cleanupExpired(): Promise<number> {
   try {
@@ -404,18 +415,30 @@ export async function cleanupExpired(): Promise<number> {
     if (!table) return 0;
 
     const now = Date.now();
-    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
 
-    const expiredIds = results
-      .filter((r: any) => r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now)
-      .map((r: any) => r.id);
+    return await withMemoryWriteRetry(async () => {
+      const rows = await fetchAllTableRows(table);
 
-    if (expiredIds.length > 0) {
-      await deleteMemoryIds(table, expiredIds);
-      console.log(`[Memory] Deleted ${expiredIds.length} expired records`);
-    }
+      const expiredIds: string[] = [];
+      for (const row of rows) {
+        if (typeof row !== 'object' || row === null) continue;
+        const r = row as Partial<CognitiveMemoryRecord>;
+        if (typeof r.id !== 'string') continue;
+        if (typeof r.expiresAt === 'number' && r.expiresAt < PERMANENT_EXPIRY && r.expiresAt < now) {
+          expiredIds.push(r.id);
+        }
+      }
 
-    return expiredIds.length;
+      for (let i = 0; i < expiredIds.length; i += PAGE_SIZE) {
+        await table.delete(idsPredicate(expiredIds.slice(i, i + PAGE_SIZE)));
+      }
+
+      if (expiredIds.length > 0) {
+        console.log(`[Memory] Cleanup complete: ${expiredIds.length} expired records deleted`);
+      }
+
+      return expiredIds.length;
+    }, 'cleanupExpired');
   } catch (error) {
     console.error('[Memory] Cleanup error:', error);
     return 0;
@@ -426,7 +449,13 @@ export async function cleanupExpired(): Promise<number> {
 const CONSOLIDATION_SIMILARITY = 0.85;  // Duplicate detection threshold
 
 /**
- * Consolidate duplicate/similar memories
+ * Consolidate duplicate/similar memories.
+ *
+ * Reads the complete table in pages: the previous single `.limit(10000)` vector
+ * query both capped the scan and let vector ranking decide which rows were
+ * eligible for merging. Runs under the in-process mutation lock like every
+ * other read-modify-write op here, so concurrent revise/consolidate cannot
+ * overwrite each other's metadata.
  */
 export async function consolidateMemories(): Promise<{
   merged: number;
@@ -438,8 +467,8 @@ export async function consolidateMemories(): Promise<{
       const table = getTable();
       if (!table) return { merged: 0, groups: [] };
 
-      const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
-      const validMemories = results.filter((r: any) => r.id !== 'init');
+      const allMemories = await fetchAllTableRows(table);
+      const validMemories = allMemories.filter((r) => r.id !== 'init');
 
       const merged: string[] = [];
       const groups: Array<{ kept: string; merged: string[] }> = [];
@@ -516,7 +545,11 @@ export async function consolidateMemories(): Promise<{
 }
 
 /**
- * Cosine similarity between two vectors
+ * Cosine similarity between two vectors.
+ *
+ * Returns a score in [-1, 1]; `0` means "cannot compare" (missing or
+ * mismatched vectors, or a zero-magnitude vector). Callers compare the result
+ * against a similarity threshold, so it must be a number.
  */
 function cosineSimilarity(a: number[], b: number[]): number {
   if (!a || !b || a.length !== b.length) return 0;
@@ -605,19 +638,25 @@ export async function getMemoryStats(): Promise<{
     const table = getTable();
     if (!table) return { total: 0, byType: { ...DEFAULT_BY_TYPE }, byRepo: {}, avgImportance: 0 };
 
-    const results = await table.search(Array.from({ length: EMBEDDING_DIM }, () => 0)).limit(10000).toArray();
+    // Aggregate over the complete table: the previous `.limit(10000)` vector
+    // query capped statistics at the first 10k rows and let vector ranking pick
+    // which rows were counted.
+    const results = await fetchAllTableRows(table);
 
     const byType: Record<MemoryType, number> = { ...DEFAULT_BY_TYPE };
     const byRepo: Record<string, number> = {};
     let totalImportance = 0;
     let count = 0;
 
-    for (const r of results) {
-      if (r.id === 'init') continue;
+    for (const row of results) {
+      if (typeof row !== 'object' || row === null) continue;
+      const r = row as Partial<CognitiveMemoryRecord>;
+      if (r.id === 'init' || typeof r.id !== 'string') continue;
       if (byType[r.type as MemoryType] !== undefined) {
         byType[r.type as MemoryType]++;
       }
-      byRepo[r.repo] = (byRepo[r.repo] || 0) + 1;
+      const repo = r.repo ?? 'unknown';
+      byRepo[repo] = (byRepo[repo] || 0) + 1;
       totalImportance += r.importance ?? 0.5;
       count++;
     }
