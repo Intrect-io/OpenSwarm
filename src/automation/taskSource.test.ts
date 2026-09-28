@@ -37,6 +37,27 @@ describe('SqliteTaskSource', () => {
     expect(tasks.every((t) => t.source === 'local')).toBe(true);
   });
 
+  it('fetchTasks paginates past the first page instead of silently dropping the tail', async () => {
+    // A fixed limit:200/offset:0 dropped every eligible issue past the first
+    // 200 from the local queue with no upstream fetch to make up the
+    // difference — those tasks were never selected. (AGT-3421)
+    store = freshStore();
+    const pageSize = 200;
+    const total = pageSize * 2 + 37;
+    for (let i = 0; i < total; i += 1) {
+      store.createIssue({ projectId: 'p', title: `todo-${String(i).padStart(4, '0')}`, status: 'todo' });
+    }
+
+    const src = new SqliteTaskSource(store);
+    const tasks = await src.fetchTasks();
+
+    expect(tasks).toHaveLength(total);
+    // First and last of the ordering must both be present — the tail is what a
+    // single capped page used to lose.
+    const titles = new Set(tasks.map((t) => t.title));
+    expect(titles.has(`todo-${String(total - 1).padStart(4, '0')}`)).toBe(true);
+  });
+
   it('updateState transitions the issue status', async () => {
     store = freshStore();
     const issue = store.createIssue({ projectId: 'p', title: 'x', status: 'todo' });
