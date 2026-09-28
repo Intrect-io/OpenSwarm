@@ -21,6 +21,7 @@ import { taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js'
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import type { VerifyEvidence } from '../verify/runner.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { withFileLockSync } from '../support/fileLock.js';
 import {
   isProofCapableSpace,
   processAppearsAlive,
@@ -241,7 +242,9 @@ export function loadProjectSelection(file: string = PROJECT_SELECTION_FILE): Pro
 export function saveProjectSelection(sel: ProjectSelection, file: string = PROJECT_SELECTION_FILE): void {
   try {
     ensureParentDir(file);
-    atomicWriteFileSync(file, JSON.stringify(sel, null, 2));
+    withFileLockSync(`${file}.lock`, () => {
+      atomicWriteFileSync(file, JSON.stringify(sel, null, 2));
+    });
   } catch (err) {
     console.warn('[ProjectSelection] Failed to save:', err);
   }
@@ -257,13 +260,18 @@ function pruneOldEntries(entries: ProjectPaceEntry[]): ProjectPaceEntry[] {
 // below — daily-pace.json remains useful as a cost/throughput telemetry trail.
 
 export function recordProjectCompletion(projectName: string, costUsd?: number): void {
-  const state = ensurePaceLoaded();
-  if (!state.projects[projectName]) state.projects[projectName] = [];
-  state.projects[projectName] = pruneOldEntries(state.projects[projectName]);
-  state.projects[projectName].push({ completedAt: new Date().toISOString(), costUsd });
-  state.updatedAt = new Date().toISOString();
-  savePace();
-  console.log(`[Pace] ${projectName}: ${state.projects[projectName].length} tasks in 5h window`);
+  withFileLockSync(`${DAILY_PACE_FILE}.lock`, () => {
+    // Reload under the lock: two processes appending completions would otherwise
+    // each write a snapshot taken before the other's append, dropping it.
+    paceState = null;
+    const state = ensurePaceLoaded();
+    if (!state.projects[projectName]) state.projects[projectName] = [];
+    state.projects[projectName] = pruneOldEntries(state.projects[projectName]);
+    state.projects[projectName].push({ completedAt: new Date().toISOString(), costUsd });
+    state.updatedAt = new Date().toISOString();
+    savePace();
+    console.log(`[Pace] ${projectName}: ${state.projects[projectName].length} tasks in 5h window`);
+  });
 }
 
 export function getDailyPaceInfo(): DailyPaceState {
@@ -572,48 +580,57 @@ export function getRejectionCount(issueId: string): number {
 }
 
 export function incrementRejection(issueId: string, reason: string): number {
-  const state = ensureRejectionStateLoaded();
-  const entry = state.rejections[issueId] || {
-    issueId,
-    count: 0,
-    lastRejection: new Date().toISOString(),
-    reasons: [],
-  };
+  return withFileLockSync(`${REJECTION_STATE_FILE}.lock`, () => {
+    // Cross-process read-modify-write: reload disk state under the lock, or a
+    // concurrent increment's count and reasons are dropped by this write.
+    rejectionState = null;
+    const state = ensureRejectionStateLoaded();
+    const entry = state.rejections[issueId] || {
+      issueId,
+      count: 0,
+      lastRejection: new Date().toISOString(),
+      reasons: [],
+    };
 
-  entry.count++;
-  entry.lastRejection = new Date().toISOString();
-  entry.reasons.push(reason);
+    entry.count++;
+    entry.lastRejection = new Date().toISOString();
+    entry.reasons.push(reason);
 
-  // Keep only last 5 reasons
-  if (entry.reasons.length > 5) {
-    entry.reasons = entry.reasons.slice(-5);
-  }
+    // Keep only last 5 reasons
+    if (entry.reasons.length > 5) {
+      entry.reasons = entry.reasons.slice(-5);
+    }
 
-  state.rejections[issueId] = entry;
-  state.updatedAt = new Date().toISOString();
+    state.rejections[issueId] = entry;
+    state.updatedAt = new Date().toISOString();
 
-  // Persist to disk
-  try {
-    ensureParentDir(REJECTION_STATE_FILE);
-    atomicWriteFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.warn('[RejectionState] Failed to save:', err);
-  }
+    try {
+      ensureParentDir(REJECTION_STATE_FILE);
+      atomicWriteFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn('[RejectionState] Failed to save:', err);
+    }
 
-  return entry.count;
+    return entry.count;
+  }, { timeoutMs: 10_000 });
 }
 
 export function clearRejection(issueId: string): void {
-  const state = ensureRejectionStateLoaded();
-  delete state.rejections[issueId];
-  state.updatedAt = new Date().toISOString();
+  withFileLockSync(`${REJECTION_STATE_FILE}.lock`, () => {
+    // Reload under the lock so the clear applies to the current disk state,
+    // not a snapshot that another process has already incremented.
+    rejectionState = null;
+    const state = ensureRejectionStateLoaded();
+    delete state.rejections[issueId];
+    state.updatedAt = new Date().toISOString();
 
-  try {
-    ensureParentDir(REJECTION_STATE_FILE);
-    atomicWriteFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.warn('[RejectionState] Failed to save:', err);
-  }
+    try {
+      ensureParentDir(REJECTION_STATE_FILE);
+      atomicWriteFileSync(REJECTION_STATE_FILE, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn('[RejectionState] Failed to save:', err);
+    }
+  }, { timeoutMs: 10_000 });
 }
 
 export function isRejectionLimitReached(issueId: string): boolean {
@@ -694,9 +711,16 @@ export function getChildrenCount(issueId: string): number {
  * this function ensures the counter resets even when using the in-memory cache.
  */
 function resetDailyCounterIfNeeded(): void {
-  const state = ensureDecompositionStateLoaded();
   const today = new Date().toLocaleDateString('en-CA');
-  if (state.dailyCreationDate !== today) {
+  // Fast path: this runs on every canCreateMoreIssues call, and no lock is
+  // needed when the cached date is already current. Only an actual reset takes
+  // the cross-process lock (re-checked under it) so a concurrent decomposition's
+  // count is not clobbered by a stale reset write.
+  if (ensureDecompositionStateLoaded().dailyCreationDate === today) return;
+  withFileLockSync(`${DECOMPOSITION_STATE_FILE}.lock`, () => {
+    decompositionState = null;
+    const state = ensureDecompositionStateLoaded();
+    if (state.dailyCreationDate === today) return;
     console.log(`[DecompositionState] Daily counter reset: ${state.dailyCreationCount} → 0 (date: ${state.dailyCreationDate} → ${today})`);
     state.dailyCreationCount = 0;
     state.dailyCreationDate = today;
@@ -707,7 +731,7 @@ function resetDailyCounterIfNeeded(): void {
     } catch (err) {
       console.warn('[DecompositionState] Failed to persist daily reset:', err);
     }
-  }
+  }, { timeoutMs: 10_000 });
 }
 
 export function getDailyCreationCount(): number {
@@ -772,59 +796,67 @@ export function registerDecomposition(
   parentId: string | undefined,
   childrenIds: string[]
 ): void {
-  const state = ensureDecompositionStateLoaded();
-  const now = new Date().toISOString();
-  const parentDepth = parentId ? (state.decompositions[parentId]?.depth ?? 0) : -1;
-  const issueDepth = parentDepth + 1;
-  const uniqueChildren = [...new Set(childrenIds)];
-  const existingChildren = new Set(
-    Object.values(state.decompositions)
-      .filter((entry) => entry.parentId === issueId)
-      .map((entry) => entry.issueId),
-  );
+  // Date rollover first, and outside the lock: resetDailyCounterIfNeeded takes
+  // the same lock and withFileLockSync is not reentrant.
+  resetDailyCounterIfNeeded();
+  withFileLockSync(`${DECOMPOSITION_STATE_FILE}.lock`, () => {
+    // Reload under the lock: concurrent decompositions in sibling processes would
+    // otherwise each write a snapshot missing the other's child links and daily
+    // budget spend.
+    decompositionState = null;
+    const state = ensureDecompositionStateLoaded();
+    const now = new Date().toISOString();
+    const parentDepth = parentId ? (state.decompositions[parentId]?.depth ?? 0) : -1;
+    const issueDepth = parentDepth + 1;
+    const uniqueChildren = [...new Set(childrenIds)];
+    const existingChildren = new Set(
+      Object.values(state.decompositions)
+        .filter((entry) => entry.parentId === issueId)
+        .map((entry) => entry.issueId),
+    );
 
-  // Validate the full batch before mutating the in-memory projection. A child
-  // identity collision must leave no half-created parent entry behind.
-  for (const childId of uniqueChildren) {
-    const existing = state.decompositions[childId];
-    if (existing && existing.parentId !== issueId) {
-      throw new Error(`Decomposition child ${childId} is already owned by ${existing.parentId ?? 'no parent'}`);
+    // Validate the full batch before mutating the in-memory projection. A child
+    // identity collision must leave no half-created parent entry behind.
+    for (const childId of uniqueChildren) {
+      const existing = state.decompositions[childId];
+      if (existing && existing.parentId !== issueId) {
+        throw new Error(`Decomposition child ${childId} is already owned by ${existing.parentId ?? 'no parent'}`);
+      }
     }
-  }
 
-  const existingIssue = state.decompositions[issueId];
-  state.decompositions[issueId] = {
-    issueId,
-    parentId,
-    depth: issueDepth,
-    childrenCount: new Set([...existingChildren, ...uniqueChildren]).size,
-    createdAt: existingIssue?.createdAt ?? now,
-  };
-
-  let newlyRegistered = 0;
-  for (const childId of uniqueChildren) {
-    const existing = state.decompositions[childId];
-    if (!existingChildren.has(childId)) newlyRegistered++;
-    state.decompositions[childId] = {
-      issueId: childId,
-      parentId: issueId,
-      depth: issueDepth + 1,
-      childrenCount: existing?.childrenCount ?? 0,
-      createdAt: existing?.createdAt ?? now,
+    const existingIssue = state.decompositions[issueId];
+    state.decompositions[issueId] = {
+      issueId,
+      parentId,
+      depth: issueDepth,
+      childrenCount: new Set([...existingChildren, ...uniqueChildren]).size,
+      createdAt: existingIssue?.createdAt ?? now,
     };
-  }
 
-  // Retried deterministic children do not consume the daily budget twice.
-  state.dailyCreationCount += newlyRegistered;
-  state.updatedAt = new Date().toISOString();
+    let newlyRegistered = 0;
+    for (const childId of uniqueChildren) {
+      const existing = state.decompositions[childId];
+      if (!existingChildren.has(childId)) newlyRegistered++;
+      state.decompositions[childId] = {
+        issueId: childId,
+        parentId: issueId,
+        depth: issueDepth + 1,
+        childrenCount: existing?.childrenCount ?? 0,
+        createdAt: existing?.createdAt ?? now,
+      };
+    }
 
-  // Persist to disk
-  try {
-    ensureParentDir(DECOMPOSITION_STATE_FILE);
-    atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    console.warn('[DecompositionState] Failed to save:', err);
-  }
+    // Retried deterministic children do not consume the daily budget twice.
+    state.dailyCreationCount += newlyRegistered;
+    state.updatedAt = new Date().toISOString();
+
+    try {
+      ensureParentDir(DECOMPOSITION_STATE_FILE);
+      atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
+    } catch (err) {
+      console.warn('[DecompositionState] Failed to save:', err);
+    }
+  }, { timeoutMs: 10_000 });
 }
 
 // Pipeline History (persistent, time-ordered)
@@ -848,14 +880,23 @@ function ensureHistoryLoaded(): PipelineHistoryEntry[] {
 }
 
 export function appendPipelineHistory(entry: PipelineHistoryEntry): void {
-  const history = ensureHistoryLoaded();
-  history.unshift(entry); // newest first
-  if (history.length > MAX_PIPELINE_HISTORY) {
-    history.length = MAX_PIPELINE_HISTORY;
-  }
   try {
-    ensureParentDir(PIPELINE_HISTORY_FILE);
-    atomicWriteFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2));
+    withFileLockSync(`${PIPELINE_HISTORY_FILE}.lock`, () => {
+      // Read-modify-write against disk, not the process-local cache: a second
+      // process appending its own entry would otherwise overwrite this one.
+      let history: PipelineHistoryEntry[] = [];
+      try {
+        if (existsSync(PIPELINE_HISTORY_FILE)) {
+          const parsed = JSON.parse(readFileSync(PIPELINE_HISTORY_FILE, 'utf8')) as PipelineHistoryEntry[];
+          if (Array.isArray(parsed)) history = parsed;
+        }
+      } catch { history = []; }
+      history.unshift(entry); // newest first
+      if (history.length > MAX_PIPELINE_HISTORY) history.length = MAX_PIPELINE_HISTORY;
+      ensureParentDir(PIPELINE_HISTORY_FILE);
+      atomicWriteFileSync(PIPELINE_HISTORY_FILE, JSON.stringify(history, null, 2));
+      pipelineHistory = history;
+    }, { timeoutMs: 10_000 });
   } catch (err) {
     console.warn('[PipelineHistory] Failed to save:', err);
   }

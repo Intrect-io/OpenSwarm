@@ -1,13 +1,28 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { withMemoryWriteRetry } from './memoryCore.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
+
+const lockDir = mkdtempSync(join(tmpdir(), 'openswarm-mem-lock-'));
+process.env.OPENSWARM_MEMORY_MUTATION_LOCK = join(lockDir, 'mutation.lock');
+
+const { withMemoryWriteRetry } = await import('./memoryCore.js');
 
 // withMemoryWriteRetry wraps Lance writes so `openswarm review --max` (up to 16
 // concurrent reviewer processes sharing one on-disk table) survives Lance's
 // optimistic-concurrency conflicts instead of surfacing "Too many concurrent
-// writers". Fake timers skip the real backoff sleeps.
+// writers".
+//
+// Real timers, deliberately: each attempt now also takes a cross-process file
+// lock, whose acquisition is real fs I/O. Fake timers drain the backoff queue
+// before that I/O settles, so the next backoff timer is armed after the drain
+// has already finished and the test hangs. The sleeps are ~25ms + jitter.
 describe('withMemoryWriteRetry (INT-2817 store-path concurrency)', () => {
+  afterAll(() => {
+    rmSync(lockDir, { recursive: true, force: true });
+  });
+
   afterEach(() => {
-    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -18,16 +33,13 @@ describe('withMemoryWriteRetry (INT-2817 store-path concurrency)', () => {
   });
 
   it('retries on a concurrent-writer conflict and then succeeds', async () => {
-    vi.useFakeTimers();
     const op = vi.fn()
       .mockRejectedValueOnce(new Error('lance error: Too many concurrent writers.'))
       .mockRejectedValueOnce(new Error('Commit conflict: version conflict detected'))
       .mockResolvedValue('stored');
-    const p = withMemoryWriteRetry(op, 'test');
-    await vi.runAllTimersAsync();
-    await expect(p).resolves.toBe('stored');
+    await expect(withMemoryWriteRetry(op, 'test')).resolves.toBe('stored');
     expect(op).toHaveBeenCalledTimes(3);
-  });
+  }, 30_000);
 
   it('rethrows a non-retryable error immediately (no retry)', async () => {
     const op = vi.fn().mockRejectedValue(new Error('schema mismatch: column not found'));
@@ -36,12 +48,18 @@ describe('withMemoryWriteRetry (INT-2817 store-path concurrency)', () => {
   });
 
   it('gives up after the attempt cap when the conflict never clears', async () => {
-    vi.useFakeTimers();
     const op = vi.fn().mockRejectedValue(new Error('Too many concurrent writers.'));
-    const p = withMemoryWriteRetry(op, 'test');
-    const assertion = expect(p).rejects.toThrow('concurrent writers');
-    await vi.runAllTimersAsync();
-    await assertion;
+    await expect(withMemoryWriteRetry(op, 'test')).rejects.toThrow('concurrent writers');
     expect(op).toHaveBeenCalledTimes(8); // MAX_ATTEMPTS
-  });
+  }, 30_000);
+
+  it('releases the mutation lock when an attempt fails, so the next writer can proceed', async () => {
+    // A lock leaked on the error path would wedge every later memory write
+    // until the lock timed out (120s); the next retry has to be able to take it.
+    const op = vi.fn()
+      .mockRejectedValueOnce(new Error('Commit conflict: version conflict detected'))
+      .mockResolvedValue('stored');
+    await expect(withMemoryWriteRetry(op, 'test')).resolves.toBe('stored');
+    expect(op).toHaveBeenCalledTimes(2);
+  }, 30_000);
 });

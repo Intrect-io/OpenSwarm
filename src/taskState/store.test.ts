@@ -184,6 +184,36 @@ describe('task state store', () => {
     expect(getTaskState('PROCESS-B')?.title).toBe('PROCESS-B');
   });
 
+  it('lets simultaneous stale-lock reclaimers both proceed', async () => {
+    const lockPath = `${stateFile}.lock`;
+    // Expired abandoned lock: mtime past LOCK_ABANDON_MS so expiredLock fires
+    // regardless of whether pid 999999 is judgeable in this namespace.
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 999_999,
+      token: 'stale',
+      ns: 'other-space',
+      instance: 'dead',
+    }));
+    const longAgo = new Date(Date.now() - 900_000);
+    utimesSync(lockPath, longAgo, longAgo);
+
+    const fixture = fileURLToPath(new URL('./storeClaimProcess.fixture.ts', import.meta.url));
+    const run = (issueId: string) => new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ['--import', 'tsx', fixture, stateFile, issueId, '0'], {
+        stdio: 'pipe',
+      });
+      let stderr = '';
+      child.stderr.on('data', (c) => { stderr += String(c); });
+      child.on('error', reject);
+      child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(stderr || `exit ${code}`)));
+    });
+
+    await Promise.all([run('RECLAIM-A'), run('RECLAIM-B')]);
+    resetTaskStateStoreForTests();
+    expect(getTaskState('RECLAIM-A')?.title).toBe('RECLAIM-A');
+    expect(getTaskState('RECLAIM-B')?.title).toBe('RECLAIM-B');
+  });
+
   it('keeps concurrent execution upsert and Linear reconciliation consistent under the store lock', async () => {
     // Seed an in_progress row, then race a local execution bump against a Linear
     // Done reconciliation. Both paths take withStoreLock; the store must remain

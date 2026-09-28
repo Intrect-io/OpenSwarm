@@ -664,6 +664,12 @@ describe('401 refresh scope', () => {
       // refreshAndRetry expires the token through the store rather than writing
       // a snapshot back, so the fake has to offer the same door. (INT-2961)
       expireProfile: (_k: string) => { profile = { ...profile, expires: 0 }; return true; },
+      // The refresh path now runs under the store lock: it re-reads the profile
+      // from disk under that lock and persists without re-entering it
+      // (AuthProfileStore.saveUnlocked/setProfileUnlocked/reloadProfileFromDisk).
+      // The fake is in-memory, so both simply read/write the one profile.
+      reloadProfileFromDisk: (_k: string) => profile,
+      setProfileUnlocked: (_k: string, p: typeof profile) => { profile = p; },
     };
   }
 

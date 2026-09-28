@@ -9,6 +9,8 @@
 // table in one pass, following compaction's build-then-swap shape so a failure
 // leaves the original table intact.
 
+import { join } from 'node:path';
+import { withFileLock } from '../support/fileLock.js';
 import { c, status } from '../support/colors.js';
 import {
   EMBEDDING_DIM,
@@ -45,77 +47,83 @@ export interface ReembedOptions {
 }
 
 export async function reembedMemoryTable(options: ReembedOptions = {}): Promise<ReembedResult> {
-  await initDatabase();
-  const db = getDb();
-  const table = getTable();
-  if (!db || !table) throw new Error('Memory database is not initialized');
+  const memoryDir = options.memoryDir ?? MEMORY_DIR;
+  const lockPath = join(memoryDir, '.reembed.lock');
 
-  const spec = resolveEmbeddingConfig();
-  const signature = embeddingSignature(spec);
-  const progressEvery = options.progressEvery ?? 50;
+  return withFileLock(lockPath, async () => {
+    await initDatabase();
+    const db = getDb();
+    const table = getTable();
+    if (!db || !table) throw new Error('Memory database is not initialized');
 
-  const rows = (await table.query().limit(1_000_000).toArray()) as unknown as CognitiveMemoryRecord[];
-  const total = rows.length;
-  console.log(`${status.info('[Reembed]')} ${c.dim('rebuilding')} ${c.cyan(String(total))} ${c.dim('vectors with')} ${c.yellow(spec.id)}`);
+    const spec = resolveEmbeddingConfig();
+    const signature = embeddingSignature(spec);
+    const progressEvery = options.progressEvery ?? 50;
 
-  // normalizeRecords first so the rewritten table lands on the lean v3 schema,
-  // exactly like compaction does; vectors are replaced immediately after.
-  const normalized = normalizeRecords(rows);
-  let reembedded = 0;
-  let empty = 0;
+    const rows = (await table.query().limit(1_000_000).toArray()) as unknown as CognitiveMemoryRecord[];
+    rows.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const total = rows.length;
+    console.log(`${status.info('[Reembed]')} ${c.dim('rebuilding')} ${c.cyan(String(total))} ${c.dim('vectors with')} ${c.yellow(spec.id)}`);
 
-  for (let i = 0; i < normalized.length; i++) {
-    const record = normalized[i];
-    const text = embeddingTextFor(String(record.title ?? ''), String(record.content ?? ''));
-    if (!text) {
-      record.vector = Array.from({ length: EMBEDDING_DIM }, () => 0);
-      empty++;
-    } else {
-      record.vector = await embedPassage(text);
-      reembedded++;
-    }
-    if ((i + 1) % progressEvery === 0) {
-      options.onProgress?.(i + 1, total);
-      console.log(`${c.dim(`[Reembed] ${i + 1}/${total}`)}`);
-    }
-  }
-  options.onProgress?.(total, total);
+    // normalizeRecords first so the rewritten table lands on the lean v3 schema,
+    // exactly like compaction does; vectors are replaced immediately after.
+    const normalized = normalizeRecords(rows);
+    let reembedded = 0;
+    let empty = 0;
 
-  const targetTableName = table.name;
-  const tempTableName = `${targetTableName}_reembed_${Date.now()}`;
-
-  // Build a validated replacement before touching the live table.
-  if (normalized.length > 0) {
-    await db.createTable(tempTableName, normalized);
-  } else {
-    await db.createEmptyTable(tempTableName, await table.schema());
-  }
-
-  let replaced = false;
-  try {
-    if (normalized.length > 0) {
-      await db.createTable(targetTableName, normalized, { mode: 'overwrite' });
-    } else {
-      await db.createEmptyTable(targetTableName, await table.schema(), { mode: 'overwrite' });
-    }
-    setTable(await db.openTable(targetTableName));
-    replaced = true;
-  } finally {
-    if (replaced) {
-      try {
-        await db.dropTable(tempTableName);
-      } catch (cleanupError) {
-        console.warn(`[Reembed] Failed to drop temporary table ${tempTableName}:`, cleanupError);
+    for (let i = 0; i < normalized.length; i++) {
+      const record = normalized[i];
+      const text = embeddingTextFor(String(record.title ?? ''), String(record.content ?? ''));
+      if (!text) {
+        record.vector = Array.from({ length: EMBEDDING_DIM }, () => 0);
+        empty++;
+      } else {
+        record.vector = await embedPassage(text);
+        reembedded++;
       }
-    } else {
-      console.warn(`[Reembed] Replacement failed; retained recoverable table ${tempTableName}`);
+      if ((i + 1) % progressEvery === 0) {
+        options.onProgress?.(i + 1, total);
+        console.log(`${c.dim(`[Reembed] ${i + 1}/${total}`)}`);
+      }
     }
-  }
+    options.onProgress?.(total, total);
 
-  // Only claim the new signature once the swap actually succeeded — otherwise the
-  // store would advertise vectors it does not have.
-  writeStoredSignature(options.memoryDir ?? MEMORY_DIR, signature);
+    const targetTableName = table.name;
+    const tempTableName = `${targetTableName}_reembed_${Date.now()}`;
 
-  console.log(`${status.ok('[Reembed] done')} ${c.dim('records:')} ${c.cyan(String(total))} ${c.dim('signature:')} ${c.yellow(signature)}`);
-  return { total, reembedded, empty, signature };
+    // Build a validated replacement before touching the live table.
+    if (normalized.length > 0) {
+      await db.createTable(tempTableName, normalized);
+    } else {
+      await db.createEmptyTable(tempTableName, await table.schema());
+    }
+
+    let replaced = false;
+    try {
+      if (normalized.length > 0) {
+        await db.createTable(targetTableName, normalized, { mode: 'overwrite' });
+      } else {
+        await db.createEmptyTable(targetTableName, await table.schema(), { mode: 'overwrite' });
+      }
+      setTable(await db.openTable(targetTableName));
+      replaced = true;
+    } finally {
+      if (replaced) {
+        try {
+          await db.dropTable(tempTableName);
+        } catch (cleanupError) {
+          console.warn(`[Reembed] Failed to drop temporary table ${tempTableName}:`, cleanupError);
+        }
+      } else {
+        console.warn(`[Reembed] Replacement failed; retained recoverable table ${tempTableName}`);
+      }
+    }
+
+    // Only claim the new signature once the swap actually succeeded — otherwise the
+    // store would advertise vectors it does not have.
+    writeStoredSignature(memoryDir, signature);
+
+    console.log(`${status.ok('[Reembed] done')} ${c.dim('records:')} ${c.cyan(String(total))} ${c.dim('signature:')} ${c.yellow(signature)}`);
+    return { total, reembedded, empty, signature };
+  });
 }

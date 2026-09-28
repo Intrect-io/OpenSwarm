@@ -6,6 +6,8 @@
 import { isAbsolute, relative, resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
+import { withFileLock } from '../support/fileLock.js';
+import { atomicWriteFile } from '../support/atomicFile.js';
 import {
   WorkflowConfig,
   ExecutorResult,
@@ -18,7 +20,7 @@ import { checkWorkAllowed } from '../support/timeWindow.js';
 import { saveCognitiveMemory } from '../memory/index.js';
 import { analyzeIssue } from '../knowledge/index.js';
 import type { ImpactAnalysis } from '../knowledge/index.js';
-import { getTaskReadiness } from '../taskState/store.js';
+import { getTaskReadiness, getTaskState, tryClaimTaskAdmission } from '../taskState/store.js';
 import {
   applyDurablePriorityCouncilRanking,
   resolvePriorityCouncilRepositoryScopes,
@@ -436,20 +438,22 @@ interface EngineState {
 }
 
 async function loadState(): Promise<EngineState> {
-  try {
-    const content = await fs.readFile(ENGINE_STATE_FILE, 'utf-8');
-    const saved = JSON.parse(content) as Partial<EngineState>;
-    return {
-      lastTaskId: saved.lastTaskId,
-      totalTasksCompleted: saved.totalTasksCompleted ?? 0,
-      totalTasksFailed: saved.totalTasksFailed ?? 0,
-    };
-  } catch {
-    return {
-      totalTasksCompleted: 0,
-      totalTasksFailed: 0,
-    };
-  }
+  return withFileLock(ENGINE_STATE_FILE + '.lock', async () => {
+    try {
+      const content = await fs.readFile(ENGINE_STATE_FILE, 'utf-8');
+      const saved = JSON.parse(content) as Partial<EngineState>;
+      return {
+        lastTaskId: saved.lastTaskId,
+        totalTasksCompleted: saved.totalTasksCompleted ?? 0,
+        totalTasksFailed: saved.totalTasksFailed ?? 0,
+      };
+    } catch {
+      return {
+        totalTasksCompleted: 0,
+        totalTasksFailed: 0,
+      };
+    }
+  });
 }
 
 // Decision Engine
@@ -536,13 +540,32 @@ export class DecisionEngine {
 
     // 8. Return decision
     console.log(`[DecisionEngine] Returning decision: autoExecute=${this.config.autoExecute}`);
+    if (this.config.autoExecute) {
+      const issueId = selectedTask.issueId || selectedTask.id;
+      const claimed = tryClaimTaskAdmission(issueId, {
+        issueIdentifier: selectedTask.issueIdentifier,
+        title: selectedTask.title,
+        projectId: selectedTask.linearProject?.id,
+        projectName: selectedTask.linearProject?.name,
+      });
+      if (!claimed) {
+        return {
+          action: 'skip',
+          reason: `Task ${selectedTask.issueIdentifier || issueId} already claimed by another instance`,
+        };
+      }
+      return {
+        action: 'execute',
+        task: selectedTask,
+        workflow,
+        reason: `Auto-executing: ${selectedTask.title}`,
+      };
+    }
     return {
-      action: this.config.autoExecute ? 'execute' : 'defer',
+      action: 'defer',
       task: selectedTask,
       workflow,
-      reason: this.config.autoExecute
-        ? `Auto-executing: ${selectedTask.title}`
-        : `Ready to execute (requires approval): ${selectedTask.title}`,
+      reason: `Ready to execute (requires approval): ${selectedTask.title}`,
     };
   }
 
@@ -620,12 +643,41 @@ export class DecisionEngine {
     }
 
     console.log(`[DecisionEngine] Selected ${selectedTasks.length} tasks for parallel execution`);
+    if (this.config.autoExecute) {
+      const claimedTasks: Array<{ task: TaskItem; workflow: WorkflowConfig }> = [];
+      for (const item of selectedTasks) {
+        const issueId = item.task.issueId || item.task.id;
+        const claimed = tryClaimTaskAdmission(issueId, {
+          issueIdentifier: item.task.issueIdentifier,
+          title: item.task.title,
+          projectId: item.task.linearProject?.id,
+          projectName: item.task.linearProject?.name,
+        });
+        if (claimed) {
+          claimedTasks.push(item);
+        } else {
+          console.log(`[DecisionEngine] Skipping ${item.task.issueIdentifier}: already claimed`);
+        }
+      }
+      if (claimedTasks.length === 0) {
+        return {
+          action: 'skip',
+          tasks: [],
+          reason: 'All selected tasks already claimed by another instance',
+          skippedCount: sorted.length,
+        };
+      }
+      return {
+        action: 'execute',
+        tasks: claimedTasks,
+        reason: `Auto-executing ${claimedTasks.length} tasks`,
+        skippedCount,
+      };
+    }
     return {
-      action: this.config.autoExecute ? 'execute' : 'defer',
+      action: 'defer',
       tasks: selectedTasks,
-      reason: this.config.autoExecute
-        ? `Auto-executing ${selectedTasks.length} tasks`
-        : `Ready to execute ${selectedTasks.length} tasks (requires approval)`,
+      reason: `Ready to execute ${selectedTasks.length} tasks (requires approval)`,
       skippedCount,
     };
   }
@@ -676,6 +728,13 @@ export class DecisionEngine {
       // states proceed. Moving an issue to Backlog stops the daemon picking it up.
       if (!isActionableLinearState(task.linearState, this.config.includeBacklog)) {
         console.log(`[DecisionEngine] Filtered out ${task.issueIdentifier}: Linear state "${task.linearState}" is not actionable (parked)`);
+        return false;
+      }
+
+      const issueId = task.issueId || task.id;
+      const localState = getTaskState(issueId);
+      if (localState?.execution.status === 'in_progress') {
+        console.log(`[DecisionEngine] Filtered out ${task.issueIdentifier}: already executing`);
         return false;
       }
 
@@ -856,20 +915,21 @@ export class DecisionEngine {
   async addToBacklog(discovered: DiscoveredTask): Promise<void> {
     console.log(`[DecisionEngine] Adding to backlog: ${discovered.title}`);
 
-    // Save to local file (sync to Linear later)
-    let discoveredTasks: DiscoveredTask[] = [];
-    try {
-      const content = await fs.readFile(DISCOVERED_TASKS_FILE, 'utf-8');
-      discoveredTasks = JSON.parse(content);
-    } catch {
-      discoveredTasks = [];
-    }
+    await withFileLock(DISCOVERED_TASKS_FILE + '.lock', async () => {
+      let discoveredTasks: DiscoveredTask[] = [];
+      try {
+        const content = await fs.readFile(DISCOVERED_TASKS_FILE, 'utf-8');
+        discoveredTasks = JSON.parse(content);
+      } catch {
+        discoveredTasks = [];
+      }
 
-    discoveredTasks.push({
-      ...discovered,
+      discoveredTasks.push({
+        ...discovered,
+      });
+
+      await atomicWriteFile(DISCOVERED_TASKS_FILE, JSON.stringify(discoveredTasks, null, 2));
     });
-
-    await fs.writeFile(DISCOVERED_TASKS_FILE, JSON.stringify(discoveredTasks, null, 2));
 
     // Also record in memory
     try {

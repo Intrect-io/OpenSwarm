@@ -16,6 +16,7 @@ import { resolve, basename, join } from 'path';
 import { getDateLocale } from '../locale/index.js';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
+import { withFileLock } from '../support/fileLock.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
 
 // Codex storage path
@@ -308,9 +309,15 @@ export async function saveSession(
 
 /**
  * Update index.md
+ *
+ * Cross-process read-modify-write: a second runner saving a session while this
+ * one holds the parsed index would insert its entry into a snapshot that this
+ * write then overwrites, losing that session from the index entirely. The lock
+ * is taken before the read, not before the write.
  */
 async function updateIndex(session: CodexSession, summaryPath: string): Promise<void> {
   const indexPath = join(CODEX_DIR, 'index.md');
+  await withFileLock(indexPath + '.lock', async () => {
   let content = await fs.readFile(indexPath, 'utf-8');
 
   const relativePath = summaryPath.replace(CODEX_DIR + '/', '');
@@ -354,6 +361,7 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
 
   await atomicWriteFile(indexPath, content, 0o644);
   console.log('[Codex] Updated index.md');
+  });
 }
 
 /**

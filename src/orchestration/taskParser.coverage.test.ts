@@ -10,6 +10,16 @@ vi.mock('fs/promises', () => ({
   readFile: vi.fn(),
 }));
 
+const fileLockMock = vi.hoisted(() => ({
+  withFileLock: vi.fn((_path: string, operation: () => unknown) => operation()),
+}));
+vi.mock('../support/fileLock.js', () => fileLockMock);
+
+const atomicFileMock = vi.hoisted(() => ({
+  atomicWriteFile: vi.fn(),
+}));
+vi.mock('../support/atomicFile.js', () => atomicFileMock);
+
 import * as fs from 'fs/promises';
 import {
   formatParsedTaskSummary,
@@ -185,6 +195,8 @@ describe('parsedTaskFilePath validation (via saveParsedTask/loadParsedTask)', ()
     vi.mocked(fs.mkdir).mockReset().mockResolvedValue(undefined as never);
     vi.mocked(fs.writeFile).mockReset().mockResolvedValue(undefined as never);
     vi.mocked(fs.readFile).mockReset();
+    fileLockMock.withFileLock.mockImplementation((_path: string, operation: () => unknown) => operation());
+    atomicFileMock.atomicWriteFile.mockReset().mockResolvedValue(undefined);
   });
 
   it.each([
@@ -209,7 +221,8 @@ describe('parsedTaskFilePath validation (via saveParsedTask/loadParsedTask)', ()
     await saveParsedTask(parsed);
 
     expect(fs.mkdir).toHaveBeenCalledWith(PARSED_TASKS_DIR, { recursive: true });
-    expect(fs.writeFile).toHaveBeenCalledWith(
+    expect(fileLockMock.withFileLock).toHaveBeenCalled();
+    expect(atomicFileMock.atomicWriteFile).toHaveBeenCalledWith(
       resolve(PARSED_TASKS_DIR, 'INT-209.json'),
       JSON.stringify(parsed, null, 2),
     );
@@ -232,6 +245,14 @@ describe('parsedTaskFilePath validation (via saveParsedTask/loadParsedTask)', ()
     vi.mocked(fs.readFile).mockRejectedValue(new Error('ENOENT: no such file'));
 
     const result = await loadParsedTask('INT-211');
+
+    expect(result).toBeNull();
+  });
+
+  it('resolves to null when stored JSON fails schema validation', async () => {
+    vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify({ invalid: true }) as never);
+
+    const result = await loadParsedTask('INT-212');
 
     expect(result).toBeNull();
   });

@@ -7,6 +7,7 @@ import { readFileSync, existsSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { withFileLock, withFileLockSync } from '../support/fileLock.js';
 import { parseTokenResponse } from './tokenResponse.js';
 
 // Types
@@ -61,6 +62,7 @@ function isAuthProfile(value: unknown): value is AuthProfile {
 // Constants
 
 const STORE_PATH = join(homedir(), '.openswarm', 'auth-profiles.json');
+const STORE_LOCK = `${STORE_PATH}.lock`;
 const REFRESH_BUFFER_MS = 5 * 60 * 1000; // 5분 전에 갱신
 const OPENAI_TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token';
 const LINEAR_TOKEN_ENDPOINT = 'https://api.linear.app/oauth/token';
@@ -136,14 +138,20 @@ export class AuthProfileStore {
    * token fails the next refresh with invalid_grant. Only the keys this
    * instance actually touched are applied on top of the current file.
    *
-   * This narrows the race rather than removing it: two writers rotating the
-   * *same* key concurrently still read-then-write, so the later one can land on
-   * a snapshot taken before the earlier write. Closing that needs a lock around
-   * read-modify-write, which is a larger change than this fix. Different keys —
-   * the common CLI-beside-daemon case, and the one that used to lose unrelated
-   * providers' credentials — are now safe.
+   * Same-key concurrent writers are serialized by {@link STORE_LOCK} around
+   * this merge+write (and around refresh in {@link ensureValidToken}).
    */
   save(): void {
+    withFileLockSync(STORE_LOCK, () => {
+      this.saveUnlocked();
+    });
+  }
+
+  /**
+   * Merge touched keys onto disk and write. Caller must hold {@link STORE_LOCK}
+   * (or accept a race). Used by {@link save} and by refresh under an async lock.
+   */
+  saveUnlocked(): void {
     const onDisk = existsSync(STORE_PATH) ? this.readProfilesQuietly() : {};
     for (const key of this.touched) {
       const profile = this.data.profiles[key];
@@ -153,6 +161,34 @@ export class AuthProfileStore {
     this.data = { version: 1, profiles: { ...onDisk } };
     this.touched.clear();
     atomicWriteFileSync(STORE_PATH, `${JSON.stringify(this.data, null, 2)}\n`, 0o600);
+  }
+
+  /**
+   * Re-read `key` from disk into memory. Used under lock before deciding to refresh
+   * so a concurrent refresh that already completed is visible.
+   */
+  reloadProfileFromDisk(key: string): AuthProfile | null {
+    const onDisk = this.readProfilesQuietly()[key];
+    if (onDisk) {
+      this.data.profiles[key] = onDisk;
+      return onDisk;
+    }
+    return this.data.profiles[key] ?? null;
+  }
+
+  /**
+   * Like {@link setProfile}, but does not acquire {@link STORE_LOCK}.
+   * Caller must already hold the lock (e.g. refresh inside {@link withFileLock}).
+   */
+  setProfileUnlocked(key: string, profile: AuthProfile): void {
+    if (!isAuthProfile(profile)) {
+      throw new Error(
+        `Refusing to store an invalid auth profile for "${key}" — it would make the store unloadable.`,
+      );
+    }
+    this.data.profiles[key] = profile;
+    this.touched.add(key);
+    this.saveUnlocked();
   }
 
   /** Current on-disk profiles, or an empty map if the file is unreadable. */
@@ -249,6 +285,11 @@ export class TokenRefreshError extends Error {
 
 /**
  * 유효한 access token 반환. 만료 임박 시 자동 refresh.
+ *
+ * Concurrent refreshes of the same key serialize on {@link STORE_LOCK}: the
+ * second waiter re-reads disk under the lock and returns the already-rotated
+ * access token instead of refreshing again (which would invalidate the first
+ * writer's refresh_token).
  */
 export async function ensureValidToken(store: AuthProfileStore, profileKey: string): Promise<string> {
   const profile = store.getProfile(profileKey);
@@ -261,59 +302,73 @@ export async function ensureValidToken(store: AuthProfileStore, profileKey: stri
     return profile.access;
   }
 
-  const now = Date.now();
-  if (now < profile.expires - REFRESH_BUFFER_MS) {
+  if (Date.now() < profile.expires - REFRESH_BUFFER_MS) {
     return profile.access;
   }
 
-  // Token 갱신
-  console.log(`[Auth] Refreshing token for ${profileKey}...`);
+  return withFileLock(STORE_LOCK, async () => {
+    // Re-check under lock — another process may have refreshed already.
+    const fresh = store.reloadProfileFromDisk(profileKey);
+    if (!fresh) {
+      throw new Error(`Auth profile "${profileKey}" not found. Run: openswarm auth login --provider gpt`);
+    }
+    if (fresh.type === 'apiKey') {
+      return fresh.access;
+    }
+    if (Date.now() < fresh.expires - REFRESH_BUFFER_MS) {
+      return fresh.access;
+    }
 
-  const body = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: profile.refresh,
-    client_id: profile.clientId,
-  });
+    console.log(`[Auth] Refreshing token for ${profileKey}...`);
 
-  const endpoint = TOKEN_ENDPOINTS[profile.provider];
-  if (!endpoint) {
-    throw new Error(`Unknown OAuth provider "${profile.provider}" for auth profile "${profileKey}". Re-run auth login for this provider.`);
-  }
+    const body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: fresh.refresh,
+      client_id: fresh.clientId,
+    });
 
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
-  });
+    const endpoint = TOKEN_ENDPOINTS[fresh.provider];
+    if (!endpoint) {
+      throw new Error(`Unknown OAuth provider "${fresh.provider}" for auth profile "${profileKey}". Re-run auth login for this provider.`);
+    }
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    const reauth = profile.provider === 'linear' ? 'linear' : 'gpt';
-    throw new TokenRefreshError(
-      `Token refresh failed (${res.status}): ${errText.slice(0, 200)}. Run: openswarm auth login --provider ${reauth}`,
-      res.status,
-    );
-  }
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
 
-  // Validated, not cast. A 200 carrying an error body — or a proxy's HTML —
-  // would otherwise put `undefined` into access and `NaN` into expires, and
-  // that profile gets written to disk like any other, where it fails the
-  // whole-file schema check on the next load and takes every other provider's
-  // credentials down with it. refresh_token stays optional here: providers may
-  // legitimately keep the existing one on a refresh.
-  const tokens = parseTokenResponse(await res.json(), {
-    provider: profile.provider,
-    requireRefreshToken: false,
-  });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      const reauth = fresh.provider === 'linear' ? 'linear' : 'gpt';
+      throw new TokenRefreshError(
+        `Token refresh failed (${res.status}): ${errText.slice(0, 200)}. Run: openswarm auth login --provider ${reauth}`,
+        res.status,
+      );
+    }
 
-  profile.access = tokens.accessToken;
-  if (tokens.refreshToken) {
-    profile.refresh = tokens.refreshToken;
-  }
-  profile.expires = Date.now() + tokens.expiresIn * 1000;
+    // Validated, not cast. A 200 carrying an error body — or a proxy's HTML —
+    // would otherwise put `undefined` into access and `NaN` into expires, and
+    // that profile gets written to disk like any other, where it fails the
+    // whole-file schema check on the next load and takes every other provider's
+    // credentials down with it. refresh_token stays optional here: providers may
+    // legitimately keep the existing one on a refresh.
+    const tokens = parseTokenResponse(await res.json(), {
+      provider: fresh.provider,
+      requireRefreshToken: false,
+    });
 
-  store.setProfile(profileKey, profile);
-  console.log(`[Auth] Token refreshed successfully.`);
+    const updated: AuthProfile = {
+      ...fresh,
+      access: tokens.accessToken,
+      refresh: tokens.refreshToken ?? fresh.refresh,
+      expires: Date.now() + tokens.expiresIn * 1000,
+    };
 
-  return profile.access;
+    // save() would re-enter STORE_LOCK and deadlock; persist under the held lock.
+    store.setProfileUnlocked(profileKey, updated);
+    console.log(`[Auth] Token refreshed successfully.`);
+
+    return updated.access;
+  }, { timeoutMs: 30_000 });
 }

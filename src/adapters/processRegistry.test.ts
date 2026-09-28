@@ -21,7 +21,14 @@ function fakeChild(pid: number): EventEmitter & { pid: number } {
 function register(pid: number): EventEmitter & { pid: number } {
   const proc = fakeChild(pid);
   registerProcess(
-    { pid, adapter: 'codex', role: 'worker', command: 'codex', spawnedAt: Date.now() } as never,
+    {
+      pid,
+      taskId: 't',
+      stage: 'worker',
+      projectPath: '/tmp',
+      spawnedAt: Date.now(),
+      lastActivityAt: Date.now(),
+    },
     proc as never,
   );
   return proc;
