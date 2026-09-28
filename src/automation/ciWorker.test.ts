@@ -274,8 +274,12 @@ describe('CIWorker', () => {
 
       const on = new CIWorker({ repos: ['o/r'], autoRetry: true });
       await internal(on).investigateFailure('o/r', failure());
+      // The rerun must be bounded so a hung `gh` cannot park the CI worker.
       expect(execFileMock).toHaveBeenCalledWith(
-        'gh', ['run', 'rerun', '42', '-R', 'o/r', '--failed'], expect.any(Function),
+        'gh',
+        ['run', 'rerun', '42', '-R', 'o/r', '--failed'],
+        expect.objectContaining({ timeout: 30_000, maxBuffer: 10 * 1024 * 1024 }),
+        expect.any(Function),
       );
     });
 

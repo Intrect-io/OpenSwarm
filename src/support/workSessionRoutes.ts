@@ -278,26 +278,30 @@ export async function tryHandleWorkSessionRoutes(
     // would appear in `files` with no patch to show. `--intent-to-add` on a
     // throwaway index makes git emit their content as an addition without
     // touching the worktree's real index. (review finding)
+    //
+    // Use canonicalWorktree (the containment-validated path) for all I/O, not
+    // resolved.worktreePath, so a symlink replacement race after validation
+    // cannot redirect the diff onto another tree.
     const [files, diff] = await Promise.all([
-      getWorkingDiffDetail(resolved.worktreePath),
-      getDiffText(resolved.worktreePath, undefined, maxBytes, { includeUntracked: true }),
+      getWorkingDiffDetail(canonicalWorktree),
+      getDiffText(canonicalWorktree, undefined, maxBytes, { includeUntracked: true }),
     ]);
     // Both helpers swallow git errors into []/'' (they are advisory elsewhere).
     // Here that would render as "no changes" on a broken worktree — report the
     // ambiguity instead of a clean-looking lie. (review finding)
     if (files.length === 0 && !diff) {
       const { isGitRepo } = await import('./gitTracker.js');
-      if (!(await isGitRepo(resolved.worktreePath))) {
+      if (!(await isGitRepo(canonicalWorktree))) {
         writeJson(res, 409, {
           error: `Worktree for task ${taskId} is no longer a valid git repository`,
-          worktreePath: resolved.worktreePath,
+          worktreePath: canonicalWorktree,
         });
         return true;
       }
     }
     writeJson(res, 200, {
       taskId,
-      worktreePath: resolved.worktreePath,
+      worktreePath: canonicalWorktree,
       branch: resolved.branch,
       files,
       diff,

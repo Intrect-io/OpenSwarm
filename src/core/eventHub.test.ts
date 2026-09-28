@@ -10,6 +10,10 @@ import {
   getStageBuffer,
   getChatBuffer,
   __resetForTests,
+  MAX_CHAT_TEXT_CHARS,
+  MAX_LOG_LINE_CHARS,
+  SSE_MAX_BUFFERED_BYTES,
+  SSE_STALL_TIMEOUT_MS,
   type HubEvent,
 } from './eventHub.js';
 
@@ -766,6 +770,108 @@ describe('eventHub', () => {
       });
 
       expect(getStageBuffer().length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('payload and backpressure bounds (AGT-3429)', () => {
+    it('truncates an oversized log line before retaining it', () => {
+      broadcastEvent({
+        type: 'log',
+        data: { taskId: 'task-1', stage: 'worker', line: 'L'.repeat(40_000) },
+      });
+
+      const buffer = getLogBuffer();
+      expect(buffer).toHaveLength(1);
+      const logged = buffer[0] as Extract<HubEvent, { type: 'log' }>;
+      expect(logged.data.line.length).toBeLessThanOrEqual(MAX_LOG_LINE_CHARS);
+      expect(logged.data.line.endsWith('…')).toBe(true);
+    });
+
+    it('truncates oversized chat text before retaining it', () => {
+      broadcastEvent({
+        type: 'chat:user',
+        data: { text: 'C'.repeat(80_000), ts: Date.now() },
+      });
+
+      const buffer = getChatBuffer();
+      expect(buffer).toHaveLength(1);
+      const chat = buffer[0] as Extract<HubEvent, { type: 'chat:user' }>;
+      expect(chat.data.text.length).toBeLessThanOrEqual(MAX_CHAT_TEXT_CHARS);
+    });
+
+    it('does not disconnect a healthy client during a same-tick burst', () => {
+      // Regression: counting writes destroyed a healthy reader, because a burst
+      // of synchronous broadcasts returns false repeatedly with no chance to
+      // drain in between (one stdout chunk fans out hundreds of log events).
+      const writes: Array<() => void> = [];
+      const destroy = vi.fn();
+      const busyRes = {
+        write: vi.fn(() => false),
+        once: vi.fn((event: string, cb: () => void) => {
+          if (event === 'drain') writes.push(cb);
+        }),
+        removeListener: vi.fn(),
+        destroy,
+      } as unknown as ServerResponse;
+
+      cleanupFunctions.push(addSSEClient(busyRes, true));
+      for (let i = 0; i < 500; i++) {
+        // The reader keeps up: drain fires between batches.
+        if (i % 10 === 0) writes.forEach((cb) => cb());
+        broadcastEvent({ type: 'log', data: { taskId: 'busy', stage: 'worker', line: `line-${i}` } });
+      }
+
+      expect(getActiveSSECount()).toBe(1);
+      expect(destroy).not.toHaveBeenCalled();
+    });
+
+    it('disconnects a client that stays stalled past the stall window', () => {
+      vi.useFakeTimers();
+      try {
+        const destroy = vi.fn();
+        const stalledRes = {
+          write: vi.fn(() => false),
+          once: vi.fn(),
+          removeListener: vi.fn(),
+          destroy,
+        } as unknown as ServerResponse;
+
+        cleanupFunctions.push(addSSEClient(stalledRes, true));
+        expect(getActiveSSECount()).toBe(1);
+
+        broadcastEvent({ type: 'log', data: { taskId: 'stall', stage: 'worker', line: 'one' } });
+        // Still connected while inside the window...
+        vi.advanceTimersByTime(SSE_STALL_TIMEOUT_MS - 1);
+        expect(getActiveSSECount()).toBe(1);
+
+        // ...and dropped once the window elapses without a drain.
+        vi.advanceTimersByTime(2);
+        expect(getActiveSSECount()).toBe(0);
+        expect(destroy).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('disconnects a client whose queued bytes exceed the buffer cap', () => {
+      const destroy = vi.fn();
+      const stalledRes = {
+        write: vi.fn(() => false),
+        once: vi.fn(),
+        removeListener: vi.fn(),
+        destroy,
+      } as unknown as ServerResponse;
+
+      cleanupFunctions.push(addSSEClient(stalledRes, true));
+      // Lines are bounded to MAX_LOG_LINE_CHARS, so enough of them must be
+      // broadcast to queue past SSE_MAX_BUFFERED_BYTES.
+      const framesToFill = Math.ceil(SSE_MAX_BUFFERED_BYTES / MAX_LOG_LINE_CHARS) + 2;
+      for (let i = 0; i < framesToFill; i++) {
+        broadcastEvent({ type: 'log', data: { taskId: 'flood', stage: 'worker', line: 'B'.repeat(MAX_LOG_LINE_CHARS) } });
+      }
+
+      expect(getActiveSSECount()).toBe(0);
+      expect(destroy).toHaveBeenCalled();
     });
   });
 

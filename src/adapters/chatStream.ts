@@ -152,6 +152,13 @@ function parseChunkLine(line: string): StreamChunk | null {
   }
 }
 
+/** Hard cap for retained partial-frame data in the SSE buffer (64 KB). */
+export const MAX_PARTIAL_FRAME_CHARS = 64 * 1024;
+/** Hard cap on retained assistant content assembled from the stream (1 MiB). */
+export const MAX_RETAINED_CONTENT_CHARS = 1024 * 1024;
+/** Hard cap on streamed tool-call arguments retained for one call (1 MiB). */
+export const MAX_RETAINED_TOOLCALL_CHARS = 1024 * 1024;
+
 /** Read a chat/completions SSE body and reduce it, emitting content deltas live. */
 export async function consumeChatCompletionsStream(
   res: Response,
@@ -162,26 +169,90 @@ export async function consumeChatCompletionsStream(
   const reader = res.body?.getReader();
   if (!reader) throw new Error('chat stream: empty response body');
 
-  const chunks: StreamChunk[] = [];
   const decoder = new TextDecoder();
   let buffer = '';
+  // Accumulate the reduced shape as chunks arrive instead of retaining every
+  // parsed chunk. Evicting old chunks to bound memory would corrupt exactly the
+  // parts that stream incrementally — a tool call's `arguments` fragments and
+  // the head of the reply — because both are assembled by concatenation; the
+  // agent then receives unparseable arguments or a reply that starts mid-word.
+  let content = '';
+  let sawContent = false;
+  let finishReason = 'stop';
+  let usage: ChatCompletionLike['usage'];
+  let model: string | undefined;
+  const calls = new Map<number, { id: string; name: string; args: string }>();
+  let retainedToolCallChars = 0;
+
   const handle = (c: StreamChunk | null) => {
     if (!c) return;
-    const delta = c.choices?.[0]?.delta?.content;
-    if (onToken && typeof delta === 'string' && delta) onToken(delta);
-    chunks.push(c);
+    if (typeof c.model === 'string' && c.model) model = c.model;
+    if (c.usage) usage = normalizeChatUsage(c.usage);
+    const choice = c.choices?.[0];
+    if (!choice) return;
+    const delta = choice.delta ?? {};
+    if (typeof delta.content === 'string' && delta.content) {
+      sawContent = true;
+      // Emit live tokens, but stop retaining content past the hard cap so a
+      // runaway stream cannot grow the assembled reply without bound.
+      if (content.length < MAX_RETAINED_CONTENT_CHARS) {
+        const room = MAX_RETAINED_CONTENT_CHARS - content.length;
+        const emit = delta.content.length <= room ? delta.content : delta.content.slice(0, room);
+        content += emit;
+        if (onToken) onToken(emit);
+      }
+    }
+    for (const tc of delta.tool_calls ?? []) {
+      const idx = tc.index ?? 0;
+      const cur = calls.get(idx) ?? { id: '', name: '', args: '' };
+      if (tc.id) cur.id = tc.id;
+      if (tc.function?.name) cur.name = tc.function.name;
+      if (tc.function?.arguments) {
+        retainedToolCallChars += tc.function.arguments.length;
+        if (retainedToolCallChars > MAX_RETAINED_TOOLCALL_CHARS) {
+          // Truncating mid-token would hand the tool layer invalid JSON, which
+          // is worse than refusing: say so instead of corrupting silently.
+          throw new Error(`chat stream: tool-call arguments exceed ${MAX_RETAINED_TOOLCALL_CHARS} chars`);
+        }
+        cur.args += tc.function.arguments;
+      }
+      calls.set(idx, cur);
+    }
+    if (choice.finish_reason) finishReason = choice.finish_reason;
   };
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     onBytes?.();
     buffer += decoder.decode(value, { stream: true });
+    // Split first, cap second: complete frames are always parsed, and only the
+    // unterminated tail is bounded. Truncating before the split would silently
+    // drop whole frames whenever one read delivered more than the cap.
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
+    if (buffer.length > MAX_PARTIAL_FRAME_CHARS) {
+      buffer = buffer.slice(-MAX_PARTIAL_FRAME_CHARS);
+    }
     for (const line of lines) handle(parseChunkLine(line));
   }
   handle(parseChunkLine(buffer));
 
-  // Final reduce WITHOUT onToken (already emitted above) to assemble the result.
-  return reduceChatChunks(chunks);
+  // Reduce a single synthetic chunk built from the accumulated state: same
+  // shape and precedence as reducing the whole stream, with the content cap and
+  // tool calls already applied. No onToken — deltas were emitted above.
+  const toolCalls: StreamToolCall[] = [...calls.values()]
+    .filter((c) => c.id && c.name)
+    .map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args } }));
+  return {
+    choices: [{
+      message: {
+        role: 'assistant',
+        content: sawContent ? content : null,
+        tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+      },
+      finish_reason: toolCalls.length > 0 ? 'tool_calls' : finishReason,
+    }],
+    usage,
+    ...(model ? { model } : {}),
+  };
 }

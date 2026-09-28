@@ -54,8 +54,8 @@ function checkpointStashMessage(executionId: string): string {
 }
 
 /**
- * Current `stash@{N}` for a stash identified by its message, or undefined if it
- * is no longer in the list.
+ * Current `stash@{N}` for a stash identified by its message, or undefined if
+ * it is no longer in the list.
  *
  * `stash@{N}` is a POSITION, not an identity: every `git stash push` inserts at
  * 0 and shifts everything down. The checkpoint's index was captured at creation
@@ -64,11 +64,28 @@ function checkpointStashMessage(executionId: string): string {
  * itself, immediately before popping, so it reliably restored the
  * `rollback-preserve-*` stash it had just made and orphaned the checkpoint's.
  * Resolving by message at pop time is stable under that shifting.
+ *
+ * The comparison is EXACT, never a substring test: execution IDs `abc` and
+ * `abcd` overlap, and `includes('abc')` picks whichever entry happens to come
+ * first. `git stash push -m MSG` records the reflog subject as
+ * `On <branch>: MSG`, so the message must match the whole subject or its
+ * `: MSG` tail — `subject.includes('abc')` would still select `…checkpoint-abcd`.
  */
 async function resolveStashRef(projectPath: string, message: string): Promise<string | undefined> {
-  const { stdout } = await gitExec(projectPath, 'stash', 'list');
-  const line = stdout.split('\n').find((entry) => entry.includes(message));
-  return line?.match(/stash@\{\d+\}/)?.[0];
+  const { stdout } = await gitExec(projectPath, 'stash', 'list', '--pretty=format:%gd %gs');
+  const tail = `: ${message}`;
+  const entries: Array<{ ref: string; subject: string }> = [];
+  for (const line of stdout.split('\n')) {
+    if (!line) continue;
+    const spaceIdx = line.indexOf(' ');
+    if (spaceIdx === -1) continue;
+    entries.push({ ref: line.slice(0, spaceIdx), subject: line.slice(spaceIdx + 1) });
+  }
+  // A whole-subject match wins; otherwise the reflog-subject suffix
+  // (git stash push -m MSG records "On <branch>: MSG") must match exactly.
+  const match = entries.find((e) => e.subject === message)
+    ?? entries.find((e) => e.subject.endsWith(tail));
+  return match?.ref.match(/stash@\{\d+\}/)?.[0] ?? match?.ref;
 }
 
 const CheckpointSchema = z.object({
@@ -235,12 +252,8 @@ export async function createCheckpoint(
     const stashMessage = checkpointStashMessage(executionId);
     await gitExec(expandedPath, 'stash', 'push', '-m', stashMessage, '--include-untracked');
 
-    // Find Stash ID
-    const { stdout } = await gitExec(expandedPath, 'stash', 'list');
-    const stashLine = stdout.split('\n').find(line => line.includes(stashMessage));
-    if (stashLine) {
-      stashId = stashLine.match(/stash@\{(\d+)\}/)?.[0];
-    }
+    // Exact message identity — never includes() — see resolveStashRef.
+    stashId = await resolveStashRef(expandedPath, stashMessage);
   }
 
   const checkpoint: Checkpoint = {

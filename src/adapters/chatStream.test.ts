@@ -1,5 +1,121 @@
 import { describe, it, expect, vi } from 'vitest';
-import { reduceChatChunks } from './chatStream.js';
+import {
+  MAX_PARTIAL_FRAME_CHARS,
+  MAX_RETAINED_CONTENT_CHARS,
+  MAX_RETAINED_TOOLCALL_CHARS,
+  consumeChatCompletionsStream,
+  reduceChatChunks,
+} from './chatStream.js';
+
+/** An SSE body that never emits a newline — the partial-frame buffer must not grow unboundedly. */
+function endlessFrameResponse(hugeLine: string, tail: string): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(hugeLine));
+      controller.enqueue(new TextEncoder().encode(`\n${tail}\n\n`));
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200 });
+}
+
+describe('chat stream retention bounds (AGT-3429)', () => {
+  it('keeps the partial-frame buffer bounded when a frame never terminates', async () => {
+    const hugeFrame = `data: ${'x'.repeat(MAX_PARTIAL_FRAME_CHARS * 2)}`;
+    const result = await consumeChatCompletionsStream(endlessFrameResponse(
+      hugeFrame,
+      `data: ${JSON.stringify({ choices: [{ delta: { content: 'tail' }, finish_reason: 'stop' }] })}`,
+    ));
+
+    const content = result.choices[0]?.message.content;
+    expect(typeof content).toBe('string');
+    expect(content!.length).toBeLessThanOrEqual(MAX_PARTIAL_FRAME_CHARS);
+  });
+
+  it('caps retained content once the stream exceeds the hard limit', async () => {
+    const chunk = `data: ${JSON.stringify({ choices: [{ delta: { content: 'y'.repeat(64 * 1024) } }] })}\n\n`;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        // 2 MiB of deltas — twice MAX_RETAINED_CONTENT_CHARS.
+        for (let i = 0; i < 32; i++) controller.enqueue(encoder.encode(chunk));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    const seen: string[] = [];
+    const result = await consumeChatCompletionsStream(
+      new Response(body, { status: 200 }),
+      (delta) => seen.push(delta),
+    );
+
+    const content = result.choices[0]?.message.content;
+    expect(content!.length).toBeLessThanOrEqual(MAX_RETAINED_CONTENT_CHARS);
+    expect(seen.join('').length).toBeLessThanOrEqual(MAX_RETAINED_CONTENT_CHARS);
+  });
+
+  it('retains a tool call whose arguments stream in many fragments', async () => {
+    // Regression: evicting old chunks to bound memory once corrupted the head of
+    // a streamed tool call, handing the tool layer invalid JSON.
+    const total = 3000;
+    const expectedArgs = `{"path":"a.ts","content":"${'A'.repeat(4000)}"}`;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        const step = Math.ceil(expectedArgs.length / total);
+        for (let i = 0; i < expectedArgs.length; i += step) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'write_file', arguments: expectedArgs.slice(i, i + step) } }] } }],
+          })}\n\n`));
+        }
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })}\n\n`));
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    const res = await consumeChatCompletionsStream(new Response(body, { status: 200 }));
+    const call = res.choices[0].message.tool_calls?.[0];
+    expect(call?.function.name).toBe('write_file');
+    expect(call?.function.arguments).toBe(expectedArgs);
+    expect(() => JSON.parse(call!.function.arguments)).not.toThrow();
+    expect(res.choices[0].finish_reason).toBe('tool_calls');
+  });
+
+  it('keeps the head of a long reply, not a suffix', async () => {
+    const expected = Array.from({ length: 1500 }, (_, i) => `w${i} `).join('');
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (let i = 0; i < 1500; i++) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: `w${i} ` } }] })}\n\n`));
+        }
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    const res = await consumeChatCompletionsStream(new Response(body, { status: 200 }));
+    expect(res.choices[0]?.message.content).toBe(expected);
+  });
+
+  it('refuses rather than silently corrupting tool-call arguments past the cap', async () => {
+    const huge = 'z'.repeat(MAX_RETAINED_TOOLCALL_CHARS + 1);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({
+          choices: [{ delta: { tool_calls: [{ index: 0, id: 'c', function: { name: 'f', arguments: huge } }] } }],
+        })}\n\n`));
+        controller.close();
+      },
+    });
+
+    await expect(consumeChatCompletionsStream(new Response(body, { status: 200 }))).rejects.toThrow(
+      /tool-call arguments exceed/,
+    );
+  });
+});
 
 describe('reduceChatChunks', () => {
   it('keeps the model the server reports serving', () => {
