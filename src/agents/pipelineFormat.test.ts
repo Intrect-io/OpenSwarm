@@ -395,7 +395,14 @@ describe('formatPipelineResult aggregate budget (AGT-3422)', () => {
   });
 
   it('bounds the stages field at every stage count, untouched at or below the ceiling and honestly counted above it', () => {
-    for (let n = 1; n <= 400; n++) {
+    // Sweep the boundary densely rather than 1..400: the property can only
+    // change where the raw value crosses 1024, and 400 full renders cost ~6.5 s
+    // for no extra coverage (the crossing is between 33 and 34 stages). Below
+    // and far above are sampled; the crossing neighbourhood is exhaustive.
+    const counts = [
+      1, 2, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 50, 64, 100, 200, 400,
+    ];
+    for (const n of counts) {
       const stages = Array.from({ length: n }, (_, i) => stageAt(i));
       const raw = stages.map(isStage).join('\n');
       const value = formatPipelineResultEmbed(baseResult({ stages }))
