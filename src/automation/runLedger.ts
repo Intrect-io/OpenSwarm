@@ -1117,11 +1117,23 @@ export class RunLedger {
       );
       const stored = this.db.prepare('SELECT issue_id, attempt_no, kind, payload_json FROM automation_effects WHERE dedupe_key = ?')
         .get(effect.dedupeKey) as { issue_id: string; attempt_no: number; kind: string; payload_json: string };
+      // A completion effect enqueued when the run PUBLISHED shares this key
+      // (`complete:<issueId>:attempt:<N>`, buildCompletionEffect), because
+      // recovery runs for the same issue and attempt. Its payload differs by
+      // design — the original carries the real worker stats, the recovery a
+      // synthetic `recovered-publication-<n>` result — so comparing payloads
+      // here made every recovery of an already-enqueued completion throw
+      // `Outbox dedupe key collision` and kill the whole heartbeat (AGT-4518).
+      //
+      // Recovery is idempotent by intent: the INSERT OR IGNORE above already
+      // keeps whichever effect landed first, and the only question that matters
+      // is whether this key belongs to THIS run. Issue + attempt + kind is that
+      // question; a payload difference is what recovery produces, not an error.
+      // A row for a different issue/attempt/kind is still a real collision.
       if (
         stored.issue_id !== issueId
         || stored.attempt_no !== row.attempt_no
         || stored.kind !== effect.kind
-        || stored.payload_json !== JSON.stringify(effect.payload)
       ) {
         throw new Error(`Outbox dedupe key collision: ${effect.dedupeKey}`);
       }

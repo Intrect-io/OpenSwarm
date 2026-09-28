@@ -1336,6 +1336,7 @@ describe('RunLedger durable outbox races', () => {
   });
 });
 
+
 // Switching a fresh database to WAL takes a brief exclusive lock, and
 // busy_timeout does not rescue it — measured here, a connection holding a read
 // transaction makes `PRAGMA journal_mode = WAL` wait out the whole timeout and
