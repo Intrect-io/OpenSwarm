@@ -115,6 +115,22 @@ function restrictDatabasePermissions(path: string): void {
   }
 }
 
+/**
+ * Whether a caller-supplied `id` already in the store describes the same
+ * artifact the caller is asking for.
+ *
+ * Compares the identity-bearing fields only: title, description, parent and
+ * project. Optional metadata (priority, estimate, assignee) is deliberately not
+ * compared — a retry that omits or re-derives it is still the same artifact,
+ * while a changed title/description/parent is a different one.
+ */
+function sameIssueContent(existing: Issue, input: CreateIssueInput): boolean {
+  return existing.title === input.title
+    && (existing.description ?? '') === (input.description ?? '')
+    && (existing.parentId ?? undefined) === (input.parentId ?? undefined)
+    && existing.projectId === input.projectId;
+}
+
 export class SqliteIssueStore implements IIssueStore {
   private db: Database.Database;
 
@@ -326,14 +342,23 @@ export class SqliteIssueStore implements IIssueStore {
   // ============ 이슈 CRUD ============
 
   createIssue(input: CreateIssueInput): Issue {
-    // Honor the documented idempotent-ID contract: a caller-supplied stable id
-    // returns the existing row instead of colliding on UNIQUE(id).
+    const id = input.id ?? nanoid(12);
+    // Honor the documented idempotent-ID contract, but do not let it mask a real
+    // collision: a caller-supplied id that already exists is only "the same
+    // create retried" when the identity-bearing fields agree. A materially
+    // different row under the same id (a re-planned decomposition, AGT-2908) must
+    // be rejected — returning the stored row would silently accept the new plan,
+    // and overwriting it would destroy the artifact the first plan produced.
     if (input.id) {
       const existing = this.getIssue(input.id);
-      if (existing) return existing;
+      if (existing) {
+        if (sameIssueContent(existing, input)) return existing;
+        throw new Error(
+          `Issue ${input.id} already exists with different content: existing artifact does not match the requested create`,
+        );
+      }
     }
 
-    const id = input.id ?? nanoid(12);
     const now = new Date().toISOString();
 
     const insertIssue = this.db.prepare(`
@@ -446,10 +471,16 @@ export class SqliteIssueStore implements IIssueStore {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         // Concurrent create with the same caller-supplied id: return the winner's
-        // row instead of surfacing a UNIQUE(id) violation to the caller.
+        // row when it is the same artifact, otherwise report the collision rather
+        // than surfacing a raw UNIQUE(id) violation.
         if (input.id) {
           const existing = this.getIssue(input.id);
-          if (existing) return existing.id;
+          if (existing) {
+            if (sameIssueContent(existing, input)) return existing.id;
+            throw new Error(
+              `Issue ${input.id} already exists with different content: existing artifact does not match the requested create`,
+            );
+          }
         }
         // Cross-process inbound sync can both pass the pre-insert SELECT and then
         // collide on the unique Linear indexes — reclaim the winner's row.

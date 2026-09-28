@@ -25,12 +25,28 @@ describe('SqliteIssueStore durable semantics', () => {
     store.close();
   });
 
-  it('returns the existing row when createIssue is called again with the same id', () => {
+  it('returns the existing row when an identical create is retried with the same id', () => {
     const store = new SqliteIssueStore(path());
-    const first = store.createIssue({ id: 'stable-1', projectId: 'p', title: 'first' });
-    const second = store.createIssue({ id: 'stable-1', projectId: 'p', title: 'ignored duplicate' });
-    expect(second.id).toBe(first.id);
-    expect(second.title).toBe('first');
+    const first = store.createIssue({ id: 'stable-1', projectId: 'p', title: 'first', description: 'plan' });
+    const retried = store.createIssue({ id: 'stable-1', projectId: 'p', title: 'first', description: 'plan' });
+    expect(retried.id).toBe(first.id);
+    expect(retried.title).toBe('first');
+    expect(store.listIssues().total).toBe(1);
+    store.close();
+  });
+
+  it('rejects a caller-supplied id whose stored row describes a different artifact', () => {
+    const store = new SqliteIssueStore(path());
+    store.createIssue({ id: 'stable-2', projectId: 'p', title: 'first plan', description: 'plan' });
+    // A re-planned create under the same id must not be silently accepted as the
+    // stored row (and must not overwrite it) — the caller needs to see the clash.
+    expect(() => store.createIssue({
+      id: 'stable-2',
+      projectId: 'p',
+      title: 'changed plan',
+      description: 'plan',
+    })).toThrow(/already exists with different content/);
+    expect(store.getIssue('stable-2')?.title).toBe('first plan');
     expect(store.listIssues().total).toBe(1);
     store.close();
   });
