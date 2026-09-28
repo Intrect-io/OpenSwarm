@@ -82,6 +82,19 @@ testing/
 logs/run_evaluation/
 openswarm.orb-*.json
 
+# Agent session scratch (do not commit)
+ls-run-tests.sh
+ls-bash-n.sh
+ls-bash-env.sh
+ls-verify-out.txt
+ls-verify-ran.marker
+ls-bin/
+scripts/ls
+cli.json
+.tmp-run-tests.sh
+run-vitest-temp.mjs
+.cursor/hooks/
+
 # Subprojects
 openclaw/
 plan.md
