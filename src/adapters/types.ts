@@ -131,6 +131,14 @@ export interface CliRunOptions {
   /** Expose the `bash` tool. Default true; off for agents that must stay out of the working tree. */
   shellTools?: boolean;
   /**
+   * Declarative per-role tool scope (RoleConfig.tools). Applied to the fully
+   * composed tool set at the end of assembly, so it can only NARROW: an
+   * allow-list never resurrects a tool another rule withheld, and `deny` is
+   * applied after `allow`. A `deny` entry ending in `*` matches by prefix.
+   */
+  toolAllow?: string[];
+  toolDeny?: string[];
+  /**
    * Expose built-in filesystem tools (`read_file`, `search_files`, writes, and
    * patching). Defaults true. This is independent from MCP/coordination tools,
    * so a supervisor can coordinate without inspecting local checkout data.

@@ -392,6 +392,8 @@ program
         return;
       }
       if (opts.max) {
+        const { resolveAdvisorRole } = await import('./cli/advisorRole.js');
+        const advisor = await resolveAdvisorRole();
         const { runReviewMaxCommand, reviewMaxResultFailed } = await import('./cli/reviewMaxCommand.js');
         const result = await runReviewMaxCommand({
           path: opts.path,
@@ -417,6 +419,7 @@ program
           learn: opts.learn,
           securityAudit: opts.securityAudit,
           harnessOnly: opts.harnessOnly,
+          advisor,
         });
         // Exit contract (INT-3100): 2 = the gate did not run at all (no area
         // reviewed — quota/infra), 1 = it ran and failed. CI reads only this.
@@ -425,8 +428,9 @@ program
         else if (reviewMaxResultFailed(result, !!opts.fix)) process.exitCode = 1;
         return;
       }
+      const { resolveAdvisorRole } = await import('./cli/advisorRole.js');
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
-      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, model: opts.model, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly, maxTurns: opts.maxTurns, timeoutMs: opts.timeout });
+      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, model: opts.model, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly, maxTurns: opts.maxTurns, timeoutMs: opts.timeout, advisor: await resolveAdvisorRole() });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
       // A throw means no verdict was produced — the gate did NOT run. Exit 2,

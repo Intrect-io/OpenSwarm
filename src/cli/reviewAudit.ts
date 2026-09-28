@@ -504,6 +504,11 @@ export interface RunMaxReviewOptions {
   signal?: AbortSignal;
   /** Repository-local prior review log context, keyed by deterministic area label. */
   priorReviewContextByArea?: Readonly<Record<string, string>>;
+  /**
+   * Resolved `advisor` role, when it is enabled. Absent means the pass does not
+   * run at all, so a disabled advisor adds no call and no latency here.
+   */
+  advisor?: { model?: string; timeoutMs?: number };
 }
 
 export interface RunMaxReviewDeps {
@@ -580,7 +585,26 @@ async function defaultReviewArea(
   onLog: (line: string) => void,
 ): Promise<ReviewResult> {
   const { runReviewer } = await import('../agents/reviewer.js');
-  return runReviewer(buildAuditReviewerOptions(area, cwd, opts, onLog));
+  const review = await runReviewer(buildAuditReviewerOptions(area, cwd, opts, onLog));
+  // Per AREA, not once on the aggregate: the advisor's job is to find defects in
+  // the code it can inspect, and an aggregate pass would have to re-read every
+  // area's files in one call. `opts.advisor` is undefined unless the caller
+  // resolved the role, so a disabled advisor costs nothing here.
+  if (!opts.advisor) return review;
+  const { runReviewAdvisor } = await import('../agents/reviewAdvisor.js');
+  const advisement = await runReviewAdvisor({
+    projectPath: cwd,
+    diff: undefined, // an audit has no diff — the advisor reads the files themselves
+    changeSummary: `- **Files under audit (${area.files.length}):** ${area.files.join(', ')}`,
+    reviewer: review,
+    model: opts.advisor.model,
+    timeoutMs: opts.advisor.timeoutMs,
+    signal: opts.signal,
+  });
+  if (advisement.ran && advisement.disagreement) {
+    onLog(`advisor: ${advisement.disagreement}`);
+  }
+  return advisement.result;
 }
 
 /**

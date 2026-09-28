@@ -94,7 +94,13 @@ export async function buildReviewerStageOptions(input: {
       ?? modelForTask(config, 'reviewer', context.task),
     maxTurns: config.roles?.reviewer?.maxTurns,
     adapterName: config.roles?.reviewer?.adapter,
-    reasoningEffort: effortForTask(config, context.task),
+    // Declarative role scope travels with the role, like maxTurns above. The
+    // loop applies it last, so an allow-list cannot hand the read-only reviewer
+    // (readOnly: true above) a tool this run withheld. (RoleConfig.tools)
+    toolAllow: config.roles?.reviewer?.tools?.allow,
+    toolDeny: config.roles?.reviewer?.tools?.deny,
+    // Task/jobProfile effort wins; the role's own declared effort is the floor. (RoleConfig.effort)
+    reasoningEffort: effortForTask(config, context.task) ?? config.roles?.reviewer?.effort,
     completionCriteria: config.draftAnalysis?.completionCriteria,
     verificationEvidence: context.testerResult?.verificationEvidence,
     // Surface non-blocking guard warnings (dead-module, reformat/scope) so the

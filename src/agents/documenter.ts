@@ -21,6 +21,14 @@ export interface DocumenterOptions {
   model?: string;
   maxTurns?: number;
   adapterName?: AdapterName;
+  /** Reasoning effort for this role's native-loop adapter (RoleConfig.effort). */
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  /**
+   * Declarative per-role tool scope (RoleConfig.tools), applied at the end of the
+   * loop's tool assembly so it can only narrow what the run already exposes.
+   */
+  toolAllow?: string[];
+  toolDeny?: string[];
 }
 
 export interface DocumenterResult {
@@ -121,6 +129,9 @@ export async function runDocumenter(options: DocumenterOptions): Promise<Documen
       timeoutMs: options.timeoutMs,
       model: options.model,
       maxTurns: options.maxTurns,
+      reasoningEffort: options.reasoningEffort,
+      toolAllow: options.toolAllow,
+      toolDeny: options.toolDeny,
     });
 
     return parseDocumenterOutput(raw.stdout);

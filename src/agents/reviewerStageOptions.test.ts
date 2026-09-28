@@ -135,6 +135,35 @@ describe('the in-loop reviewer stage (AGT-4443)', () => {
     expect(options.workerResult.filesChanged).toContain('adapter.py');
   });
 
+  it('carries the reviewer role\'s declared tool scope and effort, with the task profile effort winning', async () => {
+    // RoleConfig.tools/effort have to reach the stage options the same way
+    // maxTurns does, or a role that denies `search_memory` still runs with it and
+    // the read-only reviewer cannot be narrowed further at all.
+    const repo = repoWithWorkerEdits();
+    const scoped = {
+      roles: { reviewer: { enabled: true, tools: { allow: ['read_file'], deny: ['scratch_*'] }, effort: 'low' } },
+    } as unknown as PipelineConfig;
+    const options = await buildReviewerStageOptions({ config: scoped, context: context(repo), prefix: 'p' });
+
+    expect(options.readOnly).toBe(true);
+    expect(options.toolAllow).toEqual(['read_file']);
+    expect(options.toolDeny).toEqual(['scratch_*']);
+    expect(options.reasoningEffort).toBe('low');
+  });
+
+  it('lets a matched jobProfile effort win over the reviewer role\'s declared effort', async () => {
+    const repo = repoWithWorkerEdits();
+    const withProfile = {
+      roles: { reviewer: { enabled: true, effort: 'low' } },
+      jobProfiles: [{ name: 'heavy', minMinutes: 30, effort: 'high' }],
+    } as unknown as PipelineConfig;
+    const ctx = context(repo);
+    ctx.task.estimatedMinutes = 60;
+
+    const options = await buildReviewerStageOptions({ config: withProfile, context: ctx, prefix: 'p' });
+    expect(options.reasoningEffort).toBe('high');
+  });
+
   it('keeps the evidence and guard-warning wiring the stage already had', async () => {
     const repo = repoWithWorkerEdits();
     const ctx = context(repo);

@@ -349,6 +349,25 @@ export type RoleConfig = {
   /** Max agentic turns per CLI invocation */
   maxTurns?: number;
   /**
+   * Declarative subagent setting ported from the harness: which built-in tools
+   * this role may use, and which it may not. An allow-list can only ever NARROW
+   * the role's default tool set, never grant a tool the role would not
+   * otherwise have — so a misconfiguration cannot hand a reviewer `bash`, and a
+   * typo cannot silently widen a sandbox. `deny` wins over `allow`. Names are
+   * the built-in tool names (`bash`, `write_file`, `edit_file`, `read_file`,
+   * `web_fetch`, `web_search`, `search_memory`, `diagnostics`, `apply_patch`,
+   * `remember`, `scratch_*`). Coordination/MCP tools are governed by their own
+   * flags, not by this list.
+   */
+  tools?: {
+    /** If set, only these tools are exposed (intersected with the role default). */
+    allow?: string[];
+    /** Explicitly withheld, applied after `allow`. */
+    deny?: string[];
+  };
+  /** Reasoning effort for this role's native-loop adapter (low|medium|high). */
+  effort?: 'low' | 'medium' | 'high';
+  /**
    * Adaptive worker fan-out gate and optional candidate execution.
    */
   fanout?: {
@@ -425,6 +444,7 @@ export type ProjectAgentConfig = {
   roles?: {
     worker?: Partial<RoleConfig>;
     reviewer?: Partial<RoleConfig>;
+    advisor?: Partial<RoleConfig>;
     tester?: Partial<RoleConfig>;
     documenter?: Partial<RoleConfig>;
     auditor?: Partial<RoleConfig>;
@@ -438,6 +458,15 @@ export type ProjectAgentConfig = {
 export type DefaultRolesConfig = {
   worker: RoleConfig;
   reviewer: RoleConfig;
+  /**
+   * Second, independently-prompted review of the SAME diff. Permitted effect:
+   * add findings the reviewer missed, and raise severity. It can never soften
+   * the reviewer's decision. Defaults to disabled (a second paid call per
+   * review), and its model family must differ from the reviewer's — an advisor
+   * on the reviewer's own model is a second identical opinion, not a second
+   * opinion.
+   */
+  advisor?: RoleConfig;
   tester?: RoleConfig;
   documenter?: RoleConfig;
   auditor?: RoleConfig;

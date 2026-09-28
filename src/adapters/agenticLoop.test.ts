@@ -534,6 +534,135 @@ describe('runAgenticLoop tool exposure options', () => {
     expect(toolNames).not.toContain('search_memory');
   });
 
+  it('exposes only the allow-listed tools, and a deny entry removes what allow kept', async () => {
+    let toolNames: string[] = [];
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      memoryTools: false,
+      // `search_files` is allow-listed and then denied: allow can never add a
+      // tool back that deny removed, not even a member of `allow` itself.
+      toolAllow: ['read_file', 'search_files', 'write_file'],
+      toolDeny: ['search_files'],
+      maxTurns: 1,
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).toEqual(['read_file', 'write_file']);
+  });
+
+  it('a deny wildcard withholds the whole scratch family', async () => {
+    let toolNames: string[] = [];
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      memoryTools: false,
+      scratchpadRunId: 'AGT-0000',
+      toolDeny: ['scratch_*'],
+      maxTurns: 1,
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).not.toContain('scratch_write');
+    expect(toolNames).not.toContain('scratch_read');
+    expect(toolNames).toContain('read_file');
+  });
+
+  it('an allow-list cannot resurrect bash on a read-only run', async () => {
+    // The narrowing-only invariant: `allow` intersects with the composition, so
+    // naming a withheld tool does not expose it. A read-only run (the reviewer's
+    // shape) keeps bash hidden no matter what the role declared.
+    let toolNames: string[] = [];
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      readOnly: true,
+      webTools: false,
+      memoryTools: false,
+      toolAllow: ['bash', 'read_file', 'write_file'],
+      maxTurns: 1,
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).toEqual(['read_file']);
+  });
+
+  it('refuses a tool the role scope narrowed away, at dispatch as well as in the schema', async () => {
+    // The schema above and the dispatch set below are the same narrowed array,
+    // so a provider that emits a withheld name anyway is answered, not obeyed.
+    let turn = 0;
+    let deniedResult = '';
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      memoryTools: false,
+      toolAllow: ['read_file'],
+      maxTurns: 2,
+      callApi: async (messages, tools) => {
+        if (turn++ === 0) {
+          expect(tools.map((tool) => tool.function.name)).toEqual(['read_file']);
+          return toolCallResp('hidden-write', 'write_file', { path: 'out.txt', content: 'x' });
+        }
+        deniedResult = messages.at(-1)?.content ?? '';
+        return finalResp('done');
+      },
+    });
+
+    expect(deniedResult).toContain('TOOL_NOT_ALLOWED');
+    expect(deniedResult).toContain('write_file');
+  });
+
+  it('leaves MCP and coordination tools to their own flags, not the role list', async () => {
+    // RoleConfig.tools names built-ins (see its doc): a role narrowing to the
+    // file tools must not silently lose its board access, which the MCP and
+    // coordination flags govern.
+    let toolNames: string[] = [];
+
+    await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      webTools: false,
+      memoryTools: false,
+      toolAllow: ['read_file'],
+      maxTurns: 1,
+      mcpTools: [{
+        type: 'function',
+        function: { name: 'linear__get_issue', description: '', parameters: { type: 'object' } },
+      }],
+      coordinationContext: { repository: '/repo', taskId: 'supervisor', actor: 'orchestrator' },
+      callApi: async (_messages, tools) => {
+        toolNames = tools.map((tool) => tool.function.name);
+        return finalResp('done');
+      },
+    });
+
+    expect(toolNames).toContain('read_file');
+    expect(toolNames).toContain('linear__get_issue');
+    expect(toolNames).toContain('coordination_read');
+    expect(toolNames).not.toContain('write_file');
+  });
+
   it('withholds the scratch tools when the run has no scratchpad', async () => {
     let toolNames: string[] = [];
     await runAgenticLoop({
