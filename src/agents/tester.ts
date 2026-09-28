@@ -367,33 +367,122 @@ export function formatTestReport(result: TesterResult): string {
 }
 
 /**
+ * Bounds for the repair prompt handed to the worker on a failing run.
+ * `failedTests`/`suggestions` are taken from the tester's JSON unvalidated, so
+ * a verbose or adversarial result composed a prompt of arbitrary size — and
+ * this text is carried into the next worker prompt as untrusted data, where a
+ * report big enough to crowd out its own instructions degrades the run instead
+ * of failing it. Bounded per entry, then per list, then whole.
+ */
+const FIX_PROMPT_ENTRIES = 20;
+const FIX_PROMPT_ENTRY_CHARS = 300;
+/**
+ * Ceiling for the composed prompt — well below the locale's per-data-block cap
+ * (`MAX_PROMPT_DATA_CHARS`, 20k) so that block's own cut can never land first.
+ */
+export const TEST_FIX_PROMPT_BUDGET_CHARS = 8_000;
+/** Room kept back for the withholding notice and the closing instruction. */
+const FIX_PROMPT_RESERVE_CHARS = 400;
+
+/** Per entry: one list line, clipped in place so the cut is visible. */
+function boundEntry(value: string): { text: string; clipped: boolean } {
+  // Normalize only a bounded window: the entry itself can be megabytes, and
+  // sweeping a discarded tail with the whitespace regex is wasted work. Trim
+  // first (cheap, and the window is taken after it) so a padded-but-real name
+  // survives instead of the window filling with the padding. The window is
+  // twice the cap because normalization only ever shortens.
+  const trimmed = value.trim();
+  const window = trimmed.length > FIX_PROMPT_ENTRY_CHARS * 2
+    ? trimmed.slice(0, FIX_PROMPT_ENTRY_CHARS * 2)
+    : trimmed;
+  const flat = window.replace(/\s+/g, ' ');
+  const clipped = window.length < trimmed.length || flat.length > FIX_PROMPT_ENTRY_CHARS;
+  return clipped
+    ? { text: `${flat.slice(0, FIX_PROMPT_ENTRY_CHARS)}…`, clipped: true }
+    : { text: flat, clipped: false };
+}
+
+/**
  * Convert Tester result to Worker feedback
  */
 export function buildTestFixPrompt(result: TesterResult): string {
   const lines: string[] = [];
+  const withheld: string[] = [];
+  // Counts the '\n' each line will add, so the ceiling below is exact.
+  let used = 0;
+  const push = (line: string): void => {
+    lines.push(line);
+    used += line.length + 1;
+  };
+  const room = TEST_FIX_PROMPT_BUDGET_CHARS - FIX_PROMPT_RESERVE_CHARS;
 
-  lines.push('## Test Failures');
-  lines.push('');
-  lines.push(`**Passed:** ${result.testsPassed} | **Failed:** ${result.testsFailed}`);
+  push('## Test Failures');
+  push('');
+  push(`**Passed:** ${result.testsPassed} | **Failed:** ${result.testsFailed}`);
 
-  if (result.failedTests && result.failedTests.length > 0) {
-    lines.push('');
-    lines.push('### Failed Tests:');
-    for (let i = 0; i < result.failedTests.length; i++) {
-      lines.push(`${i + 1}. \`${result.failedTests[i]}\``);
+  const appendEntries = (
+    label: string,
+    entries: readonly string[] | undefined,
+    render: (position: number, text: string) => string,
+    cap: number,
+  ): void => {
+    if (!entries || entries.length === 0) return;
+    push('');
+    push(`### ${label}:`);
+    let listed = 0;
+    let clipped = 0;
+    for (let i = 0; i < entries.length && i < FIX_PROMPT_ENTRIES; i++) {
+      const entry = boundEntry(entries[i]);
+      const line = render(i + 1, entry.text);
+      if (used + line.length + 1 > cap) break;
+      push(line);
+      listed += 1;
+      if (entry.clipped) clipped += 1;
+    }
+    if (listed < entries.length || clipped > 0) {
+      withheld.push(`${label}: ${listed} of ${entries.length} listed${clipped > 0 ? `, ${clipped} cut short (marked in place)` : ''}`);
+    }
+  };
+
+  // Each list gets an equal share of the room left, so a malformed first list
+  // cannot spend it all: a bounded prompt that omitted every fix suggestion
+  // would leave the worker with nothing to act on. An unused share flows on.
+  const failed = result.failedTests && result.failedTests.length > 0;
+  const suggested = result.suggestions && result.suggestions.length > 0;
+  if (failed) {
+    appendEntries(
+      'Failed Tests',
+      result.failedTests,
+      (position, text) => `${position}. \`${text}\``,
+      used + Math.floor((room - used) / (suggested ? 2 : 1)),
+    );
+  }
+  if (suggested) {
+    appendEntries(
+      'Fix Suggestions',
+      result.suggestions,
+      (position, text) => `${position}. ${text}`,
+      room,
+    );
+  }
+
+  // What a bound withheld is stated rather than silently missing: a worker
+  // shown a partial report must not read it as the whole one. The labels are a
+  // closed, short set, so the reserve covers these lines; the closing
+  // instruction is what it is kept back for.
+  const closing = 'Fix the above test failures.';
+  if (withheld.length > 0) {
+    push('');
+    push('## Report withheld (prompt budget)');
+    push('The tester reported more than this prompt carries; the rest is not here.');
+    for (const line of withheld) {
+      if (used + line.length + 1 + closing.length + 2 > TEST_FIX_PROMPT_BUDGET_CHARS) break;
+      push(`- ${line}`);
     }
   }
 
-  if (result.suggestions && result.suggestions.length > 0) {
-    lines.push('');
-    lines.push('### Fix Suggestions:');
-    for (let i = 0; i < result.suggestions.length; i++) {
-      lines.push(`${i + 1}. ${result.suggestions[i]}`);
-    }
-  }
-
-  lines.push('');
-  lines.push('Fix the above test failures.');
+  push('');
+  push(closing);
 
   return lines.join('\n');
 }

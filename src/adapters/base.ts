@@ -29,6 +29,96 @@ import { createSessionRecorder, type SessionRecorder } from '../support/sessionL
 export { terminateCliProcessTree } from './processTree.js';
 
 /**
+ * Byte ceiling on the output kept for ONE stream.
+ *
+ * The data handlers below used to concatenate every chunk for the whole worker
+ * lifetime, so a CLI that is verbose, wedged, or adversarial could hold hundreds
+ * of MB in the daemon until its timeout fired — and streaming parsing does not
+ * reduce that, it only decides what is logged. 2 MiB is the ceiling this repo
+ * already puts on other bytes read from a source we do not control (web fetch
+ * bodies, codex MCP enumeration), it is 16x the 128 KiB CLI buffer in
+ * automation/scheduler.ts — which was sized for a stderr snippet, not for
+ * parseable stdout — and it sits below the 8 MiB session log cap, so two
+ * retained streams can never dominate a session record.
+ */
+export const CLI_OUTPUT_MAX_BYTES = 2 * 1024 * 1024;
+/** Head room for the truncation marker, so a clipped stream stays under the ceiling. */
+const CLI_OUTPUT_MARKER_RESERVE = 128;
+const CLI_OUTPUT_KEEP_BYTES = CLI_OUTPUT_MAX_BYTES - CLI_OUTPUT_MARKER_RESERVE;
+/**
+ * Greppable opener of the marker a clipped stream carries in place of its head.
+ *
+ * The cut is stated in the data itself, so an operator (or a parser reading the
+ * retained text) sees that bytes are missing and how many, rather than inferring
+ * it from output that silently never arrived. Kept free of failure phrasings:
+ * `isExplicitFailure` scans raw stdout for real failure declarations.
+ */
+export const CLI_OUTPUT_TRUNCATION_MARKER = '[openswarm-cli-output:';
+
+/** How much of the tail a cut keeps, so the next cut is a megabyte away (below). */
+const CLI_OUTPUT_TRIM_BYTES = Math.ceil(CLI_OUTPUT_KEEP_BYTES / 2);
+
+/**
+ * A stream's retained tail, its byte length, and the head bytes already dropped.
+ * The retained text carries no marker of its own: the drop count lives here so a
+ * second cut reports the total, not just the last one.
+ */
+interface RetainedCliOutput {
+  text: string;
+  bytes: number;
+  droppedBytes: number;
+}
+
+/**
+ * Append a chunk, keeping only the TAIL once the ceiling is passed.
+ *
+ * The tail, not the head, because every consumer of a delegated CLI's output
+ * reads the terminal event: `extractResultFromStreamJson` (claude stream-json),
+ * `extractCodexMessageText` (`messages.at(-1)`), `extractCursorFinalText`,
+ * `detectRateLimit`, and `extractStreamJsonError` all need the LAST lines — a
+ * head clip would throw away the result event of exactly the verbose runs this
+ * bound exists for. Same direction as `tailWithinBytes`
+ * (agents/verificationEvidence.ts) and the tail-keeping `appendBounded` in
+ * automation/scheduler.ts.
+ *
+ * A cut keeps half the budget rather than exactly filling it: re-slicing on
+ * every chunk after the ceiling would copy 2 MiB per chunk, which a chatty CLI
+ * turns into gigabytes of memcpy while it floods the pipe. Each cut therefore
+ * buys a full megabyte of appends, and the retained text still never exceeds the
+ * ceiling — an append that would cross it is trimmed in the same call.
+ */
+function appendCliOutput(output: RetainedCliOutput, chunk: string): void {
+  const chunkBytes = Buffer.byteLength(chunk, 'utf8');
+  const total = output.bytes + chunkBytes;
+  if (total <= CLI_OUTPUT_KEEP_BYTES) {
+    output.text += chunk;
+    output.bytes = total;
+    return;
+  }
+  // A single chunk can exceed what we keep on its own; then the retained text is
+  // going to be discarded entirely, and concatenating it first would be a copy
+  // of a payload already known to be thrown away.
+  const source = chunkBytes >= CLI_OUTPUT_TRIM_BYTES ? chunk : output.text + chunk;
+  // The cut can land mid-character, so the retained length is re-measured rather
+  // than assumed. Decoding turns at most a handful of stray UTF-8 bytes into
+  // replacement characters (3 bytes each), so the retained text can exceed
+  // CLI_OUTPUT_TRIM_BYTES by a few bytes — never by more than
+  // CLI_OUTPUT_MARKER_RESERVE, which is why the ceiling itself still holds.
+  output.text = Buffer.from(source, 'utf8')
+    .subarray(-CLI_OUTPUT_TRIM_BYTES)
+    .toString('utf8');
+  output.bytes = Buffer.byteLength(output.text, 'utf8');
+  output.droppedBytes += total - output.bytes;
+}
+
+/** The retained output, preceded by the marker when the head was clipped. */
+function renderCliOutput(output: RetainedCliOutput): string {
+  return output.droppedBytes > 0
+    ? `${CLI_OUTPUT_TRUNCATION_MARKER} ${output.droppedBytes} bytes omitted from the head]\n${output.text}`
+    : output.text;
+}
+
+/**
  * Spawn a CLI process using the given adapter and options.
  * Handles: temp file write, argv-safe spawn, timeout/SIGKILL,
  * stdout/stderr buffering, stream parsing via onLog, cleanup.
@@ -234,13 +324,15 @@ export async function spawnCli(
         }, proc);
       }
 
-      let stdout = '';
-      let stderr = '';
+      // Retained only for the final parse and the transcript; bounded per stream
+      // so a flooding CLI cannot hold the daemon's memory for its whole run.
+      const stdoutOutput: RetainedCliOutput = { text: '', bytes: 0, droppedBytes: 0 };
+      const stderrOutput: RetainedCliOutput = { text: '', bytes: 0, droppedBytes: 0 };
       let streamBuffer = '';
 
       proc.stdout?.on('data', (data: Buffer) => {
         const text = data.toString();
-        stdout += text;
+        appendCliOutput(stdoutOutput, text);
         if (options.onLog && adapter.capabilities.supportsStreaming) {
           streamBuffer = adapter.parseStreamingChunk
             ? adapter.parseStreamingChunk(text, options.onLog, streamBuffer)
@@ -249,7 +341,7 @@ export async function spawnCli(
       });
 
       proc.stderr?.on('data', (data: Buffer) => {
-        stderr += data.toString();
+        appendCliOutput(stderrOutput, data.toString());
       });
 
       let exitDrainTimer: NodeJS.Timeout | null = null;
@@ -265,7 +357,7 @@ export async function spawnCli(
         cleanupLifecycle();
         terminateCliProcessTree(proc);
         const reason = lifecycleController.signal.reason;
-        session?.record({ type: 'assistant', rawStdout: stdout, rawStderr: stderr });
+        session?.record({ type: 'assistant', rawStdout: renderCliOutput(stdoutOutput), rawStderr: renderCliOutput(stderrOutput) });
         session?.close({
           outcome: 'aborted', durationMs: Date.now() - startTime,
           error: reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason),
@@ -284,6 +376,11 @@ export async function spawnCli(
             ? adapter.parseStreamingChunk('\n', options.onLog, streamBuffer)
             : parseCliStreamChunk('\n', options.onLog, streamBuffer);
         }
+
+        // Rendered once per settling path: the marker belongs in the transcript
+        // and in the returned result, but the retained text itself carries none.
+        const stdout = renderCliOutput(stdoutOutput);
+        const stderr = renderCliOutput(stderrOutput);
 
         session?.record({ type: 'assistant', rawStdout: stdout, rawStderr: stderr });
         session?.close({

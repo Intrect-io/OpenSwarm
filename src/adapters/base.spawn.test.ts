@@ -13,7 +13,7 @@ vi.mock('node:child_process', async (importOriginal) => ({
   spawn: spawnMock,
 }));
 
-import { spawnCli, terminateCliProcessTree } from './base.js';
+import { spawnCli, terminateCliProcessTree, CLI_OUTPUT_MAX_BYTES } from './base.js';
 import {
   prepareCliProcessTreeSpawn,
   trackCliProcessTree,
@@ -662,5 +662,145 @@ describe('delegated-CLI capability guards', () => {
 
     expect(warn.mock.calls.flat().join(' ')).toMatch(/1 MCP tool\(s\) and coordination tools will not be available/);
     warn.mockRestore();
+  });
+});
+
+describe('bounded CLI output retention', () => {
+  /** An adapter whose CLI shells out, with optional incremental stream parsing. */
+  const fixture = (parseStreamingChunk?: CliAdapter['parseStreamingChunk']): CliAdapter => ({
+    name: 'fixture-cli',
+    capabilities: {
+      supportsStreaming: !!parseStreamingChunk,
+      supportsJsonOutput: false,
+      supportsModelSelection: false,
+      managedGit: false,
+      supportedSkills: [],
+    },
+    isAvailable: async () => true,
+    getDefaultModel: async () => 'fixture',
+    buildCommand: () => ({ command: 'fixture-cli', args: [] }),
+    parseStreamingChunk,
+    parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+    parseReviewerOutput: () => ({ decision: 'approve', feedback: '', issues: [], suggestions: [] }),
+  });
+
+  const mockProc = (pid: number, emit: (proc: { stdout: PassThrough; stderr: PassThrough }) => void) => {
+    const proc = Object.assign(new EventEmitter(), {
+      pid,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
+      kill: vi.fn(),
+    });
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        emit(proc);
+        proc.emit('close', 0);
+      });
+      return proc;
+    });
+    return proc;
+  };
+
+  it('resolves a flooding CLI and marks the retained output as truncated', async () => {
+    // A wedged or adversarial CLI can write for the whole timeout window. The
+    // retained copy is capped, so the daemon holds a bounded tail instead of
+    // everything the child ever printed. (The marker must be in the data: a
+    // silently short stdout reads as "the CLI said nothing".)
+    const floodBytes = 3 * 1024 * 1024;
+    mockProc(911, ({ stdout }) => {
+      stdout.write('a'.repeat(floodBytes));
+      stdout.end('FINAL_RESULT_LINE');
+    });
+
+    const result = await spawnCli(fixture(), { prompt: 'p', cwd: process.cwd() });
+
+    expect(result.exitCode).toBe(0);
+    // The tail is what every parser reads (`messages.at(-1)`, the stream-json
+    // result event), so the terminal line must survive the clip.
+    expect(result.stdout.endsWith('FINAL_RESULT_LINE')).toBe(true);
+    expect(result.stdout).toContain('[openswarm-cli-output:');
+    expect(result.stdout).toMatch(/\[openswarm-cli-output: \d+ bytes omitted from the head\]/);
+    expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(CLI_OUTPUT_MAX_BYTES);
+
+    // The count is the real one: it plus what was kept accounts for every byte.
+    const [, dropped] = result.stdout.match(/\[openswarm-cli-output: (\d+) bytes omitted/)!;
+    const keptBytes = Buffer.byteLength(result.stdout.slice(result.stdout.indexOf('\n') + 1), 'utf8');
+    expect(Number(dropped) + keptBytes).toBe(floodBytes + 'FINAL_RESULT_LINE'.length);
+    // The marker line itself is what the operator sees instead of the head.
+    expect(result.stdout.split('\n')[0]).toMatch(/^\[openswarm-cli-output:/);
+  });
+
+  it('bounds stderr independently and keeps the diagnostic tail', async () => {
+    // stderr is where a failing CLI explains itself; the failure path below
+    // reports a snippet from it, so the tail must be the part retained.
+    const floodBytes = 2.5 * 1024 * 1024;
+    mockProc(912, ({ stderr }) => {
+      stderr.write('x'.repeat(floodBytes));
+      stderr.end('Error: ENOENT: no such file or directory');
+    });
+
+    const result = await spawnCli(fixture(), { prompt: 'p', cwd: process.cwd() });
+
+    expect(result.stderr.endsWith('Error: ENOENT: no such file or directory')).toBe(true);
+    expect(result.stderr).toContain('[openswarm-cli-output:');
+    expect(Buffer.byteLength(result.stderr, 'utf8')).toBeLessThanOrEqual(CLI_OUTPUT_MAX_BYTES);
+    // Each stream carries its own ceiling — a flooding stdout must not eat the
+    // stderr budget, and vice versa.
+    expect(result.stdout).toBe('');
+  });
+
+  it('leaves a normal run byte-for-byte untouched', async () => {
+    mockProc(913, ({ stdout, stderr }) => {
+      stdout.end('{"type":"result","result":"all good"}');
+      stderr.end('warning: deprecated flag');
+    });
+
+    const result = await spawnCli(fixture(), { prompt: 'p', cwd: process.cwd() });
+
+    expect(result.stdout).toBe('{"type":"result","result":"all good"}');
+    expect(result.stderr).toBe('warning: deprecated flag');
+    expect(result.stdout).not.toContain('[openswarm-cli-output:');
+    expect(result.stderr).not.toContain('[openswarm-cli-output:');
+  });
+
+  it('still feeds every byte to an incremental stream parser', async () => {
+    // The bound applies to the RETAINED copy only. The live log is built by the
+    // streaming parser from each chunk as it arrives; clipping its input would
+    // silently drop the middle of a long assistant message from the dashboard.
+    let seen = 0;
+    const parseStreamingChunk = vi.fn((chunk: string, _onLog: (line: string) => void, buffer = '') => {
+      seen += chunk.length;
+      return buffer;
+    });
+    const floodBytes = 3 * 1024 * 1024;
+    mockProc(914, ({ stdout }) => stdout.end('b'.repeat(floodBytes)));
+
+    const logged: string[] = [];
+    const result = await spawnCli(fixture(parseStreamingChunk), {
+      prompt: 'p', cwd: process.cwd(), onLog: (line) => logged.push(line),
+    });
+
+    expect(seen).toBe(floodBytes);
+    expect(result.stdout).toContain('[openswarm-cli-output:');
+  });
+
+  it('bounds multibyte output by bytes, not characters, and keeps the tail decodable', async () => {
+    // 3 bytes per char: a char-wise cap would retain 3x the ceiling in bytes,
+    // and clipping the string rather than the buffer would also leave a broken
+    // half-character at the cut. Both are invisible with ASCII fixtures.
+    const floodBytes = 3 * 1024 * 1024;
+    mockProc(915, ({ stdout }) => {
+      stdout.write('한'.repeat(floodBytes / 3));
+      stdout.end('\n결과: 완료');
+    });
+
+    const result = await spawnCli(fixture(), { prompt: 'p', cwd: process.cwd() });
+
+    expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(CLI_OUTPUT_MAX_BYTES);
+    expect(result.stdout.endsWith('\n결과: 완료')).toBe(true);
+    expect(result.stdout).toContain('[openswarm-cli-output:');
+    // No replacement character: the cut did not split a character in place.
+    expect(result.stdout).not.toContain('\uFFFD');
   });
 });
