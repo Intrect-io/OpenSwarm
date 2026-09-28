@@ -359,12 +359,14 @@ program
   .option('--in-place', 'For --max --fix: edit the current working tree instead of an isolated worktree (no branch, no PR)')
   .option('--fix-rounds <n>', 'For --max --fix: optional round cap (default: until clean, with a two-hour safety budget)', parsePositiveIntegerOption)
   .option('--no-security-audit', 'For --max --fix: disable the default CodeQL audit gate')
+  .option('--harness-only', 'For --max: skip LLM reviewers; run only the deterministic quality harness (static scan + verify commands)')
   .option('--no-learn', 'For --max: do not record the audit findings into the repo knowledge memory')
   .action(async (opts: {
     path?: string; base?: string; issues?: string | boolean; issuesPerArea?: string | boolean; file?: string | boolean; adapter?: string; model?: string; debug?: boolean; json?: boolean; sarif?: string; readOnly?: boolean;
     maxTurns?: number; timeout?: number;
     max?: boolean; concurrency?: number; maxFilesPerArea?: number; yes?: boolean; dryRun?: boolean;
     out?: string; linear?: boolean; fallback?: string | boolean; fix?: boolean; inPlace?: boolean; fixRounds?: number; learn?: boolean; securityAudit?: boolean;
+    harnessOnly?: boolean;
   }) => {
     try {
       // --json/--sarif are declared on the shared `review` command but only the
@@ -381,6 +383,11 @@ program
       // subagents still have it. (INT-3189)
       if (opts.max && opts.readOnly) {
         console.error('--read-only is not supported with --max yet; the audit fan-out still grants the reviewer its full toolset.');
+        process.exitCode = 2;
+        return;
+      }
+      if (opts.harnessOnly && !opts.max) {
+        console.error('--harness-only requires --max.');
         process.exitCode = 2;
         return;
       }
@@ -409,6 +416,7 @@ program
           fixRounds: opts.fixRounds,
           learn: opts.learn,
           securityAudit: opts.securityAudit,
+          harnessOnly: opts.harnessOnly,
         });
         // Exit contract (INT-3100): 2 = the gate did not run at all (no area
         // reviewed — quota/infra), 1 = it ran and failed. CI reads only this.

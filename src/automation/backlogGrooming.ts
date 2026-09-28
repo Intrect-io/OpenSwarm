@@ -131,7 +131,10 @@ Rules:
 - Keep updatedDescription concise and implementation-ready.`;
 }
 
-export function parseBacklogGroomingOutput(output: string): BacklogGroomingResult {
+export function parseBacklogGroomingOutput(
+  output: string,
+  validIssueIds: Set<string>,
+): BacklogGroomingResult {
   try {
     const fence = output.match(/```json\s*([\s\S]*?)```/i);
     const jsonText = fence?.[1] ?? output.slice(output.indexOf('{'));
@@ -142,8 +145,11 @@ export function parseBacklogGroomingOutput(output: string): BacklogGroomingResul
       const d = item as Partial<GroomingDecision>;
       if (!d.issueId || !d.status || !d.reason) return [];
       if (!['active', 'needs_update', 'stale'].includes(d.status)) return [];
+      const issueId = String(d.issueId);
+      // Drop hallucinated IDs before any downstream mutation path can see them.
+      if (!validIssueIds.has(issueId)) return [];
       return [{
-        issueId: String(d.issueId),
+        issueId,
         identifier: d.identifier ? String(d.identifier) : undefined,
         status: d.status,
         reason: String(d.reason),
@@ -177,7 +183,10 @@ export async function runBacklogGroomingPlanner(options: RunBacklogGroomingOptio
     if (raw.exitCode !== 0 && !raw.stdout.trim()) {
       return { success: false, decisions: [], error: raw.stderr.slice(0, 500) || `Planner adapter exited with code ${raw.exitCode}` };
     }
-    return parseBacklogGroomingOutput(raw.stdout);
+    const validIssueIds = new Set(
+      options.tasks.map(task => task.issueId || task.id).filter(Boolean),
+    );
+    return parseBacklogGroomingOutput(raw.stdout, validIssueIds);
   } catch (error) {
     return { success: false, decisions: [], error: error instanceof Error ? error.message : String(error) };
   }
@@ -198,7 +207,7 @@ export async function applyBacklogGrooming(
   source: ITaskSource,
   result: BacklogGroomingResult,
   mode: BacklogGroomingMode = 'comment',
-  validIssueIds?: Set<string>,
+  validIssueIds: Set<string> = new Set(),
 ): Promise<ApplyBacklogGroomingResult> {
   const applied: ApplyBacklogGroomingResult = {
     commented: 0,
@@ -209,8 +218,9 @@ export async function applyBacklogGrooming(
     skippedUnknown: 0,
   };
   if (!result.success) return applied;
+  // Scope is mandatory: an empty/missing Set must not mutate arbitrary IDs.
   for (const decision of result.decisions) {
-    if (validIssueIds && !validIssueIds.has(decision.issueId)) {
+    if (!validIssueIds.has(decision.issueId)) {
       applied.skippedUnknown++;
       continue;
     }

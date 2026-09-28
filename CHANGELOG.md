@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`openswarm review --max --harness-only` runs a deterministic quality harness with no LLM cost.** The new harness (`src/verify/qualityHarness.ts`) enumerates every **tracked** source file via the git index and scans each one, then runs the discovered typecheck/lint/test/build commands inside the existing isolated verify sandbox. It is fail-closed by construction: a file over the 512 KiB ceiling, one containing NUL bytes, an unreadable path, a symlinked source, or a path that escapes the repository root each become an explicit error finding rather than a silent skip, and a listing that scanned nothing is itself an error — so the gate cannot report "passed" over a subset it never read. Findings are folded into the audit run as a synthetic `.openswarm/quality-harness` area, which means the markdown report and the exit-code contract carry the evidence on every `--max` run, not only when an LLM area happened to notice something.
+
+### Fixed
+
+- **A workflow execution can no longer be persisted in a state its DAG forbids.** `saveExecution` now rejects a step marked `completed` without a `completedAt`, `failed` without an `error`, or advanced past a dependency that is still pending, running or failed — states that previously reached disk and were then read back as if the pipeline had progressed. It also gains a `definitionStamp` fence: a definition replaced underneath a live execution makes the next save refuse rather than record a snapshot that never ran against it.
+- **The local issue store no longer serves a stale snapshot after a same-size replacement.** The cache stamp was `mtimeMs:size`, which is unchanged when another process replaces the file by atomic rename within the same mtime tick and writes the same number of bytes — the process then kept serving the old contents indefinitely. The stamp now includes the inode.
+- **A status transition's event log records the status the write actually saw.** `changeStatus` and `updateIssue` read the current status inside the write transaction instead of from a pre-transaction read, so a concurrent transition can no longer stamp a stale `oldValue` into the audit trail.
+- **The daily reporter retries a failed project once, and only advances its watermark when every project succeeded (after that retry).** A transient Linear error previously left a project unreported until the next day, while a permanently failing project could hold the window open; the watermark now reflects post-retry reality.
+- **A Linear project description keeps its automation summary.** The compact `[Done:n InProgress:n Todo:n]` line was appended before truncation, so a long base description pushed it past Linear's 255-character limit and it was silently cut. The builder now reserves room for the summary first.
+- **Repository-registry corruption that could not be quarantined says so.** `loadRepos` reported a failed `renameSync` as if the corrupt file had been preserved, naming a recovery path that does not exist; the quarantine failure is now surfaced as its own error.
+- **A failed local Linear mapping can no longer orphan-recreate the remote issue.** If `updateIssue`/`addEvent` throws after Linear's `createIssue` succeeded, the new `linearId` is remembered in-process and re-persisted on the next call (with an `idempotencyKey` on the `linked` event), instead of the retry creating a second Linear issue.
+- **Backlog grooming refuses to act on an issue id it was not given.** `validIssueIds` is now mandatory at both parse time and apply time, so a hallucinated or out-of-scope id from the planner is dropped before any mutation path sees it, and an omitted scope means "nothing is in scope" rather than "anything goes".
+- **Shell/SQL source under data directories still requires validation evidence.** `isValidationRelevantFile` exempts locale/fixtures/snapshots trees as non-code, but its idea of "code" excluded `sh`, `bash`, `sql`, `swift` and others that a worker can meaningfully break; those now count.
+- **Linear project-overview pagination surfaces a broken page walk.** A response with no issues connection, or a missing/repeated `endCursor`, now throws instead of silently returning a truncated issue list that the overview reports as complete.
+- **An idempotent `createIssue` rejects a materially different artifact under the same id.** A caller-supplied `id` that already exists is treated as a retry only when title, description, parent and project agree; otherwise the store throws an explicit collision error instead of returning the stored row (which masked a re-planned decomposition) or overwriting it (which would destroy the first plan's artifact).
+- **The `dev.ts` close handler always releases its task.** Reporting ran before `onComplete` and `activeTasks.delete`, so a throw while formatting cost/output left the task registered forever; the reporting is now contained and the cleanup runs in `finally`.
+- **`memoryBridge` emits one `memory_linked` event per link**, not two (`linkMemory` already emits one).
+- **A failed Linear SDK load is retryable.** The rejected init promise stayed cached, so every later `initLinearBridge` call awaited the same rejection and the bridge never recovered within the process.
+
 ## 0.24.3 — 2026-09-28
 
 ### Added

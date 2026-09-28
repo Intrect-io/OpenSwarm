@@ -115,6 +115,22 @@ function restrictDatabasePermissions(path: string): void {
   }
 }
 
+/**
+ * Whether a caller-supplied `id` already in the store describes the same
+ * artifact the caller is asking for.
+ *
+ * Compares the identity-bearing fields only: title, description, parent and
+ * project. Optional metadata (priority, estimate, assignee) is deliberately not
+ * compared — a retry that omits or re-derives it is still the same artifact,
+ * while a changed title/description/parent is a different one.
+ */
+function sameIssueContent(existing: Issue, input: CreateIssueInput): boolean {
+  return existing.title === input.title
+    && (existing.description ?? '') === (input.description ?? '')
+    && (existing.parentId ?? undefined) === (input.parentId ?? undefined)
+    && existing.projectId === input.projectId;
+}
+
 export class SqliteIssueStore implements IIssueStore {
   private db: Database.Database;
 
@@ -327,6 +343,22 @@ export class SqliteIssueStore implements IIssueStore {
 
   createIssue(input: CreateIssueInput): Issue {
     const id = input.id ?? nanoid(12);
+    // Honor the documented idempotent-ID contract, but do not let it mask a real
+    // collision: a caller-supplied id that already exists is only "the same
+    // create retried" when the identity-bearing fields agree. A materially
+    // different row under the same id (a re-planned decomposition, AGT-2908) must
+    // be rejected — returning the stored row would silently accept the new plan,
+    // and overwriting it would destroy the artifact the first plan produced.
+    if (input.id) {
+      const existing = this.getIssue(input.id);
+      if (existing) {
+        if (sameIssueContent(existing, input)) return existing;
+        throw new Error(
+          `Issue ${input.id} already exists with different content: existing artifact does not match the requested create`,
+        );
+      }
+    }
+
     const now = new Date().toISOString();
 
     const insertIssue = this.db.prepare(`
@@ -438,6 +470,18 @@ export class SqliteIssueStore implements IIssueStore {
         return transaction() as string;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        // Concurrent create with the same caller-supplied id: return the winner's
+        // row when it is the same artifact, otherwise report the collision rather
+        // than surfacing a raw UNIQUE(id) violation.
+        if (input.id) {
+          const existing = this.getIssue(input.id);
+          if (existing) {
+            if (sameIssueContent(existing, input)) return existing.id;
+            throw new Error(
+              `Issue ${input.id} already exists with different content: existing artifact does not match the requested create`,
+            );
+          }
+        }
         // Cross-process inbound sync can both pass the pre-insert SELECT and then
         // collide on the unique Linear indexes — reclaim the winner's row.
         if (/UNIQUE/i.test(message) && (input.linearId || input.linearIdentifier)) {
@@ -562,7 +606,12 @@ export class SqliteIssueStore implements IIssueStore {
       }
 
       if (patch.status !== undefined) {
-        this.applyStatusChange(id, existing.status, patch.status, 'system');
+        // Re-read inside the write txn so event oldValue matches effective DB state.
+        const current = this.db.prepare('SELECT status FROM issues WHERE id = ?').get(id) as
+          | { status: IssueStatus }
+          | undefined;
+        if (!current) return;
+        this.applyStatusChange(id, current.status, patch.status, 'system');
       }
     });
 
@@ -654,11 +703,18 @@ export class SqliteIssueStore implements IIssueStore {
   // ============ 상태 전이 ============
 
   changeStatus(id: string, status: IssueStatus, actor?: string): Issue | null {
-    const existing = this.getIssue(id);
-    if (!existing) return null;
+    const run = this.db.transaction(() => {
+      // Read effective status inside the write transaction so concurrent
+      // transitions cannot stamp a stale oldValue onto the event log.
+      const row = this.db.prepare('SELECT status FROM issues WHERE id = ?').get(id) as
+        | { status: IssueStatus }
+        | undefined;
+      if (!row) return null;
 
-    this.applyStatusChange(id, existing.status, status, actor ?? 'system');
-    return this.getIssue(id);
+      this.applyStatusChange(id, row.status, status, actor ?? 'system');
+      return this.getIssue(id);
+    });
+    return run();
   }
 
   private applyStatusChange(id: string, oldStatus: IssueStatus, status: IssueStatus, actor: string): void {

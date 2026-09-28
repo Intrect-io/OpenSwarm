@@ -113,6 +113,12 @@ export interface WorkflowExecution {
   completedAt?: number;
   stepResults: Record<string, StepResult>;
   checkpoint?: string;  // git commit hash for rollback
+  /**
+   * Fence against concurrent workflow-definition replacement.
+   * Format matches filesystem identity: `${mtimeMs}:${size}` or `missing`.
+   * Captured on first persist; later saves refuse if the definition file changed.
+   */
+  definitionStamp?: string;
 }
 
 /**
@@ -174,6 +180,8 @@ export const WorkflowExecutionSchema = z.object({
   completedAt: z.number().optional(),
   stepResults: z.record(z.string(), StepResultSchema),
   checkpoint: z.string().optional(),
+  /** Fence against concurrent workflow-definition replacement (see saveExecution). */
+  definitionStamp: z.string().optional(),
 });
 
 // DAG Utilities
@@ -323,6 +331,56 @@ function storageFilePath(rootDir: string, id: string, extension: string): string
 }
 
 /**
+ * Reject incomplete step results and DAG-illegal lifecycle states before persist.
+ */
+export function validateExecution(
+  execution: WorkflowExecution,
+  workflowSteps?: WorkflowStep[],
+): void {
+  const results = execution.stepResults;
+
+  for (const [id, result] of Object.entries(results)) {
+    if (result.stepId !== id) {
+      throw new Error(`Step result key "${id}" does not match stepId "${result.stepId}"`);
+    }
+    if (result.status === 'completed' && result.completedAt == null) {
+      throw new Error(`Step ${id} is completed but has no completedAt`);
+    }
+    if (result.status === 'failed' && (result.error == null || result.error === '')) {
+      throw new Error(`Step ${id} is failed but has no error`);
+    }
+    if (
+      (result.status === 'failed' || result.status === 'skipped') &&
+      result.completedAt == null
+    ) {
+      throw new Error(`Step ${id} is ${result.status} but has no completedAt`);
+    }
+  }
+
+  if (!workflowSteps || workflowSteps.length === 0) return;
+
+  const stepById = new Map(workflowSteps.map((step) => [step.id, step]));
+  for (const [id, result] of Object.entries(results)) {
+    if (result.status === 'pending') continue;
+    const step = stepById.get(id);
+    if (!step?.dependsOn) continue;
+    for (const dep of step.dependsOn) {
+      const depResult = results[dep];
+      if (!depResult || depResult.status === 'pending' || depResult.status === 'running') {
+        throw new Error(
+          `Step ${id} cannot be ${result.status} when dependency ${dep} is ${depResult?.status ?? 'missing'}`,
+        );
+      }
+      if (depResult.status === 'failed' && result.status !== 'failed' && result.status !== 'skipped') {
+        throw new Error(
+          `Step ${id} cannot be ${result.status} when dependency ${dep} is failed`,
+        );
+      }
+    }
+  }
+}
+
+/**
  * Save workflow
  */
 export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
@@ -339,6 +397,22 @@ export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
   await fs.mkdir(WORKFLOW_DIR, { recursive: true });
   await fs.writeFile(filePath, yaml.stringify(parsed.data), 'utf-8');
   console.log(`[Workflow] Saved: ${parsed.data.name} (${parsed.data.id})`);
+}
+
+/**
+ * Loader-compatible stamp for a workflow definition file (`mtimeMs:size` or
+ * `missing`). Same convention as storeFileStamp/atomicWriteFile consumers.
+ */
+export async function workflowDefinitionStamp(workflowId: string): Promise<string> {
+  try {
+    const filePath = storageFilePath(WORKFLOW_DIR, workflowId, '.yaml');
+    const st = await fs.stat(filePath);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+    // Invalid IDs throw from storageFilePath; propagate those.
+    throw error;
+  }
 }
 
 /**
@@ -389,8 +463,21 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
 
 /**
  * Save execution state — validated against the workflow definition when present.
+ * Refuses to persist when the linked workflow definition was replaced under this
+ * execution (definitionStamp fence), so a stale snapshot cannot be reported as a
+ * success for a definition it never ran.
  */
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
+  const currentStamp = await workflowDefinitionStamp(execution.workflowId);
+  if (execution.definitionStamp !== undefined && execution.definitionStamp !== currentStamp) {
+    throw new Error(
+      `Workflow definition changed under execution ${execution.executionId} ` +
+      `(expected ${execution.definitionStamp}, found ${currentStamp})`,
+    );
+  }
+  // Stamp the caller's object so subsequent in-memory saves keep the fence.
+  execution.definitionStamp = execution.definitionStamp ?? currentStamp;
+
   const parsed = WorkflowExecutionSchema.safeParse(execution);
   if (!parsed.success) {
     const details = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'root'}: ${issue.message}`);
@@ -399,7 +486,12 @@ export async function saveExecution(execution: WorkflowExecution): Promise<void>
   // Both checks, because they see different things: the schema is structural and
   // cannot know whether a step id exists in the workflow DEFINITION, which is
   // what this one reads from disk to compare against. (AGT-3457 + AGT-4288)
-  await assertExecutionPersistable(parsed.data);
+  const workflow = await loadWorkflow(parsed.data.workflowId);
+  await assertExecutionPersistable(parsed.data, workflow);
+  // Lifecycle/DAG validation: a step cannot be persisted as completed without a
+  // completion time, failed without an error, or advanced past a dependency that
+  // is still pending/running. (AGT-3489)
+  validateExecution(parsed.data, workflow?.steps);
   const filePath = storageFilePath(EXECUTION_DIR, parsed.data.executionId, '.json');
   await fs.mkdir(EXECUTION_DIR, { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(parsed.data, null, 2), 'utf-8');
@@ -408,8 +500,12 @@ export async function saveExecution(execution: WorkflowExecution): Promise<void>
 /**
  * Reject execution snapshots that are structurally invalid or incompatible with
  * their workflow definition (unknown step ids, failed definition validation).
+ * `definition` may be passed by a caller that already loaded it.
  */
-export async function assertExecutionPersistable(execution: WorkflowExecution): Promise<void> {
+export async function assertExecutionPersistable(
+  execution: WorkflowExecution,
+  definition?: WorkflowConfig | null,
+): Promise<void> {
   const allowedStatuses = new Set(['running', 'completed', 'failed', 'aborted']);
   if (!execution.workflowId) throw new Error('Execution workflowId is required');
   if (!execution.executionId) throw new Error('Execution executionId is required');
@@ -420,7 +516,7 @@ export async function assertExecutionPersistable(execution: WorkflowExecution): 
     throw new Error('Execution stepResults must be an object');
   }
 
-  const workflow = await loadWorkflow(execution.workflowId);
+  const workflow = definition ?? await loadWorkflow(execution.workflowId);
   if (!workflow) {
     // Definition not on disk yet (common in unit tests that only exercise
     // execution storage IDs). Structural checks above still apply.

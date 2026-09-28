@@ -91,7 +91,7 @@ describe('parseBacklogGroomingOutput edge branches', () => {
   it('drops non-object decision entries', () => {
     const result = parseBacklogGroomingOutput(`\`\`\`json
 {"decisions": [null, "not-an-object", 42, {"issueId":"id-1","status":"active","reason":"ok"}]}
-\`\`\``);
+\`\`\``, new Set(['id-1']));
     expect(result.success).toBe(true);
     expect(result.decisions.map(d => d.issueId)).toEqual(['id-1']);
   });
@@ -99,13 +99,13 @@ describe('parseBacklogGroomingOutput edge branches', () => {
   it('drops decision entries missing required fields', () => {
     const result = parseBacklogGroomingOutput(`\`\`\`json
 {"decisions": [{"identifier":"INT-9"}, {"issueId":"id-1","status":"active"}, {"issueId":"id-2","reason":"no status"}]}
-\`\`\``);
+\`\`\``, new Set(['id-1', 'id-2']));
     expect(result.success).toBe(true);
     expect(result.decisions).toEqual([]);
   });
 
   it('returns a failure result when the output cannot be parsed as JSON', () => {
-    const result = parseBacklogGroomingOutput('not json at all, no brace here');
+    const result = parseBacklogGroomingOutput('not json at all, no brace here', new Set());
     expect(result.success).toBe(false);
     expect(result.decisions).toEqual([]);
     expect(result.error).toBeTruthy();
@@ -131,7 +131,10 @@ describe('runBacklogGroomingPlanner', () => {
       stdout: '```json\n{"decisions":[{"issueId":"id-1","status":"active","reason":"fine"}]}\n```',
       stderr: '',
     });
-    const result = await runBacklogGroomingPlanner({ tasks: [baseTask()], projectPath: '/repo' });
+    const result = await runBacklogGroomingPlanner({
+      tasks: [baseTask({ issueId: 'id-1' })],
+      projectPath: '/repo',
+    });
     expect(result.success).toBe(true);
     expect(result.decisions.map(d => d.issueId)).toEqual(['id-1']);
   });
@@ -142,9 +145,26 @@ describe('runBacklogGroomingPlanner', () => {
       stdout: '```json\n{"decisions":[{"issueId":"id-1","status":"active","reason":"fine"}]}\n```',
       stderr: 'warning: partial output',
     });
-    const result = await runBacklogGroomingPlanner({ tasks: [baseTask()], projectPath: '/repo' });
+    const result = await runBacklogGroomingPlanner({
+      tasks: [baseTask({ issueId: 'id-1' })],
+      projectPath: '/repo',
+    });
     expect(result.success).toBe(true);
     expect(result.decisions).toHaveLength(1);
+  });
+
+  it('drops out-of-scope decision ids from planner output', async () => {
+    spawnCli.mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: '```json\n{"decisions":[{"issueId":"other","status":"stale","reason":"nope","closeState":"Done"}]}\n```',
+      stderr: '',
+    });
+    const result = await runBacklogGroomingPlanner({
+      tasks: [baseTask({ issueId: 'id-1' })],
+      projectPath: '/repo',
+    });
+    expect(result.success).toBe(true);
+    expect(result.decisions).toEqual([]);
   });
 
   it('reports stderr as the error when exit code is non-zero and stdout is empty', async () => {

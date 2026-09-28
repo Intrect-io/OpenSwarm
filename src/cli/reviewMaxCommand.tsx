@@ -23,6 +23,7 @@ import {
   oneLineError,
   mergeFallback,
   mergeSecurityAuditFindings,
+  mergeQualityHarnessResult,
   type AuditArea,
   type AuditRun,
   type AuditSummary,
@@ -56,6 +57,7 @@ import { loadTrustedVerifyPlan, runDeterministicTester } from '../agents/determi
 import { buildFixRepositoryContext } from './fixPlanning.js';
 import { collectFixRuntimePreflightIssues } from './fixPreflight.js';
 import { DEFAULT_SECURITY_AUDIT_CONFIG, listTrackedSecurityFiles, runSecurityAudit, type SecurityFinding } from '../verify/securityAudit.js';
+import { runQualityHarness } from '../verify/qualityHarness.js';
 
 /**
  * Best-effort verify config: `review --max` must still run in a repo with no —
@@ -125,6 +127,11 @@ export interface ReviewMaxOptions {
   learn?: boolean;
   /** Disable the default-on CodeQL audit gate. */
   securityAudit?: boolean;
+  /**
+   * Skip LLM area fan-out and run only the deterministic quality harness
+   * (static scan + isolated verify commands). (M0 / PLATFORM_ROADMAP)
+   */
+  harnessOnly?: boolean;
 }
 
 export interface ReviewMaxCommandResult {
@@ -419,6 +426,39 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
   const cwd = opts.path ?? process.cwd();
   const concurrency = positiveIntegerOption(opts.concurrency, 4, '--concurrency');
   const maxFilesPerArea = positiveIntegerOption(opts.maxFilesPerArea, 12, '--max-files-per-area');
+
+  // Deterministic-only path: no LLM cost, no area fan-out. Still writes the
+  // audit report and participates in the same exit-code contract. (M0)
+  if (opts.harnessOnly) {
+    if (opts.fix) {
+      throw new Error('--harness-only cannot be combined with --fix');
+    }
+    const verifyConfig = loadVerifyConfigBestEffort();
+    console.log(status.running('Quality harness') + c.dim(' — static scan + isolated verify commands (no LLM)'));
+    const harness = await runQualityHarness(cwd, { verify: verifyConfig });
+    console.log(c.dim(
+      `  Quality harness: ${harness.status}, scanned ${harness.filesScanned}/${harness.filesListed}, `
+      + `${harness.findings.length} finding(s), ${harness.commands.length} command(s).`,
+    ));
+    let run: AuditRun = { results: [], summary: aggregateAuditResults([]) };
+    run = mergeQualityHarnessResult(run, harness);
+    console.log(formatAuditSummary(run.summary));
+
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const report = formatAuditReport(run.summary, basename(cwd) || cwd, ts);
+    const outPath = opts.out ?? join(cwd, '.openswarm', 'audit', `audit-${ts}.md`);
+    try {
+      await mkdir(dirname(outPath), { recursive: true });
+      await writeFile(outPath, report, 'utf8');
+      console.log(`\nReport saved: ${outPath}`);
+    } catch (e) {
+      console.warn(`Could not save report: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return {
+      decision: run.summary.decision,
+      gateRan: true,
+    };
+  }
 
   let files: string[];
   try {
@@ -776,6 +816,35 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
       console.warn(`\n${status.err(`--fix aborted: ${error instanceof Error ? error.message : String(error)}`)}`);
       console.warn(status.warn('Review findings kept — nothing was fixed or published.'));
     }
+  }
+
+  // Deterministic quality harness (static full-tree + isolated verify commands).
+  // Runs for every --max so the final verdict and markdown report always carry
+  // CodeQL-style coverage evidence, not only LLM area notes. (M0 / AGT-3619)
+  try {
+    console.log(`\n${status.running('Quality harness')} ${c.dim('static scan + isolated verify commands')}`);
+    const harness = await runQualityHarness(workCwd, { verify: verifyConfig });
+    console.log(c.dim(
+      `  Quality harness: ${harness.status}, scanned ${harness.filesScanned}/${harness.filesListed}, `
+      + `${harness.findings.length} finding(s), ${harness.commands.length} command(s).`,
+    ));
+    run = mergeQualityHarnessResult(run, harness);
+    if (harness.findings.length > 0) {
+      console.log(formatAuditSummary(run.summary));
+    }
+  } catch (error) {
+    run = mergeQualityHarnessResult(run, {
+      status: 'failed',
+      filesListed: 0,
+      filesScanned: 0,
+      findings: [{
+        ruleId: 'openswarm/quality-runtime',
+        level: 'error',
+        message: `Quality harness aborted: ${error instanceof Error ? error.message : String(error)}`,
+      }],
+      commands: [],
+    });
+    console.warn(status.warn(`Quality harness aborted — recorded as an explicit failure.`));
   }
 
   // (3.6) Persist a markdown report so the result isn't lost to the scrollback.

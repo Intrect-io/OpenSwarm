@@ -169,15 +169,21 @@ function readStoreLockOwner(lockPath: string): StoreLockOwner | null {
   }
 }
 
+/** Cache identity for the on-disk store. Includes inode so a same-size
+ *  cross-process replacement (atomic rename) within one mtime tick still
+ *  invalidates — mtime+size alone can miss that case. */
+function storeFileStamp(path: string): string {
+  const stat = statSync(path);
+  return `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+}
+
 function getStorePath(): string {
   return process.env.OPENSWARM_TASK_STATE_FILE || join(homedir(), '.openswarm', 'task-state.json');
 }
 
 function ensureStoreLoaded(): TaskStateStore {
   const path = getStorePath();
-  const currentStamp = existsSync(path)
-    ? (() => { const stat = statSync(path); return `${stat.mtimeMs}:${stat.size}`; })()
-    : 'missing';
+  const currentStamp = existsSync(path) ? storeFileStamp(path) : 'missing';
   if (cache && cacheStamp === currentStamp) return cache;
 
   if (existsSync(path)) {
@@ -352,7 +358,7 @@ function persistStore(): void {
     renameSync(temporaryPath, path);
     chmodSync(path, 0o600);
     const persistedStat = statSync(path);
-    cacheStamp = `${persistedStat.mtimeMs}:${persistedStat.size}`;
+    cacheStamp = `${persistedStat.mtimeMs}:${persistedStat.size}:${persistedStat.ino}`;
 
     // Persist the directory entry where the platform supports directory fsync.
     let directoryFd: number | undefined;

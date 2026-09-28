@@ -32,6 +32,7 @@ import {
 let linearClient: any = null;
 let linearTeamId: string = '';
 let linearInitPromise: Promise<void> | null = null;
+let linearInitAttempts = 0;
 
 /** Per-local-issue in-process queue — serializes createOutboundIssue callers. */
 const outboundQueues = new Map<string, Promise<unknown>>();
@@ -148,10 +149,14 @@ export function initLinearBridge(apiKey: string, teamId: string): Promise<void> 
   linearClient = null;
   linearInitPromise = import('@linear/sdk').then(({ LinearClient }) => {
     linearClient = new LinearClient({ apiKey });
+    linearInitAttempts = 0; // Reset on success
     console.log('[LinearBridge] 초기화 완료 — team:', teamId);
   }).catch((err) => {
     linearClient = null;
-    console.warn('[LinearBridge] Linear SDK 로드 실패:', err);
+    linearInitAttempts++;
+    console.warn(`[LinearBridge] Linear SDK 로드 실패 (시도 ${linearInitAttempts}):`, err);
+    // Allow retry on next call by clearing the rejected promise
+    linearInitPromise = null;
   });
   return linearInitPromise;
 }
@@ -216,8 +221,83 @@ export async function syncFromLinear(
 }
 
 /**
- * 로컬 → Linear: 로컬 이슈를 Linear에 생성 (durable claim + per-issue serialize)
+ * 로컬 → Linear: 로컬 이슈를 Linear에 생성 (durable claim + per-issue serialize).
+ * Linear create와 로컬 mapping persist를 분리해, mapping 실패 시 linearId로
+ * 재연결/재시도하고 동일 프로세스 재호출에서 중복 create를 막는다.
  */
+const pendingLinearMappings = new Map<string, {
+  linearId: string;
+  linearIdentifier: string;
+  linearUrl: string;
+}>();
+
+const MAPPING_PERSIST_ATTEMPTS = 3;
+
+/** @internal Test-only: install a fake client without loading the SDK. */
+export function __setLinearBridgeClientForTests(client: unknown, teamId = 'team-test'): void {
+  linearClient = client;
+  linearTeamId = teamId;
+  linearInitPromise = Promise.resolve();
+}
+
+/** @internal Test-only: drop in-process pending mapping recovery state. */
+export function __clearPendingLinearMappingsForTests(): void {
+  pendingLinearMappings.clear();
+}
+
+function persistLinearMapping(
+  store: SqliteIssueStore,
+  issueId: string,
+  mapping: { linearId: string; linearIdentifier: string; linearUrl: string },
+): void {
+  store.updateIssue(issueId, {
+    linearId: mapping.linearId,
+    linearIdentifier: mapping.linearIdentifier,
+    linearUrl: mapping.linearUrl,
+  });
+  store.addEvent(issueId, 'linked', {
+    content: `Linear에 생성: ${mapping.linearIdentifier}`,
+    newValue: mapping.linearIdentifier,
+    idempotencyKey: `linear-linked:${mapping.linearId}`,
+  });
+}
+
+function persistLinearMappingWithRetry(
+  store: SqliteIssueStore,
+  issueId: string,
+  mapping: { linearId: string; linearIdentifier: string; linearUrl: string },
+): boolean {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAPPING_PERSIST_ATTEMPTS; attempt++) {
+    try {
+      persistLinearMapping(store, issueId, mapping);
+      pendingLinearMappings.delete(issueId);
+      return true;
+    } catch (err) {
+      lastErr = err;
+      console.warn(
+        `[LinearBridge] 로컬 mapping persist 실패 (${attempt}/${MAPPING_PERSIST_ATTEMPTS}):`,
+        err,
+      );
+    }
+  }
+  // Best-effort reconnect: updateIssue alone may succeed even if addEvent failed.
+  try {
+    store.updateIssue(issueId, {
+      linearId: mapping.linearId,
+      linearIdentifier: mapping.linearIdentifier,
+      linearUrl: mapping.linearUrl,
+    });
+    pendingLinearMappings.delete(issueId);
+    console.warn('[LinearBridge] mapping recovered via updateIssue-only path');
+    return true;
+  } catch (err) {
+    lastErr = err;
+  }
+  console.error('[LinearBridge] 로컬 mapping persist 복구 실패:', lastErr);
+  return false;
+}
+
 export async function pushToLinear(
   store: SqliteIssueStore,
   issueId: string,
@@ -245,6 +325,18 @@ export async function createOutboundIssue(
   outboundQueues.set(issueId, prev.then(() => held, () => held));
   await prev;
 
+  // In-process recovery: a prior create succeeded but local mapping failed.
+  const pending = pendingLinearMappings.get(issueId);
+  if (pending) {
+    if (persistLinearMappingWithRetry(store, issueId, pending)) {
+      console.log(`[LinearBridge] 이슈 ${issueId} → Linear ${pending.linearIdentifier} (recovered)`);
+      return pending.linearId;
+    }
+    // Still unrecovered — return known linearId to avoid a duplicate create.
+    return pending.linearId;
+  }
+
+  let mapping: { linearId: string; linearIdentifier: string; linearUrl: string };
   try {
     return await withOutboundClaim(issueId, async () => {
       await waitForLinearBridgeInit();
@@ -271,23 +363,29 @@ export async function createOutboundIssue(
         const linearIssue = await created.issue;
         if (!linearIssue) return null;
 
-        store.updateIssue(issueId, {
+        mapping = {
           linearId: linearIssue.id,
           linearIdentifier: linearIssue.identifier,
           linearUrl: linearIssue.url,
-        });
-
-        store.addEvent(issueId, 'linked', {
-          content: `Linear에 생성: ${linearIssue.identifier}`,
-          newValue: linearIssue.identifier,
-        });
-
-        console.log(`[LinearBridge] 이슈 ${issueId} → Linear ${linearIssue.identifier}`);
-        return linearIssue.id;
+        };
       } catch (err) {
         console.error('[LinearBridge] Linear 생성 실패:', err);
         return null;
       }
+
+      // Remember the external id before local persist so a crash or a failed
+      // write cannot orphan the Linear issue behind a duplicate recreate.
+      pendingLinearMappings.set(issueId, mapping);
+      if (persistLinearMappingWithRetry(store, issueId, mapping)) {
+        console.log(`[LinearBridge] 이슈 ${issueId} → Linear ${mapping.linearIdentifier}`);
+      } else {
+        // External issue exists; return its id so callers do not treat this as
+        // "not created" and retry into a duplicate.
+        console.error(
+          `[LinearBridge] Linear ${mapping.linearIdentifier} 생성됨 but local mapping incomplete for ${issueId}`,
+        );
+      }
+      return mapping.linearId;
     });
   } finally {
     unlock();
