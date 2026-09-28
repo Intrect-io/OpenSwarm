@@ -99,13 +99,23 @@ export async function spawnCli(
   // anything OpenSwarm assembles for *our* loop is dropped. Silence there is
   // how a configured MCP grant or an `ask_human` escape hatch turns into an
   // agent that quietly never had it — say it out loud instead. The same goes for
-  // a role's `tools.allow`/`tools.deny`: this path cannot honor it (the CLI owns
-  // its tools), and a silently inert fence is worse than none.
-  if (options.mcpTools?.length || options.coordinationContext || options.toolAllow?.length || options.toolDeny?.length) {
+  // a role's `tools.allow`/`tools.deny`, and for `protectedFiles` /
+  // `forbidPublication`: this path cannot honor any of them (the CLI owns its
+  // tools), and a silently inert fence is worse than none. (AGT-4444)
+  if (
+    options.mcpTools?.length
+    || options.coordinationContext
+    || options.toolAllow?.length
+    || options.toolDeny?.length
+    || options.protectedFiles?.length
+    || options.forbidPublication
+  ) {
     const dropped = [
       options.mcpTools?.length ? `${options.mcpTools.length} MCP tool(s)` : '',
       options.coordinationContext ? 'coordination tools' : '',
       options.toolAllow?.length || options.toolDeny?.length ? 'the role tool allow/deny list' : '',
+      options.protectedFiles?.length ? `${options.protectedFiles.length} protected path(s)` : '',
+      options.forbidPublication ? 'the publication fence' : '',
     ].filter(Boolean).join(' and ');
     console.warn(
       `[Adapter] '${adapter.name}' delegates to its own CLI tool loop; ${dropped} will not be available to this run. `
