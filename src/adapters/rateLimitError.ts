@@ -110,24 +110,40 @@ export function parseResetsAtFromBody(text: string): number | undefined {
   return m ? parseInt(m[1], 10) : undefined;
 }
 
+/**
+ * Parse an RFC 9110 `Retry-After` value into seconds-from-now. The header has TWO
+ * legal forms — delta-seconds ("120") and an HTTP-date ("Wed, 21 Oct 2015
+ * 07:28:00 GMT") — and parseInt alone turns the dated form into NaN, which
+ * discarded the wait the provider asked for and fell through to the short local
+ * backoff (a retry before the window had cleared). Every caller shares this
+ * parse so both forms are honored identically. (AGT-3442)
+ */
+function parseRetryAfterSeconds(value: string | null | undefined): number | undefined {
+  if (value == null) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  // delta-seconds — the common form, and the only one parseInt may see.
+  if (/^\d+$/.test(trimmed)) return parseInt(trimmed, 10);
+  // HTTP-date (RFC 1123). A past date means "retry now": 0, which the caller's
+  // backoff turns into a bounded wait rather than an instant retry storm.
+  const at = Date.parse(trimmed);
+  return Number.isFinite(at) ? Math.max(0, Math.round((at - Date.now()) / 1000)) : undefined;
+}
+
 /** Pull a unix reset timestamp (seconds) out of headers or a JSON body, if present. */
 function extractResetsAt(headers: Headers | undefined, body: string): number | undefined {
-  const fromHeader = (k: string): number | undefined => {
-    const v = headers?.get(k);
-    const n = v == null ? NaN : parseInt(v, 10);
-    return Number.isFinite(n) ? n : undefined;
-  };
   // Only headers/fields that are genuinely UNIX-epoch seconds or seconds-from-now:
   //  - x-codex-primary-reset-at: epoch seconds
-  //  - Retry-After: seconds-from-now (→ convert to epoch)
+  //  - Retry-After: seconds-from-now (→ convert to epoch; delta-seconds OR HTTP-date)
   //  - body "resets_at": epoch seconds
   // Deliberately NOT x-ratelimit-reset-requests/-tokens: OpenAI returns those as
   // DURATION strings ("1s", "6ms", "2m59s"), not epoch — parseInt would yield a
   // 1970 timestamp and defeat the pause. Omitting them falls back to the safe
   // 60s default, which is correct rather than wrong. (INT-2520 review)
-  const codexReset = fromHeader('x-codex-primary-reset-at');
-  if (codexReset != null) return codexReset;
-  const retryAfter = fromHeader('retry-after');
+  const codexResetRaw = headers?.get('x-codex-primary-reset-at');
+  const codexReset = codexResetRaw == null ? NaN : parseInt(codexResetRaw, 10);
+  if (Number.isFinite(codexReset)) return codexReset;
+  const retryAfter = parseRetryAfterSeconds(headers?.get('retry-after'));
   if (retryAfter != null) return Math.floor(Date.now() / 1000) + retryAfter;
   return parseResetsAtFromBody(body);
 }
@@ -201,7 +217,10 @@ export function classifyLimitResponse(headers: Headers | undefined, body: string
     return Number.isFinite(n) ? n : undefined;
   };
   const usedPercent = num('x-codex-primary-used-percent');
-  const retryAfterSeconds = num('retry-after');
+  // Delta-seconds AND HTTP-date: parseInt alone left a dated Retry-After as NaN,
+  // so the throttle path discarded the provider's wait and retried on the short
+  // local backoff before the window cleared. (AGT-3442)
+  const retryAfterSeconds = parseRetryAfterSeconds(headers?.get('retry-after'));
   const lower = body.toLowerCase();
   const quota =
     QUOTA_EXHAUSTED_SUBSTRINGS.some((s) => lower.includes(s)) ||

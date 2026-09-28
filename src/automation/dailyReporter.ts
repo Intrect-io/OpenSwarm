@@ -18,12 +18,23 @@ let reportInFlight: Promise<void> | null = null;
 // Project path mapping (projectId → projectPath) for knowledge graph metrics
 let projectPathMapping = new Map<string, string>();
 
-// Watermark file — persisted only after a fully successful report generation.
-// A crash or partial failure leaves the previous watermark intact so the next
-// run can retry the same window.
+// Watermark file — records which projects have had their status update
+// published for a given day. It is only ever written after a publish actually
+// happened, so a crash or an outright generation failure leaves the previous
+// record intact. `complete` flips to true once every active project has been
+// published; only then does a later run of the same day skip outright.
 const WATERMARK_FILE = join(homedir(), '.openswarm', 'daily-reporter-watermark.json');
 
-function readWatermark(): string | null {
+interface DailyWatermark {
+  /** Day (UTC, YYYY-MM-DD) this record describes. */
+  date: string;
+  /** Project ids whose status update was already published for `date`. */
+  publishedProjectIds: string[];
+  /** True once every active project was published for `date`. */
+  complete: boolean;
+}
+
+function readWatermark(): DailyWatermark | null {
   try {
     if (!existsSync(WATERMARK_FILE)) return null;
     const parsed = JSON.parse(readFileSync(WATERMARK_FILE, 'utf8')) as unknown;
@@ -33,7 +44,16 @@ function readWatermark(): string | null {
       'date' in parsed &&
       typeof parsed.date === 'string'
     ) {
-      return parsed.date;
+      const ids = 'publishedProjectIds' in parsed ? parsed.publishedProjectIds : undefined;
+      return {
+        date: parsed.date,
+        publishedProjectIds: Array.isArray(ids)
+          ? ids.filter((id): id is string => typeof id === 'string')
+          : [],
+        // Records written before per-project progress existed only ever landed
+        // after a fully successful day, so a missing flag still means complete.
+        complete: !('complete' in parsed) || parsed.complete === true,
+      };
     }
   } catch {
     // A corrupt watermark must never suppress a report.
@@ -41,12 +61,12 @@ function readWatermark(): string | null {
   return null;
 }
 
-function writeWatermark(date: string): void {
+function writeWatermark(date: string, publishedProjectIds: string[], complete: boolean): void {
   const dir = dirname(WATERMARK_FILE);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   // Atomic: write to temp then rename so a crash never corrupts the watermark.
   const tmp = WATERMARK_FILE + '.tmp';
-  writeFileSync(tmp, JSON.stringify({ date }), 'utf8');
+  writeFileSync(tmp, JSON.stringify({ date, publishedProjectIds, complete }), 'utf8');
   renameSync(tmp, WATERMARK_FILE);
 }
 
@@ -121,7 +141,9 @@ export function stopDailyReporter(): void {
 
 /**
  * Generate daily status reports for all active projects
- * Watermark is persisted ONLY after all reports succeed.
+ * Per-project progress is persisted as each update is published, so a retry
+ * republishes only the projects that failed; the day is marked complete once
+ * every project succeeded.
  */
 export async function generateDailyReports(): Promise<void> {
   if (!linearClient) {
@@ -135,10 +157,15 @@ export async function generateDailyReports(): Promise<void> {
   }
 
   const today = new Date().toISOString().slice(0, 10);
-  if (readWatermark() === today) {
+  const watermark = readWatermark();
+  if (watermark?.date === today && watermark.complete) {
     console.log(`[DailyReporter] Reports already completed for ${today}, skipping`);
     return;
   }
+  // Publications already durably recorded for today — a retry must not
+  // republish a project whose status update already landed in Linear.
+  const alreadyPublished =
+    watermark?.date === today ? new Set(watermark.publishedProjectIds) : new Set<string>();
 
   console.log('[DailyReporter] Generating daily reports...');
 
@@ -168,28 +195,43 @@ export async function generateDailyReports(): Promise<void> {
     // Generate status update for each project
     let successCount = 0;
     let failCount = 0;
+    const publishedProjectIds = new Set(alreadyPublished);
 
     for (const project of activeProjects) {
+      if (alreadyPublished.has(project.id)) {
+        console.log(`[DailyReporter] Skipping "${project.name}" — already published for ${today}`);
+        continue;
+      }
+      const projectPath = projectPathMapping.get(project.id);
       try {
-        const projectPath = projectPathMapping.get(project.id);
         await postStatusUpdate(project.id, project.name, projectPath);
-        successCount++;
       } catch (err) {
         console.error(`[DailyReporter] Failed to post update for "${project.name}":`, err);
         failCount++;
+        continue;
       }
+      successCount++;
+      // Record the publication immediately: if a later project fails, the
+      // retry skips this one instead of posting a duplicate Linear update.
+      // A persistence error here is not a publish failure — it escapes to the
+      // outer handler so the run stops instead of publishing unrecorded work.
+      publishedProjectIds.add(project.id);
+      writeWatermark(today, [...publishedProjectIds], false);
     }
 
-    console.log(`[DailyReporter] Reports completed: ${successCount} success, ${failCount} failed`);
+    console.log(
+      `[DailyReporter] Reports completed: ${successCount} success, ${failCount} failed` +
+        (alreadyPublished.size > 0 ? `, ${alreadyPublished.size} already published` : ''),
+    );
 
-    // Only persist watermark when ALL reports succeeded.
-    // If any failed, the watermark stays at the previous value so the next
-    // run retries the same window instead of skipping it.
+    // Only mark the day complete when EVERY project has been published.
+    // If any failed, the record keeps the projects that succeeded so the next
+    // run retries only the failed ones instead of republishing all of them.
     if (failCount === 0) {
-      writeWatermark(today);
+      writeWatermark(today, [...publishedProjectIds], true);
       console.log(`[DailyReporter] Watermark persisted: ${today}`);
     } else {
-      console.warn(`[DailyReporter] ${failCount} report(s) failed — watermark NOT updated`);
+      console.warn(`[DailyReporter] ${failCount} report(s) failed — watermark NOT completed`);
     }
 
     // Send summary to Discord

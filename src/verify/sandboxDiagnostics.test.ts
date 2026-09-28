@@ -3,6 +3,7 @@ import {
   describeLinuxSandbox,
   formatSandboxUnavailable,
   makeSandboxCache,
+  makeSystemProbe,
   type SandboxProbe,
 } from './sandboxDiagnostics.js';
 
@@ -143,7 +144,6 @@ describe('formatSandboxUnavailable', () => {
 
 describe('makeSystemProbe', () => {
   it('reports ok only when bwrap exits zero', async () => {
-    const { makeSystemProbe } = await import('./sandboxDiagnostics.js');
     const spawn = vi.fn(() => ({ status: 0, stderr: '' }));
     const p = makeSystemProbe({ exists: () => true, readFile: () => '1', spawn });
     expect(p.tryBwrap('/usr/bin/bwrap')).toEqual({ ok: true, stderr: '' });
@@ -151,7 +151,7 @@ describe('makeSystemProbe', () => {
     // namespaces but denies network ones would pass a narrower probe and then
     // fail every verification command — the failure this module exists to catch.
     expect(spawn).toHaveBeenCalledWith('/usr/bin/bwrap', [
-      '--ro-bind', '/', '/', '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', '/usr/bin/true',
+      '--ro-bind', '/', '/', '--unshare-net', '--unshare-pid', '--dev', '/dev', '--proc', '/proc', '--', '/usr/bin/true',
     ]);
   });
 
@@ -162,24 +162,38 @@ describe('makeSystemProbe', () => {
     const runner = readFileSync(new URL('./runner.ts', import.meta.url), 'utf8');
     const invocation = runner.split('\n').find((line) => line.includes('--ro-bind'));
     expect(invocation).toBeDefined();
-    for (const namespaceFlag of ['--unshare-net', '--dev', '--proc']) {
+    for (const namespaceFlag of ['--unshare-net', '--unshare-pid', '--dev', '--proc']) {
       expect(invocation).toContain(namespaceFlag);
     }
 
-    const { makeSystemProbe } = await import('./sandboxDiagnostics.js');
     const spawn = vi.fn(() => ({ status: 0, stderr: '' }));
     makeSystemProbe({ exists: () => true, readFile: () => '', spawn }).tryBwrap('/usr/bin/bwrap');
     const args = spawn.mock.calls[0][1] as string[];
-    for (const namespaceFlag of ['--unshare-net', '--dev', '--proc']) {
+    for (const namespaceFlag of ['--unshare-net', '--unshare-pid', '--dev', '--proc']) {
       expect(args).toContain(namespaceFlag);
     }
+  });
+
+  it('reports a host that denies PID namespaces as unavailable', async () => {
+    // The case the probe exists for: `--unshare-user`/`--unshare-net` can be
+    // permitted while PID-namespace creation is refused, so a probe that omits
+    // `--unshare-pid` succeeds and every verification command then dies — after
+    // the sandbox has already exposed the host's process table through /proc.
+    const spawn = vi.fn((_executable: string, args: string[]) => (
+      args.includes('--unshare-pid')
+        ? { status: 1, stderr: 'bwrap: Creating new namespace failed: Operation not permitted' }
+        : { status: 0, stderr: '' }
+    ));
+    const probeFn = makeSystemProbe({ exists: () => true, readFile: () => '1', spawn });
+    expect(probeFn.tryBwrap('/usr/bin/bwrap').ok).toBe(false);
+    expect(describeLinuxSandbox({ ...probeFn, exists: (p) => p === '/usr/bin/bwrap' }))
+      .toMatchObject({ available: false });
   });
 
   it('runs an absolute command, never a PATH-resolved one', async () => {
     // Inside the sandbox a bare `true` is resolved with execvp against the
     // inherited PATH, so a project-supplied node_modules/.bin would choose what
     // the probe runs.
-    const { makeSystemProbe } = await import('./sandboxDiagnostics.js');
     const spawn = vi.fn(() => ({ status: 0, stderr: '' }));
     makeSystemProbe({ exists: (path) => path === '/bin/true', readFile: () => '', spawn })
       .tryBwrap('/usr/bin/bwrap');
@@ -189,14 +203,12 @@ describe('makeSystemProbe', () => {
   });
 
   it('falls back to bwrap itself when no true(1) is present', async () => {
-    const { makeSystemProbe } = await import('./sandboxDiagnostics.js');
     const spawn = vi.fn(() => ({ status: 0, stderr: '' }));
     makeSystemProbe({ exists: () => false, readFile: () => '', spawn }).tryBwrap('/usr/bin/bwrap');
     expect((spawn.mock.calls[0][1] as string[]).slice(-3)).toEqual(['--', '/usr/bin/bwrap', '--version']);
   });
 
   it('carries bwrap stderr through so the reason can be quoted', async () => {
-    const { makeSystemProbe } = await import('./sandboxDiagnostics.js');
     const p = makeSystemProbe({
       exists: () => true,
       readFile: () => '',
@@ -206,7 +218,6 @@ describe('makeSystemProbe', () => {
   });
 
   it('falls back to the spawn error when the binary could not be executed', async () => {
-    const { makeSystemProbe } = await import('./sandboxDiagnostics.js');
     const p = makeSystemProbe({
       exists: () => true,
       readFile: () => '',
@@ -216,7 +227,6 @@ describe('makeSystemProbe', () => {
   });
 
   it('treats an unreadable sysctl as absent rather than throwing', async () => {
-    const { makeSystemProbe } = await import('./sandboxDiagnostics.js');
     const p = makeSystemProbe({
       exists: () => true,
       readFile: () => { throw new Error('EACCES'); },

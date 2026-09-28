@@ -79,4 +79,59 @@ describe('createCoalescer (INT-2407)', () => {
       vi.useRealTimers();
     }
   });
+
+  // A flood inside one window used to accumulate every item before the trailing
+  // flush: the buffer grew without bound and each dispatch was O(batch). The
+  // batch is now capped, so a burst flushes early in bounded slices. (AGT-3458)
+  it('bounds the buffer when a burst exceeds maxBatch, without dropping items', () => {
+    vi.useFakeTimers();
+    try {
+      const batches: number[][] = [];
+      const c = createCoalescer<number>({ delayMs: 90, maxBatch: 8, onFlush: (items) => batches.push(items) });
+      for (let i = 0; i < 100; i += 1) {
+        c.push(i);
+        expect(c.pending()).toBeLessThanOrEqual(8); // never grows past the cap
+      }
+      // 100 items in slices of 8: twelve full slices, then the 4-item tail
+      // flushes on the window.
+      expect(batches).toHaveLength(12);
+      vi.advanceTimersByTime(90);
+      expect(batches).toHaveLength(13);
+      expect(batches.every((b) => b.length <= 8)).toBe(true);
+      expect(batches.flat()).toEqual(Array.from({ length: 100 }, (_, i) => i));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the trailing window after an early cap flush', () => {
+    vi.useFakeTimers();
+    try {
+      const batches: number[][] = [];
+      const c = createCoalescer<number>({ delayMs: 90, maxBatch: 2, onFlush: (items) => batches.push(items) });
+      c.push(1);
+      c.push(2); // hits the cap → early flush
+      expect(batches).toEqual([[1, 2]]);
+      c.push(3);
+      expect(batches).toEqual([[1, 2]]); // back to buffering
+      vi.advanceTimersByTime(90);
+      expect(batches).toEqual([[1, 2], [3]]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('leaves the batch uncapped when no maxBatch is given', () => {
+    vi.useFakeTimers();
+    try {
+      const batches: number[][] = [];
+      const c = createCoalescer<number>({ delayMs: 90, onFlush: (items) => batches.push(items) });
+      for (let i = 0; i < 50; i += 1) c.push(i);
+      expect(c.pending()).toBe(50);
+      vi.advanceTimersByTime(90);
+      expect(batches).toEqual([Array.from({ length: 50 }, (_, i) => i)]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

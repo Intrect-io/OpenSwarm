@@ -3,10 +3,11 @@
 // deliver committed code points, so typed/pasted Hangul appends fine; in-flight
 // IME composition is terminal-dependent. Nav keys (Tab/arrows) are left to the
 // App router; Enter submits, Backspace deletes.
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import Spinner from 'ink-spinner';
 import { theme, ICON } from '../theme.js';
 import { sanitizeTerminalText } from '../sanitize.js';
+import { oneLine, truncateLine } from '../../cli/reviewProgress.js';
 import { inputDebugEnabled, appendInputDebug } from '../inputDebug.js';
 import { dedupeDoubledGrapheme } from '../chatModel.js';
 
@@ -49,6 +50,7 @@ export function ChatInput({
   onPaletteSelect,
   onPaletteClose,
 }: ChatInputProps) {
+  const { stdout } = useStdout();
   useInput(
     (input, key) => {
       // Diagnostics for mobile-SSH multibyte doubling (OPENSWARM_DEBUG_INPUT). (INT-1964)
@@ -87,7 +89,15 @@ export function ChatInput({
       ) : (
         <Box>
           <Text color={theme.accent}>{`${ICON.prompt} `}</Text>
-          {value ? <Text>{sanitizeTerminalText(value)}</Text> : <Text color={theme.dim}>{'type a message…   / for commands'}</Text>}
+          {/* Display-only clip: the box is one row tall, so a pasted multi-line /
+              over-long value must not wrap it; Enter still submits the full
+              controlled value. Budget: 2 border columns + 2 paddingX + the `› `
+              prompt + the cursor cell + the reserved last column. (AGT-3458) */}
+          {value ? (
+            <Text>{truncateLine(oneLine(sanitizeTerminalText(value)), Math.max(10, (stdout?.columns ?? 80) - 8))}</Text>
+          ) : (
+            <Text color={theme.dim}>{'type a message…   / for commands'}</Text>
+          )}
           {active ? <Text inverse> </Text> : null}
         </Box>
       )}

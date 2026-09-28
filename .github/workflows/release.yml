@@ -76,7 +76,7 @@ jobs:
         if: steps.ver.outputs.exists == 'false'
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /bin/sh -lc 'echo sandbox-ok'
+          bwrap --ro-bind / / --unshare-net --unshare-pid --dev /dev --proc /proc -- /bin/sh -lc 'echo sandbox-ok'
 
       - if: steps.ver.outputs.exists == 'false'
         run: npm ci

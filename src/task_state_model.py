@@ -9,10 +9,12 @@ from typing import Literal
 try:
     from pydantic import BaseModel, ConfigDict, Field, field_validator
 except ImportError:  # Pydantic v1 compatibility
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, Field, validator
 
     ConfigDict = None  # type: ignore[assignment]
     field_validator = None  # type: ignore[assignment]
+else:
+    validator = None  # type: ignore[assignment]
 
 
 TaskExecutionStatus = Literal[
@@ -72,7 +74,11 @@ class WorktreeState(AliasModel):
 
 
 def _coerce_nonneg_int(v: object, *, field: str) -> int:
-    """Accept canonical integral values (int, whole float, digit string)."""
+    """Accept canonical integral values (int, whole float).
+
+    Mirrors `z.number().int().nonnegative()`: JSON numbers only — numeric
+    strings and booleans are rejected rather than coerced.
+    """
     if isinstance(v, bool):
         raise ValueError(f"Expected non-negative integral {field}, got {v!r}")
     if isinstance(v, int):
@@ -83,15 +89,42 @@ def _coerce_nonneg_int(v: object, *, field: str) -> int:
         if not isfinite(v) or v != int(v) or v < 0:
             raise ValueError(f"Expected non-negative integral {field}, got {v!r}")
         return int(v)
-    if isinstance(v, str):
-        try:
-            n = int(v)
-            if n >= 0:
-                return n
-        except (ValueError, TypeError):
-            pass
-        raise ValueError(f"Expected non-negative integral {field}, got {v!r}")
     raise ValueError(f"Expected non-negative integral {field}, got {v!r}")
+
+
+def _coerce_unit_number(v: object, *, field: str) -> float:
+    """Accept canonical 0..1 numbers (int or float).
+
+    Mirrors `z.number().min(0).max(1)`: numeric strings and booleans are
+    rejected rather than coerced.
+    """
+    if isinstance(v, bool):
+        raise ValueError(f"Expected numeric {field} in [0, 1], got {v!r}")
+    if isinstance(v, int):
+        if 0 <= v <= 1:
+            return float(v)
+    elif isinstance(v, float):
+        if isfinite(v) and 0.0 <= v <= 1.0:
+            return v
+    raise ValueError(f"Expected numeric {field} in [0, 1], got {v!r}")
+
+
+def _validate_retry_count(v: object) -> int:
+    if v is None:
+        return 0
+    return _coerce_nonneg_int(v, field="retryCount")
+
+
+def _validate_confidence(v: object) -> float | None:
+    if v is None:
+        return None
+    return _coerce_unit_number(v, field="confidence")
+
+
+def _validate_topo_rank(v: object) -> int | None:
+    if v is None:
+        return None
+    return _coerce_nonneg_int(v, field="topoRank")
 
 
 class ExecutionState(AliasModel):
@@ -105,9 +138,21 @@ class ExecutionState(AliasModel):
         @field_validator("retry_count", mode="before")
         @classmethod
         def coerce_retry_count(cls, v: object) -> int:
-            if v is None:
-                return 0
-            return _coerce_nonneg_int(v, field="retryCount")
+            return _validate_retry_count(v)
+
+        @field_validator("confidence", mode="before")
+        @classmethod
+        def coerce_confidence(cls, v: object) -> float | None:
+            return _validate_confidence(v)
+
+    elif validator is not None:
+        @validator("retry_count", pre=True)
+        def coerce_retry_count(cls, v: object) -> int:
+            return _validate_retry_count(v)
+
+        @validator("confidence", pre=True)
+        def coerce_confidence(cls, v: object) -> float | None:
+            return _validate_confidence(v)
 
 
 class OpenSwarmTaskState(AliasModel):
@@ -132,6 +177,9 @@ class OpenSwarmTaskState(AliasModel):
         @field_validator("topo_rank", mode="before")
         @classmethod
         def coerce_topo_rank(cls, v: object) -> int | None:
-            if v is None:
-                return None
-            return _coerce_nonneg_int(v, field="topoRank")
+            return _validate_topo_rank(v)
+
+    elif validator is not None:
+        @validator("topo_rank", pre=True)
+        def coerce_topo_rank(cls, v: object) -> int | None:
+            return _validate_topo_rank(v)

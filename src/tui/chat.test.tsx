@@ -5,6 +5,7 @@ import { ChatLog } from './components/ChatLog.js';
 import { CommandPalette } from './components/CommandPalette.js';
 import { ChatInput } from './components/ChatInput.js';
 import { matchSlash, type ChatLine } from './chatModel.js';
+import { displayWidth } from '../cli/reviewProgress.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 40));
 
@@ -45,6 +46,22 @@ describe('CommandPalette', () => {
   it('marks the selected row with a pointer (INT-1959)', () => {
     const f = render(<CommandPalette matches={matchSlash('/')} selectedIndex={1} />).lastFrame()!;
     expect(f).toContain('❯');
+  });
+
+  // One suggestion is one row: an over-long command/arg/description used to wrap
+  // its row and grow the palette over the input box. (AGT-3458)
+  it('keeps a pathological suggestion on one row, with the normal list unchanged', () => {
+    const pathological = `${'x'.repeat(400)}\n${'line\n'.repeat(300)}`;
+    const f = render(
+      <CommandPalette matches={[{ name: pathological, args: pathological, desc: pathological }]} />,
+    ).lastFrame()!;
+    const rows = f.split('\n');
+    expect(rows.length).toBe(2); // margin row + the single suggestion
+    expect(Math.max(...rows.map(displayWidth))).toBeLessThanOrEqual(100);
+    expect(f).toContain('xxxx');
+
+    const normal = render(<CommandPalette matches={matchSlash('/m')} />).lastFrame()!;
+    expect(normal).toContain('/model');
   });
 });
 

@@ -4,10 +4,11 @@
 // rows (≤ concurrency) keeps the board height stable no matter how many areas
 // the codebase splits into. Drives off a progress EventEmitter so the pure
 // orchestration (runMaxReview) stays ink-free.
-import { Box, Text } from 'ink';
+import { Box, Text, useStdout } from 'ink';
 import { useState, useEffect } from 'react';
 import type { EventEmitter } from 'node:events';
 import { theme, ICON } from '../theme.js';
+import { oneLine, truncateLine } from '../../cli/reviewProgress.js';
 import { Spinner } from './Status.js';
 import type { AuditArea, AuditProgress } from '../../cli/reviewAudit.js';
 import type { FixProgress } from '../../cli/reviewFixPass.js';
@@ -29,9 +30,13 @@ export interface AuditBoardProps {
   mode?: 'audit' | 'fix';
 }
 
-const truncate = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
-
 export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: AuditBoardProps) {
+  const { stdout } = useStdout();
+  // One area is one row: labels and last-log lines come straight off the
+  // progress emitter, and a newline- or over-long one would wrap the row into
+  // many. Budget: the `  ◐ ` / `  ⚠ ` prefix + the reserved last column, so the
+  // whole row — prefix and text — stays within the terminal. (AGT-3458)
+  const maxWidth = Math.max(10, (stdout?.columns ?? 80) - 5);
   const [statuses, setStatuses] = useState<Record<string, AreaStatus>>(() =>
     Object.fromEntries(areas.map((a) => [a.label, { status: 'pending' as const }])),
   );
@@ -83,22 +88,26 @@ export function AuditBoard({ areas, concurrency, events, mode = 'audit' }: Audit
         <Spinner />
         <Text bold>{` ${title} · ${done}/${areas.length} areas · concurrency ${concurrency}`}</Text>
       </Text>
-      {running.map(([label, s]) => (
-        <Text key={label} color={theme.dim}>
-          {'  '}
-          <Spinner />
-          {` ${sanitizeTerminalText(label)}`}
-          {s.lastLog ? `  ${truncate(sanitizeTerminalText(s.lastLog), 48)}` : ''}
-        </Text>
-      ))}
+      {running.map(([label, s]) => {
+        const log = s.lastLog ? `  ${oneLine(sanitizeTerminalText(s.lastLog))}` : '';
+        return (
+          <Text key={label} color={theme.dim}>
+            {'  '}
+            <Spinner />
+            {` ${truncateLine(oneLine(sanitizeTerminalText(label)) + log, maxWidth)}`}
+          </Text>
+        );
+      })}
       {/* Failures carry the reason they failed. Showing only the counter left the
           operator with "16 failed" and nothing to act on. (AGT-3990) */}
-      {errored.map(([label, s]) => (
-        <Text key={label} color={theme.warn}>
-          {`  ${ICON.warn} ${sanitizeTerminalText(label)}`}
-          {s.lastLog ? `  ${truncate(sanitizeTerminalText(s.lastLog), 64)}` : ''}
-        </Text>
-      ))}
+      {errored.map(([label, s]) => {
+        const log = s.lastLog ? `  ${oneLine(sanitizeTerminalText(s.lastLog))}` : '';
+        return (
+          <Text key={label} color={theme.warn}>
+            {`  ${ICON.warn} ${truncateLine(oneLine(sanitizeTerminalText(label)) + log, maxWidth)}`}
+          </Text>
+        );
+      })}
       <Text color={theme.dim}>
         {'  '}
         {mode === 'fix' ? (

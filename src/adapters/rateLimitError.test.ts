@@ -347,6 +347,25 @@ describe('classifyLimitResponse — spent quota vs short-window throttle (INT-29
     expect(classifyLimitResponse(new Headers({ 'retry-after': '7' }), '').retryAfterSeconds).toBe(7);
     expect(classifyLimitResponse(new Headers(), '').retryAfterSeconds).toBeUndefined();
   });
+
+  // RFC 9110 allows delta-seconds AND an HTTP-date. parseInt alone turned the
+  // dated form into NaN, so the throttle path discarded the provider's wait and
+  // retried on the short local backoff before the window had cleared. (AGT-3442)
+  it('parses an HTTP-date Retry-After into seconds-from-now, and that wait drives the backoff', () => {
+    const c = classifyLimitResponse(new Headers({ 'retry-after': new Date(Date.now() + 30_000).toUTCString() }), '');
+    expect(Number.isFinite(c.retryAfterSeconds)).toBe(true);
+    expect(c.retryAfterSeconds).toBeGreaterThanOrEqual(28);
+    expect(c.retryAfterSeconds).toBeLessThanOrEqual(30);
+    // The honored wait, not the 5-6s local fallback throttleWaitMs would pick.
+    expect(throttleWaitMs(0, c.retryAfterSeconds)).toBeGreaterThanOrEqual(28_000);
+  });
+
+  it('429 with an HTTP-date Retry-After yields the parsed reset time, not NaN', () => {
+    const err = rateLimitFromHttpResponse(429, new Headers({ 'retry-after': new Date(Date.now() + 45_000).toUTCString() }), '');
+    const nowSec = Math.floor(Date.now() / 1000);
+    expect(err?.resetsAt).toBeGreaterThanOrEqual(nowSec + 43);
+    expect(err?.resetsAt).toBeLessThanOrEqual(nowSec + 45);
+  });
 });
 
 describe('resolveLimitResponse gating (INT-2907)', () => {

@@ -1,0 +1,161 @@
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+type RunnerStateModule = typeof import('./runnerState.js');
+
+let tempHome = '';
+let mod: RunnerStateModule;
+
+async function loadFreshModule() {
+  vi.resetModules();
+  tempHome = mkdtempSync(join(tmpdir(), 'openswarm-reserve-'));
+  vi.stubEnv('HOME', tempHome);
+  vi.stubEnv('USERPROFILE', tempHome);
+  for (const v of ['OPENSWARM_RUNNER_TASK_STATE_FILE', 'OPENSWARM_RUNNER_REJECTION_STATE_FILE',
+    'OPENSWARM_RUNNER_PIPELINE_HISTORY_FILE', 'OPENSWARM_RUNNER_DECOMPOSITION_STATE_FILE']) {
+    vi.stubEnv(v, '');
+  }
+  mod = await import('./runnerState.js');
+}
+
+/** Slots the shared state file currently holds for in-flight decompositions. */
+function reservationsOnDisk(module: RunnerStateModule): number {
+  const raw = JSON.parse(readFileSync(module.DECOMPOSITION_STATE_FILE, 'utf8')) as {
+    reservations?: Record<string, { count: number }>;
+  };
+  return Object.values(raw.reservations ?? {}).reduce((total, hold) => total + hold.count, 0);
+}
+
+describe('cross-process decomposition capacity reservation', () => {
+  beforeEach(async () => {
+    await loadFreshModule();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    if (tempHome) rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  it('refuses a second reservation that the first process already spent', async () => {
+    // The defect this guards: the count lives in this process's memory. A second
+    // runner (separate process) reads the same pre-creation count, both pass the
+    // cap check, both create external children, and the day overshoots with no
+    // way to undo the already-created issues. (AGT-3468)
+    expect(mod.reserveDailyCreations(3, 5)).toBe(true);
+
+    // Simulate the other process: a fresh module instance holding no in-memory
+    // hold, reading the same durable state file.
+    vi.resetModules();
+    const other = await import('./runnerState.js');
+    expect(other.reserveDailyCreations(3, 5)).toBe(false);
+  });
+
+  it('sees a release made by another process', async () => {
+    expect(mod.reserveDailyCreations(5, 5)).toBe(true);
+    // The hold is visible to a peer through the shared file, or a second runner
+    // would read a free budget while the first is still spending it.
+    expect(reservationsOnDisk(mod)).toBe(5);
+
+    mod.releaseDailyReservation(5);
+    // The release must be durable too, not just local: the next process reads
+    // this file, not our memory.
+    expect(reservationsOnDisk(mod)).toBe(0);
+
+    vi.resetModules();
+    const other = await import('./runnerState.js');
+    expect(other.reserveDailyCreations(5, 5)).toBe(true);
+  });
+
+  it('does not leak capacity when creation fails after a reservation', async () => {
+    // A failed creation must return the reservation, cross-process: the next
+    // process (or the next attempt) has to be able to use the slots again.
+    expect(mod.reserveDailyCreations(2, 5)).toBe(true);
+    mod.releaseDailyReservation(2);
+    expect(reservationsOnDisk(mod)).toBe(0);
+
+    vi.resetModules();
+    const other = await import('./runnerState.js');
+    expect(other.getDailyCreationCount()).toBe(0);
+    expect(other.reserveDailyCreations(2, 5)).toBe(true);
+  });
+
+  it('keeps the reservation out of the durable count it charges against', async () => {
+    // Held slots must block the cap check without being persisted as spending —
+    // a restart would otherwise read the inflation as real for the rest of the day.
+    expect(mod.reserveDailyCreations(3, 5)).toBe(true);
+    const raw = JSON.parse(readFileSync(mod.DECOMPOSITION_STATE_FILE, 'utf8'));
+    expect(raw.dailyCreationCount).toBe(0);
+  });
+
+  it('cannot let two runners both pass the cap and both create beyond the limit', async () => {
+    // The reported defect, end to end: each runner reads the count, passes the
+    // check, creates its children externally, and only then registers. Both pass
+    // on the pre-creation count, so the day overshoots with no way to undo the
+    // issues already in the tracker. (AGT-3468)
+    //
+    // One slot left, two runners: exactly one may proceed.
+    vi.resetModules();
+    const runnerA = await import('./runnerState.js');
+    vi.resetModules();
+    const runnerB = await import('./runnerState.js');
+
+    const admitted = [runnerA, runnerB].filter((runner) => runner.reserveDailyCreations(1, 1));
+    expect(admitted).toHaveLength(1);
+
+    // Only the admitted runner creates; the refused one creates nothing, so the
+    // day ends at the cap rather than one past it.
+    runnerA.registerDecomposition('parent-a', undefined, ['child-a']);
+
+    vi.resetModules();
+    const nextDay = await import('./runnerState.js');
+    expect(nextDay.getDailyCreationCount()).toBe(1);
+  });
+
+  it('releases the reservation of a runner whose external creation failed', async () => {
+    // Creation can fail outside this process — the tracker rejects, the pipeline
+    // throws. That runner must give the slots back, or the day is short by a
+    // budget nobody spent. (AGT-3468)
+    vi.resetModules();
+    const failing = await import('./runnerState.js');
+    expect(failing.reserveDailyCreations(2, 2)).toBe(true);
+
+    // The creation failed, so the runner releases the whole hold.
+    failing.releaseDailyReservation(2);
+
+    vi.resetModules();
+    const retry = await import('./runnerState.js');
+    expect(retry.getDailyCreationCount()).toBe(0);
+    // A later attempt can now use the capacity that was never spent.
+    expect(retry.reserveDailyCreations(2, 2)).toBe(true);
+  });
+
+  it('reclaims a hold left by a dead predecessor that had our own pid', async () => {
+    // Container pid numbering is deterministic: a restarted daemon routinely
+    // inherits its predecessor's pid, so a plain liveness probe answers "alive"
+    // against the wrong generation and the hold would block the budget all day.
+    // (AGT-3468)
+    expect(mod.reserveDailyCreations(2, 2)).toBe(true);
+    const statePath = mod.DECOMPOSITION_STATE_FILE;
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    // Re-key the hold the module just wrote — it carries this process's real pid
+    // space — as a previous generation: our pid, written long before we started.
+    // The module's own token is fresh per load, so the successor cannot mistake it
+    // for its own hold.
+    const [written] = Object.values(state.reservations) as Array<Record<string, unknown>>;
+    state.reservations = {
+      [`${process.pid}:a-previous-generation`]: {
+        ...written,
+        holderId: `${process.pid}:a-previous-generation`,
+        pid: process.pid,
+        at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    };
+    writeFileSync(statePath, JSON.stringify(state));
+
+    vi.resetModules();
+    const successor = await import('./runnerState.js');
+    expect(successor.reserveDailyCreations(2, 2)).toBe(true);
+  });
+});

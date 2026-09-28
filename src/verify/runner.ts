@@ -444,7 +444,13 @@ async function runCommand(
     if (!sandbox.available) return { status: 'fail', output: formatSandboxUnavailable(sandbox) };
     executable = sandbox.executable;
     const writableRoot = dirname(root);
-    invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', boundedCommand.run];
+    // The PID namespace is part of the isolation, not decoration: without it
+    // the sandbox's /proc is a bind mount of the host's, so the repository's own
+    // test commands can enumerate and signal host processes. It also has to be
+    // here for the probe in sandboxDiagnostics.ts to answer the right question —
+    // a probe that creates fewer namespaces than this invocation passes on hosts
+    // where every command then fails. (AGT-3469)
+    invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--unshare-pid', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', boundedCommand.run];
   } else if (process.platform === 'win32') {
     return { status: 'fail', output: '[security] OS verification sandbox is unavailable on this Windows host' };
   }

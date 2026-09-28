@@ -138,9 +138,44 @@ describe('createPrFromCwd (INT-3282)', () => {
     execImpl
       .mockResolvedValueOnce({ stdout: 'feat/ship\n', stderr: '' }) // rev-parse
       .mockResolvedValueOnce({ stdout: '', stderr: '' }) // status --porcelain (clean)
-      .mockRejectedValueOnce(new Error('no upstream')) // rev-list fails (no @{u})
-      .mockResolvedValueOnce({ stdout: '', stderr: '' }); // log --oneline -1 (nothing)
+      .mockRejectedValueOnce(new Error('no upstream')) // rev-list @{u}..HEAD fails
+      .mockResolvedValueOnce({ stdout: 'origin\n', stderr: '' }) // git remote
+      .mockResolvedValueOnce({ stdout: 'refs/remotes/origin/main\n', stderr: '' }) // symbolic-ref
+      .mockResolvedValueOnce({ stdout: '0\n', stderr: '' }); // rev-list origin/main..HEAD (zero ahead)
     const commitAndCreate = vi.fn(async () => 'https://example.com/pr/4');
     await expect(createPrFromCwd({ fix: false }, { commitAndCreate })).rejects.toThrow(/Nothing to publish/);
+    expect(commitAndCreate).not.toHaveBeenCalled();
+  });
+
+  // `git log -1` always has output — the base commit the branch was cut from — so
+  // it cannot prove there is anything to publish. Before AGT-3442 a branch with no
+  // upstream and zero commits past its base passed preflight and attempted an
+  // empty PR; the base comparison must refuse it.
+  it('default hasDirtyOrAhead refuses a no-upstream branch that has a base commit but is zero ahead', async () => {
+    execImpl
+      .mockResolvedValueOnce({ stdout: 'feat/ship\n', stderr: '' }) // rev-parse
+      .mockResolvedValueOnce({ stdout: '', stderr: '' }) // status --porcelain (clean)
+      .mockRejectedValueOnce(new Error('no upstream')) // rev-list @{u}..HEAD fails
+      .mockResolvedValueOnce({ stdout: 'origin\n', stderr: '' }) // git remote
+      .mockResolvedValueOnce({ stdout: 'refs/remotes/origin/master\n', stderr: '' }) // symbolic-ref
+      .mockResolvedValueOnce({ stdout: '0\n', stderr: '' }) // rev-list origin/master..HEAD
+      .mockResolvedValueOnce({ stdout: 'base commit from which the branch was cut\n', stderr: '' }); // log -1 (always non-empty)
+    const commitAndCreate = vi.fn(async () => 'https://example.com/pr/5');
+    await expect(createPrFromCwd({ fix: false }, { commitAndCreate })).rejects.toThrow(/Nothing to publish/);
+    expect(commitAndCreate).not.toHaveBeenCalled();
+  });
+
+  it('default hasDirtyOrAhead publishes a no-upstream branch that is genuinely ahead of its base', async () => {
+    execImpl
+      .mockResolvedValueOnce({ stdout: 'feat/ship\n', stderr: '' }) // rev-parse
+      .mockResolvedValueOnce({ stdout: '', stderr: '' }) // status --porcelain (clean)
+      .mockRejectedValueOnce(new Error('no upstream')) // rev-list @{u}..HEAD fails
+      .mockResolvedValueOnce({ stdout: 'origin\n', stderr: '' }) // git remote
+      .mockResolvedValueOnce({ stdout: 'refs/remotes/origin/main\n', stderr: '' }) // symbolic-ref
+      .mockResolvedValueOnce({ stdout: '3\n', stderr: '' }) // rev-list origin/main..HEAD
+      .mockResolvedValueOnce({ stdout: 'feat: real work\n', stderr: '' }); // log -1 --pretty=%s
+    const commitAndCreate = vi.fn(async () => 'https://example.com/pr/6');
+    const result = await createPrFromCwd({ fix: false }, { commitAndCreate });
+    expect(result.url).toContain('/pr/6');
   });
 });

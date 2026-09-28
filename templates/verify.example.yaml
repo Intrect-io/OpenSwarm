@@ -1,4 +1,8 @@
 # Copy this file to .openswarm/verify.yaml in a managed repository.
+#
+# Bounds enforced at load time: at most 20 commands, and at most 2 hours
+# (7200000 ms) of `timeoutMs` across all of them. A manifest past either limit
+# is rejected with the exact total rather than truncated.
 version: 1
 commands:
   - name: typecheck

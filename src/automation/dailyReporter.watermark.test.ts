@@ -61,6 +61,8 @@ describe('daily reporter watermark', () => {
     expect(team).toHaveBeenCalledTimes(1);
     expect(JSON.parse(readFileSync(watermarkFile, 'utf8'))).toEqual({
       date: new Date().toISOString().slice(0, 10),
+      publishedProjectIds: ['project-1'],
+      complete: true,
     });
   });
 

@@ -5,7 +5,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { commitAndCreatePR, type WorktreeInfo } from '../support/worktreeManager.js';
+import { commitAndCreatePR, resolveBaseRef, type WorktreeInfo } from '../support/worktreeManager.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -47,14 +47,24 @@ async function defaultCurrentBranch(cwd: string): Promise<string> {
 async function defaultHasDirtyOrAhead(cwd: string): Promise<boolean> {
   const dirty = (await git(cwd, 'status', '--porcelain')).trim();
   if (dirty) return true;
-  // Anything ahead of upstream, or unpushed commits on a new branch.
+  // Anything ahead of upstream, or unpushed commits on a branch that tracks one.
   try {
     const ahead = (await git(cwd, 'rev-list', '--count', '@{u}..HEAD')).trim();
     return parseInt(ahead, 10) > 0;
   } catch {
-    // No upstream — check commits vs default base via commitAndCreatePR itself.
-    const log = (await git(cwd, 'log', '--oneline', '-1')).trim();
-    return log.length > 0;
+    // No upstream — a fresh local branch. `git log -1` always has output (the
+    // base commit the branch was cut from), so it cannot prove the branch has
+    // anything to publish: a zero-ahead branch passed preflight and attempted an
+    // empty PR. Compare against the repo's resolved base ref instead (INT-2545,
+    // same resolution commitAndCreatePR uses) and publish only when genuinely
+    // ahead. Unresolvable base fails closed — publishing cannot judge it anyway.
+    try {
+      const base = await resolveBaseRef(cwd);
+      const ahead = (await git(cwd, 'rev-list', '--count', `${base.ref}..HEAD`)).trim();
+      return parseInt(ahead, 10) > 0;
+    } catch {
+      return false;
+    }
   }
 }
 

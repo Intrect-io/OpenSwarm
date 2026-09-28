@@ -127,10 +127,13 @@ const TRUE_PATHS = ['/usr/bin/true', '/bin/true'];
  * `runner.ts`. Probing a strict subset is how a probe lies: on a host that
  * permits user namespaces but denies network ones, `--unshare-user` alone
  * succeeds and every verification command afterwards fails, which is the exact
- * failure this module exists to catch before it happens. Keep in step with the
- * runner's argv.
+ * failure this module exists to catch before it happens. `--unshare-pid` is in
+ * the list for the same reason — a container that denies PID-namespace creation
+ * (a common seccomp/capability profile) passes a probe without it and then
+ * fails at the first command, with `/proc` inside the sandbox leaking the
+ * host's process table in the meantime. Keep in step with the runner's argv.
  */
-const PROBE_NAMESPACE_ARGS = ['--ro-bind', '/', '/', '--unshare-net', '--dev', '/dev', '--proc', '/proc'];
+const PROBE_NAMESPACE_ARGS = ['--ro-bind', '/', '/', '--unshare-net', '--unshare-pid', '--dev', '/dev', '--proc', '/proc'];
 
 /**
  * The real probe, kept here rather than at the call site so it is reachable from

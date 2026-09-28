@@ -219,3 +219,198 @@ describe('formatPipelineResultEmbed (Discord embed)', () => {
     expect(embed.data.footer!.text).toBe('Session: session-...');
   });
 });
+
+// Discord caps a single field value at 1024 and an embed's parts at 6000 in
+// total, and the embed builder THROWS on the former while the API rejects the
+// latter outright — either way the whole report is lost, not trimmed. The
+// per-field slices bound each contribution but not their sum, and `stages`
+// (one line per stage per iteration) had no bound at all. (AGT-3422)
+describe('formatPipelineResult aggregate budget (AGT-3422)', () => {
+  const stageAt = (i: number): PipelineResult['stages'][number] => ({
+    stage: 'worker',
+    success: true,
+    result: { success: true, summary: 's', filesChanged: [], commands: [], output: 'o' },
+    duration: 1000 + i,
+    startedAt: 1000 + i,
+    completedAt: 2000 + i,
+  });
+
+  const isStage = (s: PipelineResult['stages'][number]) => {
+    const duration = (s.duration / 1000).toFixed(1);
+    const time = new Date(s.startedAt).toLocaleTimeString('en-GB', { hour12: false });
+    return `${s.success ? '✅' : '❌'} **${s.stage}** (${duration}s) @ ${time}`;
+  };
+
+  /**
+   * Every input near its per-field maximum — the shape the slices cannot bound.
+   * The title defaults past the embed description ceiling (4096) so that clamp is
+   * exercised too; callers that care about the message headline pass a
+   * realistic issue title instead.
+   */
+  const wideResult = (taskTitle = 't'.repeat(4000)): PipelineResult => baseResult({
+    finalStatus: 'rejected',
+    stages: Array.from({ length: 200 }, (_, i) => stageAt(i)),
+    taskContext: {
+      projectName: 'OpenSwarm',
+      issueIdentifier: 'INT-3422',
+      taskTitle,
+    },
+    workerResult: {
+      success: true,
+      summary: 'summary '.repeat(100),
+      filesChanged: Array.from({ length: 40 }, (_, i) => `src/${'deep/nested/dir/'.repeat(10)}file-${i}.ts`),
+      commands: [],
+      output: 'o',
+    },
+    reviewResult: { decision: 'revise', feedback: 'feedback '.repeat(200), issues: ['a', 'b'] },
+    testerResult: {
+      success: false,
+      testsPassed: 1,
+      testsFailed: 9,
+      output: '',
+      failedTests: Array.from({ length: 9 }, (_, i) => `suite/case-${i}.spec.ts > ${'fails '.repeat(80)}`),
+    },
+    prUrl: 'https://github.com/org/repo/pull/1',
+  });
+
+  /** The one thing the test cannot control is the host timezone; nothing else is stripped. */
+  const stripClock = (s: string) => s.replace(/\d{2}:\d{2}:\d{2}/g, 'HH:MM:SS');
+
+  it('keeps a wide embed inside the 6000 total and the 1024 per-field ceiling, marked and with stats intact', () => {
+    const embed = formatPipelineResultEmbed(wideResult());
+    const data = embed.data;
+
+    expect(embed.length).toBeLessThanOrEqual(6000);
+    for (const field of data.fields ?? []) {
+      expect(field.value.length).toBeLessThanOrEqual(1024);
+    }
+    expect(stripClock(data.description ?? '').length).toBeLessThanOrEqual(4096);
+
+    // Clipped rather than silently short.
+    expect((data.fields ?? []).some((f) => /\.\.\.\(\d+ chars omitted\)/.test(f.value))).toBe(true);
+
+    // The summary stats are short and are what a report is read for: pinned.
+    const byName = new Map((data.fields ?? []).map((f) => [f.name, f.value]));
+    expect(byName.get('🔄 Iterations')).toBe('2');
+    expect(byName.get('⏱️ Duration')).toBe('5.0s');
+    expect(byName.get('💰 Cost')).toBe('N/A');
+    expect(data.footer!.text).toBe('Session: session-...');
+  });
+
+  it('keeps a wide message inside the 2000 content limit, marked, with the header intact', () => {
+    const text = formatPipelineResult(wideResult('Reject the oversize pipeline report'));
+
+    expect(text.length).toBeLessThanOrEqual(2000);
+    // Clipping keeps the start, so the context header and the status line — the
+    // point of the message — survive even when the tail is dropped.
+    expect(text.startsWith('📁 OpenSwarm | 🔖 INT-3422')).toBe(true);
+    expect(text).toContain('❌ **Pipeline REJECTED**');
+    expect(text).toMatch(/\.\.\.\(\d+ chars omitted\)$/);
+  });
+
+  it('clamps the SUM last: a result that busts 6000 even with every field legal comes back inside it', () => {
+    // Every field individually legal (<= 1024) and the description legal
+    // (<= 4096), yet the parts still sum past 6000 — the case no per-field slice
+    // can see. The final pass must trim and say so, not hand the API an embed it
+    // rejects whole.
+    const stages = Array.from({ length: 200 }, (_, i) => stageAt(i));
+    const embed = formatPipelineResultEmbed(baseResult({
+      finalStatus: 'rejected',
+      stages,
+      taskContext: { projectName: 'OpenSwarm', issueIdentifier: 'INT-3422', taskTitle: 't'.repeat(8000) },
+      workerResult: {
+        success: true, summary: 'w'.repeat(4000),
+        filesChanged: Array.from({ length: 40 }, (_, i) => `src/f${i}.ts`), commands: [], output: 'o',
+      },
+      reviewResult: { decision: 'revise', feedback: 'r'.repeat(4000), issues: ['a', 'b'] },
+      testerResult: {
+        success: false, testsPassed: 0, testsFailed: 9, output: '',
+        failedTests: Array.from({ length: 9 }, (_, i) => `c${i} > ${'f'.repeat(200)}`),
+      },
+      prUrl: 'https://github.com/org/repo/pull/1',
+    }));
+    const data = embed.data;
+
+    expect(embed.length).toBeLessThanOrEqual(6000);
+    for (const field of data.fields ?? []) {
+      expect(field.value.length).toBeLessThanOrEqual(1024);
+    }
+    expect(stripClock(data.description ?? '').length).toBeLessThanOrEqual(4096);
+
+    // What was trimmed says so, and the count folds every step so the arithmetic
+    // still reaches the string that went in.
+    const stagesField = data.fields!.find((f) => f.name === '📊 Stages')!;
+    const marker = /\.\.\.\((\d+) chars omitted\)$/.exec(stagesField.value);
+    expect(marker).not.toBeNull();
+    const raw = stages.map(isStage).join('\n');
+    expect(stagesField.value.length - marker![0].length + Number(marker![1])).toBe(raw.length);
+
+    // The summary stats survive the trim: they are short and are the first thing
+    // a report is read for.
+    const byName = new Map((data.fields ?? []).map((f) => [f.name, f.value]));
+    expect(byName.get('🔄 Iterations')).toBe('2');
+    expect(byName.get('⏱️ Duration')).toBe('5.0s');
+    expect(byName.get('💰 Cost')).toBe('N/A');
+  });
+
+  it('leaves a normal result byte-identical: no marker, same composed output', () => {
+    const result = baseResult({
+      workerResult: {
+        success: true, summary: 'did the work', filesChanged: ['src/a.ts', 'src/b.ts'], commands: [], output: 'o',
+      },
+      reviewResult: { decision: 'approve', feedback: 'looks good', issues: [] },
+      testerResult: { success: true, testsPassed: 12, testsFailed: 0, coverage: 88.25, output: '' },
+      prUrl: 'https://github.com/org/repo/pull/7',
+    });
+
+    const text = stripClock(formatPipelineResult(result));
+    expect(text).toBe([
+      '✅ **Pipeline APPROVED**',
+      '',
+      '**Session:** `session-abc-123`',
+      '**Iterations:** 2',
+      '**Duration:** 5.0s',
+      '',
+      '**Stages:**',
+      '  ✅ worker (1.2s) @ HH:MM:SS',
+      '  ❌ reviewer (0.5s) @ HH:MM:SS',
+    ].join('\n'));
+    expect(text).not.toContain('chars omitted');
+
+    const data = formatPipelineResultEmbed(result).data;
+    expect(data.description).toBeUndefined();
+    expect(data.title).toBe('✅ Pipeline SUCCESS');
+    expect(data.footer!.text).toBe('Session: session-...');
+    expect((data.fields ?? []).map((f) => ({ name: f.name, value: stripClock(f.value), inline: f.inline ?? false })))
+      .toEqual([
+        { name: '🔄 Iterations', value: '2', inline: true },
+        { name: '⏱️ Duration', value: '5.0s', inline: true },
+        { name: '💰 Cost', value: 'N/A', inline: true },
+        { name: '📊 Stages', value: '✅ **worker** (1.2s) @ HH:MM:SS\n❌ **reviewer** (0.5s) @ HH:MM:SS', inline: false },
+        { name: '🔨 Worker', value: 'did the work\n\n**Files:** `src/a.ts`, `src/b.ts`', inline: false },
+        { name: '✅ Reviewer', value: '**Decision:** APPROVE\n\nlooks good', inline: false },
+        { name: '🧪 Tests', value: '✅ Passed: 12/12 (100.0%)\n📊 Coverage: 88.3%', inline: false },
+        { name: '🔗 Pull Request', value: '[View PR](https://github.com/org/repo/pull/7)', inline: false },
+      ]);
+  });
+
+  it('bounds the stages field at every stage count, untouched at or below the ceiling and honestly counted above it', () => {
+    for (let n = 1; n <= 400; n++) {
+      const stages = Array.from({ length: n }, (_, i) => stageAt(i));
+      const raw = stages.map(isStage).join('\n');
+      const value = formatPipelineResultEmbed(baseResult({ stages }))
+        .data.fields!.find((f) => f.name === '📊 Stages')!.value;
+
+      expect(value.length).toBeLessThanOrEqual(1024);
+
+      const marker = /\.\.\.\((\d+) chars omitted\)$/.exec(value);
+      if (raw.length <= 1024) {
+        expect(value).toBe(raw);
+      } else {
+        expect(marker).not.toBeNull();
+        // The count is the real remainder: kept + dropped is the value that went in.
+        expect(value.length - marker![0].length + Number(marker![1])).toBe(raw.length);
+      }
+    }
+  });
+});

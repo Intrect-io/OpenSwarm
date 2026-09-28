@@ -1,8 +1,9 @@
 // SubagentTree — concurrent tasks as a per-worktree agent tree (S7).
 // Presentational: takes nodes built by buildSubagentTree.
-import { Box, Text } from 'ink';
+import { Box, Text, useStdout } from 'ink';
 import { memo, useEffect, useState } from 'react';
 import { STATUS } from '../theme.js';
+import { oneLine, truncateLine } from '../../cli/reviewProgress.js';
 import type { StatusKind } from '../../support/glyphs.js';
 import type { RepositoryNode, TaskStatus } from '../subagentTree.js';
 import { spinnerFrame } from '../loadingMessages.js';
@@ -10,14 +11,18 @@ import { safeIsoDate, sanitizeTerminalText } from '../sanitize.js';
 
 // Single-sourced glyphs + colors (INT-2260): running → ◐, complete → ✓, fail → ✗.
 const KIND: Record<TaskStatus, StatusKind> = { start: 'running', complete: 'ok', fail: 'err' };
-const STAGE_LABEL_MAX_CHARS = 80;
-const MODEL_LABEL_MAX_CHARS = 80;
-const NODE_LABEL_MAX_CHARS = 96;
 
-function sanitizeTerminalLabel(value: string | undefined, maxChars?: number): string {
-  const raw = sanitizeTerminalText(value || '').replaceAll('\n', '').replaceAll('\t', ' ');
-  const bounded = maxChars === undefined ? raw : raw.slice(0, maxChars);
-  return bounded;
+// Each node is one row. The budget applies to the WHOLE composed row (indent +
+// fields + separators): stage names, branches and titles arrive from the event
+// stream, and a newline- or over-long one used to wrap its row into several,
+// growing the tree past the frame. Cap in terminal COLUMNS, never code units;
+// NODE_BUDGET is the widest indent (`     └ ` = 7) plus the reserved last
+// column. (AGT-3458)
+const NODE_BUDGET = 8;
+
+/** Collapse layout whitespace, then clip the composed row to a column budget. */
+function nodeLine(value: string, columns: number): string {
+  return truncateLine(oneLine(value), Math.max(10, columns - NODE_BUDGET));
 }
 
 function clampLimit(value: number): number {
@@ -38,6 +43,10 @@ function formatDuration(ms: number | undefined): string | undefined {
   return `${Math.round(ms / 1000)}s`;
 }
 
+function field(value: string | undefined): string {
+  return oneLine(sanitizeTerminalText(value || ''));
+}
+
 function worktreeLabel(task: RepositoryNode['worktrees'][number]): string {
   const id = task.issueIdentifier ?? task.taskId;
   const branch = task.branch ? ` ${task.branch}` : task.worktree ? ` worktree/${task.worktree}` : '';
@@ -45,13 +54,15 @@ function worktreeLabel(task: RepositoryNode['worktrees'][number]): string {
   const duration = formatDuration(task.durationMs);
   const decision = task.decision ? ` ${task.decision}` : '';
   const title = task.title ? ` ${task.title}` : '';
-  return sanitizeTerminalLabel(`${id}${branch}${stage}${duration ? ` ${duration}` : ''}${decision}${title}`, NODE_LABEL_MAX_CHARS);
+  return field(`${id}${branch}${stage}${duration ? ` ${duration}` : ''}${decision}${title}`);
 }
 
 // Memoized so log-only pipeline updates (stable `repositories` identity from the
 // panel's useMemo) skip re-rendering the tree — only stage changes rebuild it,
 // which also keeps the spinner interval from re-subscribing each render. (INT-2407)
 export const SubagentTree = memo(function SubagentTree({ repositories, max = 6, maxRoles = 5 }: SubagentTreeProps) {
+  const { stdout } = useStdout();
+  const columns = stdout?.columns ?? 80;
   const worktreeLimit = clampLimit(max);
   const roleLimit = clampLimit(maxRoles);
   const [tick, setTick] = useState(0);
@@ -70,13 +81,16 @@ export const SubagentTree = memo(function SubagentTree({ repositories, max = 6, 
       ) : (
         repositories.map((repo) => (
           <Box key={repo.repository} flexDirection="column">
-            <Text color={STATUS[KIND[repo.status]].color}>{`${STATUS[KIND[repo.status]].icon} ${sanitizeTerminalLabel(repo.repository, NODE_LABEL_MAX_CHARS)}`}</Text>
+            <Text color={STATUS[KIND[repo.status]].color}>{nodeLine(`${STATUS[KIND[repo.status]].icon} ${field(repo.repository)}`, columns)}</Text>
             {repo.worktrees.slice(-worktreeLimit).map((task) => (
               <Box key={`${repo.repository}:${task.taskId}`} flexDirection="column">
-                <Text dimColor>{`  └ ${worktreeLabel(task)} — ${task.status}`}</Text>
+                <Text dimColor>{nodeLine(`  └ ${worktreeLabel(task)} — ${task.status}`, columns)}</Text>
                 {(roleLimit === 0 ? [] : task.roles.slice(-roleLimit)).map((role, i) => (
                   <Text key={i} dimColor>
-                    {`     └ ${role.status === 'start' ? spinnerFrame(tick) : ''} ${sanitizeTerminalLabel(role.role, STAGE_LABEL_MAX_CHARS)}${role.model ? ` (${sanitizeTerminalLabel(role.model, MODEL_LABEL_MAX_CHARS)})` : ''} — ${role.status}${role.activity ? ` · ${sanitizeTerminalLabel(role.activity, STAGE_LABEL_MAX_CHARS)}` : ''}${safeIsoDate(role.rateLimitResetsAt) ? ` · reset ${safeIsoDate(role.rateLimitResetsAt)}` : ''}${role.decision ? `/${sanitizeTerminalLabel(role.decision)}` : ''}`}
+                    {nodeLine(
+                      `     └ ${role.status === 'start' ? spinnerFrame(tick) : ''} ${field(role.role)}${role.model ? ` (${field(role.model)})` : ''} — ${role.status}${role.activity ? ` · ${field(role.activity)}` : ''}${safeIsoDate(role.rateLimitResetsAt) ? ` · reset ${safeIsoDate(role.rateLimitResetsAt)}` : ''}${role.decision ? `/${field(role.decision)}` : ''}`,
+                      columns,
+                    )}
                   </Text>
                 ))}
               </Box>

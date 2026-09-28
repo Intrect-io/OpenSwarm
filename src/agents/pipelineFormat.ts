@@ -4,6 +4,7 @@
 // ============================================
 
 import { EmbedBuilder } from 'discord.js';
+import type { APIEmbedField } from 'discord.js';
 import type { PipelineResult } from './pairPipeline.js';
 import { formatCost } from '../support/costTracker.js';
 
@@ -11,6 +12,58 @@ import { formatCost } from '../support/costTracker.js';
 function formatTimestamp(epochMs: number): string {
   const d = new Date(epochMs);
   return d.toLocaleTimeString('en-GB', { hour12: false }); // HH:MM:SS
+}
+
+/**
+ * Discord ceilings for the composed pipeline notification.
+ *
+ * The per-field slices below bound each contribution but not their sum, and the
+ * stage list had no bound at all — 34 stages already pushed that one value past
+ * the 1024 the embed builder validates, which throws at the point of the set and
+ * loses the whole report. Even with every field legal the embed is capped at
+ * 6000 characters in total (title + description + fields + footer) and the API
+ * rejects an over-budget embed outright rather than trimming it. These are the
+ * ceilings on the composed output; the per-field slices stay. (AGT-3422)
+ */
+export const PIPELINE_MESSAGE_CHAR_BUDGET = 2000;
+export const PIPELINE_EMBED_CHAR_BUDGET = 6000;
+export const EMBED_FIELD_VALUE_BUDGET = 1024;
+export const EMBED_DESCRIPTION_BUDGET = 4096;
+/** Room for the elision marker plus its count, so a clip stays under its ceiling. */
+const ELISION_MARKER_RESERVE = 40;
+/** The summary stats are pinned: short, and the first thing a report is read for. */
+const PIPELINE_STAT_FIELDS: Record<string, true> = {
+  '🔄 Iterations': true,
+  '⏱️ Duration': true,
+  '💰 Cost': true,
+};
+
+/** The phrasing the Discord completion path already uses for a clipped result. */
+function elisionMarker(dropped: number): string {
+  return `...(${dropped} chars omitted)`;
+}
+
+const ELISION_MARKER_PATTERN = /\.\.\.\((\d+) chars omitted\)$/;
+
+/**
+ * Clip `value` to `limit`, dropping the tail and saying how much went. The
+ * marker's count is the real remainder, so kept + dropped is the value that came
+ * in and a reader can tell a clipped report from a short one. The composed embed
+ * clamps some fields twice (once per field, once against the total), so a count
+ * already in the value is folded into the new one rather than reset — otherwise
+ * the second trim would report only its own step and the arithmetic would no
+ * longer reach the original.
+ */
+function clipToLimit(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  const budget = limit - ELISION_MARKER_RESERVE;
+  // Only reachable when the limit is smaller than the marker itself.
+  if (budget < 1) return value.slice(0, limit);
+  const prior = ELISION_MARKER_PATTERN.exec(value);
+  const body = prior ? value.slice(0, prior.index) : value;
+  const head = body.slice(0, budget);
+  const dropped = (prior ? Number(prior[1]) : 0) + (body.length - head.length);
+  return head + elisionMarker(dropped);
 }
 
 /**
@@ -70,7 +123,9 @@ export function formatPipelineResult(result: PipelineResult): string {
     lines.push(`  ${emoji} ${stage.stage} (${duration}s) @ ${time}`);
   }
 
-  return lines.join('\n');
+  // The assembled message has a ceiling of its own; the stage loop above is the
+  // only unbounded input. (AGT-3422)
+  return clipToLimit(lines.join('\n'), PIPELINE_MESSAGE_CHAR_BUDGET);
 }
 
 /**
@@ -102,9 +157,10 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
       || (ctx.projectPath ? ctx.projectPath.split('/').pop() || '' : '');
 
     if (displayName && ctx.issueIdentifier) {
-      embed.setDescription(`📁 **${displayName}** | 🔖 ${ctx.issueIdentifier}\n${ctx.taskTitle || ''}`);
+      const line = `📁 **${displayName}** | 🔖 ${ctx.issueIdentifier}\n${ctx.taskTitle || ''}`;
+      embed.setDescription(clipToLimit(line, EMBED_DESCRIPTION_BUDGET));
     } else if (ctx.taskTitle) {
-      embed.setDescription(ctx.taskTitle);
+      embed.setDescription(clipToLimit(ctx.taskTitle, EMBED_DESCRIPTION_BUDGET));
     }
   }
 
@@ -120,7 +176,9 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     { name: '💰 Cost', value: costStr, inline: true },
   );
 
-  // Stages
+  // Stages. One value for every stage a run recorded, and a long run records
+  // one per stage per iteration — the per-field budget (not just the embed
+  // total) is what a run of ~34 stages breaches. (AGT-3422)
   const stagesStr = result.stages
     .map(s => {
       const emoji = s.success ? '✅' : '❌';
@@ -130,7 +188,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     })
     .join('\n') || 'No stages';
 
-  embed.addFields({ name: '📊 Stages', value: stagesStr, inline: false });
+  embed.addFields({ name: '📊 Stages', value: clipToLimit(stagesStr, EMBED_FIELD_VALUE_BUDGET), inline: false });
 
   // Worker result
   if (result.workerResult) {
@@ -150,7 +208,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
     }
 
     if (workerValue) {
-      embed.addFields({ name: '🔨 Worker', value: workerValue, inline: false });
+      embed.addFields({ name: '🔨 Worker', value: clipToLimit(workerValue, EMBED_FIELD_VALUE_BUDGET), inline: false });
     }
   }
 
@@ -168,7 +226,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
       reviewValue += `\n\n**Issues found:** ${review.issues.length}`;
     }
 
-    embed.addFields({ name: '✅ Reviewer', value: reviewValue, inline: false });
+    embed.addFields({ name: '✅ Reviewer', value: clipToLimit(reviewValue, EMBED_FIELD_VALUE_BUDGET), inline: false });
   }
 
   // Tester result
@@ -191,7 +249,7 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
       }
     }
 
-    embed.addFields({ name: '🧪 Tests', value: testValue, inline: false });
+    embed.addFields({ name: '🧪 Tests', value: clipToLimit(testValue, EMBED_FIELD_VALUE_BUDGET), inline: false });
   }
 
   // PR URL
@@ -202,5 +260,38 @@ export function formatPipelineResultEmbed(result: PipelineResult): EmbedBuilder 
   // Footer
   embed.setFooter({ text: `Session: ${result.sessionId.slice(0, 8)}...` });
 
+  return clampEmbedToBudget(embed);
+}
+
+/**
+ * Final pass: an embed is accepted only if its parts sum to <= 6000, and the API
+ * rejects the whole embed rather than trimming it. Per-field slices cannot see
+ * the total, so trim the largest non-pinned field last, keeping the summary
+ * stats (iterations/duration/cost) and re-clamping until the sum fits. Trimming
+ * the largest field means fewer fields lose their content, and the elision
+ * marker says which ones did. (AGT-3422)
+ */
+function clampEmbedToBudget(embed: EmbedBuilder): EmbedBuilder {
+  for (let guard = 0; embed.length > PIPELINE_EMBED_CHAR_BUDGET && guard < 16; guard++) {
+    const fields: APIEmbedField[] = embed.data.fields ? [...embed.data.fields] : [];
+    let largest = -1;
+    let largestLength = -1;
+    for (let j = 0; j < fields.length; j++) {
+      if (PIPELINE_STAT_FIELDS[fields[j].name]) continue;
+      if (fields[j].value.length > largestLength) {
+        largest = j;
+        largestLength = fields[j].value.length;
+      }
+    }
+    if (largest < 0 || largestLength <= 0) break;
+
+    const over = embed.length - PIPELINE_EMBED_CHAR_BUDGET;
+    const target = Math.max(1, largestLength - over - ELISION_MARKER_RESERVE);
+    const trimmed = clipToLimit(fields[largest].value, target);
+    // clipToLimit must keep making progress; stop rather than loop forever.
+    if (trimmed.length >= largestLength) break;
+    fields[largest] = { ...fields[largest], value: trimmed };
+    embed.setFields(fields);
+  }
   return embed;
 }

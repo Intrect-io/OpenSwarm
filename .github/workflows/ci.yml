@@ -88,7 +88,7 @@ jobs:
           # namespace and every sandboxed command dies with
           # "loopback: Failed RTM_NEWADDR: Operation not permitted".
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /bin/sh -lc 'echo sandbox-ok'
+          bwrap --ro-bind / / --unshare-net --unshare-pid --dev /dev --proc /proc -- /bin/sh -lc 'echo sandbox-ok'
       - run: npm ci --prefer-offline --no-audit --no-fund
       # Coverage thresholds live in vitest.config.ts (ratcheted floor below the
       # measured baseline — see that file's comment). Previously `npm test` had
@@ -146,7 +146,7 @@ jobs:
       - name: Bubblewrap alone must not be assumed sufficient
         run: |
           set -uo pipefail
-          if bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true 2>/dev/null; then
+          if bwrap --ro-bind / / --unshare-net --unshare-pid --dev /dev --proc /proc -- /usr/bin/true 2>/dev/null; then
             echo "::warning::The sandbox now works without lifting the AppArmor restriction — the README's sysctl step may be obsolete on this image"
           else
             echo "Confirmed: installing bubblewrap alone does not give a working sandbox on this runner"
@@ -157,5 +157,5 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           # The same namespaces src/verify/runner.ts sets up. Probing a subset
           # would pass on a host that denies one of the others.
-          bwrap --ro-bind / / --unshare-net --dev /dev --proc /proc -- /usr/bin/true
+          bwrap --ro-bind / / --unshare-net --unshare-pid --dev /dev --proc /proc -- /usr/bin/true
           echo "OS verification sandbox is available on ubuntu-latest with bubblewrap + the AppArmor sysctl"

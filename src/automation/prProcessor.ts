@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { safeConsole as console } from '../support/safeLog.js';
 import { withFreshReviewLock } from './freshReviewLock.js';
+import { withPRProcessLease } from './prProcessLease.js';
 const execFileAsync = promisify(execFile);
 /** Safe git command execution (no shell) */
 async function gitExec(cwd: string, ...args: string[]): Promise<string> {
@@ -109,6 +110,68 @@ async function restoreAutoStash(cwd: string, stash: AutoStash | null): Promise<v
   }
 }
 
+/** The latest review from each author: one that asked for changes and was then
+ * superseded by an approval must not keep the PR blocked. */
+function latestReviewPerAuthor<T extends { author: string; createdAt: string }>(reviews: T[]): Map<string, T> {
+  const latest = new Map<string, T>();
+  for (const review of reviews) {
+    const existing = latest.get(review.author);
+    if (!existing || new Date(review.createdAt) > new Date(existing.createdAt)) {
+      latest.set(review.author, review);
+    }
+  }
+  return latest;
+}
+
+/** Fail the PR on an unresolvable conflict, telling the author via the PR. */
+async function failWithConflictComment(pr: PRInfo, state: PRState, key: string, conflictMsg: string): Promise<void> {
+  console.log(`[PRProcessor] ${key}: ${conflictMsg}`);
+  await commentOnPR(pr.repo, pr.number, `## ⚠️ ${conflictMsg}\n\nPlease resolve conflicts manually.`);
+  failPR(state, key, conflictMsg);
+}
+
+/** Record a terminal failure for `key`, with the iteration count the run reached. */
+function failPR(state: PRState, key: string, error: string | undefined, iterations?: number): void {
+  const entry = state.prs[key];
+  entry.status = 'failed';
+  entry.lastError = error;
+  if (iterations !== undefined) entry.iterations = iterations;
+}
+
+/** The verdict a one-shot `pr fix`/`pr review` call reports for a single PR. */
+function oneShotResult(state: PRState, key: string): { success: boolean; error?: string; iterations: number } {
+  const entry = state.prs[key];
+  return {
+    success: entry?.status === 'completed',
+    error: entry?.lastError,
+    iterations: entry?.iterations ?? 0,
+  };
+}
+
+/** The branch to return to after in-place PR work; `main` if HEAD is unreadable. */
+async function currentBranch(cwd: string): Promise<string> {
+  try {
+    return (await gitExec(cwd, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
+  } catch {
+    return 'main';
+  }
+}
+
+/** Put the checkout back as `stashLocalChanges` found it. Never throws: losing
+ * the caller's branch must not lose the result the PR work produced. */
+async function restoreWorkingTree(cwd: string, originalBranch: string, stash: AutoStash | null): Promise<void> {
+  let restoredBranch = false;
+  try {
+    await gitExec(cwd, 'checkout', originalBranch);
+    restoredBranch = true;
+  } catch (restoreErr) {
+    console.error(`[PRProcessor] Failed to restore branch ${originalBranch}:`, restoreErr);
+  }
+  if (restoredBranch) {
+    await restoreAutoStash(cwd, stash);
+  }
+}
+
 /** Known AI review-bot author name fragments. Codex comments were previously
  * invisible to critical-comment detection because this check only matched
  * "claude" — the `claude-review` action was the only bot in mind when it was
@@ -156,8 +219,12 @@ import {
   waitForCICompletion,
   getPRBaseBranchOrThrow,
   getMergedPRsOrThrow,
+  getPRReviews,
+  getPRReviewComments,
+  getPRComments,
   type PRInfo,
 } from '../github/index.js';
+import { broadcastEvent } from '../core/eventHub.js';
 import { runReviewCommand, formatReviewOutput } from '../cli/reviewCommand.js';
 import {
   captureReviewFileHashes,
@@ -320,7 +387,12 @@ export class PRProcessor {
   /**
    * One-shot fix for a single PR (CLI `openswarm pr fix` / `pr watch`).
    * Skips cron cooldown and multi-repo scanning — runs processPR directly.
-   * (INT-3282)
+   *
+   * Takes the cross-process lease first: two invocations — `pr watch` reviewing
+   * a list while another `pr fix` runs, or two CLI calls — check out
+   * `pr.branch` in ONE checkout and push to the same branch, so one stashes the
+   * other's work in progress, or publishes a commit whose tests never ran on
+   * the tree it was based on. (AGT-3468, INT-3282)
    */
   async fixOne(
     pr: PRInfo,
@@ -340,13 +412,10 @@ export class PRProcessor {
       integrationBaselines: {},
       updatedAt: new Date().toISOString(),
     };
-    await this.processPR(pr, projectPath, state, key);
-    const entry = state.prs[key];
-    return {
-      success: entry?.status === 'completed',
-      error: entry?.lastError,
-      iterations: entry?.iterations ?? 0,
-    };
+    return withPRProcessLease(projectPath, key, async () => {
+      await this.processPR(pr, projectPath, state, key);
+      return oneShotResult(state, key);
+    });
   }
 
   /**
@@ -379,12 +448,7 @@ export class PRProcessor {
     };
     await this.processReviewFeedback(pr, projectPath, state, key, 0);
     await this.saveState(state);
-    const entry = state.prs[key];
-    return {
-      success: entry?.status === 'completed',
-      error: entry?.lastError,
-      iterations: entry?.iterations ?? 0,
-    };
+    return oneShotResult(state, key);
   }
 
   /**
@@ -641,7 +705,6 @@ export class PRProcessor {
     console.log('[PRProcessor] Checking PRs...');
 
     // Broadcast start event
-    const { broadcastEvent } = await import('../core/eventHub.js');
     broadcastEvent({ type: 'pr_processor_start', data: { repos: this.config.repos } });
 
     try {
@@ -663,15 +726,8 @@ export class PRProcessor {
           const hasConflicts = await checkPRConflicts(repo, pr.number);
 
           // Check for review feedback (formal reviews with CHANGES_REQUESTED)
-          const { getPRReviews, getPRComments } = await import('../github/github.js');
-          const reviews = await getPRReviews(repo, pr.number);
-          const latestReviews = new Map<string, typeof reviews[0]>();
-          for (const review of reviews) {
-            const existing = latestReviews.get(review.author);
-            if (!existing || new Date(review.createdAt) > new Date(existing.createdAt)) {
-              latestReviews.set(review.author, review);
-            }
-          }
+
+          const latestReviews = latestReviewPerAuthor(await getPRReviews(repo, pr.number));
           const hasFormalReviewFeedback = Array.from(latestReviews.values()).some(
             r => r.state === 'CHANGES_REQUESTED'
           );
@@ -782,7 +838,6 @@ export class PRProcessor {
       }
 
       // Broadcast end event
-      const { broadcastEvent } = await import('../core/eventHub.js');
       broadcastEvent({ type: 'pr_processor_end', data: { lastRun: this.lastRun, nextRun: this.nextRun } });
     }
   }
@@ -800,16 +855,10 @@ export class PRProcessor {
     console.log(`[PRProcessor] Processing ${key}: "${pr.title}"`);
 
     // Broadcast PR processing event
-    const { broadcastEvent } = await import('../core/eventHub.js');
     broadcastEvent({ type: 'pr_processor_pr', data: { pr: key, title: pr.title } });
 
     // Save current branch (for restoration)
-    let originalBranch = 'main';
-    try {
-      originalBranch = (await gitExec(projectPath, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
-    } catch {
-      // Fall back to main on failure
-    }
+    const originalBranch = await currentBranch(projectPath);
 
     const maxRetries = this.config.maxRetries ?? 3;
     const ciTimeoutMs = this.config.ciTimeoutMs ?? 600_000; // 10 minutes
@@ -824,8 +873,7 @@ export class PRProcessor {
       // 1. Fetch detailed PR context
       const details = await getPRContext(pr.repo, pr.number);
       if (!details) {
-        state.prs[key].status = 'failed';
-        state.prs[key].lastError = 'Failed to get PR context';
+        failPR(state, key, 'Failed to get PR context');
         return;
       }
 
@@ -843,26 +891,17 @@ export class PRProcessor {
               // Fall through to CI check flow below
             } else {
               // Resolution failed — escalation already handled by resolver
-              state.prs[key].status = 'failed';
-              state.prs[key].lastError = 'Conflict resolution failed';
+              failPR(state, key, 'Conflict resolution failed');
               return;
             }
           } else {
             // Cannot resolve (not owned or max attempts)
-            const conflictMsg = 'PR has merge conflicts - cannot auto-resolve (not owned or max attempts reached)';
-            console.log(`[PRProcessor] ${key}: ${conflictMsg}`);
-            await commentOnPR(pr.repo, pr.number, `## ⚠️ ${conflictMsg}\n\nPlease resolve conflicts manually.`);
-            state.prs[key].status = 'failed';
-            state.prs[key].lastError = conflictMsg;
+            await failWithConflictComment(pr, state, key, 'PR has merge conflicts - cannot auto-resolve (not owned or max attempts reached)');
             return;
           }
         } else {
           // No resolver available
-          const conflictMsg = 'PR has merge conflicts - cannot auto-fix';
-          console.log(`[PRProcessor] ${key}: ${conflictMsg}`);
-          await commentOnPR(pr.repo, pr.number, `## ⚠️ ${conflictMsg}\n\nPlease resolve conflicts manually.`);
-          state.prs[key].status = 'failed';
-          state.prs[key].lastError = conflictMsg;
+          await failWithConflictComment(pr, state, key, 'PR has merge conflicts - cannot auto-fix');
           return;
         }
       }
@@ -1048,29 +1087,18 @@ export class PRProcessor {
         url: pr.url,
       });
 
-      state.prs[key].status = 'failed';
-      state.prs[key].lastError = lastError;
+      failPR(state, key, lastError);
       state.prs[key].iterations = totalIterations;
       console.log(`[PRProcessor] ${key}: FAILED after ${retryCount} attempt(s) - ${lastError}`);
 
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[PRProcessor] ${key} error:`, errorMsg);
-      state.prs[key].status = 'failed';
-      state.prs[key].lastError = errorMsg;
+      failPR(state, key, errorMsg);
 
     } finally {
       // Restore branch
-      let restoredBranch = false;
-      try {
-        await gitExec(projectPath, 'checkout', originalBranch);
-        restoredBranch = true;
-      } catch (restoreErr) {
-        console.error(`[PRProcessor] Failed to restore branch ${originalBranch}:`, restoreErr);
-      }
-      if (restoredBranch) {
-        await restoreAutoStash(projectPath, autoStash);
-      }
+      await restoreWorkingTree(projectPath, originalBranch, autoStash);
     }
   }
 
@@ -1088,13 +1116,8 @@ export class PRProcessor {
     let reviewIteration = 0;
     let autoStash: AutoStash | null = null;
 
-    // Save current branch for restoration
-    let originalBranch = 'main';
-    try {
-      originalBranch = (await gitExec(projectPath, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
-    } catch {
-      // Fall back to main on failure
-    }
+    // Save current branch (for restoration)
+    const originalBranch = await currentBranch(projectPath);
 
     try {
       // git fetch + checkout PR branch
@@ -1120,18 +1143,10 @@ export class PRProcessor {
       const fetchStartedAt = new Date().toISOString();
 
       // Get PR reviews and comments
-      const { getPRReviews, getPRReviewComments, getPRComments } = await import('../github/github.js');
-      const reviews = await getPRReviews(pr.repo, pr.number);
       const prComments = await getPRComments(pr.repo, pr.number);
 
       // Find latest reviews per user (only consider latest review from each reviewer)
-      const latestReviews = new Map<string, typeof reviews[0]>();
-      for (const review of reviews) {
-        const existing = latestReviews.get(review.author);
-        if (!existing || new Date(review.createdAt) > new Date(existing.createdAt)) {
-          latestReviews.set(review.author, review);
-        }
-      }
+      const latestReviews = latestReviewPerAuthor(await getPRReviews(pr.repo, pr.number));
 
       // Check for active critical feedback in PR comments (from claude-review action)
       const lastReviewFeedbackProcessed = state.prs[key]?.lastReviewFeedbackProcessed;
@@ -1204,13 +1219,10 @@ export class PRProcessor {
       const feedbackSummary = feedbackLines.join('\n');
 
       // Get current PR context
-      const { getPRContext } = await import('../github/github.js');
       const details = await getPRContext(pr.repo, pr.number);
       if (!details) {
         console.log(`[PRProcessor] ${key}: Failed to get PR context for review iteration`);
-        state.prs[key].status = 'failed';
-        state.prs[key].iterations = totalIterations;
-        state.prs[key].lastError = `Failed to fetch PR context for ${key} (iteration ${reviewIteration})`;
+        failPR(state, key, `Failed to fetch PR context for ${key} (iteration ${reviewIteration})`, totalIterations);
         return;
       }
 
@@ -1268,9 +1280,7 @@ export class PRProcessor {
             'Manual intervention required.',
           ].join('\n')
         );
-        state.prs[key].status = 'failed';
-        state.prs[key].iterations = totalIterations;
-        state.prs[key].lastError = error;
+        failPR(state, key, error, totalIterations);
         return;
       }
 
@@ -1317,28 +1327,16 @@ export class PRProcessor {
       );
 
       // Update state
-      state.prs[key].status = 'failed';
-      state.prs[key].iterations = totalIterations;
-      state.prs[key].lastError = `Max review feedback iterations (${MAX_REVIEW_ITERATIONS}) reached`;
+      failPR(state, key, `Max review feedback iterations (${MAX_REVIEW_ITERATIONS}) reached`, totalIterations);
 
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[PRProcessor] ${key} review feedback error:`, errorMsg);
-      state.prs[key].status = 'failed';
-      state.prs[key].lastError = errorMsg;
+      failPR(state, key, errorMsg);
 
     } finally {
       // Restore branch
-      let restoredBranch = false;
-      try {
-        await gitExec(projectPath, 'checkout', originalBranch);
-        restoredBranch = true;
-      } catch (restoreErr) {
-        console.error(`[PRProcessor] Failed to restore branch ${originalBranch}:`, restoreErr);
-      }
-      if (restoredBranch) {
-        await restoreAutoStash(projectPath, autoStash);
-      }
+      await restoreWorkingTree(projectPath, originalBranch, autoStash);
     }
   }
 

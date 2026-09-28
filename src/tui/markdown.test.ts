@@ -33,4 +33,19 @@ describe('renderMarkdown (INT-1943)', () => {
     expect(out).not.toContain('\x1b]52');
     expect(out).not.toContain('\x1b[31m');
   });
+
+  // reflowText re-joins a paragraph's soft breaks and wraps it, but at a
+  // hard-coded 80 columns. On a narrower terminal every reflowed line was too
+  // wide, so Ink wrapped it again — one source line became two or more physical
+  // rows and the chat frame grew past the screen. (AGT-3458)
+  it('reflows prose to the requested width, not a fixed 80 columns', () => {
+    // eslint-disable-next-line no-control-regex
+    const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const out = strip(renderMarkdown('word '.repeat(100), 40));
+    const widest = Math.max(...out.split('\n').map((l) => l.length));
+    expect(widest).toBeLessThanOrEqual(40);
+
+    const wide = strip(renderMarkdown('word '.repeat(100), 120));
+    expect(Math.max(...wide.split('\n').map((l) => l.length))).toBeGreaterThan(40);
+  });
 });
