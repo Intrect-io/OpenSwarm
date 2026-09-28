@@ -213,10 +213,25 @@ export class SqliteTaskSource implements ITaskSource {
   constructor(private readonly store: IIssueStore, private readonly defaultProjectId = 'local') {}
 
   async fetchTasks(): Promise<TaskItem[]> {
-    const { issues } = this.store.listIssues({ status: ['todo', 'in_progress'], limit: 200, offset: 0 });
+    // Paginate rather than issuing one capped query. A fixed `limit: 200,
+    // offset: 0` silently dropped every eligible issue past the first 200 from
+    // the queue — the local source has no upstream fetch to make up the
+    // difference, so those tasks were simply never selected. Page until
+    // `total` is covered; the bound is a runaway guard, not a queue cap.
+    const pageSize = 200;
+    const collected: Issue[] = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const { issues, total } = this.store.listIssues({
+        status: ['todo', 'in_progress'],
+        limit: pageSize,
+        offset,
+      });
+      collected.push(...issues);
+      if (issues.length === 0 || collected.length >= total) break;
+    }
     // Enrich from canonical task state so planner-declared fileScope (plus
     // dependency/topoRank data) reaches the runner — mirrors the Linear path.
-    return issues.map((issue) => enrichTaskFromState(issueToTask(issue)));
+    return collected.map((issue) => enrichTaskFromState(issueToTask(issue)));
   }
   async lookupIssueState(issueId: string): Promise<TrackerIssueLookup> {
     const issue = this.store.getIssue(issueId);
