@@ -318,7 +318,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         case "process:spawn":
           fetchProcesses();
       fetchCoordination();
-          addLogLine({ taskId: ev.data.taskId || "system", stage: ev.data.stage || "spawn", line: "Process spawned PID=" + ev.data.pid + " stage=" + ev.data.stage + (ev.data.model ? " model=" + ev.data.model : "") });
+          const spawnLine = "Process spawned PID=" + ev.data.pid + " stage=" + ev.data.stage +
+            (ev.data.model ? " model=" + ev.data.model : "");
+          addLogLine({ taskId: ev.data.taskId || "system", stage: ev.data.stage || "spawn", line: spawnLine });
           break;
         case "process:exit":
           fetchProcesses();
@@ -420,7 +422,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             const priorityColor = issue.priority === 1 ? 'var(--red)' : issue.priority === 2 ? 'var(--amber)' : 'var(--dim)';
             html += '<div style="margin-bottom: 6px; padding: 4px; border-left: 2px solid ' + priorityColor + '; background: rgba(255, 170, 0, 0.05);">';
             const title = String(issue.title || '');
-            html += '<div style="color: var(--white); font-size:12px; margin-bottom: 2px;">' + escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '') + '</div>';
+            const issueTitle = escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '');
+            html += '<div style="color: var(--white); font-size:12px; margin-bottom: 2px;">' + issueTitle + '</div>';
             html += '<div style="color: var(--amber); font-size:11px;">' + escapeHtml(issue.reason) + '</div>';
             if (issue.project?.name) {
               html += '<div style="color: var(--dim); font-size:11px; margin-top: 2px;">📁 ' + escapeHtml(issue.project.name) + '</div>';
@@ -437,7 +440,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             const priorityColor = issue.priority === 1 ? 'var(--red)' : issue.priority === 2 ? 'var(--amber)' : 'var(--dim)';
             html += '<div style="margin-bottom: 6px; padding: 4px; border-left: 2px solid ' + priorityColor + '; background: rgba(255, 51, 51, 0.05);">';
             const title = String(issue.title || '');
-            html += '<div style="color: var(--white); font-size:12px; margin-bottom: 2px;">' + escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '') + '</div>';
+            const issueTitle = escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '');
+            html += '<div style="color: var(--white); font-size:12px; margin-bottom: 2px;">' + issueTitle + '</div>';
             html += '<div style="color: var(--red); font-size:11px;">' + escapeHtml(issue.reason) + '</div>';
             if (issue.project?.name) {
               html += '<div style="color: var(--dim); font-size:11px; margin-top: 2px;">📁 ' + escapeHtml(issue.project.name) + '</div>';
@@ -483,7 +487,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         html += '<div><span style="color: var(--dim);">Repos:</span> <span style="color: var(--text);">' + (data.repos?.length || 0) + '</span></div>';
 
         if (data.currentPR) {
-          html += '<div><span style="color: var(--amber);">Processing:</span> <span style="color: var(--text); font-family: var(--font-mono); font-size:12px;">' + escapeHtml(data.currentPR) + '</span></div>';
+          const prValue = '<span style="color: var(--text); font-family: var(--font-mono); font-size:12px;">' + escapeHtml(data.currentPR) + '</span>';
+          html += '<div><span style="color: var(--amber);">Processing:</span> ' + prValue + '</div>';
         }
 
         html += '<div><span style="color: var(--dim);">Last run:</span> <span style="color: var(--text);">' + formatTime(data.lastRun) + '</span></div>';
@@ -802,7 +807,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
                 "modules:" + s.totalModules + " tests:" + s.totalTestFiles +
                 " untested:" + s.untestedModules.length +
                 " churn:" + (s.avgChurnScore || 0).toFixed(2) +
-                (s.hotModules.length ? " hot:" + s.hotModules.slice(0,3).map(function(m){return m.split("/").pop()}).join(",") : "") +
+                (s.hotModules.length ? " hot:" + s.hotModules.slice(0,3).map(function(m){return escapeHtml(m.split("/").pop())}).join(",") : "") +
               "</div>"
             );
           }
@@ -943,10 +948,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       var parts = name.split("-");
       return parts[parts.length - 1];
     }
+    const TOKEN_MILLION = 1000000;
+    const TOKEN_THOUSAND = 1000;
     function fmtTokens(n) {
       if (n == null) return "";
-      if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
-      if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+      if (n >= TOKEN_MILLION) return (n / 1000000).toFixed(1) + "M";
+      if (n >= TOKEN_THOUSAND) return (n / 1000).toFixed(1) + "k";
       return String(n);
     }
     function buildStageDetails(r) {
@@ -969,7 +976,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
       if (r.summary) addLine("Summary", escapeHtml(r.summary));
       if (r.decision) {
-        const cls = "sd-decision-" + r.decision;
+        const cls = "sd-decision-" + safeCssClass(r.decision);
         addLine("Decision", "<span class=\\"" + cls + "\\">" + escapeHtml(r.decision.toUpperCase()) + "</span>");
       }
       if (r.feedback) addLine("Feedback", escapeHtml(r.feedback));
@@ -1046,7 +1053,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         // without having to expand.
         let inlineSummary = "";
         if (r.decision) {
-          const cls = "sd-decision-" + r.decision;
+          const cls = "sd-decision-" + safeCssClass(r.decision);
           inlineSummary = "<span class=\\"" + cls + "\\">" + escapeHtml(r.decision.toUpperCase()) + "</span>" +
             (r.feedback ? " · " + escapeHtml(r.feedback.slice(0, 80)) : "");
         } else if (r.summary) {
@@ -1303,6 +1310,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     }
     function escapeAttr(text) {
       return String(text || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    function safeCssClass(text) {
+      const cleaned = String(text || "").replace(/[^a-zA-Z0-9_-]/g, "_");
+      // Never emit an empty class token: "sd-decision-" + "" would produce a
+      // dangling selector prefix that can match unintended elements.
+      return cleaned.length > 0 ? cleaned : "_";
     }
     function escapeJsArgAttr(text) {
       return escapeAttr(JSON.stringify(String(text || "")));
@@ -1624,7 +1637,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             '<span class="proc-pid">' + lead + '</span>' +
             '<span class="proc-stage">' + escapeHtml(p.stage) + '</span>' +
             '<span class="proc-model">' + escapeHtml(modelStr) + '</span>' +
-            '<span style="color:var(--dim);font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeAttr(p.projectPath || "") + '">' + escapeHtml(projName) + '</span>' +
+            '<span class="proc-proj" title="' + escapeAttr(p.projectPath || "") + '">' + escapeHtml(projName) + '</span>' +
             '<span class="proc-activity">' + act + '</span>' +
             '<span class="proc-dur">' + dur + '</span>' +
             btn +
