@@ -128,8 +128,29 @@ async function fetchWithTimeout(
       if ([301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get('location');
         if (!location) throw new Error('Redirect response has no location');
-        await response.body?.cancel();
-        const next = new URL(location, current);
+        // Release the redirect body before the next hop so undici does not keep
+        // the prior socket/buffer alive across a chain of Location responses.
+        if (response.body) {
+          try {
+            await response.body.cancel();
+          } catch {
+            // A body that cannot be cancelled (already locked/consumed) must not
+            // abort the hop; draining it releases the socket the same way.
+            await response.arrayBuffer().catch(() => undefined);
+          }
+        }
+        let next: URL;
+        try {
+          next = new URL(location, current);
+        } catch {
+          throw new Error(`Invalid redirect location: ${location}`);
+        }
+        // Validate the hop before following: only http(s) destinations are
+        // eligible (publicFetch would also reject, but fail closed here so a
+        // credentialed request never even attempts a file:/javascript: target).
+        if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+          throw new Error(`Refusing redirect to non-http(s) URL (${next.protocol})`);
+        }
         if (carriesSensitiveRequestData && next.origin !== initialOrigin) {
           throw new Error('Refusing to forward credentials or request body across origins');
         }
