@@ -12,6 +12,14 @@ import type { ReviewResult, WorkerResult } from '../agents/agentPair.js';
 import type { ProcessContext } from '../adapters/types.js';
 import type { ITaskSource } from '../automation/taskSource.js';
 import { startReviewProgress } from './reviewProgress.js';
+import { PUBLICATION_REVIEW_STAGE } from '../automation/publicationReviewBudget.js';
+import {
+  getReviewVerdictStore,
+  cliReviewKey,
+  lookupStoredReview,
+  recordStoredVerdict,
+  type ReviewVerdictStoreLike,
+} from '../automation/reviewVerdictStore.js';
 import {
   captureReviewFileHashes,
   dedupeReviewActions,
@@ -492,6 +500,15 @@ export async function runReviewCommand(
     startProgress?: () => { note: (line: string) => void; stop: () => void } | null;
     /** Current git branch (default: `git rev-parse --abbrev-ref HEAD`). For --issues inference. */
     getBranch?: (cwd: string) => Promise<string>;
+    /**
+     * Durable memory of reviews this deployment already paid for.
+     *
+     * Defaults to the lazily-opened store at the automation database, so the
+     * plain CLI path reuses without any caller wiring it. Injectable because a
+     * test that asserts which reviewer options were built must be able to say
+     * "there is no cache here" rather than depend on what previous tests wrote.
+     */
+    verdictStore?: ReviewVerdictStoreLike;
   } = {},
 ): Promise<ReviewResult | null> {
   const cwd = opts.path ?? process.cwd();
@@ -562,23 +579,71 @@ export async function runReviewCommand(
   // Live "still working" feedback so a multi-second review doesn't look frozen.
   // On a TTY, a spinner heartbeat; otherwise each tool line is printed. (INT-1963)
   const startProgress = deps.startProgress ?? (() => (process.stderr.isTTY ? startReviewProgress() : null));
-  const progress = startProgress();
-  const onLog = (line: string) => {
-    if (progress) progress.note(line);
-    else log(`  · ${line}`);
-  };
 
   let result: ReviewResult;
-  try {
-    result = await review(buildReviewWorkerResult(changed), cwd, onLog, history.context);
-  } finally {
-    progress?.stop();
+  // Same-content reuse for the CLI path. `openswarm review` run twice over an
+  // identical tree is a re-review of a diff whose verdict this deployment
+  // already has: measured over the recorded history, 8 of the 15 same-mode
+  // repeats are direct→direct, and they never pass through the publication hook
+  // at all.
+  //
+  // Keyed on (kind, base, digest) and never on the path alone: the same tree
+  // diffed against a different base, or reviewed as a PR rather than directly,
+  // is a different review with a different prompt, and 15 of the 53 cross-mode
+  // repeats in that history flipped their verdict.
+  // Only the plain CLI path reuses.
+  //
+  // `prProcessor.freshReview` also runs through this function (prProcessor.ts:444),
+  // but it is a different review of the same kind of tree: it diffs against the
+  // PR's merge-base, reviews a scratch checkout, and overrides the history
+  // plumbing because its history is read from the real repository while its
+  // hashes come from that worktree. Filing it here as 'direct' is exactly the
+  // cross-mode conflation that flipped 15 of 53 verdicts, so it is excluded by
+  // the stage it tags its calls with — set for every publication review by
+  // publicationReviewBudget.ts:47 and by no other caller of this function.
+  //
+  // That path is covered one level up instead, by the publication-level key in
+  // publicationReviewHook.ts, which names the PR and the commit it reviewed.
+  const verdictKey = opts.processContext?.stage === PUBLICATION_REVIEW_STAGE
+    ? undefined
+    : cliReviewKey({
+      kind: 'direct',
+      base: opts.base,
+      files: changed,
+      contentHashes: history.currentHashes,
+    });
+  // Resolved only when there is a key to look up. Opening the deployment
+  // database is not free (a synchronous open, a WAL negotiation) and the
+  // publication path above never reuses here, so it must not pay for it.
+  const verdictStore = verdictKey ? deps.verdictStore ?? getReviewVerdictStore() : undefined;
+  const storedVerdict = lookupStoredReview(verdictStore, verdictKey);
+  if (storedVerdict) {
+    result = storedVerdict;
+    log(`Reusing the recorded verdict for this exact content (${changed.length} unchanged file(s)) — no reviewer call made.`);
+  } else {
+    const progress = startProgress();
+    const onLog = (line: string) => {
+      if (progress) progress.note(line);
+      else log(`  · ${line}`);
+    };
+
+    try {
+      result = await review(buildReviewWorkerResult(changed), cwd, onLog, history.context);
+    } finally {
+      progress?.stop();
+    }
   }
 
   // The advisor is a SECOND model asked only what this review missed. It runs
   // before dedupe so its findings are deduped against history like any other,
   // and its decision can only tighten the gate (see reviewAdvisor.ts). A
   // disabled / unresolvable advisor returns undefined here and costs nothing.
+  //
+  // It still runs over a reused verdict, deliberately. The advisor only tightens
+  // (`approve` → `revise`/`reject`), so skipping it on reuse would be the one way
+  // this cache could fail OPEN — a reused approval that a live run would have
+  // escalated. What the reuse removes is the reviewer call, which is the p50-93s,
+  // ~$0.26 one; the advisor is the cheap pass and keeps its veto.
   const advisorConfig = opts.advisor;
   if (advisorConfig) {
     const { runReviewAdvisor } = await import('../agents/reviewAdvisor.js');
@@ -643,6 +708,17 @@ export async function runReviewCommand(
   ).catch((error) => {
     log(`Could not save review history: ${error instanceof Error ? error.message : String(error)}`);
   });
+
+  // Recorded where the history record is written, so the durable verdict and the
+  // history entry describe the same outcome: this is the result after the
+  // advisor and after dedupe, which is what a later run of the same content
+  // should be handed back.
+  //
+  // Not re-recorded on a reuse. `created_at` is the age of the decision, and
+  // refreshing it would extend the TTL for as long as someone keeps re-running
+  // the same tree — the staleness bound exists for the world AROUND the row
+  // (prompt, model, base ref) and re-reading the row re-verifies none of that.
+  if (!storedVerdict) recordStoredVerdict(verdictStore, verdictKey, result);
 
   const followups = result.recommendedActions?.length ?? 0;
   // Post-verdict side-effects must not change the exit code: a verdict exists,
