@@ -3,6 +3,7 @@ import {
   filterSourceFiles,
   preferSrcRoot,
   partitionIntoAreas,
+  planAuditAreas,
   balanceAreasToConcurrency,
   aggregateAuditResults,
   formatAuditReport,
@@ -416,6 +417,9 @@ describe('mergeFallback (INT-2192)', () => {
 });
 
 describe('balanceAreasToConcurrency (INT-2249)', () => {
+  // The FIX-path distributor (fixCommand.ts deriveFixAreas): more areas there
+  // only means more parallel fix workers. The audit's units of judgement come
+  // from planAuditAreas above. (INT-2249)
   // Two dirs, 5 files each — the plain partition gives 2 areas.
   const files = [
     ...Array.from({ length: 5 }, (_, i) => `src/a/f${i}.ts`),
@@ -443,6 +447,52 @@ describe('balanceAreasToConcurrency (INT-2249)', () => {
 
   it('concurrency <= 1 returns the plain partition', () => {
     expect(balanceAreasToConcurrency(files, 1, 12)).toHaveLength(2);
+  });
+});
+
+// No deps-injectable command entry exists (`runReviewMaxCommand` spawns real
+// subagents), so this is the planner-plus-`runMaxReview` seam; the command's own
+// wiring is covered by reviewMaxCommand.test.ts.
+describe('planAuditAreas + runMaxReview verdict seam (INT-2249)', () => {
+  // 20 files in ONE directory: cap 12 → 2 areas, cap 2 → 10 areas.
+  const bigDir = Array.from({ length: 20 }, (_, i) => `src/big/f${String(i).padStart(2, '0')}.ts`);
+  // Bundle-blind reviewer: judges only the pile it is handed, approving a coarse
+  // bundle and flagging a fine one. That is the mechanism that made the verdict a
+  // function of --concurrency — same files, same reviewer, different units.
+  const bundleBlind = async (area: AuditArea): Promise<ReviewResult> => ({
+    decision: area.files.length <= 2 ? 'reject' : 'approve',
+    feedback: '',
+    issues: area.files.length <= 2 ? [`${area.label} is too fine-grained a bundle to approve`] : [],
+  });
+
+  it('partitions from maxFilesPerArea alone', () => {
+    expect(planAuditAreas(bigDir, 12)).toEqual(partitionIntoAreas(bigDir, 12));
+    expect(planAuditAreas(bigDir, 12).map((a) => a.label)).toEqual(['src/big (1/2)', 'src/big (2/2)']);
+    // The fine fan-out the old concurrency-8 path fabricated is still available —
+    // deterministically, from the cap, which is the knob that owns granularity.
+    expect(planAuditAreas(bigDir, 2)).toHaveLength(10);
+  });
+
+  it('feeds concurrency 1 and 8 the same area labels, and both aggregate to the same verdict', async () => {
+    const areas = planAuditAreas(bigDir, 12);
+    const at = (concurrency: number) => runMaxReview(areas, '/repo', { concurrency }, { review: bundleBlind });
+
+    const one = await at(1);
+    const eight = await at(8);
+
+    expect(one.summary.totalAreas).toBe(2);
+    expect(one.summary.decision).toBe('approve');
+    expect(eight.summary.decision).toBe(one.summary.decision);
+    expect(eight.results.map((r) => r.area.label)).toEqual(one.results.map((r) => r.area.label));
+
+    // The divergence must be reachable, or the assertions above hold vacuously:
+    // the old concurrency-driven split hands the SAME reviewer 10 two-file areas
+    // and worst-wins aggregation turns them into the opposite verdict.
+    const legacy = balanceAreasToConcurrency(bigDir, 8, 12);
+    const counterfactual = await runMaxReview(legacy, '/repo', { concurrency: 8 }, { review: bundleBlind });
+    expect(legacy).toHaveLength(10);
+    expect(counterfactual.summary.decision).toBe('reject');
+    expect(counterfactual.summary.decision).not.toBe(one.summary.decision);
   });
 });
 

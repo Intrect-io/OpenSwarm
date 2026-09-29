@@ -348,7 +348,7 @@ program
   // --max: full-codebase multi-agent audit (INT-2006)
   .option('--max', 'Audit the whole codebase: fan reviewer subagents out over directory-shaped areas')
   .option('--concurrency <n>', 'Max reviewer subagents in flight for --max (default 4)', parsePositiveIntegerOption)
-  .option('--max-files-per-area <n>', 'Files per area before chunking, for --max (default 12)', parsePositiveIntegerOption)
+  .option('--max-files-per-area <n>', 'Files per area before chunking, for --max (default 12). Lower values give a finer-grained audit fan-out and more parallel reviewers; the area partition depends only on this value, never on --concurrency', parsePositiveIntegerOption)
   .option('--yes', 'Skip the --max cost-confirmation prompt')
   .option('--dry-run', 'For --max: print the area partition plan and exit (no subagents)')
   .option('--out <file>', 'For --max: write the markdown report here (default .openswarm/audit/audit-<ts>.md)')
