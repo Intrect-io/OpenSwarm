@@ -23,6 +23,7 @@ import type { VerifyEvidence } from '../verify/runner.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { withFileLockSync } from '../support/fileLock.js';
 import {
+  PROCESS_STARTED_AT_MS,
   isProofCapableSpace,
   processAppearsAlive,
   processNamespaceId,
@@ -652,15 +653,50 @@ export interface DecompositionEntry {
   createdAt: string; // ISO-8601
 }
 
+/**
+ * Slots promised to one in-flight decomposition, kept in the state file so a
+ * *second process* sees them.
+ *
+ * Deliberately a separate field from `dailyCreationCount`, not folded into it:
+ * `registerDecomposition` charges that count for children that actually exist,
+ * so a hold added there would persist as real spending on every successful
+ * decomposition and a restart would read the inflation as truth for the rest of
+ * the day.
+ */
+export interface DecompositionReservation {
+  /** Process holding the slots. */
+  pid: number;
+  /** Pid space the holder lives in; absent or unknown cannot be proven dead. */
+  ns?: string | null;
+  /** Identity of the holder within its process, so one process can hold twice. */
+  holderId: string;
+  count: number;
+  at: string;
+}
+
 export interface DecompositionState {
   decompositions: Record<string, DecompositionEntry>;
   dailyCreationCount: number;
   dailyCreationDate: string; // YYYY-MM-DD
+  /** In-flight holds, keyed by holder id. Absent on state files from before AGT-3468. */
+  reservations?: Record<string, DecompositionReservation>;
   updatedAt: string;
 }
 
 // In-memory cache
 let decompositionState: DecompositionState | null = null;
+
+/**
+ * Identity of this process's holds within the state file. A pid alone is not
+ * enough: a pid can be reused after a restart, and one process can hold several
+ * reservations at once.
+ */
+const reservationToken = randomUUID();
+
+function persistDecompositionState(state: DecompositionState): void {
+  ensureParentDir(DECOMPOSITION_STATE_FILE);
+  atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
+}
 
 function ensureDecompositionStateLoaded(): DecompositionState {
   if (decompositionState !== null) return decompositionState;
@@ -706,10 +742,26 @@ export function getChildrenCount(issueId: string): number {
 }
 
 /**
- * Reset daily counter if date has changed (handles long-running service).
- * ensureDecompositionStateLoaded only checks date on initial disk load;
- * this function ensures the counter resets even when using the in-memory cache.
+ * Zero the counter for a new day and persist it. Lock-free: callers already
+ * hold the decomposition lock (`resetDailyCounterIfNeeded` for the public path,
+ * `reserveDailyCreations` for the reservation transaction), and the lock is not
+ * reentrant.
  */
+function rolloverDailyCounter(state: DecompositionState): void {
+  const today = new Date().toLocaleDateString('en-CA');
+  if (state.dailyCreationDate === today) return;
+  console.log(`[DecompositionState] Daily counter reset: ${state.dailyCreationCount} → 0 (date: ${state.dailyCreationDate} → ${today})`);
+  state.dailyCreationCount = 0;
+  state.dailyCreationDate = today;
+  state.updatedAt = new Date().toISOString();
+  try {
+    ensureParentDir(DECOMPOSITION_STATE_FILE);
+    atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.warn('[DecompositionState] Failed to persist daily reset:', err);
+  }
+}
+
 function resetDailyCounterIfNeeded(): void {
   const today = new Date().toLocaleDateString('en-CA');
   // Fast path: this runs on every canCreateMoreIssues call, and no lock is
@@ -719,18 +771,7 @@ function resetDailyCounterIfNeeded(): void {
   if (ensureDecompositionStateLoaded().dailyCreationDate === today) return;
   withFileLockSync(`${DECOMPOSITION_STATE_FILE}.lock`, () => {
     decompositionState = null;
-    const state = ensureDecompositionStateLoaded();
-    if (state.dailyCreationDate === today) return;
-    console.log(`[DecompositionState] Daily counter reset: ${state.dailyCreationCount} → 0 (date: ${state.dailyCreationDate} → ${today})`);
-    state.dailyCreationCount = 0;
-    state.dailyCreationDate = today;
-    state.updatedAt = new Date().toISOString();
-    try {
-      ensureParentDir(DECOMPOSITION_STATE_FILE);
-      atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
-    } catch (err) {
-      console.warn('[DecompositionState] Failed to persist daily reset:', err);
-    }
+    rolloverDailyCounter(ensureDecompositionStateLoaded());
   }, { timeoutMs: 10_000 });
 }
 
@@ -745,14 +786,64 @@ export function canCreateMoreIssues(dailyLimit: number): boolean {
 }
 
 /**
- * Slots promised to in-flight decompositions but not yet created.
+ * Slots promised to in-flight decompositions but not yet created, held in the
+ * shared state file so a *second process* is refused too.
  *
- * Deliberately outside the persisted state: `registerDecomposition` writes that
- * state to disk, so folding a hold into it would persist an inflated count on
- * every successful decomposition and a restart would read the inflation as real
- * spending for the rest of the day.
+ * A process-local counter only serialized callers inside one process. Two
+ * runners — the daemon and a CLI `openswarm run`, or two containers sharing a
+ * state directory — each read the same pre-creation count, both passed the cap
+ * check, both created external children, and the day overshot with no way to
+ * undo the issues already in the tracker. (AGT-3468)
+ *
+ * Holds are summed across holders, so two callers *inside* one process are two
+ * separate promises and both are charged — the same shape the in-process counter
+ * had.
  */
-let heldDailyCreations = 0;
+function heldSlots(state: DecompositionState): number {
+  return Object.values(state.reservations ?? {}).reduce((total, hold) => total + hold.count, 0);
+}
+
+/**
+ * Drop reservations whose holder is provably gone, so a crash mid-decomposition
+ * does not hold slots for the rest of the day.
+ *
+ * Reclaim needs the holder to be in OUR pid space (`isProofCapableSpace` +
+ * `sameProcessNamespace`), or its pid means nothing here. A hold from another
+ * machine — or one recorded without a namespace — is left alone: freeing a live
+ * remote owner's slots would let this process overshoot the cap its peer is
+ * still working against.
+ *
+ * Two shapes of dead holder are reclaimed:
+ *  - a pid that no longer exists, and
+ *  - a hold written before this process started but carrying OUR pid — the
+ *    pid-reuse case a container's deterministic numbering produces, where a
+ *    restarted daemon inherits its predecessor's pid and the plain liveness
+ *    probe answers "alive" against the wrong generation.
+ *
+ * A hold from a *live sibling* in this process is deliberately kept: it is a
+ * promise this process still owes, not a leak.
+ */
+function pruneDeadReservations(state: DecompositionState): boolean {
+  if (!state.reservations) return false;
+  const own = `${process.pid}:${reservationToken}`;
+  let dropped = false;
+  for (const [holderId, hold] of Object.entries(state.reservations)) {
+    if (holderId === own) continue;
+    if (!isProofCapableSpace(hold.ns ?? undefined) || !sameProcessNamespace(hold.ns ?? undefined)) continue;
+    const priorGeneration = hold.pid === process.pid
+      && Date.parse(hold.at) < PROCESS_STARTED_AT_MS - 1_000;
+    if (priorGeneration || !processAppearsAlive(hold.pid)) {
+      delete state.reservations[holderId];
+      dropped = true;
+    }
+  }
+  return dropped;
+}
+
+/** This process's own hold, which its releases draw down. */
+function ownReservation(state: DecompositionState): DecompositionReservation | undefined {
+  return state.reservations?.[`${process.pid}:${reservationToken}`];
+}
 
 /**
  * Claim `count` slots of today's creation budget in one synchronous step, or
@@ -764,17 +855,46 @@ let heldDailyCreations = 0;
  * reads the same pre-creation count in that window and both overshoot the cap.
  * (AGT-4122)
  *
- * Holds live only in this process. A crash drops them, which is the safe
- * direction — the durable count then reflects exactly what was created.
+ * The read-decide-write runs under the runner-state lock, so the two callers may
+ * be separate processes and still cannot both pass. A hold is never added to
+ * `dailyCreationCount`; `registerDecomposition` charges that for children that
+ * actually exist.
  *
  * Every granted reservation must be released with `releaseDailyReservation`.
  */
 export function reserveDailyCreations(count: number, dailyLimit: number): boolean {
-  resetDailyCounterIfNeeded();
-  const state = ensureDecompositionStateLoaded();
-  if (state.dailyCreationCount + heldDailyCreations + count > dailyLimit) return false;
-  heldDailyCreations += count;
-  return true;
+  if (!Number.isInteger(count) || count <= 0 || !Number.isInteger(dailyLimit)) return false;
+  try {
+    return withRunnerStateLock(DECOMPOSITION_STATE_FILE, () => {
+      // Re-read under the lock: another process may have reserved since our last
+      // load, and the cache would answer with pre-hold numbers.
+      decompositionState = null;
+      const state = ensureDecompositionStateLoaded();
+      state.reservations ??= {};
+      const pruned = pruneDeadReservations(state);
+      rolloverDailyCounter(state);
+      if (state.dailyCreationCount + heldSlots(state) + count > dailyLimit) {
+        if (pruned) persistDecompositionState(state);
+        return false;
+      }
+      const holderId = `${process.pid}:${reservationToken}`;
+      const mine = ownReservation(state);
+      state.reservations[holderId] = {
+        pid: process.pid,
+        ns: processNamespaceId() ?? null,
+        holderId,
+        count: (mine?.count ?? 0) + count,
+        at: new Date().toISOString(),
+      };
+      persistDecompositionState(state);
+      return true;
+    });
+  } catch (error) {
+    // Failing closed is the safe direction: no reservation means the caller
+    // refuses rather than creating children against a budget it could not claim.
+    console.warn('[DecompositionState] Reservation failed:', error);
+    return false;
+  }
 }
 
 /**
@@ -783,12 +903,28 @@ export function reserveDailyCreations(count: number, dailyLimit: number): boolea
  * the outcome — including when the decomposition failed and created nothing.
  */
 export function releaseDailyReservation(count: number): void {
-  heldDailyCreations = Math.max(0, heldDailyCreations - count);
+  if (count <= 0) return;
+  try {
+    withRunnerStateLock(DECOMPOSITION_STATE_FILE, () => {
+      decompositionState = null;
+      const state = ensureDecompositionStateLoaded();
+      const mine = ownReservation(state);
+      if (!mine) return;
+      const remaining = mine.count - count;
+      if (remaining > 0) mine.count = remaining;
+      else delete state.reservations![mine.holderId];
+      persistDecompositionState(state);
+    });
+  } catch (error) {
+    // Worst case the slots stay held until the holder is provably gone, which
+    // under-spends rather than overshooting the cap.
+    console.warn('[DecompositionState] Reservation release failed:', error);
+  }
 }
 
 /** Slots currently promised to in-flight decompositions. Test seam. */
 export function getHeldDailyCreations(): number {
-  return heldDailyCreations;
+  return heldSlots(ensureDecompositionStateLoaded());
 }
 
 export function registerDecomposition(
@@ -799,6 +935,9 @@ export function registerDecomposition(
   // Date rollover first, and outside the lock: resetDailyCounterIfNeeded takes
   // the same lock and withFileLockSync is not reentrant.
   resetDailyCounterIfNeeded();
+  // Both lock helpers contend on `${DECOMPOSITION_STATE_FILE}.lock`, so this
+  // still serializes against `reserveDailyCreations`. Reloading under the lock
+  // keeps every peer's reservation in the snapshot this write persists.
   withFileLockSync(`${DECOMPOSITION_STATE_FILE}.lock`, () => {
     // Reload under the lock: concurrent decompositions in sibling processes would
     // otherwise each write a snapshot missing the other's child links and daily
@@ -850,12 +989,7 @@ export function registerDecomposition(
     state.dailyCreationCount += newlyRegistered;
     state.updatedAt = new Date().toISOString();
 
-    try {
-      ensureParentDir(DECOMPOSITION_STATE_FILE);
-      atomicWriteFileSync(DECOMPOSITION_STATE_FILE, JSON.stringify(state, null, 2));
-    } catch (err) {
-      console.warn('[DecompositionState] Failed to save:', err);
-    }
+    persistDecompositionState(state);
   }, { timeoutMs: 10_000 });
 }
 

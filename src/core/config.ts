@@ -130,6 +130,17 @@ const RoleConfigSchema = z.object({
   escalateAfterIteration: z.number().min(1).optional(),
   /** Max agentic turns per CLI invocation; 0 = no ceiling (the default for worker/tester since AGT-4388) */
   maxTurns: z.number().int().min(0).optional(),
+  /**
+   * Declarative subagent tool scoping. `allow` can only NARROW the role's
+   * default tool set (never grant one it did not have), `deny` is applied after
+   * `allow`, so a typo cannot widen a sandbox and `deny` cannot be undone.
+   */
+  tools: z.object({
+    allow: z.array(z.string().min(1)).optional(),
+    deny: z.array(z.string().min(1)).optional(),
+  }).optional(),
+  /** Reasoning effort for this role's native-loop adapter. */
+  effort: z.enum(['low', 'medium', 'high']).optional(),
   /** Adaptive worker fan-out gate and candidate execution. */
   fanout: z.object({
     enabled: z.boolean().optional(),
@@ -176,6 +187,30 @@ const DefaultRolesConfigSchema = z.object({
     model: 'openai/gpt-5',
     timeoutMs: 0,
   }),
+  // Advisor = the missed-defect net beside the reviewer, DISABLED by default
+  // because it is a second paid call on every review.
+  //
+  // Its model must come from a DIFFERENT family than the reviewer's. The
+  // shipped reviewer is `deepseek/deepseek-v4-flash`; an advisor resolving to
+  // that same id is a second identical opinion, not a second opinion — it would
+  // re-derive the reviewer's blind spots from the same weights. modelCompat.ts
+  // documents the identical trap for `escalate` ("a tier that resolves to the
+  // same model as the tier it escalates FROM is a log line claiming work that
+  // did not happen"). z-ai/glm-5.2 is the fastest family-independent candidate
+  // that scored 100% detect on the planted-defect fixtures (18/18, 6% false
+  // reject, 6s avg) — measured against deepseek/deepseek-v4-flash's 18/18, 0%,
+  // 36s.
+  //
+  // timeoutMs is 45_000 rather than the worker/reviewer 0 (unlimited): those
+  // two are floored by stageTimeoutMs' per-stage ceilings, while the advisor is
+  // one bounded single-turn call with no ceiling machinery behind it, so 0 here
+  // would mean a hung read-only call with nothing to reclaim it. This is the
+  // same 45s ceiling guardArbiter.ts uses for the same shape of call.
+  advisor: RoleConfigSchema.default({
+    enabled: false,
+    model: 'z-ai/glm-5.2',
+    timeoutMs: 45_000,
+  }),
   tester: RoleConfigSchema.optional(),
   documenter: RoleConfigSchema.optional(),
   auditor: RoleConfigSchema.optional(),
@@ -186,6 +221,7 @@ const DefaultRolesConfigSchema = z.object({
 const ProjectRolesOverrideSchema = z.object({
   worker: RoleConfigSchema.partial().optional(),
   reviewer: RoleConfigSchema.partial().optional(),
+  advisor: RoleConfigSchema.partial().optional(),
   tester: RoleConfigSchema.partial().optional(),
   documenter: RoleConfigSchema.partial().optional(),
   auditor: RoleConfigSchema.partial().optional(),

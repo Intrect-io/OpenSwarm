@@ -348,7 +348,7 @@ program
   // --max: full-codebase multi-agent audit (INT-2006)
   .option('--max', 'Audit the whole codebase: fan reviewer subagents out over directory-shaped areas')
   .option('--concurrency <n>', 'Max reviewer subagents in flight for --max (default 4)', parsePositiveIntegerOption)
-  .option('--max-files-per-area <n>', 'Files per area before chunking, for --max (default 12)', parsePositiveIntegerOption)
+  .option('--max-files-per-area <n>', 'Files per area before chunking, for --max (default 12). Lower values give a finer-grained audit fan-out and more parallel reviewers; the area partition depends only on this value, never on --concurrency', parsePositiveIntegerOption)
   .option('--yes', 'Skip the --max cost-confirmation prompt')
   .option('--dry-run', 'For --max: print the area partition plan and exit (no subagents)')
   .option('--out <file>', 'For --max: write the markdown report here (default .openswarm/audit/audit-<ts>.md)')
@@ -392,6 +392,8 @@ program
         return;
       }
       if (opts.max) {
+        const { resolveAdvisorRole } = await import('./cli/advisorRole.js');
+        const advisor = await resolveAdvisorRole();
         const { runReviewMaxCommand, reviewMaxResultFailed } = await import('./cli/reviewMaxCommand.js');
         const result = await runReviewMaxCommand({
           path: opts.path,
@@ -417,6 +419,7 @@ program
           learn: opts.learn,
           securityAudit: opts.securityAudit,
           harnessOnly: opts.harnessOnly,
+          advisor,
         });
         // Exit contract (INT-3100): 2 = the gate did not run at all (no area
         // reviewed — quota/infra), 1 = it ran and failed. CI reads only this.
@@ -425,8 +428,9 @@ program
         else if (reviewMaxResultFailed(result, !!opts.fix)) process.exitCode = 1;
         return;
       }
+      const { resolveAdvisorRole } = await import('./cli/advisorRole.js');
       const { runReviewCommand } = await import('./cli/reviewCommand.js');
-      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, model: opts.model, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly, maxTurns: opts.maxTurns, timeoutMs: opts.timeout });
+      const result = await runReviewCommand({ path: opts.path, base: opts.base, fileIssue: opts.issues ?? opts.file, adapter: opts.adapter, model: opts.model, debug: opts.debug, json: opts.json, sarif: opts.sarif, readOnly: opts.readOnly, maxTurns: opts.maxTurns, timeoutMs: opts.timeout, advisor: await resolveAdvisorRole() });
       if (result && result.decision === 'reject') process.exitCode = 1;
     } catch (e) {
       // A throw means no verdict was produced — the gate did NOT run. Exit 2,

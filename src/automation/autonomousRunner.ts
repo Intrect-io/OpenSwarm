@@ -1729,6 +1729,14 @@ export class AutonomousRunner {
 
     for (const run of this.durableRuns.listRuns(['NEEDS_RECONCILE'])) {
       if (this.stopping) return;
+      // One row's failure must not take the heartbeat with it. This loop runs
+      // inside `heartbeat()`'s try, with no per-row catch, so a throw here
+      // aborts the ENTIRE cycle before any task is selected — which is how the
+      // AGT-4518 dedupe collision produced `[HB] ✗ Heartbeat error: Outbox
+      // dedupe key collision` and stopped all work, not just that row. The
+      // throw itself is fixed, but the blast radius was the real defect: park
+      // this row, log it, and keep reconciling the others.
+      try {
       // A task may legitimately be absent: the fetch asks only for Todo /
       // In Progress / In Review / Backlog, so an issue that reached Done is
       // structurally invisible here. That makes absence ambiguous for the
@@ -1849,6 +1857,10 @@ export class AutonomousRunner {
       }
       if (this.durableRuns.markReady(run.issueId)) {
         console.log(`[Reconciler] ${recovery.state === 'missing' ? 'Reopening branch' : 'Resuming worktree'} for ${run.identifier ?? run.issueId}`);
+      }
+      } catch (error) { // cxt-ignore: error_swallow — one row's failure stays this row's; the rest of the sweep and the rest of the heartbeat continue
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error(`[Reconciler] Reconciliation failed for ${run.identifier ?? run.issueId}; keeping NEEDS_RECONCILE:`, detail);
       }
     }
     await this.drainDurableOutbox();

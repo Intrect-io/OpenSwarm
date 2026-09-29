@@ -233,14 +233,34 @@ export function partitionIntoAreas(files: string[], maxFilesPerArea = 12): Audit
 }
 
 /**
- * Partition, then shrink the per-area cap until the fan-out can saturate the
- * reviewer pool. The plain directory partition can yield far fewer areas than
- * `concurrency` (e.g. two dirs, concurrency 8 → 2 subagents, 6 idle), so when
- * we're under the pool size we re-partition with a smaller cap — more, smaller
- * areas finish sooner in parallel. Monotonic (smaller cap ⇒ ≥ areas), so it
+ * The audit's units of judgement: the plain directory partition, cut by
+ * `maxFilesPerArea` and NOTHING else. `--concurrency` is a resource knob — how
+ * many reviewers run at once — and re-partitioning by it made the verdict a
+ * function of that knob: a smaller cap yields more, finer areas, and with
+ * worst-wins aggregation (`aggregateAuditResults`) a finer split can only turn
+ * an approve into a revise/reject. The same files and the same reviewer must
+ * yield the same verdict at any concurrency. An operator who wants the finer,
+ * more parallel fan-out asks for it deterministically with
+ * `--max-files-per-area <n>`. (INT-2249)
+ *
+ * The `--fix` path wants the opposite — more areas there just means more
+ * parallel fix workers, with no verdict involved — and uses
+ * `balanceAreasToConcurrency` instead. Pure.
+ */
+export function planAuditAreas(files: string[], maxFilesPerArea = 12): AuditArea[] {
+  return partitionIntoAreas(files, maxFilesPerArea);
+}
+
+/**
+ * The FIX-path distributor: partition, then shrink the per-area cap until the
+ * fan-out can saturate the worker pool (INT-2249: two dirs at concurrency 8 ran
+ * only 2 fix workers and left 6 idle). Monotonic (smaller cap ⇒ ≥ areas), so it
  * converges; it stops as soon as areas ≥ concurrency or the cap bottoms out at
  * one file per area. No-op when the directory partition already fills the pool.
- * (INT-2249)
+ *
+ * Sized to fill the pool, so MUST NOT be used to choose the audit's units of
+ * judgement — that coupling is exactly what made `--concurrency` decide the
+ * audit's verdict; the audit uses `planAuditAreas`. (INT-2249)
  */
 export function balanceAreasToConcurrency(
   files: string[],
@@ -504,6 +524,11 @@ export interface RunMaxReviewOptions {
   signal?: AbortSignal;
   /** Repository-local prior review log context, keyed by deterministic area label. */
   priorReviewContextByArea?: Readonly<Record<string, string>>;
+  /**
+   * Resolved `advisor` role, when it is enabled. Absent means the pass does not
+   * run at all, so a disabled advisor adds no call and no latency here.
+   */
+  advisor?: { model?: string; timeoutMs?: number };
 }
 
 export interface RunMaxReviewDeps {
@@ -580,7 +605,26 @@ async function defaultReviewArea(
   onLog: (line: string) => void,
 ): Promise<ReviewResult> {
   const { runReviewer } = await import('../agents/reviewer.js');
-  return runReviewer(buildAuditReviewerOptions(area, cwd, opts, onLog));
+  const review = await runReviewer(buildAuditReviewerOptions(area, cwd, opts, onLog));
+  // Per AREA, not once on the aggregate: the advisor's job is to find defects in
+  // the code it can inspect, and an aggregate pass would have to re-read every
+  // area's files in one call. `opts.advisor` is undefined unless the caller
+  // resolved the role, so a disabled advisor costs nothing here.
+  if (!opts.advisor) return review;
+  const { runReviewAdvisor } = await import('../agents/reviewAdvisor.js');
+  const advisement = await runReviewAdvisor({
+    projectPath: cwd,
+    diff: undefined, // an audit has no diff — the advisor reads the files themselves
+    changeSummary: `- **Files under audit (${area.files.length}):** ${area.files.join(', ')}`,
+    reviewer: review,
+    model: opts.advisor.model,
+    timeoutMs: opts.advisor.timeoutMs,
+    signal: opts.signal,
+  });
+  if (advisement.ran && advisement.disagreement) {
+    onLog(`advisor: ${advisement.disagreement}`);
+  }
+  return advisement.result;
 }
 
 /**

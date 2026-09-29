@@ -15,7 +15,7 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname, basename } from 'node:path';
 import {
   listSourceFiles,
-  balanceAreasToConcurrency,
+  planAuditAreas,
   runMaxReview,
   aggregateAuditResults,
   formatAuditSummary,
@@ -28,6 +28,7 @@ import {
   type AuditRun,
   type AuditSummary,
 } from './reviewAudit.js';
+import type { AdvisorRole } from './advisorRole.js';
 import {
   runFixVerifyLoop,
   fixTargets,
@@ -132,6 +133,8 @@ export interface ReviewMaxOptions {
    * (static scan + isolated verify commands). (M0 / PLATFORM_ROADMAP)
    */
   harnessOnly?: boolean;
+  /** Resolved `advisor` role (advisorRole.ts). Absent = the pass does not run. */
+  advisor?: AdvisorRole;
 }
 
 export interface ReviewMaxCommandResult {
@@ -211,10 +214,14 @@ export function dedupeAuditRunHistory(
 async function confirmCost(areas: number, files: number, concurrency: number): Promise<boolean> {
   if (!process.stdin.isTTY) return true;
   const rl = createInterface({ input: process.stdin, output: process.stderr });
+  // The real agent-run count is the area count, not the pool size: the partition
+  // no longer shrinks below the pool, so `areas < concurrency` is a normal
+  // under-filled run and "~N agent runs" would overstate its cost. Point at the
+  // knob that does control the granularity. (INT-2249)
+  const underFilled = areas < concurrency ? `, pool of ${concurrency} not filled — lower --max-files-per-area for more` : '';
   const answer = await new Promise<string>((res) =>
     rl.question(
-      `Audit ${files} file(s) across ${areas} area(s) with ${concurrency} concurrent reviewer subagents ` +
-        `(~${areas} agent runs). Continue? [y/N] `,
+      `Audit ${files} file(s) across ${areas} area(s) (~${areas} agent runs${underFilled}). Continue? [y/N] `,
       res,
     ),
   );
@@ -459,6 +466,9 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
       gateRan: true,
     };
   }
+  // The `advisor` role, resolved once per run. Absent (disabled / unreadable
+  // config) means `runMaxReview` skips the pass entirely — see RunMaxReviewOptions.
+  const advisor = opts.advisor;
 
   let files: string[];
   try {
@@ -473,9 +483,11 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
     console.log('No production source files to audit.');
     return null;
   }
-  // Split down to fill the reviewer pool: fewer areas than `concurrency` would
-  // leave subagents idle, so the fastest audit maximizes parallel spread. (INT-2249)
-  let areas: AuditArea[] = balanceAreasToConcurrency(files, concurrency, maxFilesPerArea);
+  // Partitioned from `maxFilesPerArea` alone: `--concurrency` decides how many
+  // reviewers run at once, never the units they judge — re-partitioning by it
+  // made the verdict a function of concurrency. Want the finer fan-out? Lower
+  // `--max-files-per-area`. (INT-2249)
+  let areas: AuditArea[] = planAuditAreas(files, maxFilesPerArea);
 
   if (opts.dryRun) {
     console.log(`Audit plan — ${files.length} file(s) across ${areas.length} area(s):`);
@@ -511,7 +523,7 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
     // Re-partition from the worktree so the areas match the files actually there
     // (the caller's index may hold staged-but-uncommitted additions).
     files = listSourceFiles(workCwd);
-    areas = balanceAreasToConcurrency(files, concurrency, maxFilesPerArea);
+    areas = planAuditAreas(files, maxFilesPerArea);
     if (!areas.length) {
       console.log('No production source files to audit at HEAD.');
       const { removeWorktree } = await import('../support/worktreeManager.js');
@@ -595,6 +607,7 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
         maxTurns: opts.maxTurns,
         timeoutMs: opts.timeoutMs,
         priorReviewContextByArea,
+        advisor,
       },
       {
         onProgress: (e) => {
@@ -626,6 +639,7 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
           maxTurns: opts.maxTurns,
           timeoutMs: opts.timeoutMs,
           priorReviewContextByArea,
+          advisor,
         },
         {
           onProgress: (e) => {
@@ -740,6 +754,7 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
           maxDurationMs: 2 * 60 * 60 * 1000,
           repositoryContext,
           priorReviewContextByArea,
+          advisor,
         },
         {
           verify: async () => {

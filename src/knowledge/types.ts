@@ -147,5 +147,8 @@ export const SerializedGraphSchema = z.object({
   nodes: z.array(GraphNodeSchema),
   edges: z.array(GraphEdgeSchema),
   summary: ProjectSummarySchema.optional(),
+  // Absent in graphs persisted before scan limits were surfaced (AGT-3490).
+  incomplete: z.boolean().optional(),
+  incompleteReasons: z.array(z.string()).optional(),
 });
 export type SerializedGraph = z.infer<typeof SerializedGraphSchema>;

@@ -285,6 +285,48 @@ describe('getActiveFailures', () => {
   });
 });
 
+describe('waitForCICompletion duration validation (AGT-3469)', () => {
+  // A non-finite duration is not a slow wait — it is no wait at all. `NaN`
+  // makes both `elapsed >= timeoutMs` and `waitMs <= 0` false, so the sleep is
+  // scheduled for 0 ms and the loop calls `gh` back-to-back until the process
+  // is killed. A negative value fires its timer immediately and does the same.
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 0])(
+    'rejects timeoutMs=%s without invoking gh',
+    async (timeoutMs) => {
+      execFileMock.mockReset();
+      await expect(waitForCICompletion('owner/repo', 1, { timeoutMs })).rejects.toThrow(/timeoutMs/);
+      expect(execFileMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([Number.NaN, Number.NEGATIVE_INFINITY, -1, 0])(
+    'rejects pollIntervalMs=%s without invoking gh',
+    async (pollIntervalMs) => {
+      execFileMock.mockReset();
+      await expect(waitForCICompletion('owner/repo', 1, { pollIntervalMs })).rejects.toThrow(/pollIntervalMs/);
+      expect(execFileMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects a duration past the ceiling instead of parking the loop for days', async () => {
+    execFileMock.mockReset();
+    await expect(waitForCICompletion('owner/repo', 1, { timeoutMs: 7 * 24 * 60 * 60 * 1000 }))
+      .rejects.toThrow(/timeoutMs must be a finite duration/);
+    await expect(waitForCICompletion('owner/repo', 1, { pollIntervalMs: 2 * 60 * 60 * 1000 }))
+      .rejects.toThrow(/pollIntervalMs must be a finite duration/);
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+
+  it('still accepts the documented defaults when no duration is given', async () => {
+    execFileMock.mockReset();
+    mockGhJson({
+      headRefOid: 'head-a',
+      statusCheckRollup: [{ name: 'unit', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+    });
+    await expect(waitForCICompletion('owner/repo', 1)).resolves.toMatchObject({ status: 'success', headSha: 'head-a' });
+  });
+});
+
 describe('getOpenPRs / getOpenPRsOrThrow (INT-3282)', () => {
   beforeEach(() => {
     execFileMock.mockReset();

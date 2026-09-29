@@ -171,6 +171,74 @@ describe('webhook URL validation (was: WebhookNotifier construction)', () => {
   });
 });
 
+// AGT-3432 additions. The guard used to be a local IPv4-only range table, so
+// equivalent IPv6 spellings of the same hosts and two of the documentation
+// blocks it listed went through. Each literal below reaches a non-global
+// destination while reading as an ordinary address, so the guard has to refuse
+// it rather than warn — `createNotifier` turns a refusal into the Noop path.
+
+describe('webhook URL validation — IPv6 and special-use encodings', () => {
+  it.each([
+    ['http://[::ffff:7f00:1]/hook', 'IPv4-mapped loopback, hex form'],
+    ['http://[::ffff:127.0.0.1]/hook', 'IPv4-mapped loopback, dotted form'],
+    ['http://[0:0:0:0:0:0:0:1]/hook', 'loopback written out in full'],
+    ['http://[::1]/hook', 'loopback, compressed'],
+    ['http://[::127.0.0.1]/hook', 'IPv4-compatible loopback'],
+    ['http://[::ffff:a9fe:1]/hook', 'IPv4-mapped link-local'],
+    ['http://[::ffff:c0a8:101]/hook', 'IPv4-mapped 192.168.1.1'],
+    ['http://[2002:7f00:1::1]/hook', '6to4 wrapping 127.0.0.1'],
+  ])('rejects %s (%s)', (url) => {
+    expect(validateWebhookUrl(url)).toBe(false);
+  });
+
+  it.each([
+    ['http://[::ffff:c000:1]/hook', 'IPv4-mapped 192.0.0.1'],
+    ['http://[::ffff:c612:1]/hook', 'IPv4-mapped 198.18.0.1'],
+    ['http://[::ffff:c633:6401]/hook', 'IPv4-mapped 198.51.100.1'],
+    ['http://[::ffff:cb00:7101]/hook', 'IPv4-mapped 203.0.113.1'],
+  ])('rejects %s (%s)', (url) => {
+    expect(validateWebhookUrl(url)).toBe(false);
+  });
+
+  it('rejects the special-use IPv4 ranges by literal spelling', () => {
+    expect(validateWebhookUrl('http://192.0.0.1/hook')).toBe(false);
+    expect(validateWebhookUrl('http://198.18.0.1/hook')).toBe(false);
+    expect(validateWebhookUrl('http://198.51.100.1/hook')).toBe(false);
+    expect(validateWebhookUrl('http://203.0.113.1/hook')).toBe(false);
+  });
+
+  it('still accepts a genuine public destination', () => {
+    expect(validateWebhookUrl('https://hooks.slack.com/services/T000/B000/XXXX')).toBe(true);
+    expect(validateWebhookUrl('http://8.8.8.8/hook')).toBe(true);
+    expect(validateWebhookUrl('https://example.com/hook')).toBe(true);
+    expect(validateWebhookUrl('http://[2606:4700:4700::1111]/hook')).toBe(true);
+  });
+
+  it('refuses an IPv6-encoded private destination at the notifier level, not just the validator', async () => {
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const notifier = createNotifier({ channel: 'webhook', webhookUrl: 'http://[::ffff:7f00:1]/hook' });
+    await notifier.notify('must not leave the process');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // Positive control for the two cases above: refusing everything would also
+  // pass them, so a genuinely public destination has to still send — including
+  // a global IPv6 literal, which the new classification must not sweep up.
+  it.each([
+    ['https://hooks.slack.com/services/T000/B000/XXXX', 'public DNS name'],
+    ['http://8.8.8.8/hook', 'global IPv4'],
+    ['http://[2606:4700:4700::1111]/hook', 'global IPv6'],
+  ])('still delivers to %s (%s)', async (url) => {
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const notifier = createNotifier({ channel: 'webhook', webhookUrl: url });
+    await notifier.notify('delivered');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toBe(url);
+  });
+});
+
 describe('validateWebhookUrl', () => {
   test('rejects loopback IPv4 addresses', () => {
     expect(validateWebhookUrl('http://127.0.0.1/hook')).toBe(false);

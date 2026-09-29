@@ -78,6 +78,12 @@ export interface WorkerOptions {
   webTools?: boolean;
   /** Expose repository memory search (default true). Set false for isolated/temp repo benchmarks. */
   memoryTools?: boolean;
+  /**
+   * Declarative per-role tool scope (RoleConfig.tools), applied at the end of the
+   * loop's tool assembly so it can only narrow what the run already exposes.
+   */
+  toolAllow?: string[];
+  toolDeny?: string[];
   /** MCP tools to expose to the agentic loop (server__tool). When unset the adapter
    * self-sources from the registry (INT-1951); set to pin a specific set. (INT-1950) */
   mcpTools?: ToolDefinition[];
@@ -418,6 +424,8 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,
+      toolAllow: options.toolAllow,
+      toolDeny: options.toolDeny,
       mcpTools: options.mcpTools,
       signal: options.signal,
       coordinationContext: options.coordinationContext,

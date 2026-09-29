@@ -6,6 +6,7 @@
 import type { WorkerResult } from './agentPair.js';
 import type { AdapterName } from '../adapters/types.js';
 import { getAdapter, spawnCli } from '../adapters/index.js';
+import { findStringAwareJsonObject } from '../adapters/resultParsing.js';
 import { type CostInfo, extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
@@ -21,6 +22,14 @@ export interface AuditorOptions {
   model?: string;
   maxTurns?: number;
   adapterName?: AdapterName;
+  /** Reasoning effort for this role's native-loop adapter (RoleConfig.effort). */
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  /**
+   * Declarative per-role tool scope (RoleConfig.tools), applied at the end of the
+   * loop's tool assembly so it can only narrow what the run already exposes.
+   */
+  toolAllow?: string[];
+  toolDeny?: string[];
 }
 
 export interface AuditorResult {
@@ -98,6 +107,9 @@ export async function runAuditor(options: AuditorOptions): Promise<AuditorResult
       timeoutMs: options.timeoutMs,
       model: options.model,
       maxTurns: options.maxTurns,
+      reasoningEffort: options.reasoningEffort,
+      toolAllow: options.toolAllow,
+      toolDeny: options.toolDeny,
     });
     return parseAuditorOutput(raw.stdout);
   } catch (error) {
@@ -169,26 +181,14 @@ export function parseAuditorOutput(output: string): AuditorResult {
 function extractResultJson(text: string): AuditorResult | null {
   const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
   if (!jsonMatch) {
-    const objMatch = text.match(/\{\s*"success"\s*:/);
-    if (!objMatch) return null;
-
-    const startIdx = objMatch.index!;
-    let depth = 0;
-    let endIdx = startIdx;
-
-    for (let i = startIdx; i < text.length; i++) {
-      if (text[i] === '{') depth++;
-      if (text[i] === '}') {
-        depth--;
-        if (depth === 0) {
-          endIdx = i + 1;
-          break;
-        }
-      }
-    }
+    // String-aware balanced scan: a brace inside a quoted value is prose, not
+    // structure, and reading it as structure truncated the slice mid-string so
+    // JSON.parse threw and every structured field was lost. (AGT-3466)
+    const jsonStr = findStringAwareJsonObject(text, '"success"');
+    if (!jsonStr) return null;
 
     try {
-      const parsed = JSON.parse(text.slice(startIdx, endIdx));
+      const parsed = JSON.parse(jsonStr);
       return normalizeResult(parsed);
     } catch {
       return null;

@@ -30,6 +30,14 @@ export interface TesterOptions {
   model?: string;
   maxTurns?: number;
   adapterName?: AdapterName;
+  /** Reasoning effort for this role's native-loop adapter (RoleConfig.effort). */
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  /**
+   * Declarative per-role tool scope (RoleConfig.tools), applied at the end of the
+   * loop's tool assembly so it can only narrow what the run already exposes.
+   */
+  toolAllow?: string[];
+  toolDeny?: string[];
 }
 
 export interface TesterResult {
@@ -129,6 +137,9 @@ export async function runTester(options: TesterOptions): Promise<TesterResult> {
       timeoutMs: options.timeoutMs,
       model: options.model,
       maxTurns: options.maxTurns,
+      reasoningEffort: options.reasoningEffort,
+      toolAllow: options.toolAllow,
+      toolDeny: options.toolDeny,
     });
 
     return parseTesterOutput(raw.stdout);
@@ -362,6 +373,26 @@ export function formatTestReport(result: TesterResult): string {
 }
 
 /**
+ * A test name as the prompt can carry it.
+ *
+ * `failedTests`/`suggestions` come from the tester's JSON through
+ * `parseTesterOutput`, which checks only `Array.isArray` — a malformed result
+ * yields entries of any JSON type, and `truncate` reads a `.length` a number or
+ * object does not have, so the whole repair prompt threw a TypeError and the
+ * self-repair iteration lost its feedback. Non-strings are summarized by shape
+ * rather than rendered: `String(value)` would materialize a megabyte for a
+ * nested array before any cap below could bite. (AGT-3466)
+ */
+function testEntryText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === null) return 'null';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return Array.isArray(value)
+    ? `(malformed entry: ${value.length} items)`
+    : `(malformed entry: ${Object.keys(value as object).length} keys)`;
+}
+
+/**
  * Convert Tester result to Worker feedback.
  * Enforces aggregate bounds on feedback to prevent prompt bloat.
  */
@@ -377,7 +408,7 @@ export function buildTestFixPrompt(result: TesterResult): string {
     lines.push('### Failed Tests:');
     const shown = result.failedTests.slice(0, PROMPT_FAILED_TESTS_LIMIT);
     for (let i = 0; i < shown.length; i++) {
-      lines.push(`${i + 1}. \`${truncate(shown[i], 200)}\``);
+      lines.push(`${i + 1}. \`${truncate(testEntryText(shown[i]), 200)}\``);
     }
     if (result.failedTests.length > PROMPT_FAILED_TESTS_LIMIT) {
       lines.push(`… +${result.failedTests.length - PROMPT_FAILED_TESTS_LIMIT} more`);
@@ -389,7 +420,7 @@ export function buildTestFixPrompt(result: TesterResult): string {
     lines.push('### Fix Suggestions:');
     const shown = result.suggestions.slice(0, PROMPT_SUGGESTIONS_LIMIT);
     for (let i = 0; i < shown.length; i++) {
-      lines.push(`${i + 1}. ${truncate(shown[i], 300)}`);
+      lines.push(`${i + 1}. ${truncate(testEntryText(shown[i]), 300)}`);
     }
     if (result.suggestions.length > PROMPT_SUGGESTIONS_LIMIT) {
       lines.push(`… +${result.suggestions.length - PROMPT_SUGGESTIONS_LIMIT} more`);

@@ -8,6 +8,7 @@
 import fs from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -30,6 +31,7 @@ import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 import { crossWorktreeAuditNote } from './crossWorktreeAudit.js';
 import { publicationCommandIn, publicationFenceMessage } from './publicationFence.js';
 import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
+import { isCommandBlocked } from './shellCommandGuard.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -250,19 +252,12 @@ export const APPLY_PATCH_TOOL: ToolDefinition = {
 
 // ============ 안전 가드 ============
 
-const BLOCKED_COMMANDS = [
-  /\brm\s+(-[rR]f?|--recursive)\b/,
-  /\bgit\s+reset\s+--hard\b/,
-  /\bgit\s+clean\s+-fd\b/,
-  /\bdrop\s+database\b/i,
-  /\btruncate\s+table\b/i,
-  /\bchmod\s+777\b/,
-  /\bchown\s+-R\b/,
-  />\s*\/dev\/sd/,
-  /\bdd\s+if=/,
-  /\bpkill\s+-9\b/,
-  /\bkill\s+-9\b/,
-];
+// Destructive-command matching lives in ./shellCommandGuard.ts (AGT-3436). It was
+// a regex sweep over raw text here, which both missed the shell's own rewriting
+// (`r"m" -rf /`, `\rm -rf /`, `r{m,} -rf /`) and refused harmless text that only
+// mentioned a destructive command (`echo "rm -rf stays blocked"`). That file
+// resolves a command the way bash does and matches destructive VERBS by word
+// position, so what it inspects is the command that will actually run.
 
 /**
  * Tools a read-only run refuses to execute.
@@ -332,65 +327,6 @@ async function searchWithGitGrep(
       is_error: true,
     };
   }
-}
-
-/**
- * A lexical guard cannot evaluate shell expansion, so `BLOCKED_COMMANDS` is
- * matched against both the raw command and this normalized form, and one
- * further shape is rejected outright. Two bypass classes, both real ways a
- * command can execute `rm -rf /` while never containing that literal
- * substring: (AGT-3436)
- *
- *  1. Quote/backslash splitting — bash strips quote delimiters and escaping
- *     backslashes before running a command, so `r'm' -rf /` and `r\m -rf /`
- *     both execute as `rm -rf /`. Stripping them here before matching makes
- *     the check see what the shell will actually see.
- *  2. Mid-word substitution — `$(...)`, `` `...` ``, or `${...}` glued
- *     directly onto adjacent letters/digits with no separating whitespace
- *     (e.g. `r$(true)m -rf /`) can splice a blocked verb together from
- *     pieces whose output cannot be known without running them. This shape
- *     is vanishingly rare in legitimate scripts — substitution is almost
- *     always its own whitespace-delimited word (`X=$(cmd)`, `for f in
- *     $(ls)`) — so `isCommandBlocked` rejects it unconditionally rather than
- *     guessing at what it might evaluate to.
- */
-function normalizeForGuard(command: string): string {
-  return command
-    .replace(/\\(.)/g, '$1')
-    .replace(/['"]/g, '');
-}
-
-/** Command/parameter-substitution spans; open and close pair unambiguously (unlike bare backticks alone). */
-const SUBSTITUTION_SPAN_PATTERNS = [/\$\([^()]*\)/g, /\$\{[^{}]*\}/g, /`[^`]*`/g];
-
-/**
- * True if any substitution span is glued directly onto an adjacent word
- * character with no separating whitespace — the shape a blocked verb gets
- * spliced together through (`r$(true)m`, `` r`true`m ``, `r${empty}m`).
- * Only the true boundary characters matter: `` `date` `` on its own is
- * ordinary, whitespace-delimited usage and must not trip this — it is the
- * word character immediately touching the span's open or close delimiter
- * that makes the output impossible to verify lexically.
- */
-function hasMidWordSubstitution(command: string): boolean {
-  for (const spanPattern of SUBSTITUTION_SPAN_PATTERNS) {
-    for (const match of command.matchAll(spanPattern)) {
-      const start = match.index ?? 0;
-      const end = start + match[0].length;
-      const before = command[start - 1];
-      const after = command[end];
-      if ((before && /[A-Za-z0-9_]/.test(before)) || (after && /[A-Za-z0-9_]/.test(after))) return true;
-    }
-  }
-  return false;
-}
-
-function isCommandBlocked(command: string): boolean {
-  const normalized = normalizeForGuard(command);
-  // Checked against both forms: quoting can hide a mid-word splice from the
-  // raw text (`r"$(true)"m`) until the quotes are stripped away.
-  if (hasMidWordSubstitution(command) || hasMidWordSubstitution(normalized)) return true;
-  return BLOCKED_COMMANDS.some(pattern => pattern.test(command) || pattern.test(normalized));
 }
 
 // ============ 도구 실행기 ============
@@ -470,6 +406,152 @@ function invalidateCache(cache: ReadCache | undefined, filePath: string): void {
   if (!cache) return;
   for (const key of cache.store.keys()) {
     if (key.startsWith(`${filePath}#`)) cache.store.delete(key);
+  }
+}
+
+/** Ceiling on the text one `read_file` returns, trailer included. */
+const MAX_READ_FILE_BYTES = 256 * 1024;
+/** Room held back inside that ceiling for the trailer notice. */
+const READ_TRAILER_RESERVE_BYTES = 256;
+const READ_CHUNK_BYTES = 64 * 1024;
+/** How far past the window lines are still counted, so "(N more lines)" stays exact. */
+const READ_SCAN_MAX_BYTES = 1024 * 1024;
+
+/** The longest prefix of `text` within `maxBytes` UTF-8 bytes, cut on a code-point boundary. */
+function prefixWithinBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let bytes = 0;
+  let end = 0;
+  for (const char of text) {
+    const width = Buffer.byteLength(char);
+    if (bytes + width > maxBytes) break;
+    bytes += width;
+    end += char.length;
+  }
+  return text.slice(0, end);
+}
+
+/** The numbered lines `read_file` returns, and what the trailer says about the rest. */
+interface ReadWindow {
+  lines: string[];
+  trailer: string;
+}
+
+/**
+ * Byte-bounded, line-windowed file read (AGT-3486).
+ *
+ * This was `fs.readFile` + `split('\n')` + `slice(offset, offset + limit)`: the
+ * WHOLE file became a string before the window picked its lines out. `limit`
+ * counts lines and a line has no upper bound, so a 200 MB log — or one 200 MB
+ * minified line in an otherwise small file — was materialized in full only for
+ * everything outside the window to be discarded, and the result handed the
+ * model whatever the window really was: one line, still 200 MB.
+ *
+ * The read is incremental now. Chunks are decoded, counted and kept only while
+ * they land inside the window; both the window and the returned text are capped
+ * — lines by `limit`, bytes by MAX_READ_FILE_BYTES. Lines past the window are
+ * still counted for a short distance so the familiar "(N more lines)" trailer
+ * stays exact for ordinary files, and a file too large for that scan is
+ * described in bytes rather than read to its end.
+ */
+async function readFileWindow(filePath: string, offset: number, limit: number): Promise<ReadWindow> {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const { size: fileBytes } = await handle.stat();
+    const buffer = Buffer.allocUnsafe(READ_CHUNK_BYTES);
+    const decoder = new StringDecoder('utf8');
+    const budget = MAX_READ_FILE_BYTES - READ_TRAILER_RESERVE_BYTES;
+    const kept: string[] = [];
+    let line = 0;             // 0-based index of the line currently being read
+    let pending = '';         // its text, retained only from the window's first line on
+    let keptBytes = 0;
+    let position = 0;         // byte cursor for the next read
+    let atEof = false;
+    let clipped = false;      // the byte ceiling, not `limit`, ended the window
+    let after = '';           // whatever followed the window inside its chunk
+
+    while (!atEof && !clipped && kept.length < limit) {
+      // eslint-disable-next-line no-await-in-loop
+      const { bytesRead } = await handle.read(buffer, 0, READ_CHUNK_BYTES, position);
+      if (bytesRead === 0) {
+        atEof = true;
+        // A partial sequence at EOF is invalid UTF-8 either way; flushing keeps
+        // it in the line rather than silently dropping it.
+        const flush = decoder.end();
+        if (flush && !clipped && line >= offset) pending += flush;
+        break;
+      }
+      position += bytesRead;
+      const text = decoder.write(buffer.subarray(0, bytesRead));
+      let start = 0;
+      chunk: while (start <= text.length) {
+        const newline = text.indexOf('\n', start);
+        const endsLine = newline >= 0;
+        const fragment = endsLine ? text.slice(start, newline) : text.slice(start);
+        if (line < offset) {
+          if (!endsLine) break chunk;             // still counting down to the window
+          line++;
+        } else {
+          const prefix = `${line + 1}\t`;
+          const room = budget - keptBytes - Buffer.byteLength(prefix) - Buffer.byteLength(pending) - (endsLine ? 1 : 0);
+          if (Buffer.byteLength(fragment) > room) {
+            kept.push(prefix + pending + prefixWithinBytes(fragment, Math.max(room, 0)));
+            clipped = true;
+            break chunk;
+          }
+          pending += fragment;
+          if (endsLine) {
+            keptBytes += Buffer.byteLength(prefix) + Buffer.byteLength(pending) + 1;
+            kept.push(prefix + pending);
+            pending = '';
+            line++;
+            if (kept.length >= limit) {
+              after = text.slice(newline + 1);
+              break chunk;
+            }
+          }
+        }
+        if (!endsLine) break chunk;               // the line continues in the next chunk
+        start = newline + 1;
+      }
+    }
+    // A file whose last line has no newline: that line is still a line.
+    if (atEof && !clipped && pending) kept.push(`${line + 1}\t${pending}`);
+
+    let remaining: number | null = 0;
+    if (!atEof && !clipped) {
+      // The window is full: count what follows so the trailer can be exact, but
+      // only for as long as that stays cheap on a huge file.
+      let openLine = false;
+      const account = (tail: string): void => {
+        remaining = (remaining ?? 0) + (tail.match(/\n/g)?.length ?? 0);
+        if (tail) openLine = !tail.endsWith('\n');
+      };
+      account(after);
+      let scanned = 0;
+      let reachedEof = false;
+      while (scanned < READ_SCAN_MAX_BYTES) {
+        // eslint-disable-next-line no-await-in-loop
+        const { bytesRead } = await handle.read(buffer, 0, READ_CHUNK_BYTES, position);
+        if (bytesRead === 0) { reachedEof = true; break; }
+        position += bytesRead;
+        scanned += bytesRead;
+        account(decoder.write(buffer.subarray(0, bytesRead)));
+      }
+      if (!reachedEof) remaining = null;
+      else if (openLine) remaining += 1;
+    }
+
+    const trailer = clipped
+      ? `\n... (cut off at the ${Math.round(MAX_READ_FILE_BYTES / 1024)} KiB read cap; the file is ${fileBytes} bytes — read a narrower range with offset/limit, or use search_files)`
+      : remaining === null
+        ? `\n... (not counted to the end: ${fileBytes - position} bytes still unread — continue with offset=${line})`
+        : remaining > 0
+          ? `\n... (${remaining} more lines)`
+          : '';
+    return { lines: kept, trailer };
+  } finally {
+    await handle.close();
   }
 }
 
@@ -763,14 +845,9 @@ export async function executeTool(
           };
         }
 
-        const content = await fs.readFile(filePath, 'utf-8');
-        const lines = content.split('\n');
-        const slice = lines.slice(offset, offset + limit);
-        const numbered = slice.map((line, i) => `${offset + i + 1}\t${line}`).join('\n');
-        const truncated = lines.length > offset + limit
-          ? `\n... (${lines.length - offset - limit} more lines)`
-          : '';
-        const result = numbered + truncated;
+        const { lines: slice, trailer } = await readFileWindow(filePath, offset, limit);
+        const numbered = slice.join('\n');
+        const result = numbered + trailer;
         if (cache) cacheSet(cache, cacheKey, result);
         return { tool_call_id: callId, content: result, is_error: false };
       }

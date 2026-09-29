@@ -2,15 +2,41 @@
 // OpenSwarm - Memory Compaction
 // ============================================
 
-import { getDb, getTable, initDatabase, PERMANENT_EXPIRY, normalizeRecords, setTable } from './memoryCore.js';
+import {
+  getDb,
+  getTable,
+  initDatabase,
+  LEGACY_MIGRATION_PAGE_SIZE,
+  PERMANENT_EXPIRY,
+  normalizeRecords,
+  setTable,
+  vectorAsNumberArray,
+} from './memoryCore.js';
 import type { CognitiveMemoryRecord } from './memoryCore.js';
 import { isTransientReviewRejectionMemory } from './memoryFilters.js';
 
 const MIN_IMPORTANCE = 0.1;
 const CONSOLIDATION_SIMILARITY = 0.85;
 
-/** Page size for full-table scans: a single `.limit(100_000)` truncates larger stores. */
-const PAGE_SIZE = 10_000;
+/**
+ * Page size for the compaction scan.
+ *
+ * The scan must be paged rather than one `.search().limit(N)` query: a single
+ * query silently truncates at N and, once a vector index exists, returns an
+ * approximate candidate set instead of every row.
+ */
+const COMPACTION_SCAN_PAGE_SIZE = LEGACY_MIGRATION_PAGE_SIZE;
+
+/**
+ * Ceiling on the records one compaction may rewrite.
+ *
+ * Survivors cannot be streamed: compaction replaces the table with a single
+ * `createTable(..., { mode: 'overwrite' })` built from the deduplicated set, and
+ * this client has no table rename, so the whole survivor set has to be
+ * materialized (≈ EMBEDDING_DIM floats per record). Exceeding this bound refuses
+ * the compaction before any mutation rather than truncating the candidate set.
+ */
+const COMPACTION_MAX_SURVIVORS = 100_000;
 
 /** v2 columns that force a compaction rewrite to the lean v3 schema. */
 const LEGACY_SCHEMA_COLUMNS: Record<string, true> = {
@@ -70,10 +96,15 @@ function cosineSimilarity(a: number[], b: number[]): number {
  * compared. Within a bucket, records are ranked by importance then recency and
  * a record is dropped only when it is a near-duplicate of an already-kept one —
  * so the survivor does not depend on the order the pages were read in.
+ *
+ * Vectors are normalized as the buckets are built: rows read back from Lance
+ * carry an Arrow `Vector`, not a JS array, and cosine similarity over one read
+ * as an array is `NaN` — which compares below every threshold, so a store-backed
+ * compaction matched nothing and kept every duplicate.
  */
 export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMemoryRecord[] {
   // 1. Bucket by identity BEFORE any merging so cross-page duplicates meet.
-  const buckets = new Map<string, CognitiveMemoryRecord[]>();
+  const buckets = new Map<string, Array<{ record: CognitiveMemoryRecord; vector: number[] }>>();
   for (const record of records) {
     const key = stableHash([
       record.repo,
@@ -81,9 +112,10 @@ export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMem
       record.derivedFrom,
       stableMetadata(record.metadata),
     ]);
+    const entry = { record, vector: vectorAsNumberArray(record.vector) };
     const bucket = buckets.get(key);
-    if (bucket) bucket.push(record);
-    else buckets.set(key, [record]);
+    if (bucket) bucket.push(entry);
+    else buckets.set(key, [entry]);
   }
 
   const unique: CognitiveMemoryRecord[] = [];
@@ -94,12 +126,12 @@ export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMem
     // Rank by quality so the survivor of a near-duplicate cluster does not
     // depend on input order (and therefore not on page order either).
     bucket.sort(
-      (a, b) => b.importance - a.importance || b.lastUpdated - a.lastUpdated
+      (a, b) => b.record.importance - a.record.importance || b.record.lastUpdated - a.record.lastUpdated
     );
 
-    const kept: CognitiveMemoryRecord[] = [];
+    const kept: number[][] = [];
 
-    for (const record of bucket) {
+    for (const { record, vector } of bucket) {
       if (seen.has(record.id)) continue;
       seen.add(record.id);
 
@@ -107,11 +139,11 @@ export function removeDuplicates(records: CognitiveMemoryRecord[]): CognitiveMem
       // bucket key is exactly those fields — so comparing within the bucket is
       // equivalent to the old whole-table scan, minus the page-order dependence.
       const isDuplicate = kept.some(
-        (existing) => cosineSimilarity(record.vector, existing.vector) >= CONSOLIDATION_SIMILARITY
+        (existing) => cosineSimilarity(vector, existing) >= CONSOLIDATION_SIMILARITY
       );
       if (isDuplicate) continue;
 
-      kept.push(record);
+      kept.push(vector);
       unique.push(record);
     }
   }
@@ -167,15 +199,20 @@ function isValidCompactionRow(row: unknown, now: number): row is CognitiveMemory
  * deduplicates the full set so duplicates straddling a page boundary are
  * still compared.
  *
+ * @param options.pageSize page size for the scan; injectable so the store-backed
+ * test can cross a real page boundary without materialising 10,001 vectors.
  * @returns Statistics about compaction
  */
-export async function compactMemoryTable(): Promise<{
+export async function compactMemoryTable(options: { pageSize?: number } = {}): Promise<{
   before: number;
   after: number;
   removed: number;
   deduplicated: number;
 }> {
   console.log('[Compaction] Starting memory table compaction...');
+
+  // Production default unchanged; the test seam only shrinks the page.
+  const pageSize = options.pageSize ?? COMPACTION_SCAN_PAGE_SIZE;
 
   try {
     await initDatabase();
@@ -190,12 +227,25 @@ export async function compactMemoryTable(): Promise<{
     // 1. Read all records across pagination boundaries. Lance returns
     //    schema-erased rows here; `unknown` keeps the boundary honest until
     //    the per-row filter below narrows the fields it actually reads.
+    //
+    //    A scalar `query()` scan is complete and index-independent, unlike a
+    //    `.search().limit(N)`, which truncates at N and — once a vector index
+    //    exists — returns an approximate candidate set rather than the table.
     const allRecords: unknown[] = [];
     for (;;) {
-      const page = await table.query().limit(PAGE_SIZE).offset(allRecords.length).toArray();
+      const page = await table.query().limit(pageSize).offset(allRecords.length).toArray();
       if (page.length === 0) break;
       allRecords.push(...page);
-      if (page.length < PAGE_SIZE) break;
+      if (allRecords.length > COMPACTION_MAX_SURVIVORS) {
+        // Refuse before any mutation: the replacement table cannot be built
+        // incrementally, so exceeding the bound has to fail loudly rather than
+        // rewrite the table with only the rows scanned so far.
+        throw new Error(
+          `Memory compaction refused: more than ${COMPACTION_MAX_SURVIVORS} candidate records; ` +
+          'the replacement table cannot be built incrementally',
+        );
+      }
+      if (page.length < pageSize) break;
     }
 
     const beforeCount = allRecords.length;
@@ -286,7 +336,7 @@ export async function shouldCompact(): Promise<boolean> {
 
     // Waste is estimated from the first page only; a full scan here would
     // cost as much as the compaction this check is trying to avoid.
-    const sample = await table.query().limit(PAGE_SIZE).toArray();
+    const sample = await table.query().limit(COMPACTION_SCAN_PAGE_SIZE).toArray();
 
     const now = Date.now();
 

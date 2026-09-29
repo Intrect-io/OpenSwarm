@@ -271,6 +271,8 @@ export interface RunFixVerifyLoopOptions {
   repositoryContext?: FixRepositoryContext;
   /** Prior repository review logs forwarded to each full re-review. */
   priorReviewContextByArea?: Readonly<Record<string, string>>;
+  /** Resolved `advisor` role; forwarded to every round's re-review. */
+  advisor?: { model?: string; timeoutMs?: number };
 }
 
 export interface RunFixVerifyLoopDeps {
@@ -374,6 +376,10 @@ export async function runFixVerifyLoop(
     timeoutMs: opts.reviewTimeoutMs,
     signal: phaseSignal,
     priorReviewContextByArea: opts.priorReviewContextByArea,
+    // Every round re-reviews the whole surface, so the advisor runs each round
+    // too — otherwise a fix could introduce a defect the reviewer misses and the
+    // advisor would never get a look at it.
+    advisor: opts.advisor,
   };
   const fixOpts: RunAreaFixesOptions = {
     concurrency: opts.concurrency,

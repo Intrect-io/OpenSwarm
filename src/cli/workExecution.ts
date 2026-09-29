@@ -109,7 +109,7 @@ export function resolveRolesForProject(
 
   // Merge overrides — every role DefaultRolesConfig supports. Dropping keys
   // here silently disables configured stages (auditor/skill-documenter were
-  // lost in the first cut — review finding).
+  // lost in the first cut — review finding; advisor was the third).
   return {
     worker: { ...base.worker, ...projectConfig.roles.worker },
     reviewer: { ...base.reviewer, ...projectConfig.roles.reviewer },
@@ -125,6 +125,9 @@ export function resolveRolesForProject(
     'skill-documenter': projectConfig.roles['skill-documenter']
       ? { ...base['skill-documenter'], ...projectConfig.roles['skill-documenter'] }
       : base['skill-documenter'],
+    advisor: projectConfig.roles.advisor
+      ? { ...base.advisor, ...projectConfig.roles.advisor }
+      : base.advisor,
   } as DefaultRolesConfig;
 }
 

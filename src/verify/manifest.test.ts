@@ -130,4 +130,50 @@ commands:
     expect(result.manifest).toBeNull();
     expect(result.error).toContain('cwd must not contain NUL bytes');
   });
+
+  it('rejects a manifest with more commands than the cap', async () => {
+    // 64 KiB of YAML holds several hundred commands. Each is cheap to write and
+    // one more subprocess to run, so the count needs its own ceiling.
+    const commands = Array.from({ length: 21 }, (_, index) => [
+      `  - name: step-${index}`, `    run: npm run step-${index}`, '    kind: test', '    timeoutMs: 1000',
+    ].join('\n'));
+    const project = await projectWithManifest(`version: 1\ncommands:\n${commands.join('\n')}\n`);
+    const result = await loadVerifyManifest(project);
+    expect(result.manifest).toBeNull();
+    expect(result.error).toContain('At most 20 verify commands are allowed');
+  });
+
+  it('accepts a manifest exactly at the command cap', async () => {
+    // The cap must not be off by one: 20 short commands are a legitimate plan.
+    const commands = Array.from({ length: 20 }, (_, index) => [
+      `  - name: step-${index}`, `    run: npm run step-${index}`, '    kind: test', '    timeoutMs: 1000',
+    ].join('\n'));
+    const project = await projectWithManifest(`version: 1\ncommands:\n${commands.join('\n')}\n`);
+    const result = await loadVerifyManifest(project);
+    expect(result.error).toBeUndefined();
+    expect(result.manifest?.commands).toHaveLength(20);
+  });
+
+  it('rejects a manifest whose commands add up past the aggregate runtime budget', async () => {
+    // Nine 15-minute commands are each legal alone and 2¼ hours together. An
+    // aggregate ceiling is what actually bounds the run: runVerify also runs
+    // every failure at the merge base, so the real cost is double.
+    const commands = Array.from({ length: 9 }, (_, index) => [
+      `  - name: step-${index}`, `    run: npm test -- --shard=${index}`, '    kind: test', '    timeoutMs: 900000',
+    ].join('\n'));
+    const project = await projectWithManifest(`version: 1\ncommands:\n${commands.join('\n')}\n`);
+    const result = await loadVerifyManifest(project);
+    expect(result.manifest).toBeNull();
+    expect(result.error).toContain('Total command timeout must not exceed 7200000 ms');
+  });
+
+  it('accepts an aggregate that lands exactly on the budget', async () => {
+    const commands = Array.from({ length: 8 }, (_, index) => [
+      `  - name: step-${index}`, `    run: npm test -- --shard=${index}`, '    kind: test', '    timeoutMs: 900000',
+    ].join('\n'));
+    const project = await projectWithManifest(`version: 1\ncommands:\n${commands.join('\n')}\n`);
+    const result = await loadVerifyManifest(project);
+    expect(result.error).toBeUndefined();
+    expect(result.manifest?.commands).toHaveLength(8);
+  });
 });

@@ -33,7 +33,7 @@ const CLAUDE_ALIASES = new Set(['sonnet', 'opus', 'haiku']);
  * without a home here is a compile error, not a silent fall to the bulk model.
  */
 export type ModelRole =
-  | 'worker' | 'reviewer' | 'tester' | 'documenter' | 'auditor' | 'skill-documenter'
+  | 'worker' | 'reviewer' | 'advisor' | 'tester' | 'documenter' | 'auditor' | 'skill-documenter'
   | 'planner' | 'orchestrator' | 'escalate';
 
 // Verified against `cursor-agent --list-models` (2026.09.08, vela, 2026-09-10):
@@ -45,6 +45,13 @@ const CURSOR_JUDGE_MODEL = 'cursor-grok-4.6-high';
 // `reviewer` because a tier that resolves to the same model as the tier it
 // escalates FROM is a log line claiming work that did not happen.
 const CURSOR_ESCALATE_MODEL = 'cursor-grok-4.6-xhigh';
+// The advisor must not resolve to the reviewer's model either — same reason as
+// the escalation above, one tier over: an advisor on `cursor-grok-4.6-high`
+// would be the reviewer's own weights asked the same question twice. cursor's
+// catalogue carries exactly two judge-grade ids, so the advisor takes the other
+// one (`-xhigh`); the collision with escalate is the catalogue's limit, not a
+// routing decision, and the two never run as the same role.
+const CURSOR_ADVISOR_MODEL = CURSOR_ESCALATE_MODEL;
 
 const ADAPTER_DEFAULT_MODEL: Partial<Record<AdapterName, string>> = {
   'codex-responses': 'gpt-5.6-terra',
@@ -98,6 +105,7 @@ const CURSOR_ROLE_MODEL: Readonly<Record<ModelRole, string>> = {
   documenter: CURSOR_BULK_MODEL,
   'skill-documenter': CURSOR_BULK_MODEL,
   reviewer: CURSOR_JUDGE_MODEL,
+  advisor: CURSOR_ADVISOR_MODEL,
   auditor: CURSOR_JUDGE_MODEL,
   planner: CURSOR_JUDGE_MODEL,
   orchestrator: CURSOR_JUDGE_MODEL,

@@ -101,13 +101,16 @@ export async function scanProject(
   });
 
   // Phase 1: Directory walking — collect nodes
-  await walkDirectory(graph, projectPath, '.', 0, maxDepth, startTime, timeoutMs);
+  const incompleteReasons: string[] = [];
+  await walkDirectory(graph, projectPath, '.', 0, maxDepth, startTime, timeoutMs, incompleteReasons);
 
   // Phase 2: Import parsing — create edges
   const modules = [...graph.getNodesByType('module'), ...graph.getNodesByType('test_file')];
+  let importsTruncated = false;
   for (const mod of modules) {
     if (Date.now() - startTime > timeoutMs) {
       console.warn(`[Scanner] Import parsing timed out after ${timeoutMs}ms`);
+      importsTruncated = true;
       break;
     }
     await parseImports(graph, projectPath, mod);
@@ -116,7 +119,13 @@ export async function scanProject(
   // Phase 3: Test ↔ module mapping
   mapTestsToModules(graph);
 
+  if (importsTruncated) {
+    incompleteReasons.push(`.: import parsing timeout ${timeoutMs}ms reached`);
+  }
+
   graph.scannedAt = Date.now();
+  graph.incomplete = incompleteReasons.length > 0;
+  graph.incompleteReasons = Array.from(new Set(incompleteReasons)).slice(0, 50);
   return graph;
 }
 
@@ -216,10 +225,15 @@ async function walkDirectory(
   maxDepth: number,
   startTime: number,
   timeoutMs: number,
+  incompleteReasons: string[],
 ): Promise<void> {
-  if (depth > maxDepth) return;
+  if (depth > maxDepth) {
+    incompleteReasons.push(`${relPath || '.'}: depth limit ${maxDepth} reached`);
+    return;
+  }
   if (Date.now() - startTime > timeoutMs) {
     console.warn(`[Scanner] Directory walking timed out after ${timeoutMs}ms`);
+    incompleteReasons.push(`${relPath || '.'}: scan timeout ${timeoutMs}ms reached`);
     return;
   }
 
@@ -245,7 +259,7 @@ async function walkDirectory(
       });
       graph.addEdge({ source: relPath === '.' ? '.' : relPath, target: entryRelPath, type: 'contains' });
 
-      await walkDirectory(graph, entryPath, entryRelPath, depth + 1, maxDepth, startTime, timeoutMs);
+      await walkDirectory(graph, entryPath, entryRelPath, depth + 1, maxDepth, startTime, timeoutMs, incompleteReasons);
     } else if (entry.isFile()) {
       const ext = extname(entry.name);
       if (!SOURCE_EXTENSIONS.has(ext)) continue;
@@ -256,7 +270,10 @@ async function walkDirectory(
       let content: string;
       try {
         content = await readBoundedRegularFile(entryPath, MAX_FILE_SIZE);
-      } catch {
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Source file exceeds')) {
+          incompleteReasons.push(`${entryRelPath}: source file excluded by size limit`);
+        }
         continue;
       }
 

@@ -12,6 +12,14 @@ import { koPrompts } from './prompts/ko.js';
 
 export type { LocaleMessages, PromptTemplates, SupportedLocale } from './types.js';
 
+/**
+ * The untrusted-data block the prompt templates wrap untrusted text in. Its
+ * escaping is locale-independent (both catalogs emit the same ASCII markers),
+ * and it is exported here so agent modules whose prompts are not templates
+ * share that one implementation instead of growing a weaker copy. (AGT-3466)
+ */
+export { promptDataBlock } from './prompts/en.js';
+
 // ── State ─────────────────────────────────
 
 // Process-global default locale. This is only the fallback for code that runs

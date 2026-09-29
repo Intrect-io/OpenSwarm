@@ -68,10 +68,36 @@ export const VerifyCommandSchema = z.object({
   ).refine((value) => !value.includes(String.fromCharCode(0)), 'cwd must not contain NUL bytes').optional(),
 }).strict();
 
+/** A manifest is repository-controlled; its size bounds nothing about its cost. */
+const MAX_VERIFY_COMMANDS = 20;
+/**
+ * The aggregate ceiling, not the per-command one, is what bounds a run.
+ *
+ * 64 KiB of YAML holds several hundred commands, and each is allowed 15 minutes
+ * on its own, so a manifest could schedule tens of hours of execution before a
+ * single result existed — twice over, since every failing command is also run
+ * at the merge base. Two hours is chosen so the largest plan the command cap
+ * allows still validates at the DEFAULT per-command timeout (20 × 5 min = 100
+ * min); it only rejects a plan that also maxes out every per-command timeout
+ * (20 × 15 min = 5 h), and the error states the exact total.
+ */
+const MAX_TOTAL_VERIFY_TIMEOUT_MS = 2 * 60 * 60_000;
+
 export const VerifyManifestSchema = z.object({
   version: z.literal(1),
-  commands: z.array(VerifyCommandSchema).min(1, 'At least one verify command is required'),
-}).strict();
+  commands: z.array(VerifyCommandSchema)
+    .min(1, 'At least one verify command is required')
+    .max(MAX_VERIFY_COMMANDS, `At most ${MAX_VERIFY_COMMANDS} verify commands are allowed`),
+}).strict().superRefine((value, ctx) => {
+  const total = value.commands.reduce((sum, command) => sum + command.timeoutMs, 0);
+  if (total > MAX_TOTAL_VERIFY_TIMEOUT_MS) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['commands'],
+      message: `Total command timeout must not exceed ${MAX_TOTAL_VERIFY_TIMEOUT_MS} ms (got ${total} ms)`,
+    });
+  }
+});
 
 export type VerifyCommand = z.infer<typeof VerifyCommandSchema>;
 export type VerifyManifest = z.infer<typeof VerifyManifestSchema>;

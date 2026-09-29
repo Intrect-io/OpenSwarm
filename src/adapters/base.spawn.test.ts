@@ -533,6 +533,71 @@ describe('delegated-CLI capability guards', () => {
     ).rejects.toThrow(/cannot withhold shell access/);
   });
 
+  it('warns that a role tool allow/deny list is inert on a delegated CLI, without failing the run', async () => {
+    // The delegated CLI owns its own tools, so the list cannot be enforced here.
+    // Warning (not throwing) keeps existing claude/codex configs running while
+    // making sure a fence nobody applies is never silent. (AGT-4444 class)
+    const warns: string[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation((line: unknown) => { warns.push(String(line)); });
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 311,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
+      kill: vi.fn(),
+    });
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        proc.stdout.end('ok');
+        proc.emit('close', 0);
+      });
+      return proc;
+    });
+    try {
+      await expect(spawnCli(delegated(), {
+        prompt: 'p', cwd: process.cwd(), toolAllow: ['read_file'], toolDeny: ['scratch_*'],
+      })).resolves.toMatchObject({ stdout: 'ok' });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(warns.join('\n')).toContain('the role tool allow/deny list');
+  });
+
+  it('warns that protectedFiles and forbidPublication are inert on a delegated CLI (AGT-4444)', async () => {
+    // Same failure class as the tool list: these fences live in the in-process
+    // tool executor, so a role routed to a delegated CLI silently loses them.
+    // The warning is the defect's whole point — silence is what made a dead
+    // fence look like a working one.
+    const warns: string[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation((line: unknown) => { warns.push(String(line)); });
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 312,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
+      kill: vi.fn(),
+    });
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        proc.stdout.end('ok');
+        proc.emit('close', 0);
+      });
+      return proc;
+    });
+    try {
+      await expect(spawnCli(delegated(), {
+        prompt: 'p', cwd: process.cwd(),
+        protectedFiles: ['secrets.env'],
+        forbidPublication: true,
+      })).resolves.toMatchObject({ stdout: 'ok' });
+    } finally {
+      warn.mockRestore();
+    }
+    const text = warns.join('\n');
+    expect(text).toContain('1 protected path(s)');
+    expect(text).toContain('the publication fence');
+  });
+
   it('does not construct or spawn a delegated fake CLI in strict mode, even with HOME credentials', async () => {
     const buildCommand = vi.fn(() => ({ command: 'fake-codex', args: [] }));
     const adapter = { ...delegated(), name: 'fake-codex', buildCommand } satisfies CliAdapter;

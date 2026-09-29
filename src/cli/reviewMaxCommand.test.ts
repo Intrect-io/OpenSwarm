@@ -286,6 +286,45 @@ describe('filePmSynthesizedIssues (INT-2599)', () => {
   });
 });
 
+describe('review --max area partition is independent of --concurrency (INT-2249)', () => {
+  // The regression this guards: the audit used to re-partition from
+  // `--concurrency`, so a bundle-blind reviewer saw 2 areas at concurrency 1 and
+  // 10 at concurrency 8 and produced a different verdict for the same files.
+  // `--dry-run` stops before the cost gate and any reviewer, so this drives the
+  // real command entry with no LLM, no timing and no network.
+  const planAt = async (repo: string, concurrency: number): Promise<string[]> => {
+    const lines: string[] = [];
+    const log = vi.spyOn(console, 'log').mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      await runReviewMaxCommand({ path: repo, dryRun: true, concurrency, yes: true });
+    } finally {
+      log.mockRestore();
+    }
+    return lines.filter((l) => l.startsWith('  · '));
+  };
+
+  it('prints the same area labels at concurrency 1 and 8 for 20 files in one directory', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'openswarm-review-max-partition-'));
+    try {
+      execFileSync('git', ['init', '-q', repo]);
+      await mkdir(join(repo, 'src', 'big'), { recursive: true });
+      for (let i = 0; i < 20; i++) {
+        await writeFile(join(repo, 'src', 'big', `f${String(i).padStart(2, '0')}.ts`), `export const v${i} = ${i};\n`);
+      }
+      execFileSync('git', ['-C', repo, 'add', '-A']);
+
+      const one = await planAt(repo, 1);
+      const eight = await planAt(repo, 8);
+
+      // Cap 12 over 20 files: two chunks, not ten.
+      expect(one).toEqual(['  · src/big (1/2)  (12 file(s))', '  · src/big (2/2)  (8 file(s))']);
+      expect(eight).toEqual(one);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('shipAuditWorktree (INT-2905)', () => {
   beforeEach(() => {
     removeWorktreeMock.mockResolvedValue(undefined);

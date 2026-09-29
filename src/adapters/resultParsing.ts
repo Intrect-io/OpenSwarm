@@ -166,7 +166,13 @@ function extractBulletsAfter(text: string, heading: RegExp): string[] {
   return items;
 }
 
-/** Brace-balanced scan for the JSON object containing `marker`. */
+/**
+ * Brace-balanced scan for the JSON object containing `marker`, counting braces
+ * blindly. Kept as the worker/reviewer adapters' path (their output is a
+ * structured completion, not prose); `findStringAwareJsonObject` below is the
+ * variant for result JSON that carries free text. Fixing brace handling in one
+ * is not fixing the other — check both call sites. (AGT-3466)
+ */
 function findJsonObject(text: string, marker: string): string | null {
   const idx = text.indexOf(marker);
   if (idx < 0) return null;
@@ -182,6 +188,66 @@ function findJsonObject(text: string, marker: string): string | null {
       if (depth === 0) {
         return text.slice(start, i + 1);
       }
+    }
+  }
+  return null;
+}
+
+/**
+ * String-aware brace-balanced scan for the top-level JSON object containing
+ * `marker` — the variant for callers whose JSON carries prose. Counting braces
+ * without tracking quoted strings reads a brace in a value as structure:
+ * `"summary": "Use \`{}\` here"` sliced to the brace inside the string, so
+ * JSON.parse threw on an unterminated string and the caller fell back to its
+ * lossy text heuristic, losing every structured field. Escape state is tracked
+ * for the same reason — the quote in `\"}\"` would otherwise close the string
+ * early and expose the brace as structure.
+ *
+ * Returns the object that ENCLOSES the marker, not the nearest `{` before it, so
+ * a nested object earlier in the text (`{"a": {"b": 1}, "success": true}`) is
+ * not mistaken for the result. Every occurrence of the marker is tried, because
+ * prose can name the field before the object appears. (AGT-3466)
+ */
+export function findStringAwareJsonObject(text: string, marker: string): string | null {
+  for (let idx = text.indexOf(marker); idx >= 0; idx = text.indexOf(marker, idx + 1)) {
+    const found = enclosingObject(text, idx);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The outermost brace-balanced object spanning `idx`, or null. */
+function enclosingObject(text: string, idx: number): string | null {
+  // Each `{` at or before the marker is a candidate, tried in position order so
+  // the outermost one wins. A candidate that closes before the marker is a
+  // sibling object, and one that never closes is an unbalanced `{` in prose;
+  // both are skipped rather than aborting the scan — prose before the result
+  // routinely carries stray braces of either kind.
+  for (let start = text.indexOf('{'); start >= 0 && start <= idx; start = text.indexOf('{', start + 1)) {
+    const end = endOfBalancedObject(text, start);
+    if (end !== null && end > idx) return text.slice(start, end);
+  }
+  return null;
+}
+
+/** Index just past the `}` matching the `{` at `start`, tracking quoted strings. */
+function endOfBalancedObject(text: string, start: number): number | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+
+    if (ch === '{') depth++;
+    if (ch === '}') {
+      depth--;
+      if (depth === 0) return i + 1;
     }
   }
   return null;

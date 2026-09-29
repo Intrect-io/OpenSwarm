@@ -1095,6 +1095,33 @@ export async function checkPRCIStatus(
   return { status: 'success', headSha };
 }
 
+/** Default CI wait budget and poll interval. */
+const CI_WAIT_TIMEOUT_MS = 600_000; // 10 minutes
+const CI_POLL_INTERVAL_MS = 30_000; // 30 seconds
+/** A wait or interval past these is a caller bug, not patience. */
+const MAX_CI_WAIT_TIMEOUT_MS = 6 * 60 * 60 * 1000; // 6 hours
+const MAX_CI_POLL_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * A polling loop is only bounded if its two durations are.
+ *
+ * `NaN` passes every guard the loop has: `elapsed >= NaN` is false and
+ * `NaN <= 0` is false, so the sleep is scheduled for 0 ms and the loop calls
+ * `gh` as fast as the CLI can answer until the process is killed. `Infinity`
+ * overflows the timer (Node clamps the delay and warns), and a negative
+ * duration fires every timer immediately — the same hammering with a shorter
+ * fuse. Reject rather than clamp: a caller that computed a nonsense duration
+ * has a bug, and silently substituting a default would hide it behind a wait
+ * that never ends.
+ */
+function ciWaitDuration(value: number | undefined, label: string, fallback: number, max: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value) || value <= 0 || value > max) {
+    throw new Error(`[GitHub] ${label} must be a finite duration in (0, ${max}] ms, got ${String(value)}`);
+  }
+  return value;
+}
+
 /**
  * Wait for CI checks to complete (polling with timeout)
  * @param repo Repository name (owner/repo)
@@ -1113,8 +1140,8 @@ export async function waitForCICompletion(
     onProgress?: (status: CIStatus, elapsed: number) => void;
   } = {}
 ): Promise<CIStatus> {
-  const timeoutMs = options.timeoutMs ?? 600_000; // 10 minutes default
-  const pollIntervalMs = options.pollIntervalMs ?? 30_000; // 30 seconds default
+  const timeoutMs = ciWaitDuration(options.timeoutMs, 'timeoutMs', CI_WAIT_TIMEOUT_MS, MAX_CI_WAIT_TIMEOUT_MS);
+  const pollIntervalMs = ciWaitDuration(options.pollIntervalMs, 'pollIntervalMs', CI_POLL_INTERVAL_MS, MAX_CI_POLL_INTERVAL_MS);
   const startTime = Date.now();
   let expectedHeadSha = options.expectedHeadSha?.trim();
   let lastPending: Extract<CIStatus, { status: 'pending' }> | undefined;

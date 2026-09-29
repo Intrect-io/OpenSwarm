@@ -13,6 +13,14 @@ import { commentOnPR } from '../github/github.js';
 import { parsePublishedPullRequest } from './publishedPullRequest.js';
 import { collectTestCaseDeltas, deletedTestNotice } from './deletedTestGuard.js';
 import { rollBackReviewedPublication } from './prReviewRollback.js';
+import {
+  getReviewVerdictStore,
+  publicationReviewKey,
+  lookupStoredPublication,
+  recordStoredVerdict,
+  type PublicationReviewOutcome,
+  type ReviewVerdictStoreLike,
+} from './reviewVerdictStore.js';
 import type { DefaultRolesConfig, SecurityAuditConfig } from '../core/types.js';
 import type { PublishableResult, PublishableTask } from './publishOnPark.js';
 
@@ -37,6 +45,15 @@ export interface PublicationReviewHookInput {
   result: PublishableResult & { success?: boolean; finalStatus?: string; prUrl?: string };
   roles?: DefaultRolesConfig;
   securityAudit?: SecurityAuditConfig;
+  /**
+   * Durable memory of reviews this deployment already paid for.
+   *
+   * Optional so the hook is constructible without a database at all; when
+   * absent, the lazily-opened store at the automation database is used, and when
+   * THAT cannot be opened the hook simply reviews. A cache that cannot be read
+   * must never suppress a review — see reviewVerdictStore.ts.
+   */
+  verdictStore?: ReviewVerdictStoreLike;
   /**
    * Whether a "changes requested" verdict may undo the publication.
    *
@@ -96,20 +113,24 @@ export function buildPublicationReviewHook(
   headSha: string;
   worktreeInfo: { originalPath: string; worktreePath?: string };
 }) => Promise<void> {
-  const { task, result, roles, securityAudit, rollbackOnRejection } = input;
+  const { task, result, roles, securityAudit, rollbackOnRejection, verdictStore } = input;
   return async ({ prUrl, headSha, worktreeInfo }) => {
-    // Only the park path may skip. The approved path's whole job is to ACT on
-    // the verdict, and this cache remembers "seen", not what was decided — so
-    // skipping there disarms the rollback exactly where a reviewer already
-    // objected. A rolled-back run resumes the preserved worktree, commits
-    // nothing new (the implementation is already there and looks finished),
-    // and republishes the same PR at the same sha; a cache hit would then
-    // finish it `approved` with the objection unaddressed. That is AGT-4270's
-    // failure — a verdict nobody acts on — reintroduced.
+    // Only the park path may skip on the in-process key. The approved path's
+    // whole job is to ACT on the verdict, and this cache remembers "seen", not
+    // what was decided — so skipping there disarms the rollback exactly where a
+    // reviewer already objected. A rolled-back run resumes the preserved
+    // worktree, commits nothing new (the implementation is already there and
+    // looks finished), and republishes the same PR at the same sha; a cache hit
+    // would then finish it `approved` with the objection unaddressed. That is
+    // AGT-4270's failure — a verdict nobody acts on — reintroduced.
+    // The durable store below is NOT bound by this restriction, and the reason
+    // is the difference between the two caches: it stores the outcome, not
+    // "seen", so a hit there re-applies the verdict — rollback and all — instead
+    // of skipping past it.
     // Before the review, and outside its try, because it depends on nothing the
     // reviewer produces and must survive a reviewer that times out OR throws.
     // A timeout is exactly the state PR #580 shipped in. Deterministic: "the
-    // diff removes test cases" is a property of the text.
+    // diff removes tests" is a property of the text.
     await noteDeletedTests(prUrl, worktreeInfo.worktreePath);
 
     const dedupKey = rollbackOnRejection ? null : `${prUrl}@${headSha}`;
@@ -117,19 +138,35 @@ export function buildPublicationReviewHook(
       if (reviewedPublications.has(dedupKey)) return;
       reviewedPublications.add(dedupKey);
     }
-    // Loaded on demand: the review pulls in the whole PR processor.
-    let review: Awaited<ReturnType<typeof import('./prPublicationReview.js')['reviewPublishedPullRequest']>>;
-    try {
-      const { reviewPublishedPullRequest } = await import('./prPublicationReview.js');
-      review = await reviewPublishedPullRequest({
-        prUrl, projectPath: worktreeInfo.originalPath, roles, securityAudit,
-      });
-    } catch (err) {
-      // The key goes in before the review so concurrent callers collapse; a
-      // review that never produced a verdict must not leave the sha marked
-      // done, or the draft is never reviewed and nothing says why.
-      if (dedupKey) reviewedPublications.delete(dedupKey);
-      throw err;
+
+    // Restart-surviving reuse of an already-computed verdict. The in-process Set
+    // above is empty after every daemon restart (the failure census records 141
+    // `owner_process_exited` + 157 `shutdown_cancelled`), so a re-park after a
+    // redeploy paid again for a diff whose verdict this deployment already had.
+    const store = verdictStore ?? getReviewVerdictStore();
+    const storeKey = publicationReviewKey({ prUrl, headSha });
+    const stored = lookupStoredPublication(store, storeKey);
+    let review: PublicationReviewOutcome;
+    if (stored) {
+      review = stored;
+    } else {
+      // Loaded on demand: the review pulls in the whole PR processor.
+      try {
+        const { reviewPublishedPullRequest } = await import('./prPublicationReview.js');
+        review = await reviewPublishedPullRequest({
+          prUrl, projectPath: worktreeInfo.originalPath, roles, securityAudit,
+        });
+      } catch (err) {
+        // The key goes in before the review so concurrent callers collapse; a
+        // review that never produced a verdict must not leave the sha marked
+        // done, or the draft is never reviewed and nothing says why.
+        if (dedupKey) reviewedPublications.delete(dedupKey);
+        throw err;
+      }
+      // Recorded only once the review produced an outcome, and recorded whole:
+      // replaying a partial one would let a rejecting verdict replay as an
+      // approve, which is the single direction this must never be wrong in.
+      recordStoredVerdict(store, storeKey, review);
     }
     const status = review.success ? 'approved' : review.gateRan ? 'changes requested' : 'did not run';
     broadcastEvent({
@@ -137,7 +174,12 @@ export function buildPublicationReviewHook(
       data: {
         taskId: task.issueId || task.id,
         stage: 'pr-review',
-        line: `PR-time fresh review ${status}${review.error ? `: ${review.error}` : ''}`,
+        line: stored
+          // Named as a reuse so the saving is visible on the dashboard instead of
+          // being invisible: an operator reading "the review ran" for a review
+          // that never ran cannot tell this cache from a broken gate.
+          ? `PR-time fresh review ${status} — durable reuse of the recorded verdict for this commit${review.error ? `: ${review.error}` : ''}`
+          : `PR-time fresh review ${status}${review.error ? `: ${review.error}` : ''}`,
       },
     });
 
@@ -157,7 +199,10 @@ export function buildPublicationReviewHook(
           await commentOnPR(pr.repo, pr.number, couldNotRunNotice(review.error));
         } catch (err) {
           // Mirror of the throw case: a sha left marked done over a PR nobody
-          // told anything means the next park says nothing either.
+          // told anything means the next park says nothing either. On a reuse
+          // there is nothing to unmark — the recorded verdict stays valid and
+          // the next park reaches this same notice again — so only the
+          // in-process key is dropped.
           if (dedupKey) reviewedPublications.delete(dedupKey);
           console.warn('[Runner] Could not post the "review did not run" notice:', err);
         }

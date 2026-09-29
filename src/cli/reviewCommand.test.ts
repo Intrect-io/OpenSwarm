@@ -27,6 +27,12 @@ vi.mock('../core/config.js', async (importOriginal) => ({
   loadConfig: loadConfigMock,
 }));
 
+// The advisor is a second model on the same diff; mocked so the reuse tests can
+// assert it still runs over a reused verdict without a provider.
+const runReviewAdvisorMock = vi.hoisted(() =>
+  vi.fn(async (input: { reviewer: unknown }) => ({ ran: false, result: input.reviewer })));
+vi.mock('../agents/reviewAdvisor.js', () => ({ runReviewAdvisor: runReviewAdvisorMock }));
+
 describe('buildReviewWorkerResult (INT-1955)', () => {
   it('synthesizes a WorkerResult from changed files', () => {
     const wr = buildReviewWorkerResult(['a.ts', 'b.ts']);
@@ -664,3 +670,182 @@ describe('classifyTaskSourceError (AGT-4148)', () => {
     });
   });
 });
+
+describe('runReviewCommand durable reuse (Tier 1)', () => {
+  // The CLI direct path is where the other half of the measured opportunity
+  // lives: of the 15 same-mode identical-content repeats in the recorded
+  // history, 8 are direct→direct, and `openswarm review` never passes through
+  // the publication hook.
+  const files = ['x.ts'];
+  const hashes = { 'x.ts': 'file:same' };
+
+  async function makeStore() {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { ReviewVerdictStore } = await import('../automation/reviewVerdictStore.js');
+    const root = mkdtempSync(join(tmpdir(), 'osw-cli-verdict-'));
+    const store = new ReviewVerdictStore(join(root, 'automation.db'));
+    return { store, cleanup: () => { store.close(); rmSync(root, { recursive: true, force: true }); } };
+  }
+
+  function deps(extra: Record<string, unknown>) {
+    return {
+      getChangedFiles: async () => files,
+      loadHistory: async () => ({ context: undefined, records: [], currentHashes: hashes }),
+      saveHistory: async () => undefined,
+      startProgress: () => null,
+      log: () => {},
+      ...extra,
+    } as never;
+  }
+
+  it('reuses the recorded verdict for identical content instead of paying for the review again', async () => {
+    const { store, cleanup } = await makeStore();
+    try {
+      const first = vi.fn(async () => ({ decision: 'approve', feedback: 'looks good' }) as ReviewResult);
+      await runReviewCommand({}, deps({ review: first, verdictStore: store }));
+      expect(first).toHaveBeenCalledTimes(1);
+
+      // A second run over the same tree: no reviewer call, same verdict.
+      const second = vi.fn(async () => ({ decision: 'reject', feedback: 'should not run' }) as ReviewResult);
+      const logs: string[] = [];
+      const out = await runReviewCommand({}, deps({ review: second, verdictStore: store, log: (l: string) => logs.push(l) }));
+
+      expect(second).not.toHaveBeenCalled();
+      expect(out?.decision).toBe('approve');
+      expect(out?.feedback).toBe('looks good');
+      expect(logs.join('\n')).toContain('Reusing the recorded verdict');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('does not reuse the same content when the base ref differs', async () => {
+    // The verdict depends on what the diff is taken against. `--base` is a
+    // documented CI mode (INT-2552), and a review of the working tree is not a
+    // review of the branch against origin/main.
+    const { store, cleanup } = await makeStore();
+    try {
+      await runReviewCommand(
+        { base: 'origin/main' },
+        deps({ review: async () => ({ decision: 'approve', feedback: 'fine against main' }) as ReviewResult, verdictStore: store }),
+      );
+
+      const workingTree = vi.fn(async () => ({ decision: 'reject', feedback: 'different review' }) as ReviewResult);
+      const out = await runReviewCommand({}, deps({ review: workingTree, verdictStore: store }));
+
+      expect(workingTree).toHaveBeenCalledTimes(1);
+      expect(out?.feedback).toBe('different review');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('does not reuse when the content changed', async () => {
+    const { store, cleanup } = await makeStore();
+    try {
+      await runReviewCommand({}, deps({ review: async () => ({ decision: 'approve', feedback: 'first' }) as ReviewResult, verdictStore: store }));
+
+      const review = vi.fn(async () => ({ decision: 'reject', feedback: 'second' }) as ReviewResult);
+      const out = await runReviewCommand({}, deps({
+        review,
+        verdictStore: store,
+        loadHistory: async () => ({ context: undefined, records: [], currentHashes: { 'x.ts': 'file:changed' } }),
+      }));
+
+      expect(review).toHaveBeenCalledTimes(1);
+      expect(out?.feedback).toBe('second');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('does not reuse when the file hashes are missing for a reviewed file', async () => {
+    // An injected history stub that returns no hashes is not evidence the
+    // content is unchanged — reusing there would hand back a verdict for a diff
+    // nothing had described.
+    const { store, cleanup } = await makeStore();
+    try {
+      const review = vi.fn(async () => ({ decision: 'approve', feedback: 'ran' }) as ReviewResult);
+      await runReviewCommand({}, deps({
+        review,
+        verdictStore: store,
+        loadHistory: async () => ({ context: undefined, records: [], currentHashes: {} }),
+      }));
+      await runReviewCommand({}, deps({
+        review,
+        verdictStore: store,
+        loadHistory: async () => ({ context: undefined, records: [], currentHashes: {} }),
+      }));
+
+      expect(review).toHaveBeenCalledTimes(2);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('runs the review when the store throws, leaving behaviour unchanged', async () => {
+    // A cache that cannot be read must never suppress a review (the fail-open
+    // direction the store is built around).
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const review = vi.fn(async () => ({ decision: 'approve', feedback: 'ran anyway' }) as ReviewResult);
+    const broken = {
+      lookupPublication: () => { throw new Error('locked'); },
+      lookupReview: () => { throw new Error('locked'); },
+      record: () => { throw new Error('readonly'); },
+    };
+
+    const out = await runReviewCommand({}, deps({ review, verdictStore: broken }));
+
+    expect(review).toHaveBeenCalledTimes(1);
+    expect(out?.feedback).toBe('ran anyway');
+  });
+
+  it('does not reuse for the publication path, which reviews a different diff', async () => {
+    // `prProcessor.freshReview` (prProcessor.ts:444) calls this function with
+    // the publication stage and its own history plumbing. Its review is of a
+    // scratch checkout diffed against a merge-base, not of a working tree, so
+    // filing it as a 'direct' review is the cross-mode conflation that flipped
+    // 15 of 53 verdicts in the measured history.
+    const { store, cleanup } = await makeStore();
+    try {
+      await runReviewCommand(
+        { processContext: { taskId: 'o/r#1', stage: 'pr-review' } },
+        deps({ review: async () => ({ decision: 'approve', feedback: 'publication review' }) as ReviewResult, verdictStore: store }),
+      );
+
+      const plain = vi.fn(async () => ({ decision: 'reject', feedback: 'cli review' }) as ReviewResult);
+      const out = await runReviewCommand({}, deps({ review: plain, verdictStore: store }));
+
+      expect(plain).toHaveBeenCalledTimes(1);
+      expect(out?.feedback).toBe('cli review');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('keeps the reuse cheap: the advisor still runs, the reviewer does not', async () => {
+    // The advisor only tightens a verdict (approve → revise/reject), so skipping
+    // it on reuse would be the one way this cache fails OPEN. It is also the
+    // cheap pass; the reviewer call is the p50-93s, ~$0.26 one.
+    const { store, cleanup } = await makeStore();
+    try {
+      await runReviewCommand({}, deps({ review: async () => ({ decision: 'approve', feedback: 'first' }) as ReviewResult, verdictStore: store }));
+      runReviewAdvisorMock.mockClear();
+
+      const review = vi.fn();
+      const out = await runReviewCommand(
+        { advisor: { model: 'x' } },
+        deps({ review, verdictStore: store, getDiff: async () => 'diff --git a/x.ts b/x.ts' }),
+      );
+
+      expect(review).not.toHaveBeenCalled();
+      expect(runReviewAdvisorMock).toHaveBeenCalledTimes(1);
+      expect(out?.decision).toBe('approve');
+    } finally {
+      cleanup();
+    }
+  });
+});
+
