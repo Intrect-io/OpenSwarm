@@ -459,11 +459,26 @@ export function shouldPublishUnfinishedWork(
   return UNFINISHED_STATUSES.has(result.finalStatus ?? '');
 }
 
+// A pytest progress row is only result marks and a percentage. The first 500
+// characters of a failing run were all of them, so a draft PR said nothing about
+// what failed (AGT-4672: #796, #798); the failing ids and totals come last.
+const PROGRESS_RUN = /(?:^|\s)[.sxXFE]{8,}(?=\s|$)/g;
+const PERCENT_MARK = /\s\[\s*\d{1,3}%\]/g;
+const SUMMARY_CAP = 500;
+const SUMMARY_HEAD = 150;
+
 /** One line of a failure detail, bounded, for the draft PR's body. */
-function summarizeFailure(detail: string | undefined): string {
-  const flat = (detail ?? '').replace(/\s+/g, ' ').trim();
+export function summarizeFailure(detail: string | undefined): string {
+  const flat = (detail ?? '')
+    .replace(/\s+/g, ' ')
+    .replace(PROGRESS_RUN, ' ')
+    .replace(PERCENT_MARK, '')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!flat) return 'no failure detail was recorded';
-  return flat.length > 500 ? `${flat.slice(0, 500)}…` : flat;
+  if (flat.length <= SUMMARY_CAP) return flat;
+  // Keep both ends: the stage that failed leads, the final failure lines trail.
+  return `${flat.slice(0, SUMMARY_HEAD)} … ${flat.slice(-(SUMMARY_CAP - SUMMARY_HEAD))}`;
 }
 
 /**
