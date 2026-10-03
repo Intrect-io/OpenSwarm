@@ -287,6 +287,10 @@ export class SqliteRegistryStore {
       CREATE INDEX IF NOT EXISTS idx_ce_has_tests ON code_entities(has_tests);
       CREATE INDEX IF NOT EXISTS idx_ce_risk ON code_entities(risk_level);
       CREATE INDEX IF NOT EXISTS idx_ce_knowledge ON code_entities(knowledge_node_id);
+      -- Covering index for getStats: its grouped count reads only these columns, so the
+      -- scan touches this index instead of every wide row. On a 373 MB registry the
+      -- table scan took 28 s of disk wait under load and stalled the daemon's loop.
+      CREATE INDEX IF NOT EXISTS idx_ce_stats ON code_entities(project_id, kind, status, has_tests, risk_level);
       CREATE INDEX IF NOT EXISTS idx_ce_events_entity ON code_entity_events(entity_id);
       CREATE INDEX IF NOT EXISTS idx_ce_events_created ON code_entity_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_ce_tags_tag ON code_entity_tags(tag);

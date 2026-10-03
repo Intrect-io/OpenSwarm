@@ -98,6 +98,20 @@ describe('SqliteRegistryStore.getStats (AGT-4668)', () => {
     expect(Object.fromEntries(stats.byStatus.map((entry) => [entry.status, entry.count]))).toEqual(count('status'));
   });
 
+  // The count must be answerable from the index alone; otherwise every call reads the
+  // whole table, which is what stalled the daemon on a large registry.
+  it('answers the grouped count from a covering index', () => {
+    const registry = createStore();
+    seed(registry);
+    const db = (registry as unknown as { db: { prepare(sql: string): { all(...args: unknown[]): Array<{ detail: string }> } } }).db;
+    const plan = db.prepare(
+      `EXPLAIN QUERY PLAN SELECT kind, status, has_tests, risk_level, COUNT(*) as cnt
+       FROM code_entities WHERE project_id = ?
+       GROUP BY kind, status, has_tests, risk_level`,
+    ).all('p');
+    expect(plan.map((row) => row.detail).join('\n')).toContain('COVERING INDEX idx_ce_stats');
+  });
+
   it('counts every project when none is given', () => {
     const registry = createStore();
     const inputs = seed(registry);
