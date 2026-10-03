@@ -68,7 +68,7 @@ export async function copyIsolatedPath(
   // Always validate the destination tree. Even a previously sanitized snapshot
   // is mutable filesystem state; trusting it here would turn an intermediate
   // symlink change into a sandbox escape or unexpected dereference.
-  await isolateCopiedTreeSymlinks(sandboxRoot, target, physicalSource, label, exclude);
+  await isolateCopiedTreeSymlinks(sandboxRoot, target, physicalSource, label, exclude, new Set([physicalSource]));
 }
 
 async function isolateCopiedTreeSymlinks(
@@ -76,7 +76,13 @@ async function isolateCopiedTreeSymlinks(
   current: string,
   sourceCurrent: string,
   label: string,
-  exclude?: (path: string) => boolean,
+  exclude: ((path: string) => boolean) | undefined,
+  /**
+   * Physical directories already being copied on the way here. A link that
+   * leads back into one of them is a cycle, and dereferencing it copies the
+   * same tree again inside itself.
+   */
+  chain: ReadonlySet<string>,
 ): Promise<void> {
   const info = await lstat(current);
   if (info.isSymbolicLink()) {
@@ -113,9 +119,20 @@ async function isolateCopiedTreeSymlinks(
       await symlink(safeRelativeTarget, current);
       return;
     }
+    // A link to a directory already on the copy chain (a `node_modules` that
+    // contains a link to itself, say) would be copied in again, and the copy
+    // would contain the same link again, until the path got too long. Each level
+    // copied the whole tree: on 2026-10-03 nine abandoned sandboxes held about
+    // 73 GB and the disk filled (AGT-4666). Neutralize it like a dangling link.
+    if (chain.has(physicalTarget)) {
+      const safeMissingTarget = join(sandboxRoot, '.git', 'openswarm-isolated-missing-target');
+      await rm(current, { force: true });
+      await symlink(relative(dirname(current), safeMissingTarget), current);
+      return;
+    }
     await rm(current, { force: true });
     await copyWithCloneFallback(physicalTarget, current, exclude, label);
-    await isolateCopiedTreeSymlinks(sandboxRoot, current, physicalTarget, label, exclude);
+    await isolateCopiedTreeSymlinks(sandboxRoot, current, physicalTarget, label, exclude, new Set([...chain, physicalTarget]));
     return;
   }
   if (!info.isDirectory()) return;
@@ -129,6 +146,7 @@ async function isolateCopiedTreeSymlinks(
       join(sourceCurrent, entry.name),
       `${label}/${entry.name}`,
       exclude,
+      chain,
     );
   }
 }
