@@ -108,13 +108,22 @@ async function capturePackageJsons(projectPath: string, commands: VerifyCommand[
   return Object.fromEntries(packages);
 }
 
+/**
+ * Discovered commands carry the generic 300 s default; give them the configured one. Only
+ * these: a manifest-declared command already states the timeout its repository wants.
+ */
+export function withDiscoveredTimeout(commands: VerifyCommand[], timeoutMs: number | undefined): VerifyCommand[] {
+  return timeoutMs === undefined ? commands : commands.map((command) => ({ ...command, timeoutMs }));
+}
+
 export async function loadTrustedVerifyPlan(projectPath: string, config: VerifyConfig): Promise<TrustedVerifyPlan> {
   if (!config.enabled) return { commands: [], packageJsonByDirectory: {} };
   const loaded = await loadVerifyManifest(projectPath);
   // A checked-in manifest error is a task/configuration failure, not transient
   // infrastructure: fail closed instead of silently falling back to an LLM.
   if (loaded.error) throw new Error(`verify-config: ${loaded.error}`);
-  const commands = (loaded.manifest?.commands ?? await discoverVerifyCommands(projectPath)).slice(0, config.maxCommands);
+  const commands = (loaded.manifest?.commands ?? withDiscoveredTimeout(await discoverVerifyCommands(projectPath), config.commandTimeoutMs))
+    .slice(0, config.maxCommands);
   return { commands, packageJsonByDirectory: await capturePackageJsons(projectPath, commands) };
 }
 
