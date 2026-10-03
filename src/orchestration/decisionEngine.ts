@@ -555,7 +555,7 @@ export class DecisionEngine {
         title: selectedTask.title,
         projectId: selectedTask.linearProject?.id,
         projectName: selectedTask.linearProject?.name,
-      });
+      }, { takeOverStale: this.hasStaleExecutionMarker(issueId) });
       if (!claimed) {
         return {
           action: 'skip',
@@ -660,7 +660,7 @@ export class DecisionEngine {
           title: item.task.title,
           projectId: item.task.linearProject?.id,
           projectName: item.task.linearProject?.name,
-        });
+        }, { takeOverStale: this.hasStaleExecutionMarker(issueId) });
         if (claimed) {
           claimedTasks.push(item);
         } else {
@@ -705,6 +705,16 @@ export class DecisionEngine {
    */
   updateAllowedProjects(paths: string[]): void {
     this.config.allowedProjects = paths;
+  }
+
+  /**
+   * The local state says `in_progress` but no live executor stands behind it —
+   * the filter above let the task through, so the admission claim must be
+   * allowed to take the marker over too. (AGT-4667)
+   */
+  private hasStaleExecutionMarker(issueId: string): boolean {
+    return getTaskState(issueId)?.execution.status === 'in_progress'
+      && !(this.config.isExecutionLive?.(issueId) ?? true);
   }
 
   /**

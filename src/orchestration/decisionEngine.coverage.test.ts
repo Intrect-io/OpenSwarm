@@ -260,6 +260,33 @@ describe('DecisionEngine.heartbeat', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('already executing'));
   });
 
+  it('lets the admission claim take over a marker it just judged stale', async () => {
+    taskStateMock.getTaskState.mockReturnValue({ issueId: 'issue-1', execution: { status: 'in_progress' } });
+    try {
+      const engine = new DecisionEngine({ autoExecute: true, isExecutionLive: () => false });
+      const t = task({ workflowId: 'wf-1' });
+      workflowMock.loadWorkflow.mockResolvedValueOnce(workflow());
+      const result = await engine.heartbeat([t]);
+      expect(result.action).toBe('execute');
+      expect(taskStateMock.tryClaimTaskAdmission).toHaveBeenCalledWith(
+        'issue-1', expect.anything(), { takeOverStale: true },
+      );
+    } finally {
+      taskStateMock.getTaskState.mockReset();
+      taskStateMock.getTaskState.mockImplementation(() => undefined);
+    }
+  });
+
+  it('does not ask to take over when no marker is stale', async () => {
+    const engine = new DecisionEngine({ autoExecute: true });
+    const t = task({ workflowId: 'wf-1' });
+    workflowMock.loadWorkflow.mockResolvedValueOnce(workflow());
+    await engine.heartbeat([t]);
+    expect(taskStateMock.tryClaimTaskAdmission).toHaveBeenCalledWith(
+      'issue-1', expect.anything(), { takeOverStale: false },
+    );
+  });
+
   it('does not consult the probe for a task that is not marked in_progress', async () => {
     const probe = vi.fn(() => false);
     const engine = new DecisionEngine({ isExecutionLive: probe });
@@ -302,7 +329,7 @@ describe('DecisionEngine.heartbeat', () => {
     expect(taskStateMock.tryClaimTaskAdmission).toHaveBeenCalledWith('issue-1', expect.objectContaining({
       issueIdentifier: 'INT-1',
       title: t.title,
-    }));
+    }), { takeOverStale: false });
   });
 
   it('skips when autoExecute claim fails (already claimed)', async () => {
