@@ -7,9 +7,20 @@ import type { GraphNode, GraphEdge, EdgeType, NodeType, ProjectSummary, Serializ
 
 // KnowledgeGraph Class
 
+/** Identity of an edge for duplicate detection: same endpoints and type. */
+function edgeKey(edge: Pick<GraphEdge, 'source' | 'target' | 'type'>): string {
+  return `${edge.source}\u0000${edge.target}\u0000${edge.type}`;
+}
+
 export class KnowledgeGraph {
   private nodes = new Map<string, GraphNode>();
   private edges: GraphEdge[] = [];
+  // (source, target, type) keys of every edge in `edges`. addEdge used to
+  // dedupe with `edges.some(...)`, which made deserialize O(E²): the daemon's
+  // heartbeat reloads every stored graph, and a 54k-edge graph held the event
+  // loop for minutes, so the dashboard stopped answering (AGT-4659). Every
+  // mutation of `edges` below keeps this set in sync.
+  private edgeKeys = new Set<string>();
 
   // Adjacency list: nodeId → outgoing edges
   private adjacency = new Map<string, GraphEdge[]>();
@@ -53,7 +64,11 @@ export class KnowledgeGraph {
   removeNode(id: string): void {
     this.nodes.delete(id);
     // Remove related edges
-    this.edges = this.edges.filter(e => e.source !== id && e.target !== id);
+    this.edges = this.edges.filter(e => {
+      const keep = e.source !== id && e.target !== id;
+      if (!keep) this.edgeKeys.delete(edgeKey(e));
+      return keep;
+    });
     this.adjacency.delete(id);
     this.reverseAdjacency.delete(id);
     // Also remove from other nodes' adjacency lists
@@ -80,11 +95,10 @@ export class KnowledgeGraph {
   // ============================================
 
   addEdge(edge: GraphEdge): void {
-    // Prevent duplicates
-    const exists = this.edges.some(
-      e => e.source === edge.source && e.target === edge.target && e.type === edge.type
-    );
-    if (exists) return;
+    // Prevent duplicates — O(1), not a scan of every edge (see edgeKeys).
+    const key = edgeKey(edge);
+    if (this.edgeKeys.has(key)) return;
+    this.edgeKeys.add(key);
 
     this.edges.push(edge);
 
@@ -111,6 +125,7 @@ export class KnowledgeGraph {
 
     // Remove from main edge array
     this.edges = this.edges.filter(e => !(e.source === nodeId && typeSet.has(e.type)));
+    for (const edge of toRemove) this.edgeKeys.delete(edgeKey(edge));
 
     // Sync adjacency map
     const outEdges = this.adjacency.get(nodeId);
@@ -306,6 +321,7 @@ export class KnowledgeGraph {
   clear(): void {
     this.nodes.clear();
     this.edges = [];
+    this.edgeKeys.clear();
     this.adjacency.clear();
     this.reverseAdjacency.clear();
   }
