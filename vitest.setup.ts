@@ -47,6 +47,13 @@ process.env.OPENSWARM_USAGE_DIR = join(tmpdir(), 'openswarm-test-usage', workerS
 // because pruning reads the whole directory back. (AGT-4442)
 process.env.OPENSWARM_SESSION_LOG_DIR = join(tmpdir(), 'openswarm-test-sessions', workerScope);
 
+// A live Codex model fetch now writes its context windows to the model catalog
+// cache (AGT-4660), and the existing codexModels tests stub that fetch to
+// succeed. Without this they would leave a codex-responses.json in the
+// operator's live ~/.openswarm/model-catalogs/, which a real run would then
+// read as truth. Tests that exercise the catalog set their own directory.
+process.env.OPENSWARM_MODEL_CATALOG_DIR = join(tmpdir(), 'openswarm-test-model-catalogs', workerScope);
+
 // Same reason as the session log above: pipeline tests build worker options
 // that carry a scratchpad id, and a tool test that writes a note would land it
 // in the operator's live ~/.openswarm/scratch/. Per worker because the prune

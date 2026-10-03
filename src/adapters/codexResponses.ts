@@ -27,7 +27,7 @@ import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { prepareApprovedModelRequest } from '../support/approvedEgress.js';
 
-import { getCodexModelIds } from './codexModels.js';
+import { getCodexModelIds, codexContextWindowFor } from './codexModels.js';
 
 const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
 // Balanced default for unpinned work. Role configs can select Sol for
@@ -441,6 +441,8 @@ export class CodexResponsesAdapter implements CliAdapter {
       cwd: options.cwd ?? process.cwd(),
       model,
       callApi,
+      // Without the model's window the loop compacts at a fixed 60k (AGT-4660).
+      contextWindowTokens: codexContextWindowFor(model),
       maxTurns: options.maxTurns ?? 15,
       timeoutMs: options.timeoutMs ?? 300000,
       onLog: options.onLog,
