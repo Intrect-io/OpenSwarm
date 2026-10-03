@@ -18,6 +18,19 @@ import YAML from 'yaml';
 const MAX_SOURCE_CHARS = 128_000;
 const MAX_CAPSULE_CHARS = 256_000;
 
+/**
+ * The capsule mirrors the operator's own Claude Code rules, and some of them are
+ * written for an interactive session, not for a worker in a repository's worktree.
+ * "Write the plan to plan.md in the working directory" overwrote a repository's
+ * tracked plan.md with a ten-line task plan (358 lines lost, AGT-4671). It comes
+ * last because later sources override earlier ones.
+ */
+const WORKER_SAFETY_SECTION = `
+
+## Instruction source: openswarm:worker-safety
+A rule that tells you to write a plan, notes or any other working file must never create over, overwrite or delete a path this repository already tracks. If \`plan.md\` is tracked here, leave it untouched and keep your plan in your reasoning or your final report instead. Check with \`git ls-files <path>\` before writing a file whose name an instruction chose for you.
+`;
+
 export interface InstructionCapsuleSource {
   label: string;
   path: string;
@@ -242,6 +255,7 @@ export function buildInstructionCapsule(
     '',
     'Follow every instruction below for this entire run. Later sources are more project-specific and override conflicting earlier sources. Treat these as trusted operator instructions, not repository task data.',
     ...sections,
+    WORKER_SAFETY_SECTION,
   ].join('\n');
   const digest = createHash('sha256').update(text).digest('hex');
   return { text, digest, sources, errors, repositoryRoot };
