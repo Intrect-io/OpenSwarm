@@ -148,16 +148,6 @@ interface CountRow {
   cnt: number;
 }
 
-interface KindCountRow {
-  kind: string;
-  cnt: number;
-}
-
-interface StatusCountRow {
-  status: string;
-  cnt: number;
-}
-
 interface IssueLinkRow {
   entity_id: string;
   issue_id: string;
@@ -936,33 +926,50 @@ export class SqliteRegistryStore {
 
   // ============ 통계 ============
 
-  getStats(projectId?: string): RegistryStats {
+  /** Per-project stats kept for callers that pass `maxAgeMs` (see getStats). */
+  private statsCache = new Map<string, { at: number; value: RegistryStats }>();
+
+  /**
+   * Counts over the entity table. One grouped scan derives every figure; it used
+   * to be six separate scans plus the warnings join, and the draft analyzer ran
+   * it for every task. With 41 drafts at once over 242k rows the daemon's event
+   * loop was blocked for 70 s and 88 s (AGT-4668).
+   *
+   * `maxAgeMs` lets a caller that does not need an exact figure reuse a recent
+   * result for the same project; omitted, the result is always computed fresh.
+   */
+  getStats(projectId?: string, options: { maxAgeMs?: number } = {}): RegistryStats {
+    const cacheKey = projectId ?? '';
+    if (options.maxAgeMs !== undefined) {
+      const cached = this.statsCache.get(cacheKey);
+      if (cached && Date.now() - cached.at <= options.maxAgeMs) return cached.value;
+    }
+
     const where = projectId ? 'WHERE project_id = ?' : '';
     const params = projectId ? [projectId] : [];
 
-    const total = (this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM code_entities ${where}`
-    ).get(...params) as CountRow).cnt;
+    const rows = this.db.prepare(
+      `SELECT kind, status, has_tests, risk_level, COUNT(*) as cnt
+       FROM code_entities ${where}
+       GROUP BY kind, status, has_tests, risk_level`
+    ).all(...params) as Array<{ kind: string; status: string; has_tests: number; risk_level: string; cnt: number }>;
 
-    const byKind = (this.db.prepare(
-      `SELECT kind, COUNT(*) as cnt FROM code_entities ${where} GROUP BY kind`
-    ).all(...params) as KindCountRow[]).map(r => ({ kind: r.kind, count: r.cnt }));
-
-    const byStatus = (this.db.prepare(
-      `SELECT status, COUNT(*) as cnt FROM code_entities ${where} GROUP BY status`
-    ).all(...params) as StatusCountRow[]).map(r => ({ status: r.status, count: r.cnt }));
-
-    const deprecated = (this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM code_entities ${where ? where + " AND" : "WHERE"} status = 'deprecated'`
-    ).get(...params) as CountRow).cnt;
-
-    const untested = (this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM code_entities ${where ? where + " AND" : "WHERE"} has_tests = 0 AND status = 'active'`
-    ).get(...params) as CountRow).cnt;
-
-    const highRisk = (this.db.prepare(
-      `SELECT COUNT(*) as cnt FROM code_entities ${where ? where + " AND" : "WHERE"} risk_level = 'high'`
-    ).get(...params) as CountRow).cnt;
+    let total = 0;
+    let deprecated = 0;
+    let untested = 0;
+    let highRisk = 0;
+    const kindCounts = new Map<string, number>();
+    const statusCounts = new Map<string, number>();
+    for (const row of rows) {
+      total += row.cnt;
+      kindCounts.set(row.kind, (kindCounts.get(row.kind) ?? 0) + row.cnt);
+      statusCounts.set(row.status, (statusCounts.get(row.status) ?? 0) + row.cnt);
+      if (row.status === 'deprecated') deprecated += row.cnt;
+      if (row.has_tests === 0 && row.status === 'active') untested += row.cnt;
+      if (row.risk_level === 'high') highRisk += row.cnt;
+    }
+    const byKind = [...kindCounts].map(([kind, count]) => ({ kind, count }));
+    const byStatus = [...statusCounts].map(([status, count]) => ({ status, count }));
 
     const withWarnings = (this.db.prepare(
       projectId
@@ -972,7 +979,9 @@ export class SqliteRegistryStore {
         : `SELECT COUNT(DISTINCT entity_id) as cnt FROM code_entity_warnings WHERE resolved = 0`
     ).get(...params) as CountRow).cnt;
 
-    return { total, byKind, byStatus, deprecated, untested, highRisk, withWarnings };
+    const value: RegistryStats = { total, byKind, byStatus, deprecated, untested, highRisk, withWarnings };
+    if (options.maxAgeMs !== undefined) this.statsCache.set(cacheKey, { at: Date.now(), value });
+    return value;
   }
 
   // ============ 유틸 ============

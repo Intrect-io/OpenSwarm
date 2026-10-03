@@ -56,3 +56,97 @@ describe('SqliteRegistryStore safe queries', () => {
     expect(page.total).toBe(5);
   });
 });
+
+describe('SqliteRegistryStore.getStats (AGT-4668)', () => {
+  type Input = Parameters<SqliteRegistryStore['registerEntity']>[0];
+
+  function seed(registry: SqliteRegistryStore): Input[] {
+    const inputs: Input[] = [];
+    const kinds = ['function', 'class', 'module'] as const;
+    const statuses = ['active', 'active', 'deprecated', 'broken'] as const;
+    const risks = ['low', 'medium', 'high'] as const;
+    for (let index = 0; index < 60; index++) {
+      inputs.push({
+        projectId: index % 5 === 0 ? 'other' : 'p',
+        kind: kinds[index % kinds.length],
+        name: `entity${index}`,
+        filePath: `src/file${index}.ts`,
+        status: statuses[index % statuses.length],
+        hasTests: index % 3 === 0,
+        riskLevel: risks[index % risks.length],
+      });
+    }
+    for (const input of inputs) registry.registerEntity(input);
+    return inputs;
+  }
+
+  // The expected figures are counted straight from the inputs, so a change to the
+  // grouped query cannot agree with itself by accident.
+  it('reports the same figures as counting the entities one by one', () => {
+    const registry = createStore();
+    const inputs = seed(registry).filter((input) => input.projectId === 'p');
+    const stats = registry.getStats('p');
+
+    expect(stats.total).toBe(inputs.length);
+    expect(stats.deprecated).toBe(inputs.filter((input) => input.status === 'deprecated').length);
+    expect(stats.untested).toBe(inputs.filter((input) => input.status === 'active' && !input.hasTests).length);
+    expect(stats.highRisk).toBe(inputs.filter((input) => input.riskLevel === 'high').length);
+    const count = (key: 'kind' | 'status') => Object.fromEntries(
+      [...new Set(inputs.map((input) => input[key]))].map((value) => [value, inputs.filter((input) => input[key] === value).length]),
+    );
+    expect(Object.fromEntries(stats.byKind.map((entry) => [entry.kind, entry.count]))).toEqual(count('kind'));
+    expect(Object.fromEntries(stats.byStatus.map((entry) => [entry.status, entry.count]))).toEqual(count('status'));
+  });
+
+  it('counts every project when none is given', () => {
+    const registry = createStore();
+    const inputs = seed(registry);
+    expect(registry.getStats().total).toBe(inputs.length);
+  });
+
+  it('counts unresolved warnings once per entity, scoped to the project', () => {
+    const registry = createStore();
+    const a = registry.registerEntity({ projectId: 'p', kind: 'function', name: 'a', filePath: 'src/a.ts' });
+    const b = registry.registerEntity({ projectId: 'other', kind: 'function', name: 'b', filePath: 'src/b.ts' });
+    registry.addWarning(a.id, 'one', 'complexity', 'warning');
+    registry.addWarning(a.id, 'two', 'complexity', 'warning');
+    registry.addWarning(b.id, 'three', 'complexity', 'warning');
+    expect(registry.getStats('p').withWarnings).toBe(1);
+    expect(registry.getStats().withWarnings).toBe(2);
+  });
+
+  it('is always fresh unless the caller allows an age', () => {
+    const registry = createStore();
+    registry.registerEntity({ projectId: 'p', kind: 'function', name: 'first', filePath: 'src/a.ts' });
+    expect(registry.getStats('p', { maxAgeMs: 60_000 }).total).toBe(1);
+
+    registry.registerEntity({ projectId: 'p', kind: 'function', name: 'second', filePath: 'src/b.ts' });
+
+    // No age given: computed now, so it sees both.
+    expect(registry.getStats('p').total).toBe(2);
+    // An age given: the recent result is served, by design.
+    expect(registry.getStats('p', { maxAgeMs: 60_000 }).total).toBe(1);
+  });
+
+  it('recomputes once the allowed age has passed', async () => {
+    const registry = createStore();
+    registry.registerEntity({ projectId: 'p', kind: 'function', name: 'first', filePath: 'src/a.ts' });
+    expect(registry.getStats('p', { maxAgeMs: 20 }).total).toBe(1);
+    registry.registerEntity({ projectId: 'p', kind: 'function', name: 'second', filePath: 'src/b.ts' });
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(registry.getStats('p', { maxAgeMs: 20 }).total).toBe(2);
+  });
+
+  it('reuses a recent result for the same project only', () => {
+    const registry = createStore();
+    registry.registerEntity({ projectId: 'p', kind: 'function', name: 'first', filePath: 'src/a.ts' });
+    const first = registry.getStats('p', { maxAgeMs: 60_000 });
+    registry.registerEntity({ projectId: 'p', kind: 'function', name: 'second', filePath: 'src/b.ts' });
+    registry.registerEntity({ projectId: 'q', kind: 'function', name: 'third', filePath: 'src/c.ts' });
+
+    expect(registry.getStats('p', { maxAgeMs: 60_000 })).toBe(first);
+    expect(registry.getStats('q', { maxAgeMs: 60_000 }).total).toBe(1);
+  });
+});
