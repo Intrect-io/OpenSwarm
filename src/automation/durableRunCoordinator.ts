@@ -155,8 +155,13 @@ export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): 
     const exponent = Math.max(0, Math.min(16, attemptNo - 1));
     return now + Math.min(6 * 60 * 60_000, 5 * 60_000 * (2 ** exponent));
   }
-  if (result.finalStatus === 'infra_error') return now + 15 * 60_000;
-  return now + 30 * 60_000;
+  // A task that fails every time was re-claimed as soon as its attempt ended and
+  // kept its place at the top of the queue: 11 issues took 74% of 78 attempts in
+  // four hours while 80 others waited (AGT-4673). The delay stays at today's value
+  // for the first three attempts, then doubles with each one.
+  const ramp = 2 ** Math.max(0, Math.min(16, attemptNo - 3));
+  if (result.finalStatus === 'infra_error') return now + Math.min(2 * 60 * 60_000, 15 * 60_000 * ramp);
+  return now + Math.min(6 * 60 * 60_000, 30 * 60_000 * ramp);
 }
 
 function processIsAlive(pid: number): boolean {
@@ -933,7 +938,7 @@ export class DurableRunCoordinator {
       default: target = 'RETRY_AT'; break;
     }
     const transitioned = this.ledger.transition(claim, target, {
-      retryAt: target === 'RETRY_AT' ? retryAtFor(result, now) : null,
+      retryAt: target === 'RETRY_AT' ? retryAtFor(result, now, claim.attemptNo) : null,
       errorCode: result.finalStatus,
       errorMessage: detail,
       eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus },
