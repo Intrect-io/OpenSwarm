@@ -559,6 +559,8 @@ const McpServerSchema = z
     url: z.string().optional(),
     headers: z.record(z.string(), z.string()).optional(),
     transport: z.enum(['stdio', 'http', 'sse']).optional(),
+    /** `scope` keeps one connection for the length of an agentic-loop invocation (browser state). */
+    session: z.enum(['call', 'scope']).optional(),
   })
   .refine((s) => !!s.preset || !!s.command || !!s.url, {
     message: 'MCP server needs a `preset`, a `command` (stdio), or a `url` (remote)',

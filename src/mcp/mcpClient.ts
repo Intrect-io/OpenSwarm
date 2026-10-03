@@ -7,8 +7,11 @@
 // vega-agent pipeline/mcp_client.py: registry → transport (stdio/http/sse) →
 // initMcpTools (per-server listTools, qualified name `server__tool`) →
 // callMcpTool dispatch → isMcpTool. Connections are per-call (like vega's
-// `async with Client`); unreachable servers degrade with a log, never crash.
+// `async with Client`) unless a server declares `session: 'scope'`, which keeps
+// one connection for the length of an agentic-loop invocation (see
+// `withMcpSessionScope`); unreachable servers degrade with a log, never crash.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -42,6 +45,13 @@ const EMPTY_INPUT_SCHEMA: Record<string, unknown> = { type: 'object', properties
 interface ServerConfig {
   transport: 'stdio' | 'http' | 'sse';
   surface?: McpSurface;
+  /**
+   * `call` (default): a fresh connection per tool call. `scope`: one connection
+   * per agentic-loop invocation, closed when it ends. A server that keeps state
+   * between calls — a browser that has navigated somewhere — needs `scope`, or
+   * the next call lands on a blank page.
+   */
+  session?: 'call' | 'scope';
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -174,10 +184,12 @@ export function sanitizeInputSchema(schema: unknown): Record<string, unknown> {
 function normalizeEntry(raw: unknown): ServerConfig | null {
   if (!isRecord(raw)) return null;
   if (raw.surface !== undefined && !isMcpSurface(raw.surface)) return null;
+  if (raw.session !== undefined && raw.session !== 'call' && raw.session !== 'scope') return null;
   const surface = raw.surface as McpSurface | undefined;
+  const session = raw.session === 'scope' ? { session: 'scope' as const } : {};
   if (typeof raw.preset === 'string' && raw.preset) {
     const preset = BUILTIN_MCP_SERVERS[raw.preset];
-    return preset ? { ...preset, ...(surface ? { surface } : {}) } : null;
+    return preset ? { ...preset, ...(surface ? { surface } : {}), ...session } : null;
   }
   if (typeof raw.command === 'string' && raw.command) {
     const args = stringArrayOrNull(raw.args);
@@ -186,6 +198,7 @@ function normalizeEntry(raw: unknown): ServerConfig | null {
     return {
       transport: 'stdio',
       ...(surface ? { surface } : {}),
+      ...session,
       command: raw.command,
       args,
       env,
@@ -195,7 +208,7 @@ function normalizeEntry(raw: unknown): ServerConfig | null {
     const headers = stringRecordOrNull(raw.headers);
     if (headers === null) return null;
     const t = raw.transport === 'sse' ? 'sse' : 'http';
-    return { transport: t, ...(surface ? { surface } : {}), url: raw.url, headers };
+    return { transport: t, ...(surface ? { surface } : {}), ...session, url: raw.url, headers };
   }
   return null;
 }
@@ -273,14 +286,90 @@ export async function withDeadline<T>(operation: Promise<T>, timeoutMs: number, 
   }
 }
 
-async function withClient<T>(cfg: ServerConfig, fn: (c: Client) => Promise<T>): Promise<T> {
+/** A connection held open for the length of an agentic-loop invocation. */
+interface ScopedSession {
+  client: Promise<Client>;
+  /** Serializes calls: a stateful server (a browser) must see them one at a time. */
+  tail: Promise<unknown>;
+}
+
+const sessionScope = new AsyncLocalStorage<Map<string, ScopedSession>>();
+
+function sessionKey(cfg: ServerConfig): string {
+  return JSON.stringify([cfg.transport, cfg.command, cfg.args, cfg.env, cfg.url, cfg.headers]);
+}
+
+async function connectClient(cfg: ServerConfig): Promise<Client> {
   const client = new Client({ name: 'openswarm', version: '0.7.0' }, { capabilities: {} });
   try {
     await withDeadline(client.connect(makeTransport(cfg)), MCP_CONNECT_TIMEOUT_MS, 'MCP connect');
+    return client;
+  } catch (err) {
+    await client.close().catch(() => {});
+    throw err;
+  }
+}
+
+async function dropSession(sessions: Map<string, ScopedSession>, key: string): Promise<void> {
+  const session = sessions.get(key);
+  sessions.delete(key);
+  if (!session) return;
+  const client = await session.client.catch(() => undefined);
+  await client?.close().catch(() => {});
+}
+
+/**
+ * Run `fn` with a scope that owns the connections of `session: 'scope'` servers.
+ * They are opened on first use and closed when `fn` settles, however it ends —
+ * a worker that throws must not leave a browser running on the other machine.
+ * Outside a scope, every server behaves as `session: 'call'`.
+ */
+export async function withMcpSessionScope<T>(fn: () => Promise<T>): Promise<T> {
+  const sessions = new Map<string, ScopedSession>();
+  try {
+    return await sessionScope.run(sessions, fn);
+  } finally {
+    await Promise.all([...sessions.keys()].map((key) => dropSession(sessions, key)));
+  }
+}
+
+async function withClient<T>(cfg: ServerConfig, fn: (c: Client) => Promise<T>): Promise<T> {
+  const sessions = cfg.session === 'scope' ? sessionScope.getStore() : undefined;
+  if (sessions) return withScopedClient(sessions, cfg, fn);
+  const client = await connectClient(cfg);
+  try {
     return await withDeadline(fn(client), MCP_OPERATION_TIMEOUT_MS, 'MCP operation');
   } finally {
     await client.close().catch(() => {});
   }
+}
+
+async function withScopedClient<T>(
+  sessions: Map<string, ScopedSession>,
+  cfg: ServerConfig,
+  fn: (c: Client) => Promise<T>,
+): Promise<T> {
+  const key = sessionKey(cfg);
+  let session = sessions.get(key);
+  if (!session) {
+    session = { client: connectClient(cfg), tail: Promise.resolve() };
+    sessions.set(key, session);
+  }
+  const current = session;
+  const run = current.tail.then(async () => {
+    try {
+      const client = await current.client;
+      return await withDeadline(fn(client), MCP_OPERATION_TIMEOUT_MS, 'MCP operation');
+    } catch (err) {
+      // A connection that failed or timed out is not trusted for the next call.
+      // The next call reconnects, which means a fresh page — better than a
+      // silently half-dead session.
+      if (sessions.get(key) === current) await dropSession(sessions, key);
+      throw err;
+    }
+  });
+  current.tail = run.catch(() => undefined);
+  return run;
 }
 
 /** A qualified MCP tool name carries the `__` separator. */

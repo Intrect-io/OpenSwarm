@@ -22,6 +22,7 @@ import { localDataNote } from './localDataNote.js';
 import { SandboxExecutorClient } from '../sandboxExecutor/client.js';
 import { getSandboxExecutorConfig } from '../sandboxExecutor/runtime.js';
 import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
+import { withMcpSessionScope } from '../mcp/mcpClient.js';
 
 // ============ 토큰 카운팅 (VEGA token_count.py 이식) ============
 
@@ -349,7 +350,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     cwd: options.cwd,
   });
   try {
-    const result = await runAgenticLoopInner({ ...options, session });
+    const result = await withMcpSessionScope(() => runAgenticLoopInner({ ...options, session }));
     session?.close({
       outcome: 'returned',
       toolCallCount: result.toolCallCount,

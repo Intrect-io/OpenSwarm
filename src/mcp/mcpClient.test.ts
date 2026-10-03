@@ -11,6 +11,7 @@ import {
   initMcpTools,
   callMcpTool,
   withDeadline,
+  withMcpSessionScope,
   sanitizeInputSchema,
 } from './mcpClient.js';
 import type { ToolDefinition } from '../adapters/tools.js';
@@ -447,5 +448,121 @@ describe('sanitizeInputSchema bounds', () => {
   it('rejects non-object root types', () => {
     expect(sanitizeInputSchema({ type: 'string' })).toEqual({ type: 'object', properties: {} });
     expect(sanitizeInputSchema(null)).toEqual({ type: 'object', properties: {} });
+  });
+});
+
+describe('session: scope servers (AGT-4663)', () => {
+  const scoped = { browser: { transport: 'stdio' as const, command: 'ssh', args: ['vela', 'vega-browser'], session: 'scope' as const } };
+  const perCall = { svc: { transport: 'stdio' as const, command: 'mock-mcp' } };
+
+  async function registerBrowser(): Promise<void> {
+    clientMock.listTools.mockResolvedValue({ tools: [
+      { name: 'navigate', inputSchema: { type: 'object', properties: {} } },
+      { name: 'read_page', inputSchema: { type: 'object', properties: {} } },
+    ] });
+    await initMcpTools(scoped);
+    // Listing tools used its own throwaway connection; count only what follows.
+    clientMock.connect.mockClear();
+    clientMock.close.mockClear();
+    clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+  }
+
+  it('keeps one connection across calls and closes it when the scope ends', async () => {
+    await registerBrowser();
+
+    await withMcpSessionScope(async () => {
+      await callMcpTool('browser__navigate', { url: 'https://example.test' });
+      await callMcpTool('browser__read_page', {});
+      // The page navigated to is still there: same process, not a fresh one per call.
+      expect(clientMock.connect).toHaveBeenCalledTimes(1);
+      expect(clientMock.close).not.toHaveBeenCalled();
+    });
+
+    expect(clientMock.callTool).toHaveBeenCalledTimes(2);
+    expect(clientMock.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes the connection when the scope body throws', async () => {
+    await registerBrowser();
+
+    await expect(withMcpSessionScope(async () => {
+      await callMcpTool('browser__navigate', {});
+      throw new Error('worker crashed');
+    })).rejects.toThrow('worker crashed');
+
+    expect(clientMock.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('connects per call outside any scope, and per call for a default server inside one', async () => {
+    await registerBrowser();
+    await callMcpTool('browser__navigate', {});
+    await callMcpTool('browser__navigate', {});
+    expect(clientMock.connect).toHaveBeenCalledTimes(2);
+    expect(clientMock.close).toHaveBeenCalledTimes(2);
+
+    clientMock.listTools.mockResolvedValue({ tools: [{ name: 'ok', inputSchema: { type: 'object' } }] });
+    await initMcpTools(perCall);
+    clientMock.connect.mockClear();
+    clientMock.close.mockClear();
+    await withMcpSessionScope(async () => {
+      await callMcpTool('svc__ok', {});
+      await callMcpTool('svc__ok', {});
+    });
+    expect(clientMock.connect).toHaveBeenCalledTimes(2);
+    expect(clientMock.close).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs concurrent calls on one session one at a time', async () => {
+    await registerBrowser();
+    const order: string[] = [];
+    let releaseFirst: () => void = () => {};
+    clientMock.callTool.mockImplementation(async ({ name }: { name: string }) => {
+      order.push(`start:${name}`);
+      if (name === 'navigate') await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      order.push(`end:${name}`);
+      return { content: [{ type: 'text', text: name }] };
+    });
+
+    await withMcpSessionScope(async () => {
+      const first = callMcpTool('browser__navigate', {});
+      const second = callMcpTool('browser__read_page', {});
+      await vi.waitFor(() => expect(order).toEqual(['start:navigate']));
+      releaseFirst();
+      await Promise.all([first, second]);
+    });
+
+    expect(order).toEqual(['start:navigate', 'end:navigate', 'start:read_page', 'end:read_page']);
+  });
+
+  it('drops a session whose call failed so the next call starts clean', async () => {
+    await registerBrowser();
+    clientMock.callTool.mockRejectedValueOnce(new Error('ssh connection reset'));
+
+    await withMcpSessionScope(async () => {
+      const failed = await callMcpTool('browser__navigate', {});
+      expect(failed.isError).toBe(true);
+      expect(clientMock.close).toHaveBeenCalledTimes(1);
+      await callMcpTool('browser__read_page', {});
+      // A second connection, because the first was not trusted any more.
+      expect(clientMock.connect).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('keeps two scopes apart', async () => {
+    await registerBrowser();
+
+    await Promise.all([
+      withMcpSessionScope(() => callMcpTool('browser__navigate', {})),
+      withMcpSessionScope(() => callMcpTool('browser__navigate', {})),
+    ]);
+
+    expect(clientMock.connect).toHaveBeenCalledTimes(2);
+    expect(clientMock.close).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads `session` from the registry and rejects an unknown value', () => {
+    expect(registryFromConfigServers({ b: { command: 'ssh', args: ['vela'], session: 'scope' } }).b).toMatchObject({ session: 'scope' });
+    expect(registryFromConfigServers({ b: { command: 'ssh', args: ['vela'] } }).b).not.toHaveProperty('session');
+    expect(registryFromConfigServers({ b: { command: 'ssh', session: 'forever' } })).toEqual({});
   });
 });
