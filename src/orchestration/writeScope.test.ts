@@ -33,3 +33,17 @@ describe('filesOutsideWriteScope', () => {
     expect(filesOutsideWriteScope(['src/a.ts', 'src/a.test.ts', 'src/z.ts'], ['src/a.ts'])).toEqual(['src/z.ts']);
   });
 });
+
+
+describe('language companion tests', () => {
+  it.each([
+    ['pkg/module.py', 'pkg/tests/test_module.py'], ['pkg/module.py', 'pkg/tests/module_test.py'],
+    ['pkg/module.py', 'pkg/test_module.py'], ['pkg/module.py', 'pkg/module_test.py'],
+    ['pkg/module.go', 'pkg/module_test.go'], ['crate/src/module.rs', 'crate/tests/module.rs'],
+  ])('allows %s -> %s', (scoped, candidate) => { expect(filesOutsideWriteScope([candidate], [scoped])).toEqual([]); });
+  it.each([
+    ['pkg/module.py', 'pkg/tests/test_other.py'], ['pkg/module.py', 'other/tests/test_module.py'],
+    ['pkg/module.go', 'pkg/other_test.go'], ['crate/src/module.rs', 'other/tests/module.rs'],
+    ['pkg/module.py', 'pkg/tests/nested/test_module.py'],
+  ])('rejects non-companion/crafted path %s -> %s', (scoped, candidate) => { expect(filesOutsideWriteScope([candidate], [scoped])).toEqual([candidate]); });
+});

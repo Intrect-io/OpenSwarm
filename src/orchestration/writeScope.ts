@@ -54,13 +54,22 @@ export async function canonicalExistingRepoFiles(
 
 /** Narrow companion-test allowance retained from the worker boundary. */
 function isTestForScopedFile(file: string, scoped: string): boolean {
-  const match = scoped.match(/^(.*?)([^/]+)\.([cm]?[jt]sx?)$/);
+  const match = scoped.match(/^(.*?)([^/]+)\.([cm]?[jt]sx?|py|go|rs)$/);
   if (!match) return false;
   const [, dir, base, ext] = match;
   const escape = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(
-    `^${escape(dir)}${escape(base)}(\\.[^/]+)?\\.(test|spec)\\.${escape(ext)}$`,
-  ).test(file);
+  if (/^[cm]?[jt]sx?$/.test(ext)) {
+    return new RegExp(`^${escape(dir)}${escape(base)}(\\.[^/]+)?\\.(test|spec)\\.${escape(ext)}$`).test(file);
+  }
+  // Companion allowance must stay within one path segment.
+  const packageDir = dir.endsWith('src/') ? dir.slice(0, -4) : dir;
+  if (ext === 'go') return file === `${dir}${base}_test.go`;
+  if (ext === 'rs') return file === `${packageDir}tests/${base}.rs`;
+  if (ext === 'py') return file === `${dir}test_${base}.py`
+    || file === `${dir}${base}_test.py`
+    || file === `${packageDir}tests/test_${base}.py`
+    || file === `${packageDir}tests/${base}_test.py`;
+  return false;
 }
 
 /** Provenance of a task's reserved write scope; mirrors TaskItem.fileScopeSource. */
