@@ -347,6 +347,13 @@ const VerifyConfigSchema = z.object({
   enabled: z.boolean().default(true),
   blockOnNewFailures: z.boolean().default(true),
   maxCommands: z.number().int().min(1).max(20).default(4),
+  /**
+   * Timeout for a test command the verifier discovers itself. Unset keeps the generic
+   * 300 s, which is shorter than cgf-portal's suite under any load (272 s calm, 295 s with
+   * two verifications at once; AGT-4678). A command a repository declares in its own
+   * manifest keeps the timeout it declared.
+   */
+  commandTimeoutMs: z.number().int().min(60_000).max(900_000).optional(),
 }).default({ enabled: true, blockOnNewFailures: true, maxCommands: 4 });
 
 const SecurityAuditConfigSchema = z.object({

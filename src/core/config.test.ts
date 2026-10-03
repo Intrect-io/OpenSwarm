@@ -241,6 +241,45 @@ agents:
       });
     });
 
+    // AGT-4678: a schema field that loadConfig does not carry through never reaches the verifier.
+    it('carries autonomous.verify.commandTimeoutMs through loadConfig, and leaves it unset by default', () => {
+      const withTimeout = JSON.stringify({
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+        autonomous: { enabled: true, verify: { commandTimeoutMs: 600000 } },
+      });
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(withTimeout);
+      expect(loadConfig('/tmp/config.json').autonomous?.verify).toEqual({
+        enabled: true,
+        blockOnNewFailures: true,
+        maxCommands: 4,
+        commandTimeoutMs: 600000,
+      });
+
+      const without = JSON.stringify({
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+        autonomous: { enabled: true },
+      });
+      vi.mocked(readFileSync).mockReturnValue(without);
+      expect(loadConfig('/tmp/config.json').autonomous?.verify?.commandTimeoutMs).toBeUndefined();
+    });
+
+    it.each([59_999, 900_001, 0, -1])('rejects autonomous.verify.commandTimeoutMs=%i (outside 60 s to 900 s)', (value) => {
+      const jsonContent = JSON.stringify({
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+        autonomous: { enabled: true, verify: { commandTimeoutMs: value } },
+      });
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(jsonContent);
+      expect(() => loadConfig('/tmp/config.json')).toThrow();
+    });
+
     it('should preserve explicit autonomous.securityAudit overrides', () => {
       const jsonContent = JSON.stringify({
         language: 'en',

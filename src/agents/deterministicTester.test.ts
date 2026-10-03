@@ -8,6 +8,7 @@ import {
   loadTrustedVerifyPlan,
   runDeterministicTester,
   runTesterWithVerification,
+  withDiscoveredTimeout,
 } from './deterministicTester.js';
 import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 import { configureSandboxExecutor, resetSandboxExecutorForTests } from '../sandboxExecutor/runtime.js';
@@ -20,6 +21,48 @@ afterEach(async () => {
   resetSandboxExecutorForTests();
   if (root) await rm(root, { recursive: true, force: true });
   root = undefined;
+});
+
+// cgf-portal's suite takes 272 s calm and 295 s with two verifications at once, and the
+// generic 300 s for a discovered command lost both verdicts (AGT-4678). The configured value
+// is for what the verifier discovers; a repository's own manifest keeps its own timeout.
+describe('timeout of discovered verification commands (AGT-4678)', () => {
+  const verify = (extra: Record<string, unknown> = {}) => ({ enabled: true, blockOnNewFailures: true, maxCommands: 4, ...extra });
+
+  async function discoveredRepo(): Promise<string> {
+    root = await mkdtemp(join(tmpdir(), 'openswarm-verify-timeout-'));
+    await writeFile(join(root, 'package.json'), '{"scripts":{"test":"vitest"}}');
+    return root;
+  }
+
+  it('gives a discovered command the configured timeout', async () => {
+    const plan = await loadTrustedVerifyPlan(await discoveredRepo(), verify({ commandTimeoutMs: 600_000 }));
+    expect(plan.commands.length).toBeGreaterThan(0);
+    expect(plan.commands.every((command) => command.timeoutMs === 600_000)).toBe(true);
+  });
+
+  it('keeps the 300 s default when nothing is configured', async () => {
+    const plan = await loadTrustedVerifyPlan(await discoveredRepo(), verify());
+    expect(plan.commands.length).toBeGreaterThan(0);
+    expect(plan.commands.every((command) => command.timeoutMs === 300_000)).toBe(true);
+  });
+
+  it('leaves a manifest-declared command at the timeout its repository declared', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openswarm-verify-timeout-manifest-'));
+    await mkdir(join(root, '.openswarm'));
+    await writeFile(join(root, '.openswarm', 'verify.yaml'), [
+      'version: 1', 'commands:', '  - name: unit', '    run: npm test', '    kind: test', '    timeoutMs: 120000',
+    ].join('\n'));
+    const plan = await loadTrustedVerifyPlan(root, verify({ commandTimeoutMs: 600_000 }));
+    expect(plan.commands.map((command) => command.timeoutMs)).toEqual([120_000]);
+  });
+
+  it('withDiscoveredTimeout does not mutate its input and ignores an unset value', () => {
+    const input = [{ name: 'pytest', run: 'pytest', kind: 'test' as const, timeoutMs: 300_000 }];
+    expect(withDiscoveredTimeout(input, 600_000)[0].timeoutMs).toBe(600_000);
+    expect(input[0].timeoutMs).toBe(300_000);
+    expect(withDiscoveredTimeout(input, undefined)).toBe(input);
+  });
 });
 
 describe('deterministic verification trust inputs', () => {

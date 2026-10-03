@@ -606,6 +606,8 @@ export type VerifyConfig = {
   enabled: boolean;
   blockOnNewFailures: boolean;
   maxCommands: number;
+  /** Timeout for commands the verifier discovers (not for manifest-declared ones). */
+  commandTimeoutMs?: number;
 };
 
 export type SecurityAuditConfig = {
