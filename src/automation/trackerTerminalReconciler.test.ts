@@ -114,4 +114,43 @@ describe('tracker terminal reconciliation', () => {
     expect(lookup).toHaveBeenCalledTimes(2);
     durableRuns.close();
   });
+
+  // A run parked in NEEDS_RECONCILE still counts against the project's active cap.
+  // When its card is closed afterwards nothing else will ever release that slot.
+  it('closes a NEEDS_RECONCILE run whose card was closed, and frees its project slot', async () => {
+    const durableRuns = coordinator();
+    const old = 1_000;
+    durableRuns.importLegacyRun({
+      issueId: 'dup-id', source: 'linear', identifier: 'AX-DUP', title: 'duplicate',
+      projectPath: '/repo', state: 'NEEDS_RECONCILE',
+    }, old);
+    durableRuns.importLegacyRun({
+      issueId: 'open-id', source: 'linear', identifier: 'AX-OPEN', title: 'still open',
+      projectPath: '/repo', state: 'NEEDS_RECONCILE',
+    }, old);
+    durableRuns.importLegacyRun({
+      issueId: 'next-id', source: 'linear', identifier: 'AX-NEXT', title: 'waiting for a slot',
+      projectPath: '/repo', state: 'READY',
+    }, old);
+    const lookup = vi.fn<ITaskSource['lookupIssueState']>(async (key) => ({
+      ok: true,
+      issue: key === 'AX-DUP'
+        ? { state: 'Duplicate', stateType: 'canceled' }
+        : { state: 'In Progress', stateType: 'started' },
+    }));
+    const claim = () => durableRuns.getRun('next-id') && durableRuns['ledger'].claimRun('next-id', {
+      ownerInstanceId: 'test-reconciler', leaseMs: 3_000, maxActiveForProject: 2,
+    });
+
+    // Both parked rows fill the cap of two, so the queued run cannot start.
+    expect(claim()).toBeNull();
+
+    const now = old + 8 * 60 * 60_000;
+    const result = await reconcileTrackerTerminalRuns({ durableRuns, source: source(lookup), now });
+    expect(result).toMatchObject({ eligible: 3, terminal: 1 });
+    expect(durableRuns.getRun('dup-id')).toMatchObject({ state: 'CANCELLED', trackerStateType: 'canceled' });
+    expect(durableRuns.getRun('open-id')).toMatchObject({ state: 'NEEDS_RECONCILE', trackerState: 'In Progress' });
+    expect(claim()).not.toBeNull();
+    durableRuns.close();
+  });
 });
