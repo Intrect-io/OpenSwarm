@@ -29,6 +29,7 @@ import {
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { filesOutsideWriteScope } from '../orchestration/writeScope.js';
 import { acceptWorkerPaths, noteRejectedWorkerPaths, rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
+import { formatProjectGoalSection } from '../support/projectGoal.js';
 
 // Types
 
@@ -97,6 +98,8 @@ export interface WorkerOptions {
   editFormat?: EditFormat;
   /** Run-scoped Claude Code instruction and runbook snapshot. */
   instructionCapsule?: InstructionCapsule;
+  /** The project's standing goal, carried into the system prompt (AGT-4662). */
+  projectGoal?: string;
   /** Identity and mailbox scope for inter-worker coordination. */
   coordinationContext?: CoordinationToolContext;
   /** Typed fallback policy; semantic task failures never trigger it. */
@@ -393,6 +396,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
     // human session's commit/PR/review/tracker workflow (the operator's own
     // CLAUDE.md), and the last instruction is the one a model follows (AGT-4418).
     let systemPrompt = getPrompts().systemPrompt + callSignHeader + coordinationGuidance
+      + formatProjectGoalSection(options.projectGoal)
       + (options.instructionCapsule?.text ?? loadWorkerRepoRules(cwd))
       + getPrompts().harnessBoundaryPrompt;
     if (editFormat === 'search-replace') systemPrompt += SEARCH_REPLACE_PROMPT;

@@ -59,6 +59,8 @@ export interface PipelineConfig {
   resumedTaskFiles?: string[];
   /** Claude Code instructions/runbooks captured before the run starts. */
   instructionCapsule?: InstructionCapsule;
+  /** The project's standing goal; the worker and reviewer prompts carry it (AGT-4662). */
+  projectGoal?: string;
   roleMcpTools?: { worker?: ToolDefinition[]; reviewer?: ToolDefinition[] };
   adapterRouting?: AdapterRoutePolicy;
   /** OS fence for the worker's bash tool (autonomous.workerSandbox). Unset = off, as before AGT-4387. */

@@ -17,6 +17,7 @@ import { renderVerifyEvidence } from './verificationEvidence.js';
 import type { InstructionCapsule } from './instructionCapsule.js';
 import { COORDINATION_GUIDANCE_PROMPT, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import { boundedMessageContent } from '../support/outputBudget.js';
+import { formatProjectGoalSection } from '../support/projectGoal.js';
 
 // Types
 
@@ -93,6 +94,8 @@ export interface ReviewerOptions {
   diff?: string;
   /** Run-scoped Claude Code instruction and runbook snapshot. */
   instructionCapsule?: InstructionCapsule;
+  /** The project's standing goal, carried into the system prompt (AGT-4662). */
+  projectGoal?: string;
   /**
    * This reviewer's board identity — its call sign and mailbox address.
    *
@@ -378,6 +381,7 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       systemPrompt: getPrompts().systemPrompt
         + reviewerIdentityHeader(options.coordinationContext?.actorName)
         + reviewerCoordinationGuidance(options.coordinationContext, options.readOnly)
+        + formatProjectGoalSection(options.projectGoal)
         + (options.instructionCapsule?.text ?? ''),
       reasoningEffort: options.reasoningEffort,
       toolAllow: options.toolAllow,

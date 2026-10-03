@@ -273,6 +273,43 @@ agents:
       expect(loadConfig('/tmp/config.json').autonomous?.includeBacklog).toBe(false);
     });
 
+    it('carries a project goal from autonomous.projectAgents to the runtime config (AGT-4662)', () => {
+      const base = {
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base,
+        autonomous: {
+          enabled: true,
+          projectAgents: [
+            { projectPath: '~/dev/cgf-portal', goal: '  의존성 순서대로 데이터 원장 대조하고 실제 사용 가능한 수준까지 개발하여 PR 올리기  ' },
+            { projectPath: '~/dev/OpenSwarm' },
+          ],
+        },
+      }));
+      const agents = loadConfig('/tmp/config.json').autonomous?.projectAgents;
+      expect(agents?.[0].goal).toBe('의존성 순서대로 데이터 원장 대조하고 실제 사용 가능한 수준까지 개발하여 PR 올리기');
+      expect(agents?.[0].projectPath).toBe(join(homedir(), 'dev/cgf-portal'));
+      expect(agents?.[1].goal).toBeUndefined();
+    });
+
+    it('rejects a goal that is empty or longer than a goal should be (AGT-4662)', () => {
+      const withGoal = (goal: string) => JSON.stringify({
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+        autonomous: { enabled: true, projectAgents: [{ projectPath: '/p', goal }] },
+      });
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(withGoal('x'.repeat(4001)));
+      expect(() => loadConfig('/tmp/config.json')).toThrow();
+      vi.mocked(readFileSync).mockReturnValue(withGoal('   '));
+      expect(() => loadConfig('/tmp/config.json')).toThrow();
+    });
+
     it('defaults unknownScopeAdmission to admit and carries an explicit serialize through', () => {
       const base = {
         language: 'en',

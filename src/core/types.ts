@@ -440,6 +440,12 @@ export type ProjectAgentConfig = {
   /** Trusted command-to-output declarations for generated files. A task must
    * name the command before its outputs join the binding worker write scope. */
   generatedOutputRules?: Array<{ command: string; outputs: string[] }>;
+  /**
+   * Standing goal for every task in this project (AGT-4662). The draft, worker,
+   * reviewer and planner all read it, and the draft may decline a task that
+   * cannot serve it before any worktree is created.
+   */
+  goal?: string;
   /** Per-role configuration override */
   roles?: {
     worker?: Partial<RoleConfig>;

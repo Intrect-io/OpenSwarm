@@ -12,6 +12,7 @@ import type { SwarmConfig, AgentSession, LongRunningMonitorConfig, ConflictResol
 import { setTimeWindowConfig, DEFAULT_TIME_WINDOW } from '../support/timeWindow.js';
 import { c, status } from '../support/colors.js';
 import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { MAX_PROJECT_GOAL_CHARS } from '../support/projectGoal.js';
 import { wireSandboxExecutorIfEnabled } from '../sandboxExecutor/runtime.js';
 
 export { validateConfig } from './configValidation.js';
@@ -238,6 +239,8 @@ const ProjectAgentConfigSchema = z.object({
     command: z.string().min(1),
     outputs: z.array(z.string().min(1)).min(1),
   })).optional(),
+  /** Standing goal every stage follows for tasks in this project (AGT-4662) */
+  goal: z.string().trim().min(1).max(MAX_PROJECT_GOAL_CHARS).optional(),
   /** Per-role configuration override */
   roles: ProjectRolesOverrideSchema,
 });

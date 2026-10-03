@@ -223,3 +223,14 @@ describe('the change-mode prompt shows the diff (AGT-4443)', () => {
     expect(REVIEWER_DIFF_MAX_BYTES).toBe(16_000);
   });
 });
+
+describe('the reviewer stage carries the project goal (AGT-4662)', () => {
+  it('hands the goal from the pipeline config to the reviewer options', async () => {
+    const repo = repoWithWorkerEdits();
+    const withGoal = { ...config, projectGoal: 'Reconcile ledgers in dependency order.' } as PipelineConfig;
+    const options = await buildReviewerStageOptions({ config: withGoal, context: context(repo), prefix: 'p' });
+    expect(options.projectGoal).toBe('Reconcile ledgers in dependency order.');
+    const plain = await buildReviewerStageOptions({ config, context: context(repo), prefix: 'p' });
+    expect(plain.projectGoal).toBeUndefined();
+  });
+});

@@ -1,4 +1,5 @@
 import type { DraftAnalysis, DraftPeerIssue } from '../agents/draftAnalyzer.js';
+import { isScopeDeclined } from '../agents/draftScope.js';
 import { createHash } from 'node:crypto';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
@@ -33,6 +34,8 @@ export async function applyDraftGates(options: {
   worktreeMode?: boolean;
   /** Issues a worker currently holds; only their PRs reserve files. (AGT-4097) */
   activeWorkerIssues?: readonly string[];
+  /** A project goal is set, so the draft's scope verdict may stop the task. (AGT-4662) */
+  goalScopeGate?: boolean;
 }): Promise<PipelineResult | null> {
   const { task, draft, peers, source } = options;
   const duplicateTarget = peers?.find(peer => (peer.issueId || peer.id) === draft.duplicateOfIssueId);
@@ -47,6 +50,24 @@ export async function applyDraftGates(options: {
       console.log(`[AutonomousRunner] Draft grooming: ${task.issueIdentifier ?? task.issueId} duplicates ${duplicateTarget.issueIdentifier ?? canonicalId}`);
       return supersededResult('duplicate', draft.durationMs);
     }
+  }
+
+  // Decided before any worktree exists: a task no worker can usefully do here
+  // should not cost a checkout, a worker run and two retries to find that out.
+  // Opt-in per project, and only on a verdict that clears the duplicate gate's bar.
+  if (options.goalScopeGate && isScopeDeclined(draft.scope)) {
+    const { kind, reason, evidence } = draft.scope;
+    console.log(`[AutonomousRunner] Draft scope gate: ${task.issueIdentifier ?? task.issueId} is ${kind} — ${reason}`);
+    if (task.issueId && source?.kind === 'linear') {
+      const marker = `draft-scope:${createHash('sha256').update(`${kind}:${reason}`).digest('hex').slice(0, 24)}`;
+      await source.addComment(
+        task.issueId,
+        `Draft grooming did not start a worker for this issue: \`${kind}\`.\n\nReason: ${reason}\n\nEvidence:\n${evidence.map((item) => `- ${item}`).join('\n')}\n\n`
+          + 'Change the issue so it names work this project goal can act on, then move it to Todo to run it.',
+        marker,
+      );
+    }
+    return supersededResult('out_of_scope', draft.durationMs, `${kind}: ${reason}`);
   }
 
   if (options.worktreeMode && draft.relevantFiles.length > 0) {

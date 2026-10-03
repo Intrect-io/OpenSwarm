@@ -514,6 +514,7 @@ export class PairPipeline extends EventEmitter {
             workerContext,
             signal: PairPipeline.runControl.getStore()?.signal,
             instructionCapsule: this.config.instructionCapsule,
+            projectGoal: this.config.projectGoal,
             mcpTools: this.config.roleMcpTools?.worker,
             adapterRouting: this.config.adapterRouting,
             coordinationContext: coordinationContextFor(context, 'worker'),
@@ -1476,6 +1477,7 @@ export function createPipelineFromConfig(
   adapterRouting?: PipelineConfig['adapterRouting'],
   workerSandbox?: PipelineConfig['workerSandbox'],
   taskBudgetMs?: number,
+  projectGoal?: string,
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1515,6 +1517,7 @@ export function createPipelineFromConfig(
     roleMcpTools,
     adapterRouting,
     workerSandbox,
+    projectGoal,
   });
 }
 

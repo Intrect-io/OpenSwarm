@@ -153,3 +153,25 @@ describe('plan JSON containing braces inside string values', () => {
     expect(res.subTasks).toHaveLength(1);
   });
 });
+
+describe('runPlanner project goal (AGT-4662)', () => {
+  const promptOf = () => (mockedSpawnCli.mock.calls[0][1] as { prompt: string }).prompt;
+
+  it('appends the goal after the plan request and before the read-only guard', async () => {
+    mockedSpawnCli.mockResolvedValue(cliResult(PLAN_JSON) as never);
+    await runPlanner({
+      taskTitle: 'big task', taskDescription: 'do it', projectPath: '/tmp/x',
+      projectGoal: 'Order the work by data dependency.',
+    });
+    const prompt = promptOf();
+    expect(prompt).toContain('## Standing project goal');
+    expect(prompt).toContain('Order the work by data dependency.');
+    expect(prompt.indexOf('Standing project goal')).toBeLessThan(prompt.indexOf('you are PLANNING ONLY'));
+  });
+
+  it('adds nothing without a goal', async () => {
+    mockedSpawnCli.mockResolvedValue(cliResult(PLAN_JSON) as never);
+    await runPlanner({ taskTitle: 'big task', taskDescription: 'do it', projectPath: '/tmp/x' });
+    expect(promptOf()).not.toContain('Standing project goal');
+  });
+});
