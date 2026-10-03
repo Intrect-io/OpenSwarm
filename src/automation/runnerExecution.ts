@@ -76,6 +76,7 @@ import {
   registerDecomposition,
   reserveDailyCreations,
   releaseDailyReservation,
+  pickPipelineFailureDetail,
 } from './runnerState.js';
 import {
   buildTaskStateSyncComment,
@@ -1250,6 +1251,7 @@ export async function executePipeline(
 
     await publishFinishedRun(worktreeInfo, task, result, ctx.durability, reviewHook, ctx.verify, {
       lifecycleFailed: Boolean(lifecycleFailure),
+      failureSummary: pickPipelineFailureDetail(result),
     });
 
     keepWorktree = !(result.success && result.finalStatus === 'approved');

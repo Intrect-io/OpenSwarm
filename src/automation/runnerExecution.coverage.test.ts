@@ -124,6 +124,7 @@ vi.mock('./runnerState.js', () => ({
   registerDecomposition,
   reserveDailyCreations,
   releaseDailyReservation,
+  pickPipelineFailureDetail: () => undefined,
 }));
 
 // resolveProjectPath / isValidProjectPath dependencies (real versions all read

@@ -555,7 +555,16 @@ export async function publishFinishedRun(
   durability: ExecutionDurabilityHooks | undefined,
   reviewHook: (rollbackOnRejection: boolean) => ApprovedPublicationHook | undefined,
   verify?: VerifyConfig,
-  opts: { lifecycleFailed?: boolean } = {},
+  opts: {
+    lifecycleFailed?: boolean;
+    /**
+     * Why the run stopped, as the ledger would record it. `result.failureDetail`
+     * is set by only some failure paths — a reviewer-rejection stall leaves it
+     * empty — so a draft's body said "no failure detail was recorded" for a run
+     * the ledger could explain (cgf-portal AX-1635, 2026-10-03).
+     */
+    failureSummary?: string;
+  } = {},
 ): Promise<void> {
   const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, durability, reviewHook(false));
 
@@ -568,6 +577,11 @@ export async function publishFinishedRun(
   }
 
   if (worktreeInfo && shouldPublishUnfinishedWork(true, result, { approvedAttempt, lifecycleFailed: opts.lifecycleFailed })) {
-    await publishUnfinishedWork(worktreeInfo, task, result, durability);
+    await publishUnfinishedWork(
+      worktreeInfo,
+      task,
+      { finalStatus: result.finalStatus, failureDetail: opts.failureSummary ?? result.failureDetail },
+      durability,
+    );
   }
 }

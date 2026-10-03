@@ -518,6 +518,16 @@ describe('unfinished-run publication (AGT-4664)', () => {
       expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
     });
 
+    it('puts the ledger-style failure summary in the draft body when the result carries none', async () => {
+      commitAndCreatePRWithHead.mockResolvedValue(pr);
+      // A reviewer-rejection stall sets no failureDetail on the result.
+      const result = { success: false, finalStatus: 'failed' };
+
+      await publishFinishedRun(info, task, result, undefined, noHook, undefined, { failureSummary: 'reviewer: the new route has no test' });
+
+      expect(String(commitAndCreatePRWithHead.mock.calls[0][3])).toContain('Last failure: reviewer: the new route has no test');
+    });
+
     it('publishes nothing for a lifecycle-fence failure', async () => {
       const result = { success: false, finalStatus: 'infra_error', failureDetail: 'lease lost' };
 
