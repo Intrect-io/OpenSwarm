@@ -12,6 +12,7 @@ import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { symlinkTargetEscapes } from '../support/escapingSymlink.js';
 import { isPrivateConfigurationFile, isPrivateWorkspaceFile } from '../support/environmentFiles.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
+import { verifySlots } from './verifySlots.js';
 import { resolveSharedPaths } from '../support/worktreeManager.js';
 import { atomicWriteFileSync } from '../support/atomicFile.js';
 import { terminateProcessesWithEnvMarker } from '../adapters/processTree.js';
@@ -903,6 +904,20 @@ async function runAtBase(
 }
 
 export async function runVerify(options: RunVerifyOptions): Promise<VerifyEvidence[]> {
+  // Eight suites at once on a loaded machine each hit the 300 s cap at 3% (AGT-4676).
+  // The slot is taken before any sandbox exists, so the cap counts only the run itself.
+  const startedWaiting = Date.now();
+  return verifySlots.run(
+    () => {
+      const waited = Date.now() - startedWaiting;
+      if (waited >= 1_000) console.log(`[Verify] verification slot acquired after ${Math.round(waited / 1000)}s`);
+      return runVerifyInSlot(options);
+    },
+    (ahead, running) => console.log(`[Verify] waiting for a verification slot (${running}/${verifySlots.limit} running, ${ahead} ahead)`),
+  );
+}
+
+async function runVerifyInSlot(options: RunVerifyOptions): Promise<VerifyEvidence[]> {
   const evidence: VerifyEvidence[] = [];
   const scratchRoot = options.sandboxScratchRoot
     ? await realpath(options.sandboxScratchRoot)
