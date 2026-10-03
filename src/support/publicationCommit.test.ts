@@ -20,6 +20,10 @@ function repoWithRejectingHook(): string {
     stdio: 'pipe',
   }).toString();
   git('init', '-q', '-b', 'main');
+  // The code under test runs a plain `git commit`, so the identity has to live in the repository;
+  // a CI runner has no global one ("Author identity unknown", PR 818's first run).
+  git('config', 'user.name', 't');
+  git('config', 'user.email', 't@t');
   // The hook is the repository's own gate; git must be pointed at it explicitly so the
   // test does not depend on the global hooksPath of the machine it runs on.
   const hook = join(dir, '.git', 'hooks', 'pre-commit');
