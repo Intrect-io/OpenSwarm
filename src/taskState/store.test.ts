@@ -16,6 +16,7 @@ import {
   completeParentIfChildrenDone,
   buildTaskStateSyncComment,
   hydrateTaskStateFromComments,
+  syncTaskStatesFromIssues,
   markTaskBacklog,
   planLinearStateReconciliation,
   reconcileDependencyBlockers,
@@ -820,6 +821,106 @@ describe('task state store', () => {
 
     expect(hydrated?.execution.status).toBe('done');
     expect(hydrated?.linearState).toBe('Done');
+  });
+
+  describe('syncTaskStatesFromIssues (AGT-4659)', () => {
+    const stale = new Date('2020-01-01T00:00:00Z');
+    const syncComment = (id: string, status: OpenSwarmTaskState['execution']['status'], linearState: string) => ({
+      body: buildTaskStateSyncComment(taskState(id, status, linearState), 'Task state'),
+      createdAt: '2026-03-18T01:00:00.000Z',
+      source: 'openswarm',
+    });
+
+    it('writes nothing when every issue already matches the store', () => {
+      const issues = [
+        { issueId: 'AGT-1', linearState: 'Backlog', comments: [syncComment('AGT-1', 'backlog', 'Backlog')] },
+        { issueId: 'AGT-2', linearState: 'Todo' },
+      ];
+      expect(syncTaskStatesFromIssues(issues)).toBeGreaterThan(0);
+      utimesSync(stateFile, stale, stale);
+
+      // The heartbeat repeats the same fetch; "nothing moved" has to mean "no write",
+      // asserted on the file, not on the return value.
+      expect(syncTaskStatesFromIssues(issues)).toBe(0);
+      expect(statSync(stateFile).mtimeMs).toBe(stale.getTime());
+    });
+
+    it('applies every change in one pass and writes again only for a real move', () => {
+      syncTaskStatesFromIssues([{ issueId: 'AGT-1', linearState: 'Backlog' }, { issueId: 'AGT-2', linearState: 'Todo' }]);
+      utimesSync(stateFile, stale, stale);
+
+      const changed = syncTaskStatesFromIssues([
+        { issueId: 'AGT-1', linearState: 'Todo' },
+        { issueId: 'AGT-2', linearState: 'Todo' },
+        { issueId: 'AGT-3', linearState: 'Backlog' },
+      ]);
+
+      expect(changed).toBe(2);
+      expect(statSync(stateFile).mtimeMs).toBeGreaterThan(stale.getTime());
+      expect(getTaskState('AGT-1')?.linearState).toBe('Todo');
+      expect(getTaskState('AGT-2')?.linearState).toBe('Todo');
+      expect(getTaskState('AGT-3')?.linearState).toBe('Backlog');
+    });
+
+    it('reconciles a stale local status against Linear, as the per-issue call does (R5)', () => {
+      markTaskInProgress('AGT-4', { linearState: 'In Progress' });
+
+      syncTaskStatesFromIssues([{ issueId: 'AGT-4', linearState: 'Done' }]);
+
+      expect(getTaskState('AGT-4')?.execution.status).toBe('done');
+      expect(getTaskState('AGT-4')?.linearState).toBe('Done');
+    });
+
+    it('hydrates from the latest trusted sync comment and ignores an untrusted one', () => {
+      syncTaskStatesFromIssues([
+        { issueId: 'AGT-5', linearState: 'Backlog', comments: [syncComment('AGT-5', 'blocked', 'Backlog')] },
+        { issueId: 'AGT-6', linearState: 'Backlog', comments: [{ body: syncComment('AGT-6', 'done', 'Done').body, createdAt: '2026-03-18T01:00:00.000Z' }] },
+      ]);
+
+      expect(getTaskState('AGT-5')?.execution.status).toBe('blocked');
+      // An authorless copy of the marker has no authority over execution state.
+      expect(getTaskState('AGT-6')?.execution.status).not.toBe('done');
+    });
+
+    it('ends in the same state as the per-issue calls it replaces', () => {
+      const issues = [
+        { issueId: 'AGT-7', linearState: 'Todo', comments: [syncComment('AGT-7', 'ready', 'Todo')] },
+        { issueId: 'AGT-8', linearState: 'Done', comments: [syncComment('AGT-8', 'done', 'Done')] },
+        { issueId: 'AGT-9', linearState: 'Backlog' },
+      ];
+      const strip = (state: OpenSwarmTaskState | undefined) => ({ ...state, updatedAt: '' });
+
+      for (const issue of issues) {
+        updateTaskLinearState(issue.issueId, issue.linearState);
+        hydrateTaskStateFromComments(issue.issueId, issue.comments ?? []);
+      }
+      const sequential = issues.map((issue) => strip(getTaskState(issue.issueId)));
+
+      resetTaskStateStoreForTests();
+      rmSync(stateFile, { force: true });
+      syncTaskStatesFromIssues(issues);
+      const batched = issues.map((issue) => strip(getTaskState(issue.issueId)));
+
+      expect(batched).toEqual(sequential);
+    });
+
+    it('does nothing for an empty fetch', () => {
+      expect(syncTaskStatesFromIssues([])).toBe(0);
+      expect(existsSync(stateFile)).toBe(false);
+    });
+  });
+
+  it('does not rewrite the store when the sync comment it hydrates from is already reflected', () => {
+    const body = buildTaskStateSyncComment(taskState('ISSUE-NOOP', 'blocked', 'Backlog'), 'Task blocked');
+    const comments = [{ body, createdAt: '2026-03-18T01:00:00.000Z', source: 'openswarm' }];
+    hydrateTaskStateFromComments('ISSUE-NOOP', comments);
+    const stale = new Date('2020-01-01T00:00:00Z');
+    utimesSync(stateFile, stale, stale);
+
+    const again = hydrateTaskStateFromComments('ISSUE-NOOP', comments);
+
+    expect(statSync(stateFile).mtimeMs).toBe(stale.getTime());
+    expect(again?.execution.status).toBe('blocked');
   });
 
   it('does not grant execution authority to an authorless copied sync comment', () => {
