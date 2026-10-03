@@ -13,6 +13,10 @@ export type TrackerTerminalState = 'DONE' | 'CANCELLED';
 export const TRACKER_RECONCILABLE_STATES: readonly RunState[] = [
   'DISCOVERED', 'READY', 'RETRY_AT', 'WAITING_EXTERNAL',
   'NEEDS_SPEC', 'NEEDS_ENV', 'NEEDS_HUMAN',
+  // NEEDS_RECONCILE counts against the project's active cap in claimRun. Left out
+  // of this list, a row whose card was closed afterwards kept a slot for good
+  // (AGT-4670: AX-1027, Duplicate since 09-19, still held one on 10-03).
+  'NEEDS_RECONCILE',
 ];
 
 function placeholders(values: readonly unknown[]): string {
