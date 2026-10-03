@@ -78,6 +78,7 @@ async function runPipeline(options: {
   verbose?: boolean;
   verify?: { enabled: boolean; blockOnNewFailures: boolean; maxCommands: number };
   securityAudit?: { enabled: boolean; maxThreads: number };
+  roles?: { tester?: { enabled?: boolean } };
 } = {}) {
   const { PairPipeline } = await import('./pairPipeline.js');
   const pipeline = new PairPipeline({
@@ -297,6 +298,30 @@ describe('PairPipeline deterministic tester (INT-2662)', () => {
     expect(runReviewer).toHaveBeenCalledOnce();
     // The downgrade is on the stage log, not only stderr (AGT-4416).
     expect(logs).toEqual(expect.arrayContaining([expect.stringMatching(/^Deterministic verify unavailable; falling back to LLM tester: verify-runner: /)]));
+  });
+
+  it('does not fall back to the LLM tester when that role is disabled (AGT-4679)', async () => {
+    discoverVerifyCommands.mockResolvedValue([verifyCommand]);
+    runVerify.mockResolvedValue([{
+      command: verifyCommand,
+      baseStatus: 'skipped',
+      headStatus: 'infra',
+      newFailure: false,
+      rawOutputTail: 'timeout after 20ms',
+      durationMs: 20,
+    }]);
+    const { result, logs } = await runPipeline({ roles: { tester: { enabled: false } } });
+    expect(runTester).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.finalStatus).toBe('infra_error');
+    expect(logs).toEqual(expect.arrayContaining([expect.stringMatching(/LLM tester is disabled, no verdict/)]));
+  });
+
+  it('passes without the LLM tester when it is disabled and no command exists (AGT-4679)', async () => {
+    const { result } = await runPipeline({ roles: { tester: { enabled: false } } });
+    expect(runTester).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.testerResult?.output).toMatch(/nothing was verified/);
   });
 
   it('downgrades an unavailable baseline comparison to the LLM fallback', async () => {

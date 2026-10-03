@@ -187,6 +187,14 @@ export async function runTesterWithVerification(options: {
   trustedInputFingerprint?: string;
   fallback: () => Promise<TesterResult>;
   onInfra?: (error: unknown) => void;
+  /**
+   * Whether the LLM tester may stand in when the deterministic verification cannot give a
+   * verdict. A role the operator disabled must not run, so the pipeline passes `false` then
+   * (AGT-4679): an infrastructure failure is rethrown and the attempt ends as `infra_error`,
+   * and a repository with no deterministic command gets a result that says nothing was verified.
+   * Default true keeps the old behaviour for everyone else.
+   */
+  llmFallback?: boolean;
 }): Promise<TesterResult> {
   if (options.verify?.enabled) {
     try {
@@ -202,7 +210,20 @@ export async function runTesterWithVerification(options: {
       if (error instanceof VerifySecurityError) throw error;
       if (!isInfraError(error)) throw error;
       options.onInfra?.(error);
+      if (options.llmFallback === false) throw error;
     }
   }
+  if (options.llmFallback === false) return unverifiedResult();
   return await options.fallback();
+}
+
+/** Nothing could be run and no LLM was asked: say so rather than pass silently. */
+function unverifiedResult(): TesterResult {
+  return {
+    success: true,
+    testsPassed: 0,
+    testsFailed: 0,
+    output: 'No deterministic verification command exists for this repository and the LLM tester is disabled; nothing was verified.',
+    deterministic: false,
+  };
 }
