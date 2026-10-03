@@ -20,6 +20,8 @@ import { analyzeIssue } from '../knowledge/index.js';
 import { getRegistryStore } from '../registry/sqliteStore.js';
 import type { ImpactAnalysis } from '../knowledge/types.js';
 import type { AdapterName } from '../adapters/types.js';
+import { formatProjectGoalSection } from '../support/projectGoal.js';
+import { parseScopeVerdict, isScopeDeclined, scopePromptParts, type DraftScopeVerdict } from './draftScope.js';
 
 // ============ drafter 모델 / 게이트 정책 ============
 
@@ -111,6 +113,15 @@ export function isDraftSufficient(d: Partial<DraftAnalysis>): boolean {
   );
 }
 
+/**
+ * Whether the retry loop may stop. A brief that declines the task with strong
+ * evidence has no files or criteria by design, so insufficiency must not send it
+ * back for another round. (AGT-4662)
+ */
+function isDraftSettled(d: Partial<DraftAnalysis>): boolean {
+  return isDraftSufficient(d) || isScopeDeclined(d.scope);
+}
+
 // ============ 타입 ============
 
 /** Draft 분석 결과 — Planner와 Worker 모두에 주입 */
@@ -154,6 +165,8 @@ export interface DraftAnalysis {
   duplicateConfidence?: number;
   duplicateReason?: string;
   duplicateEvidence?: string[];
+  /** Present only when the drafter declined the task against the project goal (AGT-4662). */
+  scope?: DraftScopeVerdict;
 }
 
 export interface DraftPeerIssue {
@@ -193,6 +206,8 @@ export interface DraftAnalyzerOptions {
   onLog?: (line: string) => void;
   /** Open issues in the same Linear project, used only for duplicate grooming. */
   peerIssues?: DraftPeerIssue[];
+  /** The project's standing goal (AGT-4662). Unset leaves the prompt exactly as it was. */
+  projectGoal?: string;
 }
 
 // ============ 코드베이스 상태 수집 (로컬, LLM 불필요) ============
@@ -349,6 +364,11 @@ the hard parts.`);
 - **Project stats:** ${codeContext.projectStats}`);
   }
 
+  // Project-stable like the stats above, so it stays in the shared cacheable prefix.
+  const goalSection = formatProjectGoalSection(options.projectGoal);
+  if (goalSection) parts.push(goalSection.trimEnd());
+  const scopeParts = scopePromptParts(options.projectGoal);
+
   if (options.peerIssues?.length) {
     const peers = options.peerIssues.slice(0, 40).map((peer) => ({
       issueId: peer.issueId,
@@ -421,7 +441,7 @@ ${options.authoritativeOperatorFeedback}`);
   "duplicateOfIssueId": "optional exact issueId from the peer list",
   "duplicateConfidence": 0.0,
   "duplicateReason": "optional concise explanation",
-  "duplicateEvidence": ["optional concrete requirement/code overlap evidence"]
+  "duplicateEvidence": ["optional concrete requirement/code overlap evidence"]${scopeParts.field}
 }
 \`\`\`
 
@@ -447,7 +467,7 @@ Each criterion must be a runtime/observable fact, NOT mere existence of code:
   remainder in suggestedApproach — never put "needs human" into DoD itself.
   Prefer narrowing over inventing impossible gates; worker+orchestrator will
   revise DoD via coordination rather than paging a human.
-`);
+${scopeParts.rules}`);
 
   return parts.join('\n');
 }
@@ -486,6 +506,7 @@ export function parseDraftResponse(output: string): Partial<DraftAnalysis> {
         duplicateEvidence: Array.isArray(parsed.duplicateEvidence)
           ? parsed.duplicateEvidence.filter((e: unknown): e is string => typeof e === 'string' && e.trim().length > 0)
           : undefined,
+        scope: parseScopeVerdict(parsed.scope),
       };
     } catch { /* fall through to prose salvage */ }
   }
@@ -733,7 +754,7 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
         finishValidator: (finalText, attempt) => {
           lastAttemptNumber = attempt;
           const parsed = parseDraftResponse(finalText);
-          const sufficient = isDraftSufficient(parsed);
+          const sufficient = isDraftSettled(parsed);
           onLog?.(`[Draft] ${adapterName}(${resolvedModel}) attempt ${attempt}: type=${parsed.taskType}, files=${parsed.relevantFiles?.length ?? 0}, criteria=${parsed.completionCriteria?.length ?? 0}, sufficient=${sufficient}`);
           if (sufficient) return { ok: true };
           onLog?.('[Draft] Brief insufficient — retrying with a stricter prompt');
@@ -743,7 +764,7 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
 
       haikuResult = parseDraftResponse(raw.stdout);
       succeeded = true;
-      draftSufficient = isDraftSufficient(haikuResult);
+      draftSufficient = isDraftSettled(haikuResult);
       if (lastAttemptNumber === 0) {
         // finishValidator never fired (no-tool-calls path never reached, e.g. the
         // maxTurns-exhaustion salvage answered instead) — log once so this attempt
@@ -776,7 +797,7 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
           processContext: { taskId: options.taskId ?? options.taskTitle, stage: 'draft' },
         });
         const fallbackResult = parseDraftResponse(fallbackRaw.stdout);
-        const fallbackSufficient = isDraftSufficient(fallbackResult);
+        const fallbackSufficient = isDraftSettled(fallbackResult);
         onLog?.(`[Draft] ${adapterName}(${resolvedModel}) fresh retry: type=${fallbackResult.taskType}, files=${fallbackResult.relevantFiles?.length ?? 0}, criteria=${fallbackResult.completionCriteria?.length ?? 0}, sufficient=${fallbackSufficient}`);
         haikuResult = fallbackResult;
         draftSufficient = fallbackSufficient;
@@ -819,7 +840,8 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
     relevantFiles: haikuResult.relevantFiles ?? [],
     suggestedApproach: haikuResult.suggestedApproach ?? '',
     completionCriteria: haikuResult.completionCriteria ?? [],
-    sufficient: draftSufficient,
+    // A settled decline is not a sufficient brief; the flag keeps its old meaning.
+    sufficient: draftSufficient && isDraftSufficient(haikuResult),
     impactAnalysis: impactAnalysis ?? undefined,
     registrySnapshot: codeContext.registrySnapshot,
     projectStats: codeContext.projectStats,
@@ -828,5 +850,6 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
     duplicateConfidence: haikuResult.duplicateConfidence,
     duplicateReason: haikuResult.duplicateReason,
     duplicateEvidence: haikuResult.duplicateEvidence,
+    scope: haikuResult.scope,
   };
 }

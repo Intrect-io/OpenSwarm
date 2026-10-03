@@ -119,6 +119,7 @@ export async function buildReviewerStageOptions(input: {
       }),
     signal: input.abortSignal,
     instructionCapsule: config.instructionCapsule,
+    projectGoal: config.projectGoal,
     mcpTools: config.roleMcpTools?.reviewer,
     coordinationContext: coordinationContextFor(context, 'reviewer'),
   };

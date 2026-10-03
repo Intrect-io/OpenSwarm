@@ -125,3 +125,54 @@ describe('executePipeline open-PR preflight (INT-2568)', () => {
     expect(runDraftAnalysis).not.toHaveBeenCalled();
   });
 });
+
+describe('executePipeline project goal (AGT-4662)', () => {
+  const goal = 'Reconcile ledgers in dependency order, to a usable level.';
+  const decline = {
+    taskType: 'feature', relevantFiles: [], durationMs: 7, intentSummary: '', completionCriteria: [], sufficient: false,
+    scope: {
+      applicable: false, kind: 'wrong_repository', confidence: 0.95,
+      reason: 'The runtime this task names lives in kyte-portal.',
+      evidence: ['no bin/kyte-chat-daemon here', 'no KYTE_PYTHON reference here'],
+    },
+  };
+  const task: TaskItem = {
+    id: 'task-goal', source: 'linear', issueId: 'issue-goal', issueIdentifier: 'AX-goal',
+    title: 'Fix kyte interpreter paths', priority: 2, createdAt: Date.now(),
+  };
+  const baseCtx = { allowedProjects: ['/repo'], enableDraftAnalysis: true, enableDecomposition: false, worktreeMode: true };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    loadAuthoritativeOperatorFeedback.mockReturnValue(undefined);
+    findOpenPRFileOverlaps.mockResolvedValue([]);
+    createWorktree.mockRejectedValue(new Error('worktree reached'));
+  });
+
+  it('gives the project goal to both the pre-admission draft and the in-pipeline draft', async () => {
+    runDraftAnalysis.mockResolvedValue({ ...decline, scope: undefined });
+    const ctx = { ...baseCtx, getProjectGoal: vi.fn(() => goal) } as unknown as ExecutionContext;
+
+    await runPreAdmissionDraft(ctx, task, '/repo');
+    await executePipeline(ctx, task, '/repo');
+
+    expect(runDraftAnalysis).toHaveBeenCalledTimes(2);
+    for (const [options] of runDraftAnalysis.mock.calls) expect(options.projectGoal).toBe(goal);
+    expect(ctx.getProjectGoal).toHaveBeenCalledWith('/repo');
+  });
+
+  it('stops a declined task before any worktree is created when the project has a goal', async () => {
+    runDraftAnalysis.mockResolvedValue(decline);
+    const result = await executePipeline({ ...baseCtx, getProjectGoal: () => goal } as unknown as ExecutionContext, task, '/repo');
+    expect(result).toMatchObject({ success: true, finalStatus: 'superseded', iterations: 0 });
+    expect(result.failureDetail).toContain('wrong_repository');
+    expect(createWorktree).not.toHaveBeenCalled();
+  });
+
+  it('does not stop the same task in a project with no goal', async () => {
+    runDraftAnalysis.mockResolvedValue(decline);
+    const result = await executePipeline(baseCtx as unknown as ExecutionContext, task, '/repo');
+    expect(result.finalStatus).not.toBe('superseded');
+    expect(createWorktree).toHaveBeenCalled();
+  });
+});

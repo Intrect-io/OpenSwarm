@@ -13,6 +13,7 @@ import { mapModelForProvider } from '../adapters/modelCompat.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { expandPath } from '../core/config.js';
 import { z } from 'zod';
+import { formatProjectGoalSection } from './projectGoal.js';
 
 // Types
 
@@ -31,6 +32,8 @@ export interface PlannerOptions {
   targetMinutes?: number;  // Target time per sub-task (default 25 min)
   /** Failed whole-task attempts so far; set only when the split is forced (AGT-4287). */
   priorFailures?: number;
+  /** The project's standing goal, appended after the plan request (AGT-4662). */
+  projectGoal?: string;
   onLog?: (line: string) => void;  // Stream planner stdout to dashboard
   impactAnalysis?: ImpactAnalysis;  // KG 영향 분석 (파일 분리 유도)
   /** Draft Analyzer 결과 (Haiku 사전 분석) */
@@ -148,7 +151,7 @@ const READ_ONLY_GUARD =
  * code before decomposing. The `PlannerResult` contract is unchanged.
  */
 export async function runPlanner(options: PlannerOptions): Promise<PlannerResult> {
-  const prompt = buildPlannerPrompt(options) + READ_ONLY_GUARD;
+  const prompt = buildPlannerPrompt(options) + formatProjectGoalSection(options.projectGoal) + READ_ONLY_GUARD;
 
   try {
     const adapter = getAdapter(options.adapterName);

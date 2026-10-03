@@ -23,7 +23,7 @@ import * as planner from '../support/planner.js';
 import { evaluateDecompositionTrigger } from './decompositionTrigger.js';
 import type { SubTask } from '../support/planner.js';
 import { analyzeIssue } from '../knowledge/index.js';
-import { runDraftAnalysis, type DraftAnalysis } from '../agents/draftAnalyzer.js';
+import { runDraftAnalysis, type DraftAnalysis, type DraftAnalyzerOptions } from '../agents/draftAnalyzer.js';
 import { loadAuthoritativeOperatorFeedback } from '../coordination/operatorGuidance.js';
 import { t } from '../locale/index.js';
 import { formatTaskDescription, parseFileScopeFromDescription } from '../linear/format.js';
@@ -175,6 +175,8 @@ export interface ExecutionContext {
   /** Failed attempts already recorded for an issue, from the runner's ledger. */
   getPriorFailures?: (issueId: string) => number;
   getRolesForProject: (projectPath: string) => DefaultRolesConfig | undefined;
+  /** Standing goal configured for the project at this path; every stage reads it (AGT-4662). */
+  getProjectGoal?: (projectPath: string) => string | undefined;
   reportToDiscord: (message: string | EmbedBuilder) => Promise<void>;
   /** Git worktree mode: work in an isolated worktree per issue, auto-create PR */
   worktreeMode?: boolean;
@@ -208,6 +210,30 @@ export function prepareTaskExecutionContext(task: TaskItem): Promise<TaskItem> {
   return refreshExecutionTaskContext(task, taskSource);
 }
 
+/**
+ * Draft options shared by the pre-admission draft and the in-pipeline draft, so
+ * the two cannot drift. The draft scales its own read/analyze budget to the
+ * codebase (no fixed timeout) and mirrors its log to stdout and the event
+ * stream. (INT-2485, AGT-4662)
+ */
+function draftOptionsFor(ctx: ExecutionContext, task: TaskItem, projectPath: string): DraftAnalyzerOptions {
+  const taskId = taskEventKey(task);
+  return {
+    taskTitle: task.title,
+    taskDescription: task.description || '',
+    authoritativeOperatorFeedback: task.authoritativeOperatorFeedback,
+    projectPath,
+    taskId: task.issueIdentifier ?? taskId,
+    model: ctx.draftModel,
+    peerIssues: projectDraftPeers(task, ctx.peerIssues),
+    projectGoal: ctx.getProjectGoal?.(projectPath),
+    onLog: (line) => {
+      console.log(`[${task.issueIdentifier ?? taskId}] ${line}`);
+      broadcastEvent({ type: 'log', data: { taskId, stage: 'draft', line } });
+    },
+  };
+}
+
 /** Draft unknown/broad write scope before admission; the pipeline reuses it. */
 export async function runPreAdmissionDraft(
   ctx: ExecutionContext,
@@ -218,20 +244,7 @@ export async function runPreAdmissionDraft(
   await prepareTaskExecutionContext(task);
   const operatorFeedback = loadAuthoritativeOperatorFeedback(task.issueId || task.id);
   if (operatorFeedback) task.authoritativeOperatorFeedback = operatorFeedback;
-  const taskId = taskEventKey(task);
-  return runDraftAnalysis({
-    taskTitle: task.title,
-    taskDescription: task.description || '',
-    authoritativeOperatorFeedback: task.authoritativeOperatorFeedback,
-    projectPath,
-    taskId: task.issueIdentifier ?? taskId,
-    model: ctx.draftModel,
-    peerIssues: projectDraftPeers(task, ctx.peerIssues),
-    onLog: (line) => {
-      console.log(`[${task.issueIdentifier ?? taskId}] ${line}`);
-      broadcastEvent({ type: 'log', data: { taskId, stage: 'draft', line } });
-    },
-  });
+  return runDraftAnalysis(draftOptionsFor(ctx, task, projectPath));
 }
 
 // Project Path Resolution
@@ -666,6 +679,7 @@ export async function decomposeTask(
       taskId: task.issueIdentifier ?? taskId,
       targetMinutes,
       priorFailures: forcedAfterFailures,
+      projectGoal: ctx.getProjectGoal?.(projectPath),
       // Planner runs through the configured adapter loop now (not claude -p);
       // leave model unset to use the adapter default when no planner model is configured.
       model: ctx.plannerModel,
@@ -784,6 +798,7 @@ export async function executePipeline(
   // Planner + Worker에 enriched context 제공
   // ============================================
   let draftResult: DraftAnalysis | undefined = task.preAdmissionDraft;
+  const projectGoal = ctx.getProjectGoal?.(projectPath);
   // A rate limit during the pre-pipeline phase (draft analysis or the decomposition
   // planner) must PAUSE the scheduler immediately — not be swallowed into a
   // best-effort draft or a silent direct-execution fallback that keeps hammering the
@@ -797,21 +812,7 @@ export async function executePipeline(
       broadcastEvent({ type: 'pipeline:stage', data: { taskId, stage: 'draft', status: 'start', ...metadata } });
 
       if (!draftResult) {
-        draftResult = await runDraftAnalysis({
-          taskTitle: task.title,
-          taskDescription: task.description || '',
-          authoritativeOperatorFeedback: task.authoritativeOperatorFeedback,
-          projectPath,
-          taskId: task.issueIdentifier ?? taskId,
-          model: ctx.draftModel,
-          peerIssues: projectDraftPeers(task, ctx.peerIssues),
-          // No fixed timeout: the draft scales its own read/analyze budget to the
-          // codebase size. Mirror logs to stdout and the event stream. (INT-2485)
-          onLog: (line) => {
-            console.log(`[${task.issueIdentifier ?? taskId}] ${line}`);
-            broadcastEvent({ type: 'log', data: { taskId, stage: 'draft', line } });
-          },
-        });
+        draftResult = await runDraftAnalysis(draftOptionsFor(ctx, task, projectPath));
       } else {
         console.log(`[AutonomousRunner] Reusing pre-admission draft for ${task.issueIdentifier ?? taskId}`);
       }
@@ -821,7 +822,7 @@ export async function executePipeline(
 
       const draftGate = await applyDraftGates({ task, projectPath, draft: draftResult,
         peers: ctx.peerIssues, source: taskSource, worktreeMode: ctx.worktreeMode,
-        activeWorkerIssues: ctx.getActiveWorkerIssues?.(projectPath) });
+        activeWorkerIssues: ctx.getActiveWorkerIssues?.(projectPath), goalScopeGate: !!projectGoal });
       if (draftGate) return draftGate;
     } catch (err) {
       if (err instanceof RateLimitError) throw err; // → outer catch → rate_limited (INT-2521)
@@ -1007,6 +1008,7 @@ export async function executePipeline(
         workerTimeoutMs: stageTimeoutMs('worker', roles?.worker?.timeoutMs),
         otherStagesTimeoutMs: otherStageTimeoutsMs(roles, ctx.verify),
       }),
+      projectGoal,
     );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);

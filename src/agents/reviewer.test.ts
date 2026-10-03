@@ -597,6 +597,24 @@ describe('reviewer read-only mode (INT-3189)', () => {
     expect(options.systemPrompt).toContain('acknowledges_correlation_id');
   });
 
+  it('carries the project goal in the system prompt, and adds nothing without one (AGT-4662)', async () => {
+    const spawn = vi.spyOn(adapters, 'spawnCli').mockResolvedValue({ exitCode: 0, stdout: '{}', stderr: '', durationMs: 1 } as never);
+    spawn.mockClear();
+    mockAdapter();
+
+    await runReviewer({
+      taskTitle: 't', taskDescription: 'd', workerResult: wr, projectPath: '/tmp',
+      projectGoal: 'Reconcile ledgers in dependency order, to a usable level.',
+    });
+    const withGoal = (spawn.mock.calls[0][1] as { systemPrompt?: string }).systemPrompt;
+    expect(withGoal).toContain('## Standing project goal');
+    expect(withGoal).toContain('Reconcile ledgers in dependency order, to a usable level.');
+
+    spawn.mockClear();
+    await runReviewer({ taskTitle: 't', taskDescription: 'd', workerResult: wr, projectPath: '/tmp' });
+    expect((spawn.mock.calls[0][1] as { systemPrompt?: string }).systemPrompt).not.toContain('Standing project goal');
+  });
+
   it('does not instruct a read-only reviewer to call withheld coordination tools', async () => {
     const spawn = vi.spyOn(adapters, 'spawnCli').mockResolvedValue({ exitCode: 0, stdout: '{}', stderr: '', durationMs: 1 } as never);
     spawn.mockClear();
