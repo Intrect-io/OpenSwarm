@@ -80,6 +80,7 @@ import { publishStuckWork } from './publishOnPark.js';
 import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
 import { draftPullRequestCause } from './draftPullRequestCause.js';
 import { missingWorktreeDisposition } from './missingWorktreeDisposition.js';
+import { isExecutionLive } from './executionLiveness.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { STUCK_LABEL } from '../linear/index.js';
@@ -579,6 +580,12 @@ export class AutonomousRunner {
       // Same-project parallel selection only makes sense when the scheduler can
       // actually run those tasks concurrently (worktree isolation). (INT-2318)
       sameProjectParallel: (config.allowSameProjectConcurrent ?? true) && (config.worktreeMode ?? false),
+      // The local in_progress marker outlives a run that died; ask what is
+      // actually executing (AGT-4667). Lazy, so it reads the live scheduler and ledger.
+      isExecutionLive: (issueId) => isExecutionLive({
+        schedulerHolds: Boolean(this.scheduler?.isTaskRunning(issueId) || this.scheduler?.isTaskQueued(issueId)),
+        ledgerState: this.durableRuns?.isPrimary ? this.durableRuns.getRun(issueId)?.state : undefined,
+      }),
     });
 
     // Initialize TaskScheduler

@@ -618,10 +618,20 @@ export function markTaskInProgress(
 export function tryClaimTaskAdmission(
   issueId: string,
   patch: Parameters<typeof markTaskInProgress>[1] = {},
+  options: {
+    /**
+     * The caller has established that the existing `in_progress` marker has no
+     * live executor behind it (a restart or an expired lease left it), so the
+     * claim may take it over instead of reporting "claimed by another
+     * instance". Without this a stale marker blocked admission even after the
+     * decision engine stopped filtering on it (AGT-4667).
+     */
+    takeOverStale?: boolean;
+  } = {},
 ): OpenSwarmTaskState | null {
   return withStoreLock(() => {
     const store = ensureStoreLoaded();
-    if (store.tasks[issueId]?.execution.status === 'in_progress') return null;
+    if (store.tasks[issueId]?.execution.status === 'in_progress' && !options.takeOverStale) return null;
     const result = upsertTaskStateUnlocked(issueId, {
       issueIdentifier: patch.issueIdentifier,
       title: patch.title,
