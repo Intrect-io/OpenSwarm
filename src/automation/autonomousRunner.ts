@@ -114,6 +114,7 @@ import {
 } from './backlogGrooming.js';
 import {
   DurableRunCoordinator,
+  RETRY_RAMP_FROM_ATTEMPT,
   runRecordToTask,
   type ExecutionDurabilityHooks,
   type RepositoryAdmissionPolicy,
@@ -1346,6 +1347,10 @@ export class AutonomousRunner {
           && (durableRun.retryAt ?? 0) > Date.now()
           && infraStreak < AutonomousRunner.MAX_CONSECUTIVE_INFRA_IDLE_FILL
           && durableRun.lastErrorCode !== 'superseded'
+          // A run that has failed three times is backed off on purpose (AGT-4673).
+          // Lifting it here whenever a slot frees put the highest-priority failing
+          // run ahead of 36 READY tasks, so the backoff never held (AGT-4675).
+          && durableRun.attemptNo < RETRY_RAMP_FROM_ATTEMPT
           && !this.durableRuns.idleFillWouldRepeatVerdict(id)
         )
           || durableRun.state === 'NEEDS_SPEC'
