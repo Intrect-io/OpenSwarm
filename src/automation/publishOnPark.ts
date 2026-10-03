@@ -8,7 +8,12 @@
 // - `publishApprovedWork` — the reviewed path. A publication failure is fatal:
 //   a run is not deliverable until its branch is reviewable.
 // - `publishParkedWork` — a run that stopped for an operator decision. Draft,
-//   committed work only, and a failure never changes the park.
+//   and a failure never changes the park.
+// - `publishUnfinishedWork` — a run that failed, was rejected, hit a rate limit
+//   or an infrastructure fault but left changes behind. Draft, and a failure
+//   never changes the outcome (AGT-4664).
+//
+// `publishFinishedRun` runs all three in the order a run can need them.
 //
 // Split out of runnerExecution.ts, which sits on the 1500-line pre-commit cap.
 
@@ -84,6 +89,9 @@ export function shouldPublishParkedWork(
 /**
  * Publish the branch of a run that stopped for an operator decision.
  *
+ * Commits whatever is still uncommitted, pushes, and leaves a clean tree for
+ * the caller to remove (see the options comment below).
+ *
  * Otherwise the commits sit on a branch that was never pushed: measured on the
  * deployed daemon, 23 commits across six branches with no PR, while the
  * operator was being asked 70 questions about work they could not see. (The
@@ -120,15 +128,21 @@ export async function publishParkedWork(
       'Published because this run parked for an operator decision, so the work is'
         + ' visible instead of sitting on an unpushed branch. It has not been'
         + ' reviewed — this PR is a draft on purpose.',
-      // Draft, and committed work only: nothing reviewed this, and the tree
-      // must stay exactly as the worker left it so the resume continues.
+      // Draft: nothing reviewed this. Everything in the tree is committed
+      // first, so the push carries the whole of the worker's work and the tree
+      // is clean afterwards — `preserveWorktree` then removes it, and the
+      // resume rebuilds from the pushed branch (`createWorktree` reuses an
+      // existing branch). The old `committedOnly` mode left the tree dirty so
+      // the resume found it exactly as the worker left it; that kept an
+      // unpublished diff on disk, and dead daemons' trees piled up to 54 GB
+      // with no PR for any of them (2026-10-03).
       //
       // No write-scope fence. The fence stops an unreviewed run from
       // *delivering* files it never reserved; this PR delivers nothing — it is
       // how the person the run is waiting on sees what it built. Enforcing it
       // here only hides the branch, which is the exact failure this function
       // exists to fix (AGT-3844 parked on that fence holding 42 commits).
-      { draft: true, committedOnly: true },
+      { draft: true },
     );
     // The ledger records the PR; the pipeline result deliberately does NOT.
     //
@@ -249,12 +263,11 @@ export async function publishStuckWork(
         + 'It has not been reviewed and is very likely incomplete — this PR is a'
         + ' draft on purpose. It exists so the work is reviewable instead of'
         + ' sitting on a branch that was never pushed.',
-      // NOT committedOnly, unlike the operator-park path. That path leaves the
-      // tree untouched because the run resumes from it; this tree is about to
-      // be deleted, so anything still uncommitted is about to be lost. The
-      // pre-cleanup WIP commit normally captures it first and makes this a
-      // no-op (a clean tree skips the whole commit phase) — but that commit
-      // swallows its own failures, and this is the second chance.
+      // Commit-all: this tree is about to be deleted, so anything still
+      // uncommitted is about to be lost. The pre-cleanup WIP commit normally
+      // captures it first and makes this a no-op (a clean tree skips the whole
+      // commit phase) — but that commit swallows its own failures, and this is
+      // the second chance.
       // No write-scope fence, for the reason publishParkedWork documents: a
       // draft PR nobody merged is how the operator sees the work, and this
       // tree is about to be deleted.
@@ -407,5 +420,168 @@ export async function publishApprovedWork(
       ? `Pipeline failed (${result.finalStatus})`
       : `Unexpected state (success=${result.success}, finalStatus=${result.finalStatus})`;
     console.log(`[Runner] PR not created for ${task.issueIdentifier}: ${reason}`);
+  }
+}
+
+/** Terminal statuses of a run that stopped short of an approved review. */
+const UNFINISHED_STATUSES: ReadonlySet<string> = new Set(['failed', 'rejected', 'infra_error', 'rate_limited']);
+
+/**
+ * Should a run that did not finish still publish what it built (AGT-4664)?
+ *
+ * True for the four outcomes where a worker may have left real changes behind:
+ * failed, rejected, infra_error and rate_limited. Measured on the deployed
+ * daemon on 2026-10-03: 48 worker stages, 32 failed, zero pull requests, and a
+ * tree per run piling up on disk — a failed run's work was only ever kept as a
+ * dirty directory.
+ *
+ * Not for anything else, and each exclusion is deliberate:
+ * - `cancelled`, `superseded`, `decomposed`, `deferred`: the run was told to
+ *   stop or was replaced, so its tree is not a deliverable.
+ * - an `operatorPark` / `waiting_on_operator`: {@link shouldPublishParkedWork}
+ *   already publishes those, with its own review hook.
+ * - a run that went into the approved publish as approved
+ *   (`approvedAttempt`): a push or `gh` error there turns it into an
+ *   `infra_error`, and republishing reviewed work as a draft would trade the
+ *   retry that fixes it for a PR that hides it. The reviewed retry owns it.
+ * - a lifecycle-fence failure (`lifecycleFailed`): this executor no longer
+ *   speaks for the run, and the runner's own comment says a failed fence must
+ *   prevent publication.
+ * - a result that already carries a `prUrl`.
+ */
+export function shouldPublishUnfinishedWork(
+  hasWorktree: boolean,
+  result: PublishableResult,
+  opts: { approvedAttempt?: boolean; lifecycleFailed?: boolean } = {},
+): boolean {
+  if (!hasWorktree || opts.approvedAttempt || opts.lifecycleFailed) return false;
+  if (result.prUrl || result.operatorPark || result.workerResult?.executionOutcomeUnknown === true) return false;
+  return UNFINISHED_STATUSES.has(result.finalStatus ?? '');
+}
+
+/** One line of a failure detail, bounded, for the draft PR's body. */
+function summarizeFailure(detail: string | undefined): string {
+  const flat = (detail ?? '').replace(/\s+/g, ' ').trim();
+  if (!flat) return 'no failure detail was recorded';
+  return flat.length > 500 ? `${flat.slice(0, 500)}…` : flat;
+}
+
+/**
+ * Publish the branch of a run that ended without an approved review, as a draft.
+ *
+ * The point is the same as {@link publishParkedWork}'s — work that exists
+ * should be visible — and the consequence is the one the operator asked for
+ * ("PR 올리면 워크트리를 없애게"): `commitAndCreatePRWithHead` commits whatever
+ * is in the tree, so afterwards the tree is clean and `preserveWorktree` removes
+ * it. The branch stays; a retry resumes from it (`createWorktree` reuses an
+ * existing branch), and a later approved publication finds this PR by branch
+ * name and promotes it out of draft.
+ *
+ * What it deliberately does NOT do:
+ * - It does not set `result.prUrl` or attach the PR to the ledger.
+ *   `durableRunCoordinator.execute()` turns any non-approved result carrying a
+ *   prUrl into `publication_reconcile` / NEEDS_RECONCILE, which would stop the
+ *   retry this run is owed — the phantom-row shape that idled the loop on
+ *   2026-08-29.
+ * - It runs no review hook. A reviewer pass per failed attempt costs an LLM
+ *   call each time, and on `rate_limited` it would only hit the limit again.
+ * - It does not enforce the write scope, for the reason {@link publishParkedWork}
+ *   documents.
+ *
+ * Returns the PR URL, or undefined when nothing was published. Every failure is
+ * swallowed: the run's outcome and its retry budget are not this function's to
+ * change, and a tree it could not publish is committed locally either way.
+ */
+export async function publishUnfinishedWork(
+  worktreeInfo: WorktreeInfo,
+  task: PublishableTask,
+  result: Pick<PublishableResult, 'finalStatus'> & Pick<PipelineResult, 'failureDetail'>,
+  durability: ExecutionDurabilityHooks | undefined,
+): Promise<string | undefined> {
+  // The lease fence, as in the other two paths: an executor that lost its claim
+  // must not push for a run it no longer owns.
+  const publishAllowed = await durability?.beforePublish() ?? true;
+  if (!publishAllowed) {
+    console.warn(`[Runner] Unfinished-run publication fenced for ${task.issueIdentifier}; leaving the branch unpublished`);
+    return undefined;
+  }
+  try {
+    const { prUrl } = await commitAndCreatePRWithHead(
+      worktreeInfo,
+      task.title,
+      task.issueIdentifier || '',
+      `Published because this run ended as \`${result.finalStatus}\` before it was approved, so what it`
+        + ' built is visible instead of sitting in a worktree. It has not passed review and may be'
+        + ' incomplete — this PR is a draft on purpose.\n\n'
+        + `Last failure: ${summarizeFailure(result.failureDetail)}`,
+      { draft: true },
+    );
+    broadcastEvent({
+      type: 'log',
+      data: { taskId: task.issueId || task.id, stage: 'pr', line: `Draft PR created for unfinished run (${result.finalStatus}): ${prUrl}` },
+    });
+    console.log(`[Runner] Unfinished run (${result.finalStatus}) published as draft for ${task.issueIdentifier}: ${prUrl}`);
+    return prUrl;
+  } catch (err) {
+    // "No commits to create PR from" is the common, correct outcome: the run
+    // failed before it edited anything.
+    const detail = err instanceof Error ? err.message : String(err);
+    if (!NO_COMMITS_TO_PUBLISH.test(detail)) {
+      console.warn(`[Runner] Could not publish unfinished work for ${task.issueIdentifier}: ${detail}`);
+    }
+    return undefined;
+  }
+}
+
+/**
+ * Every publication a finished run can need, in the order it can need them.
+ *
+ * 1. parked before the approved publish (the pipeline set `operatorPark`);
+ * 2. the approved publish itself;
+ * 3. parked during it (the scope fence refused the push) — only if 1 did not
+ *    already publish;
+ * 4. a run that simply did not finish ({@link shouldPublishUnfinishedWork}).
+ *
+ * A run takes exactly one of these. They are separate steps rather than one
+ * decision because 1 and 3 depend on what 2 did to the result.
+ *
+ * `reviewHook` builds the post-publication review for 1 and 3; 2 gets the
+ * rolling-back variant and 4 gets none.
+ */
+export async function publishFinishedRun(
+  worktreeInfo: WorktreeInfo | null | undefined,
+  task: PublishableTask,
+  result: PublishableResult & Pick<PipelineResult, 'failureDetail' | 'operatorPark'>,
+  durability: ExecutionDurabilityHooks | undefined,
+  reviewHook: (rollbackOnRejection: boolean) => ApprovedPublicationHook | undefined,
+  verify?: VerifyConfig,
+  opts: {
+    lifecycleFailed?: boolean;
+    /**
+     * Why the run stopped, as the ledger would record it. `result.failureDetail`
+     * is set by only some failure paths — a reviewer-rejection stall leaves it
+     * empty — so a draft's body said "no failure detail was recorded" for a run
+     * the ledger could explain (cgf-portal AX-1635, 2026-10-03).
+     */
+    failureSummary?: string;
+  } = {},
+): Promise<void> {
+  const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, durability, reviewHook(false));
+
+  // Read before the approved publish: a push or `gh` failure there rewrites
+  // `finalStatus` to `infra_error`, and by then this is no longer knowable.
+  const approvedAttempt = result.success === true && result.finalStatus === 'approved';
+  await publishApprovedWork(worktreeInfo, task, result, durability, reviewHook(true), verify);
+  if (!parkedPublished) {
+    await publishParkedIfNeeded(worktreeInfo, task, result, durability, reviewHook(false));
+  }
+
+  if (worktreeInfo && shouldPublishUnfinishedWork(true, result, { approvedAttempt, lifecycleFailed: opts.lifecycleFailed })) {
+    await publishUnfinishedWork(
+      worktreeInfo,
+      task,
+      { finalStatus: result.finalStatus, failureDetail: opts.failureSummary ?? result.failureDetail },
+      durability,
+    );
   }
 }

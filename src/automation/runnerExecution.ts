@@ -34,7 +34,7 @@ import type { ITaskSource } from './taskSource.js';
 import {createWorktree, hasRecoverableWorktree, preserveWorktree, removeWorktree, WorktreeCoordinationError,  } from '../support/worktreeManager.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
-import { publishApprovedWork, publishParkedIfNeeded } from './publishOnPark.js';
+import { publishFinishedRun } from './publishOnPark.js';
 import { buildPublicationReviewHook } from './publicationReviewHook.js';
 import { loadPublicationFreshReview, loadRepoMetadata } from '../support/repoMetadata.js';
 import { prepareAttemptBranch } from '../support/branchLineage.js';
@@ -76,6 +76,7 @@ import {
   registerDecomposition,
   reserveDailyCreations,
   releaseDailyReservation,
+  pickPipelineFailureDetail,
 } from './runnerState.js';
 import {
   buildTaskStateSyncComment,
@@ -1248,12 +1249,10 @@ export async function executePipeline(
       ? buildPublicationReviewHook({ task, result, roles, securityAudit: ctx.securityAudit, rollbackOnRejection })
       : undefined;
 
-    const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability, reviewHook(false));
-
-    await publishApprovedWork(worktreeInfo, task, result, ctx.durability, reviewHook(true), ctx.verify);
-    if (!parkedPublished) {
-      await publishParkedIfNeeded(worktreeInfo, task, result, ctx.durability, reviewHook(false));
-    }
+    await publishFinishedRun(worktreeInfo, task, result, ctx.durability, reviewHook, ctx.verify, {
+      lifecycleFailed: Boolean(lifecycleFailure),
+      failureSummary: pickPipelineFailureDetail(result),
+    });
 
     keepWorktree = !(result.success && result.finalStatus === 'approved');
     return result;

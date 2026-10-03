@@ -61,6 +61,7 @@ vi.mock('./runnerState.js', () => ({
   getDailyCreationCount: vi.fn(),
   canCreateMoreIssues: vi.fn(),
   registerDecomposition: vi.fn(),
+  pickPipelineFailureDetail: () => undefined,
 }));
 vi.mock('../support/repoMetadata.js', () => ({ loadRepoMetadata }));
 vi.mock('../support/projectMapper.js', () => ({ mapLinearProject }));

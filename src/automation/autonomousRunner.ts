@@ -78,6 +78,7 @@ import {
 import { publishStuckWork } from './publishOnPark.js';
 import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
 import { draftPullRequestCause } from './draftPullRequestCause.js';
+import { missingWorktreeDisposition } from './missingWorktreeDisposition.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { STUCK_LABEL } from '../linear/index.js';
@@ -1711,7 +1712,17 @@ export class AutonomousRunner {
         }
       }
       const prefix = `Worktree gone before publication; branch \`${run.branchName ?? '(none)'}\` ${branchOnOrigin ? 'is on origin' : 'is not on origin'}`;
-      const disposition = pr ? 'published' : run.state === 'READY' ? 'needs_human' : 'clear';
+      // Only a draft on a RETRY_AT row can be the leftover of an unfinished
+      // attempt, so only then pay for the sibling lookup (AGT-4664).
+      const siblingPullRequestCount = pr?.isDraft && run.state === 'RETRY_AT' && run.identifier && run.branchName
+        ? (await findDuplicateIssuePRs(run.projectPath, run.identifier, run.branchName)).length
+        : 0;
+      const disposition = missingWorktreeDisposition({
+        state: run.state,
+        hasPullRequest: Boolean(pr),
+        pullRequestIsDraft: Boolean(pr?.isDraft),
+        siblingPullRequestCount,
+      });
       if (this.durableRuns.reconcileMissingWorktree(
         run,
         disposition,
