@@ -62,7 +62,7 @@ describe('normalizeFailureOutput', () => {
     ].join('\n');
     const a = normalizeFailureOutput(out('1.93'), paths(SANDBOX_A));
     expect(a).toBe(normalizeFailureOutput(out('1.54'), paths(SANDBOX_B)));
-    expect(a).toContain('3 skipped, 1 error in <DURATION>');
+    expect(a).toContain('<N> skipped, 1 error in <DURATION>');
     // A different count is still a different failure.
     expect(a).not.toBe(normalizeFailureOutput(out('1.93').replace('1 error', '2 errors'), paths(SANDBOX_A)));
   });
@@ -80,11 +80,48 @@ describe('normalizeFailureOutput', () => {
     ].join('\n');
     const a = normalizeFailureOutput(out('1 failed, 4234 passed, 581 skipped in 124.27s (0:02:04)'), paths(SANDBOX_A));
     expect(a).toBe(normalizeFailureOutput(out('1 failed, 4234 passed, 581 skipped in 113.47s (0:01:53)'), paths(SANDBOX_B)));
-    expect(a).toContain('1 failed, 4234 passed, 581 skipped in <DURATION>');
+    expect(a).toContain('1 failed, <N> passed, <N> skipped in <DURATION>');
     // A different count is still a different failure.
     expect(a).not.toBe(normalizeFailureOutput(
       out('2 failed, 4233 passed, 581 skipped in 124.27s (0:02:04)'), paths(SANDBOX_A),
     ));
+  });
+
+  describe('failure identity, not the run transcript (AGT-4681)', () => {
+    const run = (progress: string, summary: string, failed = 'FAILED tests/test_b5.py::test_x') => [
+      progress,
+      '=================================== FAILURES ===================================',
+      '___ test_x ___',
+      'E   AssertionError: boom',
+      '=========================== short test summary info ============================',
+      failed,
+      summary,
+      '',
+    ].join('\n');
+    const norm = (text: string) => normalizeFailureOutput(text, paths(SANDBOX_A));
+    const baseline = () => norm(run('..........s...... [ 11%]', '1 failed, 4234 passed, 581 skipped in 124.27s (0:02:04)'));
+
+    it('ignores how many tests passed before the stop', () => {
+      // A worker that adds tests, or a base that gained some, moves these totals.
+      expect(norm(run('..........s...... [ 11%]', '1 failed, 4237 passed, 581 skipped in 113.47s (0:01:53)'))).toBe(baseline());
+    });
+
+    it('ignores the progress lines that precede the failure', () => {
+      expect(norm(run('..........s....... [ 12%]', '1 failed, 4234 passed, 581 skipped in 124.27s (0:02:04)'))).toBe(baseline());
+    });
+
+    it('masks the totals on a decorated summary line as well', () => {
+      const a = norm(run('', '=== 1 failed, 10 passed in 3.10s ==='));
+      expect(a).toBe(norm(run('', '=== 1 failed, 12 passed in 4.20s ===')));
+      expect(a).toContain('=== 1 failed, <N> passed in <DURATION> ===');
+    });
+
+    it('still tells a different failure apart', () => {
+      expect(norm(run('..........s...... [ 11%]', '1 failed, 4234 passed, 581 skipped in 124.27s (0:02:04)', 'FAILED tests/test_b5.py::test_y')))
+        .not.toBe(baseline());
+      expect(norm(run('..........s...... [ 11%]', '2 failed, 4233 passed, 581 skipped in 124.27s (0:02:04)'))).not.toBe(baseline());
+      expect(norm(run('..........s...... [ 11%]', '1 failed, 1 error, 4233 passed, 581 skipped in 124.27s (0:02:04)'))).not.toBe(baseline());
+    });
   });
 
   it('normalizes paths outside the command cwd — the subdirectory-cwd bug', () => {
