@@ -10,6 +10,7 @@ import type { TaskScheduler } from '../orchestration/taskScheduler.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { AutonomousConfig } from './runnerTypes.js';
 import type { ITaskSource } from './taskSource.js';
+import { RETRY_RAMP_FROM_ATTEMPT } from './durableRunCoordinator.js';
 
 // Regression for INT-2010: adapter CLI/infra failures (the worker/reviewer never
 // ran) must NOT drive a completable issue to durable STUCK. They get a backoff
@@ -422,6 +423,58 @@ describe('idle-fill must not out-race a repeated infra_error on the same issue (
     expect(filtered.map((t) => t.issueId)).toContain('ISSUE-1');
     expect(runner.durableRuns.getRun('ISSUE-1')?.state).toBe('READY');
 
+    runner.durableRuns.close();
+  });
+
+  // AGT-4675: the retry ramp (AGT-4673) only holds if idle fill leaves a run on it alone.
+  // AX-1844 failed its 8th attempt, was backed off, and was lifted to READY seven seconds
+  // later because a slot was free, ahead of 36 READY tasks.
+  async function runnerWithFailedAttempts(attempts: number): Promise<{
+    runner: InternalRunner & { durableRuns: { getRun(id: string): { state: string; attemptNo: number } | null; close(): void } };
+    task: TaskItem;
+  }> {
+    const task: TaskItem = {
+      id: 'ISSUE-1', issueId: 'ISSUE-1', issueIdentifier: 'ISSUE-1',
+      source: 'linear', title: `failed ${attempts} times`, priority: 1, createdAt: 0,
+      linearState: 'Todo', linearProject: { id: 'project', name: 'Repo' },
+    };
+    const dbPath = join(tempDir, `automation-ramp-${attempts}.db`);
+    runnerExecution.setTaskSource(mockTaskSource());
+    const runner = new AutonomousRunner(cfg({ automationLedgerMode: 'primary', automationDbPath: dbPath })) as unknown as InternalRunner & {
+      durableRuns: { observeTask(task: TaskItem, repo: string): void; getRun(id: string): { state: string; attemptNo: number } | null; close(): void };
+    };
+    runner.durableRuns.observeTask(task, '/repo');
+
+    const { RunLedger } = await import('./runLedger.js');
+    const ledger = new RunLedger(dbPath);
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      const claim = ledger.claimRun('ISSUE-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+      expect(claim).not.toBeNull();
+      // Earlier attempts are already due; the last one is still backed off.
+      const retryAt = attempt < attempts ? Date.now() - 1_000 : Date.now() + 6 * 60 * 60_000;
+      expect(ledger.transition(claim!, 'RETRY_AT', { retryAt, errorCode: 'failed' })).toBe(true);
+    }
+    ledger.close();
+    return { runner, task };
+  }
+
+  it('idle fill leaves a run alone once its retry delay has started to double (AGT-4675)', async () => {
+    const { runner, task } = await runnerWithFailedAttempts(RETRY_RAMP_FROM_ATTEMPT);
+    expect(runner.durableRuns.getRun('ISSUE-1')?.attemptNo).toBe(RETRY_RAMP_FROM_ATTEMPT);
+
+    const filtered = runner.filterAlreadyProcessed([task]);
+    expect(filtered.map((t) => t.issueId)).not.toContain('ISSUE-1');
+    expect(runner.durableRuns.getRun('ISSUE-1')?.state).toBe('RETRY_AT');
+    runner.durableRuns.close();
+  });
+
+  it('idle fill still lifts a run one attempt before the ramp (control, AGT-4675)', async () => {
+    const { runner, task } = await runnerWithFailedAttempts(RETRY_RAMP_FROM_ATTEMPT - 1);
+    expect(runner.durableRuns.getRun('ISSUE-1')?.attemptNo).toBe(RETRY_RAMP_FROM_ATTEMPT - 1);
+
+    const filtered = runner.filterAlreadyProcessed([task]);
+    expect(filtered.map((t) => t.issueId)).toContain('ISSUE-1');
+    expect(runner.durableRuns.getRun('ISSUE-1')?.state).toBe('READY');
     runner.durableRuns.close();
   });
 

@@ -144,6 +144,12 @@ function fencedResult(result: PipelineResult): PipelineResult {
   };
 }
 
+/**
+ * Attempt number from which a failing run's retry delay doubles per attempt. The
+ * runner's idle fill reads the same value to leave such a run alone (AGT-4675).
+ */
+export const RETRY_RAMP_FROM_ATTEMPT = 4;
+
 export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): number {
   if (result.finalStatus === 'rate_limited') return result.rateLimitResetsAt ?? now + 60_000;
   if (result.finalStatus === 'deferred') return Math.max(now + 1_000, result.retryAt ?? 0);
@@ -159,7 +165,7 @@ export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): 
   // kept its place at the top of the queue: 11 issues took 74% of 78 attempts in
   // four hours while 80 others waited (AGT-4673). The delay stays at today's value
   // for the first three attempts, then doubles with each one.
-  const ramp = 2 ** Math.max(0, Math.min(16, attemptNo - 3));
+  const ramp = 2 ** Math.max(0, Math.min(16, attemptNo - (RETRY_RAMP_FROM_ATTEMPT - 1)));
   if (result.finalStatus === 'infra_error') return now + Math.min(2 * 60 * 60_000, 15 * 60_000 * ramp);
   return now + Math.min(6 * 60 * 60_000, 30 * 60_000 * ramp);
 }
