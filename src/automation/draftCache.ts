@@ -29,8 +29,27 @@
 // template is ~378 of 22,896 tokens); and the provider does cache — two direct
 // calls with an identical prefix returned 24,221 of 24,222 tokens cached.
 
+import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { defaultAutomationDbPath } from './automationDbPath.js';
+
+/**
+ * The key a draft is cached under: the issue text, plus the project goal when
+ * the project has one.
+ *
+ * A project without a goal keeps the exact key it always had, so nothing cached
+ * is lost. With a goal the key also carries a short hash of it, because a draft
+ * computed before the goal existed has no scope verdict and would otherwise be
+ * reused for up to {@link DRAFT_CACHE_TTL_MS}, walking straight past the gate
+ * that stops a worker before any worktree is created: cgf-portal AX-1726, a
+ * kyte-dev-server task, ran two attempts that way on 2026-10-03 (AGT-4669).
+ * Editing the goal changes the key too, so cached drafts are judged again.
+ */
+export function draftFingerprint(title: string, description: string | undefined, goal?: string): string {
+  const base = [title, description ?? ''];
+  if (!goal) return JSON.stringify(base);
+  return JSON.stringify([...base, createHash('sha256').update(goal).digest('hex').slice(0, 12)]);
+}
 
 /** What the pre-admission pass computed, and the inputs it was computed from. */
 export interface CachedDraftEntry<TDraft = unknown> {
