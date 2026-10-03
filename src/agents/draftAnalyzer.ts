@@ -251,7 +251,10 @@ function collectCodebaseState(
     const store = getRegistryStore();
 
     // 1. 프로젝트 전체 통계 — always scoped; global stats are cross-repo noise.
-    const stats = store.getStats(registryKey);
+    // One query serves every draft started within a minute: the brief only needs
+    // a rough count, and 41 drafts at once each scanning the table blocked the
+    // daemon for over a minute (AGT-4668).
+    const stats = store.getStats(registryKey, { maxAgeMs: 60_000 });
     // Prefer active rows — broken/worktree leftovers used to inflate "0 → 130k"
     // noise after skipped dirs still left stale actives in the DB.
     const activeCount = stats.byStatus.find((s) => s.status === 'active')?.count ?? stats.total;
