@@ -115,6 +115,11 @@ autonomous:
     worker:
       servers: [github, linear]
       writeTools: [linear__save_comment]
+      # Browser UAT: add `browser` to servers and grant only the shutdown call.
+      # `publish`, `upload_file`, `save_draft` and `set_editor` classify as
+      # writes, so listing the server without granting them keeps them out.
+      # servers: [github, linear, browser]
+      # writeTools: [linear__save_comment, browser__close_browser]
     reviewer:
       servers: [github, linear]
 
@@ -372,3 +377,31 @@ mcp:
     # company-comms:
     #   surface: human
     #   url: https://mcp.example.com/comms
+    #
+    # Browser UAT: a real headless browser on another machine, driven over SSH
+    # stdio so no new port is opened. `session: scope` keeps ONE browser for the
+    # length of a worker/reviewer loop; without it every tool call connects
+    # afresh and lands on a blank page.
+    #  - VEGA_BROWSER_TRUSTED_ORIGINS: the test deployment ONLY, never a
+    #    production origin. Navigation and interaction are pre-approved there.
+    #  - VEGA_BROWSER_CONSENT_CHANNEL=elicit: any other site is refused. With
+    #    `auto` a model approves a new site itself by passing confirm=true.
+    #  - VEGA_BROWSER_DATA_DIR: a profile of its own, not one a person is logged
+    #    into.
+    #  - The browser runs on that machine, so the page under test must be
+    #    reachable from there (a Tailscale address, not localhost).
+    # browser:
+    #   session: scope
+    #   command: ssh
+    #   args:
+    #     - -o
+    #     - BatchMode=yes
+    #     - vela
+    #     - env
+    #     - VEGA_BROWSER_DATA_DIR=/home/you/.vega-browser-openswarm
+    #     - VEGA_BROWSER_TRUSTED_ORIGINS=https://uat.example.internal
+    #     - VEGA_BROWSER_CONSENT_CHANNEL=elicit
+    #     - /path/to/venv/bin/vega-browser
+    #     - --client
+    #     - generic
+    #     - --headless

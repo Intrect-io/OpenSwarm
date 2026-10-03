@@ -74,4 +74,40 @@ describe('MCP role policy', () => {
     });
     expect(result.tools).toEqual(tools);
   });
+
+  // vega-browser (AGT-4663): tool names measured against the real server on 2026-10-03.
+  // A role that lists the browser server without granting writes must still be
+  // unable to publish, upload, save a draft or edit a rich-text field — those
+  // classify as writes — while navigation, reading and screenshots pass.
+  describe('browser UAT server', () => {
+    const browserTools = [
+      'open_browser', 'navigate', 'read_page', 'read_form', 'screenshot', 'tabs', 'wait_for', 'scroll',
+      'click', 'type_text', 'press_key', 'select_option', 'close_browser',
+      'publish', 'upload_file', 'save_draft', 'set_editor',
+    ].map((name) => tool(`browser__${name}`));
+    const names = (tools: ToolDefinition[]) => tools.map((entry) => entry.function.name.replace('browser__', ''));
+
+    it('denies publish, upload_file, save_draft and set_editor unless a write is granted', () => {
+      const { tools, denied } = filterMcpToolsForRole(browserTools, { servers: ['browser'] });
+
+      expect(denied.map((entry) => entry.name.replace('browser__', '')).sort())
+        .toEqual(['close_browser', 'publish', 'save_draft', 'set_editor', 'upload_file']);
+      expect(denied.every((entry) => entry.reason === 'write capability was not granted')).toBe(true);
+      expect(names(tools)).toEqual(expect.arrayContaining(['open_browser', 'navigate', 'read_page', 'screenshot']));
+    });
+
+    it('lets a role close its browser without opening the publishing tools', () => {
+      const { tools } = filterMcpToolsForRole(browserTools, { servers: ['browser'], writeTools: ['browser__close_browser'] });
+
+      expect(names(tools)).toContain('close_browser');
+      expect(names(tools)).not.toContain('publish');
+      expect(names(tools)).not.toContain('upload_file');
+    });
+
+    it('exposes no browser tool to a role that does not list the server', () => {
+      const { tools } = filterMcpToolsForRole(browserTools, { servers: ['github'] });
+
+      expect(tools).toEqual([]);
+    });
+  });
 });

@@ -114,6 +114,8 @@ export type McpServerConfig = {
   url?: string;
   headers?: Record<string, string>;
   transport?: 'stdio' | 'http' | 'sse';
+  /** `scope` keeps one connection for the length of an agentic-loop invocation (browser state). */
+  session?: 'call' | 'scope';
 };
 
 /** MCP servers declared in config.yaml (merged into the mcp.json registry). */
