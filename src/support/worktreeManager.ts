@@ -27,6 +27,7 @@ import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, type Sand
 import { copyIsolatedPath } from './isolatedPath.js';
 import { hasEditableInstallInto, rebasePythonEnvironment } from '../verify/pythonEnvironment.js';
 import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
+import { commitStagedForPublication } from './publicationCommit.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1101,7 +1102,7 @@ export async function commitAndCreatePRWithHead(
           console.warn(`[Worktree] Commit format warning: ${commitCheck.issues.join('; ')}`);
         }
 
-        await git(worktreePath, 'commit', '-m', commitMsg);
+        await commitStagedForPublication(worktreePath, commitMsg, { draft: options.draft });
         console.log(`[Worktree] Committed uncommitted changes (${branchName})`);
       } else {
         console.log(`[Worktree] Nothing left to commit after unsafe-binary-staging guard stripped all staged changes (${branchName})`);
