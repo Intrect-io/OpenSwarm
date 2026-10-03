@@ -6,7 +6,7 @@ vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
-import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishParkedIfNeeded, publishParkedWork, publishStuckWork, shouldPublishParkedWork } from './publishOnPark.js';
+import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishFinishedRun, publishParkedIfNeeded, publishParkedWork, publishStuckWork, publishUnfinishedWork, shouldPublishParkedWork, shouldPublishUnfinishedWork } from './publishOnPark.js';
 
 beforeEach(() => {
   commitAndCreatePRWithHead.mockReset();
@@ -232,7 +232,7 @@ describe('parked-work draft publication', () => {
 
     expect(commitAndCreatePRWithHead).toHaveBeenCalledWith(
       info, publishable.title, 'AGT-3844', expect.any(String),
-      { draft: true, committedOnly: true },
+      { draft: true },
     );
   });
 
@@ -372,5 +372,181 @@ describe('publishStuckWork — terminal parks publish instead of holding', () =>
 
       expect(commitAndCreatePRWithHead.mock.calls.at(-1)?.[4]).toEqual({ draft: true });
     }
+  });
+});
+
+describe('unfinished-run publication (AGT-4664)', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AX-1774', issueId: 'AX-1774' };
+  const task = { id: 'task-1', issueIdentifier: 'AX-1774', title: 'Reconcile ledger', fileScope: ['src/'], fileScopeSource: 'drafted' as const };
+  const pr = { prUrl: 'https://github.com/o/r/pull/31', headSha: 'abc' };
+
+  describe('shouldPublishUnfinishedWork', () => {
+    it.each(['failed', 'rejected', 'infra_error', 'rate_limited'])('publishes a %s run that has a worktree', (finalStatus) => {
+      expect(shouldPublishUnfinishedWork(true, { success: false, finalStatus })).toBe(true);
+    });
+
+    it.each(['cancelled', 'superseded', 'decomposed', 'deferred', 'approved', 'waiting_on_operator', undefined])(
+      'does not publish a %s run',
+      (finalStatus) => {
+        expect(shouldPublishUnfinishedWork(true, { finalStatus })).toBe(false);
+      },
+    );
+
+    it('does not publish without a worktree', () => {
+      expect(shouldPublishUnfinishedWork(false, { finalStatus: 'failed' })).toBe(false);
+    });
+
+    it('leaves an operator park to the parked path', () => {
+      expect(shouldPublishUnfinishedWork(true, { finalStatus: 'failed', operatorPark: { code: 'worker_no_changes', reason: 'r' } })).toBe(false);
+    });
+
+    it('does not publish a sandbox outcome it cannot trust or a run that already has a PR', () => {
+      expect(shouldPublishUnfinishedWork(true, { finalStatus: 'failed', workerResult: { executionOutcomeUnknown: true } })).toBe(false);
+      expect(shouldPublishUnfinishedWork(true, { finalStatus: 'failed', prUrl: 'https://x/1' })).toBe(false);
+    });
+
+    it('does not publish for a lifecycle-fence failure or a run that was approved going in', () => {
+      expect(shouldPublishUnfinishedWork(true, { finalStatus: 'infra_error' }, { lifecycleFailed: true })).toBe(false);
+      expect(shouldPublishUnfinishedWork(true, { finalStatus: 'infra_error' }, { approvedAttempt: true })).toBe(false);
+    });
+  });
+
+  describe('publishUnfinishedWork', () => {
+    it('opens a draft with the status and last failure, without attaching it to the ledger', async () => {
+      commitAndCreatePRWithHead.mockResolvedValue(pr);
+      const onPublication = vi.fn(async () => true);
+      const durability = { beforePublish: vi.fn(async () => true), onPublication } as unknown as ExecutionDurabilityHooks;
+
+      const url = await publishUnfinishedWork(info, task, { finalStatus: 'rejected', failureDetail: 'reviewer: tests missing\nfor the new branch' }, durability);
+
+      expect(url).toBe(pr.prUrl);
+      expect(commitAndCreatePRWithHead).toHaveBeenCalledWith(
+        info, task.title, 'AX-1774',
+        expect.stringMatching(/ended as `rejected`[\s\S]*Last failure: reviewer: tests missing for the new branch/),
+        { draft: true },
+      );
+      // No PR on the ledger row: a non-approved result with one becomes NEEDS_RECONCILE and stops the retry.
+      expect(onPublication).not.toHaveBeenCalled();
+    });
+
+    it('bounds the failure text and survives a missing one', async () => {
+      commitAndCreatePRWithHead.mockResolvedValue(pr);
+
+      await publishUnfinishedWork(info, task, { finalStatus: 'failed', failureDetail: 'x'.repeat(2_000) }, undefined);
+      await publishUnfinishedWork(info, task, { finalStatus: 'failed' }, undefined);
+
+      const bodies = commitAndCreatePRWithHead.mock.calls.map((call) => String(call[3]));
+      expect(bodies[0].length).toBeLessThan(900);
+      expect(bodies[1]).toContain('no failure detail was recorded');
+    });
+
+    it('publishes nothing when the lease fence refuses', async () => {
+      const durability = { beforePublish: vi.fn(async () => false), onPublication: vi.fn() } as unknown as ExecutionDurabilityHooks;
+
+      expect(await publishUnfinishedWork(info, task, { finalStatus: 'failed' }, durability)).toBeUndefined();
+      expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+    });
+
+    it('swallows a branch with nothing on it and any publication failure', async () => {
+      commitAndCreatePRWithHead.mockRejectedValueOnce(new Error('No commits to create PR from - branch has no changes compared to main'));
+      expect(await publishUnfinishedWork(info, task, { finalStatus: 'failed' }, undefined)).toBeUndefined();
+
+      commitAndCreatePRWithHead.mockRejectedValueOnce(new Error('gh: HTTP 502'));
+      expect(await publishUnfinishedWork(info, task, { finalStatus: 'failed' }, undefined)).toBeUndefined();
+    });
+  });
+
+  describe('publishFinishedRun', () => {
+    const noHook = () => undefined;
+
+    it('publishes a failed run once, as a draft, and leaves its result alone', async () => {
+      commitAndCreatePRWithHead.mockResolvedValue(pr);
+      const result: { success: boolean; finalStatus: string; prUrl?: string; failureDetail?: string } = { success: false, finalStatus: 'failed', failureDetail: 'tests red' };
+
+      await publishFinishedRun(info, task, result, undefined, noHook);
+
+      expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
+      expect(commitAndCreatePRWithHead.mock.calls[0][4]).toEqual({ draft: true });
+      // Setting prUrl here would turn the retry into NEEDS_RECONCILE.
+      expect(result).toEqual({ success: false, finalStatus: 'failed', failureDetail: 'tests red' });
+    });
+
+    it('publishes an approved run through the reviewed path only', async () => {
+      commitAndCreatePRWithHead.mockResolvedValue(pr);
+      const result: { success: boolean; finalStatus: string; prUrl?: string } = { success: true, finalStatus: 'approved' };
+
+      await publishFinishedRun(info, task, result, undefined, noHook);
+
+      expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
+      expect(commitAndCreatePRWithHead.mock.calls[0][4]).not.toMatchObject({ draft: true });
+      expect(result.prUrl).toBe(pr.prUrl);
+    });
+
+    // A push or `gh` error in the reviewed publish rewrites the status to
+    // infra_error. Republishing that as a draft would hide approved work behind
+    // a draft and skip the reviewed retry that fixes it.
+    it('does not republish approved work as a draft when the reviewed publish fails', async () => {
+      commitAndCreatePRWithHead.mockRejectedValue(new Error('gh: HTTP 502'));
+      const result: { success: boolean; finalStatus: string; failureDetail?: string } = { success: true, finalStatus: 'approved' };
+
+      await publishFinishedRun(info, task, result, undefined, noHook);
+
+      expect(result).toMatchObject({ success: false, finalStatus: 'infra_error' });
+      expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
+    });
+
+    it('publishes a scope-mismatch park once, through the parked path', async () => {
+      commitAndCreatePRWithHead
+        .mockRejectedValueOnce(new PublicationScopeMismatchError(['uv.lock']))
+        .mockResolvedValueOnce(pr);
+      const result: { success: boolean; finalStatus: string; operatorPark?: unknown } = { success: true, finalStatus: 'approved' };
+
+      await publishFinishedRun(info, task, result, undefined, noHook);
+
+      expect(result.operatorPark).toBeDefined();
+      // One rejected reviewed attempt and one draft; the unfinished path stays out.
+      expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(2);
+      expect(commitAndCreatePRWithHead.mock.calls[1][4]).toEqual({ draft: true });
+    });
+
+    it('publishes a run parked before the approved publish once, not twice', async () => {
+      commitAndCreatePRWithHead.mockResolvedValue(pr);
+      const result = { success: false, finalStatus: 'failed', operatorPark: { code: 'worker_no_changes', reason: 'r' } };
+
+      await publishFinishedRun(info, task, result, undefined, noHook);
+
+      expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
+    });
+
+    it('publishes nothing for a lifecycle-fence failure', async () => {
+      const result = { success: false, finalStatus: 'infra_error', failureDetail: 'lease lost' };
+
+      await publishFinishedRun(info, task, result, undefined, noHook, undefined, { lifecycleFailed: true });
+
+      expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+    });
+
+    it.each(['cancelled', 'superseded', 'decomposed', 'deferred'])('publishes nothing for a %s run', async (finalStatus) => {
+      await publishFinishedRun(info, task, { success: false, finalStatus }, undefined, noHook);
+
+      expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+    });
+
+    it('publishes nothing without a worktree', async () => {
+      await publishFinishedRun(null, task, { success: false, finalStatus: 'failed' }, undefined, noHook);
+
+      expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+    });
+
+    it('runs no post-publication review for the unfinished draft', async () => {
+      commitAndCreatePRWithHead.mockResolvedValue(pr);
+      const hook = vi.fn(async () => {});
+
+      await publishFinishedRun(info, task, { success: false, finalStatus: 'failed' }, undefined, () => hook);
+
+      // A review per failed attempt is one LLM call each, and on rate_limited it only hits the limit again.
+      expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
+      expect(hook).not.toHaveBeenCalled();
+    });
   });
 });
