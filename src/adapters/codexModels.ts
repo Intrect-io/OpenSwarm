@@ -15,6 +15,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { contextWindowFor, writeCachedCatalog } from './modelCatalog.js';
+
+/** Provider key under which the live Codex model windows are cached (AGT-4660). */
+const CODEX_CATALOG_PROVIDER = 'codex-responses';
 
 const CODEX_MODELS_ENDPOINT =
   'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0';
@@ -93,6 +97,34 @@ interface CodexModelEntry {
   slug?: unknown;
   visibility?: unknown;
   priority?: unknown;
+  context_window?: unknown;
+  effective_context_window_percent?: unknown;
+}
+
+/**
+ * Parse the Codex backend `models` array → `slug → usable context window`.
+ *
+ * The backend reports `context_window` (272k for the gpt-5.6 family) and
+ * `effective_context_window_percent` (95), the share of that window its own
+ * client treats as usable. The loop sizes compaction from this number, so the
+ * effective share is applied when present. Entries with a missing or invalid
+ * window are skipped: an unknown window must stay unknown rather than become 0.
+ * Hidden models are kept — a pinned model can be hidden from the list and still
+ * be the one a worker runs. (AGT-4660)
+ */
+export function parseCodexModelWindows(entries: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!Array.isArray(entries)) return out;
+  for (const item of entries as CodexModelEntry[]) {
+    if (!item || typeof item !== 'object') continue;
+    const slug = typeof item.slug === 'string' ? item.slug.trim() : '';
+    const raw = item.context_window;
+    if (!slug || typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) continue;
+    const pct = item.effective_context_window_percent;
+    const share = typeof pct === 'number' && Number.isFinite(pct) && pct > 0 && pct <= 100 ? pct / 100 : 1;
+    out[slug] = Math.floor(raw * share);
+  }
+  return out;
 }
 
 /** Parse the Codex backend `models` array → slugs sorted by priority. */
@@ -133,7 +165,15 @@ async function fetchModelsFromApi(accessToken: string): Promise<string[]> {
     if (!res.ok) return [];
     const data = (await res.json()) as { models?: unknown };
     const models = data && typeof data === 'object' ? data.models : undefined;
-    return addForwardCompatModels(parseModelEntries(models));
+    const ids = addForwardCompatModels(parseModelEntries(models));
+    // Persist the windows for hosts that have no Codex CLI cache (a container):
+    // the adapter reads them synchronously per run and must not wait on the
+    // network. Best-effort, like every catalog write. (AGT-4660)
+    const windows = parseCodexModelWindows(models);
+    if (ids.length > 0 && Object.keys(windows).length > 0) {
+      writeCachedCatalog(CODEX_CATALOG_PROVIDER, ids, undefined, windows);
+    }
+    return ids;
   } catch {
     // Network error, abort/timeout, or malformed JSON — fall back to local sources.
     return [];
@@ -185,6 +225,36 @@ function readCacheModels(home: string): string[] {
     return parseModelEntries(models);
   } catch {
     return [];
+  }
+}
+
+/**
+ * The context window the agentic loop should size compaction against for a
+ * Codex model, or undefined when no source reports one.
+ *
+ * Synchronous on purpose, like `contextWindowFor`: the loop reads it once per
+ * run. Sources, in order: the catalog cache a live fetch wrote, then the Codex
+ * CLI's own `models_cache.json`, which the CLI keeps fresh on any host that
+ * runs it. Without this the loop falls back to a fixed 60k and compacts a
+ * 272k-window model at under a quarter of its window. (AGT-4660)
+ */
+export function codexContextWindowFor(
+  model: string,
+  opts: { home?: string; catalogDir?: string } = {},
+): number | undefined {
+  const cached = opts.catalogDir === undefined
+    ? contextWindowFor(CODEX_CATALOG_PROVIDER, model)
+    : contextWindowFor(CODEX_CATALOG_PROVIDER, model, opts.catalogDir);
+  if (cached !== undefined) return cached;
+
+  const cachePath = join(opts.home ?? codexHome(), 'models_cache.json');
+  if (!existsSync(cachePath)) return undefined;
+  try {
+    const raw = JSON.parse(readFileSync(cachePath, 'utf-8')) as { models?: unknown };
+    const models = raw && typeof raw === 'object' ? raw.models : undefined;
+    return parseCodexModelWindows(models)[model];
+  } catch {
+    return undefined;
   }
 }
 

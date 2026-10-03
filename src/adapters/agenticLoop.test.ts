@@ -7,7 +7,10 @@
 // ============================================
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fs } from 'node:fs';
+import { promises as fs, mkdtempSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import os from 'node:os';
 import path from 'node:path';
 import { compactPriorTurns, toolCallKey, allToolCallsSeen, shouldNudgeReadLoop, READ_LOOP_NUDGE_AT, shouldNudgeCoordinationCheck, COORDINATION_CHECK_NUDGE_EVERY, COORDINATION_CHECK_NUDGE_PROMPT, runAgenticLoop, loopResultToCliResult, formatToolErrorLog, loopDeadlines, wrapUpNotice, type ChatMessage, type AgenticLoopResult } from './agenticLoop.js';
@@ -365,22 +368,71 @@ describe('runAgenticLoop finishValidator (AGT-4300)', () => {
   });
 });
 
-describe('runAgenticLoop warehouse discovery (AGT-4128)', () => {
-  it('points every tool-loop worker at the warehouse index before it asks for local-only data', async () => {
+describe('runAgenticLoop local-data discovery (AGT-4128, AGT-4661)', () => {
+  const ENV = 'OPENSWARM_WAREHOUSE_ROOT';
+  const original = process.env[ENV];
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    if (original === undefined) delete process.env[ENV];
+    else process.env[ENV] = original;
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function firstPrompt(cwd: string, readOnly = false): Promise<string> {
     let firstMessages: ChatMessage[] = [];
     await runAgenticLoop({
       prompt: 'run the repository tests',
-      cwd: process.cwd(),
+      cwd,
       model: 'test',
       webTools: false,
       maxTurns: 1,
+      readOnly,
       callApi: async (messages) => {
         firstMessages = messages;
         return finalResp('done');
       },
     });
-    expect(firstMessages[0].content).toContain('/warehouse/INDEX.md');
-    expect(firstMessages[0].content).toContain('never print secret values');
+    return String(firstMessages[0].content);
+  }
+
+  it('points a tool-loop worker at the warehouse index when the warehouse is mounted', async () => {
+    const warehouse = mkdtempSync(join(tmpdir(), 'warehouse-'));
+    dirs.push(warehouse);
+    process.env[ENV] = warehouse;
+    const prompt = await firstPrompt(process.cwd());
+    expect(prompt).toContain(`${warehouse}/INDEX.md`);
+    expect(prompt).toContain('never print secret values');
+  });
+
+  it('does not send a native-host worker to a warehouse that is not there', async () => {
+    process.env[ENV] = join(tmpdir(), 'warehouse-that-does-not-exist');
+    const prompt = await firstPrompt(process.cwd());
+    expect(prompt).not.toContain('INDEX.md');
+    expect(prompt).not.toContain('/warehouse');
+    // The task prompt still follows the working-directory note on its own line.
+    expect(prompt).toMatch(/rejected\.\n\nrun the repository tests$/);
+  });
+
+  it('names the linked main checkout for a worktree worker when there is no warehouse', async () => {
+    process.env[ENV] = join(tmpdir(), 'warehouse-that-does-not-exist');
+    const root = mkdtempSync(join(tmpdir(), 'local-data-'));
+    dirs.push(root);
+    const main = join(root, 'main');
+    const linked = join(root, 'linked');
+    const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'pipe' });
+    mkdirSync(main);
+    git(main, 'init', '-q', '-b', 'main');
+    git(main, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init');
+    git(main, 'worktree', 'add', '-q', '-b', 'task', linked);
+
+    const prompt = await firstPrompt(linked);
+    expect(prompt).toContain(realpathSync(main));
+    expect(prompt).toContain('read-only');
+    expect(prompt).not.toContain('/warehouse');
+
+    // A read-only run is denied main-checkout reads, so it is not told about them.
+    expect(await firstPrompt(linked, true)).not.toContain(realpathSync(main));
   });
 });
 

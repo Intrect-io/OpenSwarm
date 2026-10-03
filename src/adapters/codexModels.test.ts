@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { addForwardCompatModels, getCodexModelIds, DEFAULT_CODEX_MODELS } from './codexModels.js';
+import {
+  addForwardCompatModels,
+  getCodexModelIds,
+  DEFAULT_CODEX_MODELS,
+  parseCodexModelWindows,
+  codexContextWindowFor,
+} from './codexModels.js';
+import { readCachedCatalog, writeCachedCatalog } from './modelCatalog.js';
 
 // Adapters send HTTPS traffic through undici's own fetch with a shared HTTP/1.1
 // dispatcher (AGT-4220), so `vi.stubGlobal('fetch', ...)` alone no longer
@@ -155,5 +162,108 @@ describe('getCodexModelIds — live API', () => {
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe('parseCodexModelWindows (AGT-4660)', () => {
+  // Shape copied from a real ~/.codex/models_cache.json entry (Codex CLI 0.160.0).
+  const real = { slug: 'gpt-5.6-terra', context_window: 272000, max_context_window: 872000, effective_context_window_percent: 95, visibility: 'list' };
+
+  it('applies the effective share the backend reports', () => {
+    expect(parseCodexModelWindows([real])).toEqual({ 'gpt-5.6-terra': 258400 });
+  });
+
+  it('uses the raw window when no usable share is reported', () => {
+    expect(parseCodexModelWindows([
+      { slug: 'no-pct', context_window: 100000 },
+      { slug: 'zero-pct', context_window: 100000, effective_context_window_percent: 0 },
+      { slug: 'over-pct', context_window: 100000, effective_context_window_percent: 150 },
+    ])).toEqual({ 'no-pct': 100000, 'zero-pct': 100000, 'over-pct': 100000 });
+  });
+
+  it('leaves an unknown window unknown instead of recording 0', () => {
+    expect(parseCodexModelWindows([
+      { slug: 'zero', context_window: 0 },
+      { slug: 'negative', context_window: -5 },
+      { slug: 'fractional', context_window: 1.5 },
+      { slug: 'string', context_window: '272000' },
+      { slug: 'missing' },
+      { context_window: 272000 },
+      null,
+    ])).toEqual({});
+    expect(parseCodexModelWindows('not an array')).toEqual({});
+  });
+
+  it('keeps a hidden model: a pinned model can be hidden and still be the one a worker runs', () => {
+    expect(parseCodexModelWindows([{ ...real, slug: 'pinned', visibility: 'hide' }])).toEqual({ pinned: 258400 });
+  });
+});
+
+describe('codexContextWindowFor (AGT-4660)', () => {
+  let home: string;
+  let catalogDir: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'codex-window-home-'));
+    catalogDir = mkdtempSync(join(tmpdir(), 'codex-window-catalog-'));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(catalogDir, { recursive: true, force: true });
+  });
+
+  const writeCliCache = (models: unknown[]) =>
+    writeFileSync(join(home, 'models_cache.json'), JSON.stringify({ models }));
+
+  it('reads the window from the Codex CLI cache', () => {
+    writeCliCache([{ slug: 'gpt-5.6-terra', context_window: 272000, effective_context_window_percent: 95 }]);
+    expect(codexContextWindowFor('gpt-5.6-terra', { home, catalogDir })).toBe(258400);
+  });
+
+  it('is undefined for an unknown model, a missing cache, or a corrupt cache', () => {
+    writeCliCache([{ slug: 'gpt-5.6-terra', context_window: 272000 }]);
+    expect(codexContextWindowFor('gpt-unknown', { home, catalogDir })).toBeUndefined();
+    rmSync(join(home, 'models_cache.json'));
+    expect(codexContextWindowFor('gpt-5.6-terra', { home, catalogDir })).toBeUndefined();
+    writeFileSync(join(home, 'models_cache.json'), '{ not json');
+    expect(codexContextWindowFor('gpt-5.6-terra', { home, catalogDir })).toBeUndefined();
+  });
+
+  it('prefers the catalog cache a live fetch wrote over the CLI cache', () => {
+    writeCliCache([{ slug: 'gpt-5.6-terra', context_window: 111111 }]);
+    writeCachedCatalog('codex-responses', ['gpt-5.6-terra'], catalogDir, { 'gpt-5.6-terra': 222222 });
+    expect(codexContextWindowFor('gpt-5.6-terra', { home, catalogDir })).toBe(222222);
+  });
+});
+
+describe('getCodexModelIds — live fetch persists windows (AGT-4660)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'codex-live-catalog-'));
+    vi.stubEnv('OPENSWARM_MODEL_CATALOG_DIR', dir);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes the windows so a host without a Codex CLI cache can still size compaction', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      models: [{ slug: 'gpt-5.6-terra', priority: 1, context_window: 272000, effective_context_window_percent: 95 }],
+    }), { status: 200 })));
+    await getCodexModelIds('token');
+    expect(readCachedCatalog('codex-responses', dir)?.windows).toEqual({ 'gpt-5.6-terra': 258400 });
+  });
+
+  it('writes nothing when the backend reports no windows', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      models: [{ slug: 'gpt-5.4', priority: 1 }],
+    }), { status: 200 })));
+    await getCodexModelIds('token');
+    expect(readCachedCatalog('codex-responses', dir)).toBeNull();
   });
 });

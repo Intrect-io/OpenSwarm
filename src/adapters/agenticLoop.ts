@@ -18,6 +18,7 @@ import { recordUsage, type UsageAttribution } from '../support/usageLedger.js';
 import { createSessionRecorder, type SessionRecorder } from '../support/sessionLog.js';
 import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import { filterHumanSurfaceMcpTools, isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+import { localDataNote } from './localDataNote.js';
 import { SandboxExecutorClient } from '../sandboxExecutor/client.js';
 import { getSandboxExecutorConfig } from '../sandboxExecutor/runtime.js';
 import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
@@ -454,8 +455,7 @@ async function runAgenticLoopInner(
     `Your project root is: ${cwd}\n` +
     `All file tools operate within this root. Use paths relative to it (e.g. "src/foo.ts" or ".") ` +
     `or absolute paths under this root. Do NOT use "/" or a bare repo name — those are outside the project and will be rejected.\n` +
-    `Local-only data, credentials, and cross-repository artifacts may be available read-only under /warehouse. ` +
-    `Read /warehouse/INDEX.md before asking the operator for missing material, and never print secret values.\n\n`;
+    (localDataNote(cwd, readOnly) || '\n');
   messages.push({ role: 'user', content: cwdNote + prompt });
 
   // Owned by the wrapper so every exit path — including a thrown rate limit
