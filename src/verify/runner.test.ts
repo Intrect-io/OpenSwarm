@@ -89,6 +89,51 @@ describe('runVerify', () => {
     );
   });
 
+  it('uses the host uv cache in offline mode inside the sandbox', async () => {
+    const originalHome = process.env.HOME;
+    const cacheHome = join(root, 'cache-home');
+    const uvCache = join(cacheHome, '.cache', 'uv');
+    await mkdir(uvCache, { recursive: true });
+    process.env.HOME = cacheHome;
+    const execute = vi.fn(async () => ({
+      output: 'head: 2 passed', exitCode: 0, signal: null, timedOut: false,
+      truncated: false, outputLimitExceeded: false,
+    }));
+    try {
+      const [evidence] = await runVerify({
+        projectPath: repo,
+        commands: [verify('uv run --frozen python -m pytest -q')],
+        baseRef: 'HEAD',
+        sandboxExecutorSessionFactory: async () => ({ execute }),
+        sandboxScratchRoot: root,
+      });
+      expect(evidence.headStatus).toBe('pass');
+      expect(execute).toHaveBeenCalledWith(expect.stringContaining(`export UV_CACHE_DIR='${uvCache}' && export UV_OFFLINE=1`), 2_000);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
+
+  it('reports an offline uv cache miss as an environment failure rather than a pass', async () => {
+    const execute = vi.fn(async () => ({
+      output: 'error: Failed to download package: cache miss while offline',
+      exitCode: 2, signal: null, timedOut: false, truncated: false, outputLimitExceeded: false,
+    }));
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('uv run --frozen python -m pytest -q')],
+      baseRef: 'HEAD',
+      sandboxExecutorSessionFactory: async () => ({ execute }),
+      sandboxScratchRoot: root,
+    });
+
+    expect(evidence).toMatchObject({
+      baseStatus: 'fail', headStatus: 'fail', newFailure: false, environmentFailure: true,
+    });
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it('fails closed when the strict companion cannot attest instead of falling back to host execution', async () => {
     const createSession = vi.fn(async () => {
       throw new Error('socket unavailable');
