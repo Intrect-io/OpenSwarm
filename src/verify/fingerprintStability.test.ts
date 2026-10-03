@@ -67,6 +67,26 @@ describe('normalizeFailureOutput', () => {
     expect(a).not.toBe(normalizeFailureOutput(out('1.93').replace('1 error', '2 errors'), paths(SANDBOX_A)));
   });
 
+  it('normalizes a pytest summary that carries a (H:MM:SS) suffix (AGT-4680)', () => {
+    // pytest -q adds `(0:02:04)` once a run passes a minute, which every full cgf-portal
+    // suite does. The seconds were normalised but the suffix was not, so two runs of the
+    // SAME failure on main hashed differently and read as a new regression.
+    const out = (summary: string) => [
+      '=========================== short test summary info ============================',
+      'FAILED tests/test_b5_repository.py::test_the_empty_result_has_the_same_shape_as_a_real_one',
+      '!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!',
+      summary,
+      '',
+    ].join('\n');
+    const a = normalizeFailureOutput(out('1 failed, 4234 passed, 581 skipped in 124.27s (0:02:04)'), paths(SANDBOX_A));
+    expect(a).toBe(normalizeFailureOutput(out('1 failed, 4234 passed, 581 skipped in 113.47s (0:01:53)'), paths(SANDBOX_B)));
+    expect(a).toContain('1 failed, 4234 passed, 581 skipped in <DURATION>');
+    // A different count is still a different failure.
+    expect(a).not.toBe(normalizeFailureOutput(
+      out('2 failed, 4233 passed, 581 skipped in 124.27s (0:02:04)'), paths(SANDBOX_A),
+    ));
+  });
+
   it('normalizes paths outside the command cwd — the subdirectory-cwd bug', () => {
     // A command with `cwd: packages/api` fails, but the traceback points at a
     // sibling package. Normalizing only the cwd left this line sandbox-specific.
