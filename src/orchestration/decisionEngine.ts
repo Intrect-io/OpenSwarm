@@ -247,6 +247,14 @@ export interface DecisionEngineConfig {
   /** Allow auto-execution */
   autoExecute: boolean;
 
+  /**
+   * Does a live executor stand behind a task the local state marks
+   * `in_progress`? When it says no, the marker is stale (a restart or an expired
+   * lease left it behind) and the task is not filtered as "already executing".
+   * Omitted: the marker alone decides, as before. (AGT-4667)
+   */
+  isExecutionLive?: (issueId: string) => boolean;
+
   /** Dry run mode */
   dryRun: boolean;
 
@@ -734,8 +742,11 @@ export class DecisionEngine {
       const issueId = task.issueId || task.id;
       const localState = getTaskState(issueId);
       if (localState?.execution.status === 'in_progress') {
-        console.log(`[DecisionEngine] Filtered out ${task.issueIdentifier}: already executing`);
-        return false;
+        if (this.config.isExecutionLive?.(issueId) ?? true) {
+          console.log(`[DecisionEngine] Filtered out ${task.issueIdentifier}: already executing`);
+          return false;
+        }
+        console.log(`[DecisionEngine] ${task.issueIdentifier}: local in_progress marker is stale (no live executor) — not filtered`);
       }
 
       const readiness = getTaskReadiness(task);

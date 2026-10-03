@@ -233,6 +233,40 @@ describe('DecisionEngine.heartbeat', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('already executing'));
   });
 
+  // The marker survives a restart or an expired lease. Read as "already
+  // executing" it kept READY work out of the queue for hours (AGT-4667).
+  it('does not treat a stale local in_progress marker as executing when no live executor exists', async () => {
+    taskStateMock.getTaskState.mockReturnValueOnce({
+      issueId: 'issue-1',
+      execution: { status: 'in_progress' },
+    });
+    const probe = vi.fn(() => false);
+    const engine = new DecisionEngine({ isExecutionLive: probe });
+    const result = await engine.heartbeat([task()]);
+    expect(probe).toHaveBeenCalledWith('issue-1');
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('local in_progress marker is stale'));
+    expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining('already executing'));
+    expect(result).not.toEqual({ action: 'skip', reason: 'No executable tasks in backlog' });
+  });
+
+  it('still filters an in_progress task when a live executor stands behind the marker', async () => {
+    taskStateMock.getTaskState.mockReturnValueOnce({
+      issueId: 'issue-1',
+      execution: { status: 'in_progress' },
+    });
+    const engine = new DecisionEngine({ isExecutionLive: () => true });
+    const result = await engine.heartbeat([task()]);
+    expect(result).toEqual({ action: 'skip', reason: 'No executable tasks in backlog' });
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('already executing'));
+  });
+
+  it('does not consult the probe for a task that is not marked in_progress', async () => {
+    const probe = vi.fn(() => false);
+    const engine = new DecisionEngine({ isExecutionLive: probe });
+    await engine.heartbeat([task()]);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
   it('rejects a task whose source is outside backlog scope', async () => {
     const engine = new DecisionEngine();
     const result = await engine.heartbeat([task({ source: 'github_pr' })]);
