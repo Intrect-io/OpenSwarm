@@ -22,6 +22,7 @@ import type { ImpactAnalysis } from '../knowledge/types.js';
 import type { AdapterName } from '../adapters/types.js';
 import { formatProjectGoalSection } from '../support/projectGoal.js';
 import { parseScopeVerdict, isScopeDeclined, scopePromptParts, type DraftScopeVerdict } from './draftScope.js';
+import { findBaseCommitsForIssue, formatBaseCommitsSection } from './baseBranchCommits.js';
 
 // ============ drafter 모델 / 게이트 정책 ============
 
@@ -332,6 +333,7 @@ function buildDraftPrompt(
   options: DraftAnalyzerOptions,
   codeContext: { registrySnapshot: RegistryBrief[]; projectStats?: string },
   impactAnalysis?: ImpactAnalysis | null,
+  baseCommits: readonly string[] = [],
 ): string {
   const parts: string[] = [];
 
@@ -406,6 +408,10 @@ The resolved operator decisions below are the newest task-scoped requirements. I
 
 ${options.authoritativeOperatorFeedback}`);
   }
+
+  // Task-specific: the base branch's own history for this issue (AGT-4674).
+  const baseCommitsSection = formatBaseCommitsSection(baseCommits);
+  if (baseCommitsSection) parts.push(baseCommitsSection.trimEnd());
 
   if (impactAnalysis && impactAnalysis.directModules.length > 0) {
     parts.push(`## Impact Analysis (this task)
@@ -699,7 +705,11 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
   onLog?.(`[Draft] Budget: ${fileCount} tracked files → timeout ${Math.round(draftTimeoutMs / 1000)}s, ${budget.maxTurns} turns`);
 
   // 3. Fast model draft analysis (~3s) — model resolves from the adapter when unset
-  const prompt = buildDraftPrompt(options, codeContext, impactAnalysis);
+  const baseCommits = await findBaseCommitsForIssue(options.projectPath, options.taskId);
+  if (baseCommits.length > 0) {
+    onLog?.(`[Draft] ${baseCommits.length} commit(s) on the base branch already mention this issue`);
+  }
+  const prompt = buildDraftPrompt(options, codeContext, impactAnalysis, baseCommits);
 
   let haikuResult: Partial<DraftAnalysis> = {
     taskType: 'unknown',
