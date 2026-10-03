@@ -417,30 +417,65 @@ export function listTaskStates(): OpenSwarmTaskState[] {
   return Object.values(ensureStoreLoaded().tasks);
 }
 
-/** Mutate the in-memory store. Caller MUST hold `withStoreLock`. */
-function upsertTaskStateUnlocked(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
-  const store = ensureStoreLoaded();
-  const current = store.tasks[issueId] || createDefaultState(issueId);
+/**
+ * Merge a patch into one task row. Pure: `updatedAt` is the caller's, so the
+ * same merge can be run once to ask "would this change anything" (with the
+ * row's own timestamp) and again to apply it.
+ */
+function mergeTaskState(
+  current: OpenSwarmTaskState | undefined,
+  issueId: string,
+  patch: Partial<OpenSwarmTaskState>,
+  updatedAt: string,
+): OpenSwarmTaskState {
+  const base = current || createDefaultState(issueId);
   const { execution, worktree, ...topLevelPatch } = patch;
   const definedTopLevelPatch = Object.fromEntries(
     Object.entries(topLevelPatch).filter(([, value]) => value !== undefined)
   ) as Partial<OpenSwarmTaskState>;
   const merged: OpenSwarmTaskState = {
-    ...current,
+    ...base,
     ...definedTopLevelPatch,
     issueId,
-    childIssueIds: patch.childIssueIds ?? current.childIssueIds ?? [],
-    dependencyIssueIds: patch.dependencyIssueIds ?? current.dependencyIssueIds ?? [],
-    dependencyTitles: patch.dependencyTitles ?? current.dependencyTitles ?? [],
-    fileScope: patch.fileScope ?? current.fileScope ?? [],
-    execution: { ...current.execution, ...execution },
-    worktree: { ...current.worktree, ...worktree },
-    updatedAt: new Date().toISOString(),
+    childIssueIds: patch.childIssueIds ?? base.childIssueIds ?? [],
+    dependencyIssueIds: patch.dependencyIssueIds ?? base.dependencyIssueIds ?? [],
+    dependencyTitles: patch.dependencyTitles ?? base.dependencyTitles ?? [],
+    fileScope: patch.fileScope ?? base.fileScope ?? [],
+    execution: { ...base.execution, ...execution },
+    worktree: { ...base.worktree, ...worktree },
+    updatedAt,
   };
+  return OpenSwarmTaskStateSchema.parse(merged);
+}
 
-  store.tasks[issueId] = OpenSwarmTaskStateSchema.parse(merged);
+/** Mutate the in-memory store. Caller MUST hold `withStoreLock`. */
+function upsertTaskStateUnlocked(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
+  const store = ensureStoreLoaded();
+  store.tasks[issueId] = mergeTaskState(store.tasks[issueId], issueId, patch, new Date().toISOString());
   persistStore();
   return store.tasks[issueId];
+}
+
+/** Two rows hold the same data. Both sides are schema-parsed, so key order is the schema's. */
+function sameTaskStateRow(a: OpenSwarmTaskState, b: OpenSwarmTaskState): boolean {
+  return JSON.stringify({ ...a, updatedAt: '' }) === JSON.stringify({ ...b, updatedAt: '' });
+}
+
+/**
+ * Merge a patch into the in-memory store WITHOUT persisting, and say whether it
+ * changed anything. A patch that leaves the row as it was writes nothing — not
+ * even a fresh `updatedAt`, which is what made every no-op look like a change.
+ * Caller MUST hold `withStoreLock` and persist when this returned true.
+ */
+function applyTaskStatePatchIfChanged(
+  store: TaskStateStore,
+  issueId: string,
+  patch: Partial<OpenSwarmTaskState>,
+): boolean {
+  const current = store.tasks[issueId];
+  if (current && sameTaskStateRow(mergeTaskState(current, issueId, patch, current.updatedAt), current)) return false;
+  store.tasks[issueId] = mergeTaskState(current, issueId, patch, new Date().toISOString());
+  return true;
 }
 
 export function upsertTaskState(issueId: string, patch: Partial<OpenSwarmTaskState>): OpenSwarmTaskState {
@@ -1024,7 +1059,7 @@ export function parseTaskStateSyncComment(body: string): OpenSwarmTaskState | nu
   }
 }
 
-type TaskStateSyncComment = {
+export type TaskStateSyncComment = {
   body: string;
   createdAt?: string;
   user?: string;
@@ -1060,17 +1095,69 @@ function isTrustedTaskStateSyncComment(comment: TaskStateSyncComment): boolean {
   return author.includes('openswarm') || author.includes('open swarm');
 }
 
-export function hydrateTaskStateFromComments(
+/** The newest trusted sync comment that describes this issue, parsed. */
+function latestTaskStateFromComments(
   issueId: string,
-  comments: TaskStateSyncComment[] = [],
+  comments: TaskStateSyncComment[],
 ): OpenSwarmTaskState | undefined {
-  const latest = [...comments]
+  return [...comments]
     .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
     .filter(isTrustedTaskStateSyncComment)
     .map((comment) => parseTaskStateSyncComment(comment.body))
     .find((state): state is OpenSwarmTaskState => state !== null && state.issueId === issueId);
+}
 
+export function hydrateTaskStateFromComments(
+  issueId: string,
+  comments: TaskStateSyncComment[] = [],
+): OpenSwarmTaskState | undefined {
+  const latest = latestTaskStateFromComments(issueId, comments);
   if (!latest) return undefined;
 
-  return upsertTaskState(issueId, latest);
+  // Re-applying the comment that is already reflected must not rewrite the
+  // store: this runs for every issue that carries a sync comment on every
+  // heartbeat, and each rewrite is a parse + serialize + two fsyncs of the
+  // whole file (AGT-4659).
+  return withStoreLock(() => {
+    const store = ensureStoreLoaded();
+    if (applyTaskStatePatchIfChanged(store, issueId, latest)) persistStore();
+    return store.tasks[issueId];
+  });
+}
+
+/**
+ * Reconcile the whole heartbeat fetch against the store in one pass: take the
+ * store lock once, load it once, apply what changed, persist once.
+ *
+ * The heartbeat used to call `updateTaskLinearState` and
+ * `hydrateTaskStateFromComments` per issue. Each took the file lock (create,
+ * write, fsync, unlink), and the hydrate half rewrote the entire store for
+ * every issue that carried a sync comment — measured on the deployed daemon on
+ * 2026-10-03 as multi-second event-loop blocks every heartbeat, long enough to
+ * fail health checks and drop the dashboard. Per issue the semantics are the
+ * same as calling the two in that order; only the cost is different.
+ *
+ * Returns how many rows changed (0 means nothing was written).
+ */
+export function syncTaskStatesFromIssues(
+  issues: ReadonlyArray<{ issueId: string; linearState: string; comments?: TaskStateSyncComment[] }>,
+): number {
+  if (issues.length === 0) return 0;
+  return withStoreLock(() => {
+    const store = ensureStoreLoaded();
+    let changed = 0;
+    for (const issue of issues) {
+      // Patch planning reads the row under the same lock that writes it, for
+      // the reason `updateTaskLinearState` documents.
+      const patch = planLinearStateReconciliation(store.tasks[issue.issueId], issue.linearState);
+      if ((patch !== null || !store.tasks[issue.issueId])
+        && applyTaskStatePatchIfChanged(store, issue.issueId, patch ?? { linearState: issue.linearState })) {
+        changed += 1;
+      }
+      const latest = latestTaskStateFromComments(issue.issueId, issue.comments ?? []);
+      if (latest && applyTaskStatePatchIfChanged(store, issue.issueId, latest)) changed += 1;
+    }
+    if (changed > 0) persistStore();
+    return changed;
+  });
 }

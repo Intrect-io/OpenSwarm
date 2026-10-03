@@ -25,7 +25,7 @@ import { compactMemoryTable, shouldCompact, cleanupBackupFiles } from '../memory
 import { Cron } from 'croner';
 import { setDefaultAdapter } from '../adapters/index.js';
 import { readProviderOverride, formatProviderOverrideMismatchWarning } from './providerOverride.js';
-import { enrichTaskFromState, hydrateTaskStateFromComments, updateTaskLinearState } from '../taskState/store.js';
+import { enrichTaskFromState, syncTaskStatesFromIssues } from '../taskState/store.js';
 import { probeDaemonPort } from '../cli/daemon.js';
 import { rotateServiceLogs } from '../support/logRotation.js';
 import { acquireServiceInstanceLock, type ServiceInstanceLock } from '../support/serviceInstanceLock.js';
@@ -292,9 +292,13 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       await linear.ensureLinearAuthFresh(); // refresh OAuth token (no-op for API key) each heartbeat
       const issues = await linear.getMyIssues({ slim: true, timeoutMs: 300000 });
       const { linearIssueToTask } = await import('../orchestration/decisionEngine.js');
+      // One lock, one load, one write for the whole fetch — not one of each per issue (AGT-4659).
+      syncTaskStatesFromIssues(issues.map((issue: any) => ({
+        issueId: issue.id,
+        linearState: issue.state,
+        comments: issue.comments || [],
+      })));
       return issues.map((issue: any) => {
-        updateTaskLinearState(issue.id, issue.state);
-        hydrateTaskStateFromComments(issue.id, issue.comments || []);
         return enrichTaskFromState(linearIssueToTask({
           id: issue.id,
           identifier: issue.identifier,
