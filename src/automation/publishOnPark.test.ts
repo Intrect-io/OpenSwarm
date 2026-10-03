@@ -6,7 +6,7 @@ vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
-import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishFinishedRun, publishParkedIfNeeded, publishParkedWork, publishStuckWork, publishUnfinishedWork, shouldPublishParkedWork, shouldPublishUnfinishedWork } from './publishOnPark.js';
+import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishFinishedRun, publishParkedIfNeeded, publishParkedWork, publishStuckWork, publishUnfinishedWork, shouldPublishParkedWork, shouldPublishUnfinishedWork, summarizeFailure } from './publishOnPark.js';
 
 beforeEach(() => {
   commitAndCreatePRWithHead.mockReset();
@@ -45,6 +45,41 @@ describe('shouldPublishParkedWork (AGT-4076)', () => {
       finalStatus: 'waiting_on_operator',
       workerResult: { executionOutcomeUnknown: true },
     })).toBe(false);
+  });
+});
+
+describe('summarizeFailure (AGT-4672)', () => {
+  const dots = '.'.repeat(71);
+  const pytest = [
+    `[pytest:apps/pipelines] ${dots} [ 10%]`,
+    `${dots.slice(0, 40)}ss${dots.slice(0, 29)} [ 11%]`,
+    `${'s'.repeat(30)}${dots.slice(0, 41)} [ 12%]`,
+    '=================================== FAILURES ===================================',
+    '___________________________ test_month_column_width ____________________________',
+    'FAILED apps/pipelines/tests/test_b1_store_names.py::test_alias_rows - AssertionError: 4 != 8',
+    '1 failed, 412 passed, 31 skipped in 212.40s',
+  ].join('\n');
+
+  it('keeps the failing test and the totals of a long pytest run', () => {
+    const summary = summarizeFailure(pytest);
+    expect(summary).toContain('FAILED apps/pipelines/tests/test_b1_store_names.py::test_alias_rows');
+    expect(summary).toContain('1 failed, 412 passed');
+    expect(summary).not.toMatch(/\.{8,}/);
+    expect(summary.length).toBeLessThanOrEqual(500 + 5);
+  });
+
+  it('keeps the head and the tail of a long detail that has no progress rows', () => {
+    const detail = `worker: ${'a'.repeat(900)} end-marker`;
+    const summary = summarizeFailure(detail);
+    expect(summary.startsWith('worker: aaa')).toBe(true);
+    expect(summary.endsWith('end-marker')).toBe(true);
+    expect(summary).toContain(' … ');
+  });
+
+  it('leaves a short detail alone and names an empty one', () => {
+    expect(summarizeFailure('reviewer: tests missing   for the new branch')).toBe('reviewer: tests missing for the new branch');
+    expect(summarizeFailure(undefined)).toBe('no failure detail was recorded');
+    expect(summarizeFailure('   \n ')).toBe('no failure detail was recorded');
   });
 });
 
