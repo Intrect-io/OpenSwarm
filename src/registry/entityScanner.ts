@@ -13,6 +13,7 @@ import { homedir } from 'node:os';
 import { join, extname, dirname, resolve } from 'node:path';
 import { getRegistryStore, LIST_ENTITIES_MAX_LIMIT } from './sqliteStore.js';
 import type { CodeEntity, EntityKind, RiskLevel } from './schema.js';
+import { yieldToEventLoop } from '../support/yieldToEventLoop.js';
 
 // ============ 상수 ============
 
@@ -24,12 +25,18 @@ const SKIP_DIRS = new Set([
   'trash', 'testing', 'vendor', 'third_party',
   // Isolated agent worktrees duplicate the main tree; scanning them inflated
   // vega-agent to 130k+ rows and mixed ephemeral paths into File Map briefs.
-  'worktree',
+  // `worktrees` (plural) is where the repo convention puts human worktrees, and
+  // it was not skipped: cgf-portal's registry grew from ~6.8k to 169k entities
+  // and each scan blocked the daemon for minutes (AGT-4665).
+  'worktree', 'worktrees',
   'target',    // Rust/Java
   'bin', 'obj', // C#
   'cmake-build-debug', 'cmake-build-release', // C/C++
 ]);
 const SKIP_DIR_PREFIXES = ['.venv'];
+
+/** Registry writes per transaction, and per turn handed back to the event loop. */
+const REGISTRY_WRITE_SLICE = 250;
 
 const MAX_FILE_SIZE = 512 * 1024;
 
@@ -790,6 +797,7 @@ export async function scanRepository(
       || page.entities.length < existingPageSize
       || existingEntities.length >= page.total
     ) break;
+    await yieldToEventLoop();
   }
   const existingByQName = new Map(existingEntities.map(e => [e.qualifiedName, e]));
   const extractedQNames = new Set<string>();
@@ -798,68 +806,87 @@ export async function scanRepository(
   let updated = 0;
   let testsMapped = 0;
 
-  for (const ext of allExtracted) {
-    const qualifiedName = `${ext.filePath}::${ext.name}`;
-    extractedQNames.add(qualifiedName);
+  // Each slice is one transaction (one commit) followed by a turn for the event
+  // loop. A transaction per entity cost an fsync each, and a loop that never
+  // yielded held the daemon for as long as the scan wrote (AGT-4665).
+  for (let sliceStart = 0; sliceStart < allExtracted.length; sliceStart += REGISTRY_WRITE_SLICE) {
+    const slice = allExtracted.slice(sliceStart, sliceStart + REGISTRY_WRITE_SLICE);
+    store.inTransaction(() => {
+      for (const ext of slice) {
+        const qualifiedName = `${ext.filePath}::${ext.name}`;
+        extractedQNames.add(qualifiedName);
 
-    const testInfo = testMap.get(qualifiedName);
-    const hasTests = testInfo?.hasTests ?? false;
-    const testFile = testInfo?.testFile;
-    const score = computeComplexityFromMetrics(ext.loc, ext.nestingDepth, ext.paramCount);
-    const riskLevel = computeRisk(score, hasTests);
+        const testInfo = testMap.get(qualifiedName);
+        const hasTests = testInfo?.hasTests ?? false;
+        const testFile = testInfo?.testFile;
+        const score = computeComplexityFromMetrics(ext.loc, ext.nestingDepth, ext.paramCount);
+        const riskLevel = computeRisk(score, hasTests);
 
-    if (hasTests) testsMapped++;
+        if (hasTests) testsMapped++;
 
-    const existingEntity = existingByQName.get(qualifiedName);
+        const existingEntity = existingByQName.get(qualifiedName);
 
-    if (!existingEntity) {
-      try {
-        store.registerEntity({
-          projectId,
-          kind: ext.kind,
-          name: ext.name,
-          filePath: ext.filePath,
-          lineStart: ext.lineStart,
-          lineEnd: ext.lineEnd,
-          signature: ext.signature,
-          status: 'active',
-          hasTests,
-          testFile,
-          complexityScore: score,
-          riskLevel,
-          author: 'scanner',
-        });
-        registered++;
-      } catch (err) {
-        errors.push(`register ${qualifiedName}: ${err instanceof Error ? err.message : String(err)}`);
+        if (!existingEntity) {
+          try {
+            store.registerEntity({
+              projectId,
+              kind: ext.kind,
+              name: ext.name,
+              filePath: ext.filePath,
+              lineStart: ext.lineStart,
+              lineEnd: ext.lineEnd,
+              signature: ext.signature,
+              status: 'active',
+              hasTests,
+              testFile,
+              complexityScore: score,
+              riskLevel,
+              author: 'scanner',
+            });
+            registered++;
+          } catch (err) {
+            errors.push(`register ${qualifiedName}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else {
+          const needsUpdate =
+            existingEntity.lineStart !== ext.lineStart ||
+            existingEntity.lineEnd !== ext.lineEnd ||
+            existingEntity.signature !== ext.signature ||
+            existingEntity.hasTests !== hasTests ||
+            existingEntity.testFile !== testFile ||
+            existingEntity.complexityScore !== score ||
+            existingEntity.riskLevel !== riskLevel;
+
+          if (needsUpdate) {
+            store.updateEntity(existingEntity.id, {
+              lineStart: ext.lineStart,
+              lineEnd: ext.lineEnd,
+              signature: ext.signature,
+              hasTests,
+              testFile,
+              complexityScore: score,
+              riskLevel,
+            }, 'scanner');
+            updated++;
+          }
+        }
       }
-    } else {
-      const needsUpdate =
-        existingEntity.lineStart !== ext.lineStart ||
-        existingEntity.lineEnd !== ext.lineEnd ||
-        existingEntity.signature !== ext.signature ||
-        existingEntity.hasTests !== hasTests ||
-        existingEntity.testFile !== testFile ||
-        existingEntity.complexityScore !== score ||
-        existingEntity.riskLevel !== riskLevel;
-
-      if (needsUpdate) {
-        store.updateEntity(existingEntity.id, {
-          lineStart: ext.lineStart,
-          lineEnd: ext.lineEnd,
-          signature: ext.signature,
-          hasTests,
-          testFile,
-          complexityScore: score,
-          riskLevel,
-        }, 'scanner');
-        updated++;
-      }
-    }
+    });
+    await yieldToEventLoop();
   }
 
   // 사라진 엔티티 → broken
   let removed = 0;
+  let pendingBroken: string[] = [];
+  const flushBroken = async (): Promise<void> => {
+    if (pendingBroken.length === 0) return;
+    const ids = pendingBroken;
+    pendingBroken = [];
+    store.inTransaction(() => {
+      for (const id of ids) store.changeEntityStatus(id, 'broken', 'scanner');
+    });
+    await yieldToEventLoop();
+  };
   for (const [qName, entity] of existingByQName) {
     if (extractedQNames.has(qName) || entity.author !== 'scanner' || entity.status !== 'active') {
       continue;
@@ -883,10 +910,12 @@ export async function scanRepository(
     );
 
     if (sourceFileScanned || sourceFileMissing || underSkippedDir) {
-      store.changeEntityStatus(entity.id, 'broken', 'scanner');
+      pendingBroken.push(entity.id);
       removed++;
+      if (pendingBroken.length >= REGISTRY_WRITE_SLICE) await flushBroken();
     }
   }
+  await flushBroken();
 
   return {
     scanned: scannedFiles,

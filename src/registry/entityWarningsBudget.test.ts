@@ -6,6 +6,7 @@ let warned: Array<{ offset: number; limit: number }> = [];
 
 vi.mock('./sqliteStore.js', () => ({
   getRegistryStore: () => ({
+    inTransaction: (fn: () => unknown) => fn(),
     getUnresolvedWarnings: (_severity: unknown, _projectId: unknown, limit: number, offset: number) => {
       warned.push({ limit, offset });
       return [];

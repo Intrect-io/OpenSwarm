@@ -321,6 +321,17 @@ export class SqliteRegistryStore {
     `);
   }
 
+  /**
+   * Run `fn` inside one transaction (a savepoint when already inside one), so a
+   * caller can commit a whole slice of writes once instead of once per
+   * statement. In WAL mode with the default `synchronous`, every autocommit is
+   * its own fsync — the registry scan paid that for each of up to 169k rows
+   * (AGT-4665).
+   */
+  inTransaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
   // ============ 엔티티 CRUD ============
 
   registerEntity(input: RegisterEntityInput): CodeEntity {

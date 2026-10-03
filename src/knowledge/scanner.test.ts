@@ -45,6 +45,22 @@ describe('knowledge scanner', () => {
     await rm(tmp, { recursive: true, force: true });
   });
 
+  // `worktrees/` (plural) is where the repo convention puts human worktrees. Only
+  // `worktree/` was skipped, so a scan of cgf-portal walked every checkout under
+  // it (23,608 "changed files" in one incremental update, AGT-4665).
+  it('does not scan checkouts under worktrees/', async () => {
+    await writeProjectFile('src/real.ts', 'export const real = 1;\n');
+    await writeProjectFile('worktrees/feature-x/src/copy.ts', 'export const copy = 1;\n');
+    await writeProjectFile('worktree/agent-1/src/copy2.ts', 'export const copy2 = 1;\n');
+
+    const graph = await scanProject(tmp, 'worktrees-skip');
+    const modules = graph.getNodesByType('module').map((node) => node.id);
+
+    expect(modules).toContain('src/real.ts');
+    expect(modules.some((id) => id.startsWith('worktrees/'))).toBe(false);
+    expect(modules.some((id) => id.startsWith('worktree/'))).toBe(false);
+  });
+
   it('clears stale test edges during incremental remapping', async () => {
     await writeProjectFile('src/foo.ts', 'export const foo = 1;\n');
     await writeProjectFile('src/bar.ts', 'export const bar = 1;\n');

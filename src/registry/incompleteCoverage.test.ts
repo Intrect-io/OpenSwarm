@@ -23,6 +23,7 @@ describe('incomplete scan coverage', () => {
     vi.doMock('./sqliteStore.js', () => ({
       LIST_ENTITIES_MAX_LIMIT: 2,
       getRegistryStore: () => ({
+        inTransaction: (fn: () => unknown) => fn(),
         listEntities: () => ({ entities: [], total: 0 }),
         registerEntity: (input: { name: string }) => {
           store.warnings.push(input.name);
@@ -53,6 +54,7 @@ describe('incomplete scan coverage', () => {
     vi.doMock('./sqliteStore.js', () => ({
       LIST_ENTITIES_MAX_LIMIT: 2,
       getRegistryStore: () => ({
+        inTransaction: (fn: () => unknown) => fn(),
         listEntities: () => ({ entities: [], total: 0 }),
         registerEntity: () => null,
         updateEntity: () => null,
