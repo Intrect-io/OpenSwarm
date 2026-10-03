@@ -31,6 +31,19 @@ describe('buildInstructionCapsule', () => {
     } finally { rmSync(f.root, { recursive: true, force: true }); }
   });
 
+  // A global rule such as "write the plan to plan.md" must not be able to clobber a
+  // file the repository tracks; the guard comes last so it overrides earlier sources.
+  it('ends with the worker safety rule about tracked files', () => {
+    const f = fixture();
+    try {
+      writeFileSync(join(f.user, 'CLAUDE.md'), 'write your plan to plan.md');
+      const capsule = buildInstructionCapsule(f.repo, [], { userClaudeDir: f.user });
+      expect(capsule.text.indexOf('openswarm:worker-safety')).toBeGreaterThan(capsule.text.indexOf('PROJECT'));
+      expect(capsule.text.trimEnd().endsWith('instead. Check with `git ls-files <path>` before writing a file whose name an instruction chose for you.')).toBe(true);
+      expect(capsule.text).toContain('If `plan.md` is tracked here, leave it untouched');
+    } finally { rmSync(f.root, { recursive: true, force: true }); }
+  });
+
   it('skips conditional rules that do not match the run scope', () => {
     const f = fixture();
     try {
