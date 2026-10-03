@@ -241,6 +241,32 @@ agents:
       });
     });
 
+    // AGT-4682: the same hand-picked mapping applies to the skip rules.
+    it('carries autonomous.skip through loadConfig, with defaults when it is absent', () => {
+      const base = {
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+      };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        ...base,
+        autonomous: { enabled: true, skip: { labels: ['swarm:skip', '외부 검증·결정 대기'], titleTags: ['UAT'], epics: false } },
+      }));
+      expect(loadConfig('/tmp/config.json').autonomous?.skip).toEqual({
+        labels: ['swarm:skip', '외부 검증·결정 대기'],
+        titleTags: ['UAT'],
+        epics: false,
+      });
+
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { enabled: true } }));
+      expect(loadConfig('/tmp/config.json').autonomous?.skip).toEqual({
+        labels: ['swarm:skip'],
+        titleTags: ['인수', '확인 원장', 'Docs'],
+        epics: true,
+      });
+    });
+
     // AGT-4678: a schema field that loadConfig does not carry through never reaches the verifier.
     it('carries autonomous.verify.commandTimeoutMs through loadConfig, and leaves it unset by default', () => {
       const withTimeout = JSON.stringify({

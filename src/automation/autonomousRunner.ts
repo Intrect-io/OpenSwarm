@@ -129,6 +129,7 @@ import {
 } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
+import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
 import { completeParentIfChildrenDone as completeParentLocally, buildTaskStateSyncComment } from '../taskState/store.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
@@ -2873,14 +2874,24 @@ export class AutonomousRunner {
         return;
       }
 
+      // Issues a person owns (a skip label, an epic, a title tag) never reach selection or
+      // idle fill: the idle-fill loop inside filterAlreadyProcessed would otherwise lift a
+      // parked or backed-off ledger row for them. (AGT-4682)
+      const { eligible: agentTasks, skipped: humanOwned } = partitionHumanOwned(tasks, this.config.skip ?? DEFAULT_AGENT_SKIP);
+      for (const line of formatSkipSummary(humanOwned)) this.syslog(line);
+      if (agentTasks.length === 0) {
+        this.syslog('— Every task is a person\'s work (skip labels, epics, title tags)');
+        return;
+      }
+
       // Filter out completed and over-retried tasks
-      const filteredTasks = this.filterAlreadyProcessed(tasks);
+      const filteredTasks = this.filterAlreadyProcessed(agentTasks);
       if (filteredTasks.length === 0) {
         this.syslog('— All tasks already completed or max retries exceeded');
         return;
       }
-      if (filteredTasks.length !== tasks.length) {
-        this.syslog(`  Filtered: ${tasks.length} → ${filteredTasks.length} (skipped ${tasks.length - filteredTasks.length} completed/failed)`);
+      if (filteredTasks.length !== agentTasks.length) {
+        this.syslog(`  Filtered: ${agentTasks.length} → ${filteredTasks.length} (skipped ${agentTasks.length - filteredTasks.length} completed/failed)`);
       }
 
       // Parallel processing mode. vela runs this branch on every heartbeat

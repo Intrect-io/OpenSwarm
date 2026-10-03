@@ -66,6 +66,8 @@ export type LinearIssueInfo = {
   stateType?: string;
   priority: number;
   labels: string[];
+  /** The issue has sub-issues, i.e. it is an epic that only groups other issues (AGT-4682). */
+  hasChildren?: boolean;
   comments: LinearComment[];
   /** Linear project info */
   project?: LinearProjectInfo;
@@ -642,6 +644,8 @@ export type AutonomousStartupConfig = {
   maxConcurrentTasks?: number;
   /** Move unowned In Progress issues back to Backlog after this many idle hours. */
   stalledInProgressHours?: number;
+  /** Issues the heartbeat must not pick because a person owns them (labels, epics, title tags). */
+  skip?: { labels: string[]; titleTags: string[]; epics: boolean };
   /** Optional hard cap; omitted uses work-conserving weighted project fairness. */
   maxConcurrentPerProject?: number;
   /** Durable execution ledger rollout mode. */

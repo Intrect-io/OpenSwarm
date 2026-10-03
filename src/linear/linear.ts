@@ -83,6 +83,8 @@ export interface RawIssueNode {
   state?: { name?: string } | null;
   project?: { id: string; name: string; icon?: string | null; color?: string | null } | null;
   labels?: { nodes: Array<{ name: string }> } | null;
+  /** One child is enough to know the issue is an epic that only groups other issues (AGT-4682). */
+  children?: { nodes: Array<{ id: string }> } | null;
   comments?: { nodes: Array<{ id: string; body: string; createdAt: string }> } | null;
   /**
    * Linear's native relations pointing AT this issue, embedded in the bulk
@@ -116,6 +118,7 @@ const ISSUES_QUERY = `
         state { name }
         project { id name icon color }
         labels { nodes { name } }
+        children(first: 1) { nodes { id } }
         inverseRelations(first: ${INVERSE_RELATIONS_PAGE_SIZE}) { nodes { type issue { id } } }
       }
       pageInfo { hasNextPage endCursor }
@@ -737,6 +740,7 @@ export async function getMyIssues(
           state,
           priority: issue.priority,
           labels: issue.labels?.nodes?.map((l) => l.name) ?? [],
+          hasChildren: (issue.children?.nodes?.length ?? 0) > 0,
           comments: [],
           project: p ? { id: p.id, name: p.name, icon: p.icon ?? undefined, color: p.color ?? undefined } : undefined,
           createdAt: issue.createdAt,
@@ -771,6 +775,7 @@ export async function getMyIssues(
           state: issue.state?.name ?? 'Unknown',
           priority: issue.priority,
           labels: issue.labels?.nodes?.map((l) => l.name) ?? [],
+          hasChildren: (issue.children?.nodes?.length ?? 0) > 0,
           comments: [],
           project: p ? { id: p.id, name: p.name, icon: p.icon ?? undefined, color: p.color ?? undefined } : undefined,
           createdAt: issue.createdAt,

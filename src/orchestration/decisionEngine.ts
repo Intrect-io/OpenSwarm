@@ -57,6 +57,8 @@ export interface TaskItem {
   issueUrl?: string;       // Canonical Linear card URL
   linearState?: string;    // Linear issue state (e.g., 'Todo', 'Backlog', 'In Progress')
   labels?: string[];       // Linear label names (e.g., 'swarm:stuck') — used to gate re-selection
+  /** The tracker issue has sub-issues, i.e. it is an epic that only groups other issues (AGT-4682). */
+  hasChildren?: boolean;
   parentId?: string;       // Parent issue ID (for decomposed sub-tasks)
   topoRank?: number;       // Planner topological rank within a decomposed tree
   workflowId?: string;     // Mapped workflow
@@ -1028,6 +1030,7 @@ export function linearIssueToTask(issue: {
   dueDate?: string;
   state?: string;
   labels?: string[];
+  hasChildren?: boolean;
   project?: { id: string; name: string };
   parentId?: string;
   blockedBy?: string[];
@@ -1045,6 +1048,7 @@ export function linearIssueToTask(issue: {
     issueUrl: issue.url,
     linearState: issue.state,
     labels: issue.labels,
+    hasChildren: issue.hasChildren,
     parentId: issue.parentId,
     blockedBy: issue.blockedBy,
     topoRank: issue.topoRank,
