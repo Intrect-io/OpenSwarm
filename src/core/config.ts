@@ -362,6 +362,16 @@ const SecurityAuditConfigSchema = z.object({
   maxRamMb: z.number().int().min(512).max(65536).default(4096),
 }).default({ enabled: false, maxThreads: 2, maxRamMb: 4096 });
 
+/** Issues that are not the swarm agent's work and must never be picked (AGT-4682). */
+const AgentSkipConfigSchema = z.object({
+  /** Tracker labels that mark an issue as a person's work. Compared case-insensitively. */
+  labels: z.array(z.string().min(1)).default(['swarm:skip']),
+  /** Title tags, matched where one opens a bracket group: `[인수]`, `[Docs]`. A title-tagged `[EPIC]` is already dropped by the decision engine. */
+  titleTags: z.array(z.string().min(1)).default(['인수', '확인 원장', 'Docs']),
+  /** An issue with sub-issues only groups other issues. */
+  epics: z.boolean().default(true),
+}).default({ labels: ['swarm:skip'], titleTags: ['인수', '확인 원장', 'Docs'], epics: true });
+
 const AutonomousConfigSchema = z.object({
   /** Auto-enable on service start */
   enabled: z.boolean().default(false),
@@ -387,6 +397,8 @@ const AutonomousConfigSchema = z.object({
   maxConcurrentTasks: z.number().int().min(1).max(256).default(64),
   /** Retire stale tracker claims so In Progress means a worker actually owns the task. */
   stalledInProgressHours: z.number().min(1).max(168).default(6),
+  /** Issues the heartbeat must not pick because a person owns them (AGT-4682). */
+  skip: AgentSkipConfigSchema,
   /** Max concurrent tasks from the same project when same-project parallelism is enabled. */
   maxConcurrentPerProject: z.number().int().min(1).max(256).optional(),
   /** SQLite execution-truth rollout. primary is fail-closed; shadow only observes. */
@@ -816,6 +828,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       reviewerTimeoutMs: raw.autonomous.reviewerTimeoutMs,
       maxConcurrentTasks: raw.autonomous.maxConcurrentTasks,
       stalledInProgressHours: raw.autonomous.stalledInProgressHours,
+      skip: raw.autonomous.skip,
       maxConcurrentPerProject: raw.autonomous.maxConcurrentPerProject,
       automationLedgerMode: raw.autonomous.automationLedgerMode,
       automationDbPath: raw.autonomous.automationDbPath ? expandPath(raw.autonomous.automationDbPath) : undefined,

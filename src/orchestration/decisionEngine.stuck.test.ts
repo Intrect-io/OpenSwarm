@@ -67,3 +67,11 @@ describe('linearIssueToTask — label propagation', () => {
     expect(task.labels).toBeUndefined();
   });
 });
+
+describe('linearIssueToTask — epic marker (AGT-4682)', () => {
+  it('carries hasChildren onto the TaskItem so the heartbeat can tell an epic from a task', () => {
+    expect(linearIssueToTask({ id: 'u', identifier: 'AX-1', title: 'e', priority: 2, hasChildren: true }).hasChildren).toBe(true);
+    expect(linearIssueToTask({ id: 'u', identifier: 'AX-2', title: 't', priority: 2, hasChildren: false }).hasChildren).toBe(false);
+    expect(linearIssueToTask({ id: 'u', identifier: 'AX-3', title: 'x', priority: 2 }).hasChildren).toBeUndefined();
+  });
+});

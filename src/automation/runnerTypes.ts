@@ -6,6 +6,7 @@ import type { DecisionResult, TaskItem } from '../orchestration/decisionEngine.j
 import type { ExecutorResult } from '../orchestration/workflow.js';
 import type { BacklogGroomingConfig, DefaultRolesConfig, ProjectAgentConfig, JobProfile, OrchestratorConfig, SecurityAuditConfig, VerifyConfig } from '../core/types.js';
 import type { RoleMcpPolicy } from '../coordination/mcpPolicy.js';
+import type { AgentSkipConfig } from './agentEligibility.js';
 
 export interface AutonomousConfig {
   defaultAdapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'ollama-cloud' | 'openrouter' | 'atlascloud' | 'claude' | 'cc-router' | 'cursor';
@@ -34,6 +35,8 @@ export interface AutonomousConfig {
   maxConcurrentTasks?: number;
   /** Move unowned In Progress issues back to Backlog after this many idle hours. */
   stalledInProgressHours?: number;
+  /** Issues the heartbeat must not pick because a person owns them (AGT-4682). */
+  skip?: AgentSkipConfig;
   /** Optional hard cap; omitted uses work-conserving weighted project fairness. */
   maxConcurrentPerProject?: number;
   defaultRoles?: DefaultRolesConfig;

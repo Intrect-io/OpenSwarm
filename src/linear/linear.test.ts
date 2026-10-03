@@ -132,6 +132,8 @@ describe('fetchIssuesForStates pagination', () => {
     // not one `inverseRelations()` resolver call per issue — measured 100
     // issues at complexity 54 in 0.4 s against the live API.
     expect(queries[0]).toMatch(/inverseRelations\(first: \d+\) \{ nodes \{ type issue \{ id \} \} \}/);
+    // One child is enough to tell an epic from a task (AGT-4682); the swarm must not pick an epic.
+    expect(queries[0]).toMatch(/children\(first: 1\) \{ nodes \{ id \} \}/);
     expect(queries).toHaveLength(2);
   });
 
