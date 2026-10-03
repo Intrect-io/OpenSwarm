@@ -331,11 +331,13 @@ export class PairPipeline extends EventEmitter {
       verify: this.config.verify,
       trustedCommands: context.trustedVerifyCommands, trustedPackageJsonByDirectory: context.trustedVerifyPackageJsonByDirectory,
       trustedInputFingerprint: context.trustedVerifyInputFingerprint,
+      // Only an explicit `enabled: false` turns the LLM tester off (AGT-4679).
+      llmFallback: this.config.roles?.tester?.enabled !== false,
       onInfra: (error) => {
         // The fallback changes what "tester passed" means — an LLM opinion in
         // place of ruff/pytest — so it goes to the stage log (stdout, dashboard)
         // and not only to stderr, where 29 of them went unnoticed (AGT-4416).
-        const line = `Deterministic verify unavailable; falling back to LLM tester: ${error instanceof Error ? error.message : String(error)}`;
+        const line = `Deterministic verify unavailable; ${this.config.roles?.tester?.enabled === false ? 'LLM tester is disabled, no verdict' : 'falling back to LLM tester'}: ${error instanceof Error ? error.message : String(error)}`;
         safeConsole.warn(`[${context.taskPrefix}] ${line}`);
         this.emit('log', { line });
       },

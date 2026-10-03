@@ -214,3 +214,24 @@ describe('deterministic verification trust inputs', () => {
     )).rejects.toThrow(/verify-security: typecheck could not run inside the attested companion/);
   });
 });
+
+describe('llmFallback (AGT-4679)', () => {
+  const verify = { enabled: true, blockOnNewFailures: true, maxCommands: 4 };
+
+  it('does not ask the LLM tester when it is disabled and no deterministic command exists', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openswarm-verify-nollm-'));
+    const fallback = vi.fn();
+    const result = await runTesterWithVerification({ projectPath: root, verify, llmFallback: false, fallback });
+    expect(fallback).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: true, testsPassed: 0, testsFailed: 0, deterministic: false });
+    expect(result.output).toMatch(/nothing was verified/);
+  });
+
+  it('keeps the LLM tester as the fallback by default', async () => {
+    root = await mkdtemp(join(tmpdir(), 'openswarm-verify-llm-'));
+    const fallback = vi.fn().mockResolvedValue({ success: true, testsPassed: 1, testsFailed: 0, output: 'LLM tester' });
+    const result = await runTesterWithVerification({ projectPath: root, verify, fallback });
+    expect(fallback).toHaveBeenCalledOnce();
+    expect(result.output).toBe('LLM tester');
+  });
+});
