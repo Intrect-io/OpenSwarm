@@ -45,6 +45,7 @@ function resetState(): void {
 vi.mock('./sqliteStore.js', () => ({
   LIST_ENTITIES_MAX_LIMIT: 2,
   getRegistryStore: () => ({
+    inTransaction: (fn: () => unknown) => fn(),
     listEntities: (filter?: { limit?: number; offset?: number }) => {
       const limit = filter?.limit ?? state.existingEntities.length;
       const offset = filter?.offset ?? 0;
