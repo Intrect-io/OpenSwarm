@@ -203,6 +203,16 @@ function escapeForRegExp(value: string): string {
 }
 
 /**
+ * How many tests passed, skipped or were deselected is a property of the run, not of the
+ * failure: base and head differ in it whenever a worker adds a test or main gained tests the
+ * worktree lacks, so two runs of the SAME failure hashed differently and read as a new one
+ * (AGT-4681). `failed` and `error` counts stay, so a second failure still changes the text.
+ */
+function maskRunTotals(counts: string): string {
+  return counts.replace(/\d+ (passed|skipped|deselected|xfailed|xpassed|warnings?)/g, '<N> $1');
+}
+
+/**
  * Replace every run-specific absolute path with a stable placeholder.
  *
  * `paths` is applied longest-first so a nested path is substituted before the
@@ -228,14 +238,19 @@ export function normalizeFailureOutput(output: string, paths: Array<[string, str
   }
   normalized = normalized
     .replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g'), '')
-    .replace(/(=+ .*? in )\d+(?:\.\d+)?s( =+)/g, '$1<DURATION>$2')
+    .replace(/(=+ .*? in )\d+(?:\.\d+)?s( =+)/g, (_m, counts: string, tail: string) => `${maskRunTotals(counts)}<DURATION>${tail}`)
     // The discovered pytest command runs with `-q`, whose final summary line
     // carries no `=` decoration: `3 skipped, 1 error in 1.54s`. Left alone,
     // base and head fingerprints differed by timing alone, and every
     // pre-existing failure read as a new regression (vega-agent AGT-4118:
     // the same ModuleNotFoundError on both sides, 1.93s vs 1.54s). A run past a minute adds
     // ` (0:02:04)` after the seconds, so that suffix is optional too (AGT-4680).
-    .replace(/^(\d+ [a-z]+(?:, \d+ [a-z]+)* in )\d+(?:\.\d+)?s(?: \(\d+:\d{2}:\d{2}\))?$/gm, '$1<DURATION>')
+    .replace(/^(\d+ [a-z]+(?:, \d+ [a-z]+)* in )\d+(?:\.\d+)?s(?: \(\d+:\d{2}:\d{2}\))?$/gm,
+      (_m, counts: string) => `${maskRunTotals(counts)}<DURATION>`)
+    // pytest -q progress lines (`....ss.. [ 11%]`) only say how many tests ran before the stop,
+    // which moves with every test a worker adds. The failure itself is named by the FAILED/ERROR
+    // lines and the traceback blocks, which are kept (AGT-4681).
+    .replace(/^[.sxXFEP]+ *\[ *\d+%\]\n?/gm, '')
     .replace(/(Ran \d+ tests? in )\d+(?:\.\d+)?s/g, '$1<DURATION>')
     .replace(/(finished in )\d+(?:\.\d+)?s/gi, '$1<DURATION>')
     // pytest-xdist assigns the same failure to different workers on base and
