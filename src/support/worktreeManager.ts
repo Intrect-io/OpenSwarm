@@ -1192,8 +1192,11 @@ export async function commitAndCreatePRWithHead(
 
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
   const overlapSection = await buildFileOverlapSection(worktreePath, branchName);
+  // Three dots: what this branch changed since it left the base. Two dots diff the
+  // two tips, so a branch that is behind its base also "changed" every file the
+  // base moved — cgf-portal PR 776 reported 58 files for a one-file change.
   const shapeSection = changeShapeSection(
-    (await git(worktreePath, 'diff', '--name-only', `${base.ref}..HEAD`).catch(() => '')).split('\n').filter(Boolean),
+    (await git(worktreePath, 'diff', '--name-only', `${base.ref}...HEAD`).catch(() => '')).split('\n').filter(Boolean),
   );
 
   // Another branch may already close this same Linear issue (INT-2544) — never
