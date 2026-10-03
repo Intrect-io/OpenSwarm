@@ -55,7 +55,7 @@ import type { DefaultRolesConfig } from '../core/types.js';
 import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import * as execution from './runnerExecution.js';
-import { pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
+import { draftFingerprint, pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
 import { pruneSessionLogs } from '../support/sessionLog.js';
 import { pruneScratchpads } from '../support/scratchpad.js';
 import { pruneSnapshots } from '../support/worktreeSnapshot.js';
@@ -3148,7 +3148,7 @@ export class AutonomousRunner {
           // are already separate elements of this array, so an operator edit
           // to either still invalidates — trackerUpdatedAt added no coverage
           // beyond that, only self-inflicted misses. (AGT-4300)
-          const fingerprint = JSON.stringify([c.task.title, c.task.description ?? '']);
+          const fingerprint = draftFingerprint(c.task.title, c.task.description, resolveProjectGoal(this.config.projectAgents, projPath));
           const wanted = (c.task.fileScope?.length ?? 0) === 0;
           const apply = (entry: {
             fileScope: string[]; draft: NonNullable<TaskItem['preAdmissionDraft']>;

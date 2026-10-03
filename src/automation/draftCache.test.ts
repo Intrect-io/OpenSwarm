@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  DRAFT_CACHE_TTL_MS, pruneDraftCache, readDraftCache, resetDraftCacheForTests, writeDraftCache,
+  DRAFT_CACHE_TTL_MS, draftFingerprint, pruneDraftCache, readDraftCache, resetDraftCacheForTests, writeDraftCache,
 } from './draftCache.js';
 
 let dir: string;
@@ -151,5 +151,39 @@ describe('durable draft cache (AGT-4286)', () => {
     } finally {
       rmSync(second, { recursive: true, force: true });
     }
+  });
+});
+
+// A draft computed before the project goal existed has no scope verdict. Cached
+// under a goal-blind key it was reused for up to 12 hours and walked past the gate
+// that stops a worker before any worktree exists (cgf-portal AX-1726, AGT-4669).
+describe('draftFingerprint goal awareness (AGT-4669)', () => {
+  it('keeps the old key for a project without a goal, so nothing already cached is lost', () => {
+    expect(draftFingerprint('Title', 'Body')).toBe(JSON.stringify(['Title', 'Body']));
+    expect(draftFingerprint('Title', undefined)).toBe(JSON.stringify(['Title', '']));
+    expect(draftFingerprint('Title', 'Body', undefined)).toBe(draftFingerprint('Title', 'Body'));
+    expect(draftFingerprint('Title', 'Body', '')).toBe(draftFingerprint('Title', 'Body'));
+  });
+
+  it('changes the key once a goal is set, so a goal-blind draft is not reused', () => {
+    expect(draftFingerprint('Title', 'Body', 'ship usable PRs')).not.toBe(draftFingerprint('Title', 'Body'));
+  });
+
+  it('changes the key when the goal is edited, and is stable for the same goal', () => {
+    const first = draftFingerprint('Title', 'Body', 'ship usable PRs');
+    expect(draftFingerprint('Title', 'Body', 'ship usable PRs')).toBe(first);
+    expect(draftFingerprint('Title', 'Body', 'reconcile ledgers first')).not.toBe(first);
+  });
+
+  it('still separates different issue text under the same goal', () => {
+    expect(draftFingerprint('Other', 'Body', 'goal')).not.toBe(draftFingerprint('Title', 'Body', 'goal'));
+    expect(draftFingerprint('Title', 'Edited', 'goal')).not.toBe(draftFingerprint('Title', 'Body', 'goal'));
+  });
+
+  it('does not serve a draft stored under the goal-less key to a goal-aware reader', () => {
+    writeDraftCache('issue-1', entry(draftFingerprint('Title', 'Body')));
+
+    expect(readDraftCache('issue-1', draftFingerprint('Title', 'Body', 'ship usable PRs'))).toBeUndefined();
+    expect(readDraftCache('issue-1', draftFingerprint('Title', 'Body'))).toBeDefined();
   });
 });
