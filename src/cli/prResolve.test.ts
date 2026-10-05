@@ -14,7 +14,7 @@ vi.mock('node:child_process', () => {
   return { execFile };
 });
 
-const { parsePRRef, resolveRepoName, resolveOriginRepo, resolvePR, toPRInfo } = await import('./prResolve.js');
+const { parsePRRef, resolveRepoName, resolveOriginRepo, resolveCurrentBranchPR, resolvePR, toPRInfo, PRProviderLookupError, isNoPullRequestsError } = await import('./prResolve.js');
 
 beforeEach(() => {
   execImpl.mockReset();
@@ -115,6 +115,58 @@ describe('resolvePR (INT-3282)', () => {
       .mockRejectedValueOnce(new Error('no pull requests found')) // gh pr view fails
       .mockResolvedValueOnce({ stdout: 'feat/no-pr\n', stderr: '' }); // git rev-parse
     await expect(resolvePR({ path: '/tmp/proj' })).rejects.toThrow(/No open PR for branch "feat\/no-pr"/);
+  });
+});
+
+describe('resolveCurrentBranchPR (AGT-3474)', () => {
+  const ghView = { number: 9, title: 'Ship it', headRefName: 'feat/x', url: 'https://example/pr/9', author: { login: 'someone' } };
+
+  it('resolves the open PR when one exists', async () => {
+    execImpl.mockResolvedValueOnce({ stdout: JSON.stringify(ghView), stderr: '' });
+    const result = await resolveCurrentBranchPR('/tmp/proj', 'o/r');
+    expect(result).toEqual({ repo: 'o/r', number: 9, title: 'Ship it', branch: 'feat/x', url: 'https://example/pr/9', author: 'someone' });
+  });
+
+  it('resolves to null when gh reports no PR for the branch', async () => {
+    execImpl.mockRejectedValueOnce(new Error('no pull requests found for branch "feat/x"'));
+    await expect(resolveCurrentBranchPR('/tmp/proj', 'o/r')).resolves.toBeNull();
+  });
+
+  it('classifies the no-open-pr phrasing and stderr payloads as no-PR', () => {
+    expect(isNoPullRequestsError(new Error('no open pull requests in this repo'))).toBe(true);
+    expect(isNoPullRequestsError({ message: 'Command failed: gh pr view', stderr: 'no pull requests found for branch "x"' })).toBe(true);
+    expect(isNoPullRequestsError(new Error('Could not resolve host: api.github.com'))).toBe(false);
+    expect(isNoPullRequestsError('gh auth expired')).toBe(false);
+  });
+
+  it('surfaces a provider lookup failure instead of reading it as no-PR', async () => {
+    execImpl.mockRejectedValueOnce(new Error('Could not resolve host: api.github.com'));
+    const promise = resolveCurrentBranchPR('/tmp/proj', 'o/r');
+    await expect(promise).rejects.toBeInstanceOf(PRProviderLookupError);
+    await expect(promise).rejects.toThrow(/Could not look up the open PR for the current branch in o\/r/);
+    await expect(promise).rejects.toThrow(/Could not resolve host/);
+  });
+
+  it('keeps the underlying gh failure as the cause', async () => {
+    const cause = new Error('HTTP 401: Bad credentials');
+    execImpl.mockRejectedValueOnce(cause);
+    try {
+      await resolveCurrentBranchPR('/tmp/proj', 'o/r');
+      expect.unreachable('resolveCurrentBranchPR should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(PRProviderLookupError);
+      expect((error as InstanceType<typeof PRProviderLookupError>).cause).toBe(cause);
+    }
+  });
+
+  it('propagates through resolvePR, never masked as "no open PR"', async () => {
+    execImpl
+      .mockResolvedValueOnce({ stdout: 'o/r\n', stderr: '' })
+      .mockRejectedValueOnce(new Error('HTTP 401: Bad credentials')); // gh pr view
+    const promise = resolvePR({ path: '/tmp/proj' });
+    await expect(promise).rejects.toBeInstanceOf(PRProviderLookupError);
+    const message = await promise.catch((error: unknown) => (error as Error).message);
+    expect(message).not.toMatch(/No open PR for branch/);
   });
 });
 
