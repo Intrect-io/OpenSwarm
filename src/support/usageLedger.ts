@@ -150,6 +150,26 @@ function isUsageRecord(value: unknown): value is UsageRecord {
 export const USAGE_GROUP_KEYS = ['model', 'stage', 'task', 'project', 'adapter', 'day', 'hour'] as const;
 export type UsageGroupKey = (typeof USAGE_GROUP_KEYS)[number];
 
+/** Query controls rather than ledger dimensions; other axes are filters. */
+export const USAGE_RESERVED_PARAMS = ['since', 'by'] as const;
+export type ParsedUsageQuery = { ok: true; since: string; by: UsageGroupKey; filters: Record<string, string> }
+  | { ok: false; error: string };
+
+/** Parse API query controls and cross-axis filters. */
+export function parseUsageQuery(searchParams: URLSearchParams): ParsedUsageQuery {
+  const by = searchParams.get('by') ?? 'model';
+  if (!isUsageGroupKey(by)) return { ok: false, error: `invalid --by '${by}': one of ${USAGE_GROUP_KEYS.join(', ')}` };
+  const filters: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const key of new Set(searchParams.keys())) {
+    if ((USAGE_RESERVED_PARAMS as readonly string[]).includes(key)) continue;
+    if (!isUsageGroupKey(key) || key === by) return { ok: false, error: `invalid usage filter axis '${key}'` };
+    const values = searchParams.getAll(key);
+    if (values.length !== 1 || !values[0]) return { ok: false, error: `invalid usage filter value for '${key}'` };
+    filters[key] = values[0];
+  }
+  return { ok: true, since: searchParams.get('since') ?? '24h', by, filters };
+}
+
 export interface UsageAggregateRow {
   key: string;
   calls: number;
@@ -218,6 +238,12 @@ export function aggregateUsage(records: readonly UsageRecord[], by: UsageGroupKe
   return { by, rows: ordered, total };
 }
 
+/** Match cross-axis filters with the same key semantics used by aggregate rows. */
+function filterUsage(records: readonly UsageRecord[], filters: Record<string, string>): UsageRecord[] {
+  const axes = Object.keys(filters) as UsageGroupKey[];
+  return records.filter((record) => axes.every((axis) => groupKeyOf(record, axis) === filters[axis]));
+}
+
 /**
  * Parse a window spec: a duration (`90m`, `24h`, `7d`) measured back from
  * `now`, or an ISO date/time. Returns null for anything else.
@@ -238,6 +264,8 @@ export interface UsageQuery {
   since: string;
   /** One of USAGE_GROUP_KEYS. */
   by: string;
+  /** Exact matches on other grouping axes. */
+  filters?: Record<string, string>;
   now?: number;
 }
 
@@ -256,5 +284,12 @@ export function queryUsage(query: UsageQuery): UsageQueryResult {
   if (since === null) return { ok: false, error: `invalid --since '${query.since}': use a duration (90m, 24h, 7d) or an ISO date` };
   if (!isUsageGroupKey(query.by)) return { ok: false, error: `invalid --by '${query.by}': one of ${USAGE_GROUP_KEYS.join(', ')}` };
   const records = readUsage({ since, until: now });
-  return { ok: true, since, until: now, by: query.by, aggregate: aggregateUsage(records, query.by), dir: usageLedgerDir() };
+  if (query.filters) {
+    for (const [axis, value] of Object.entries(query.filters)) {
+      if (!isUsageGroupKey(axis) || axis === query.by) return { ok: false, error: `invalid usage filter axis '${axis}'` };
+      if (!records.some((record) => groupKeyOf(record, axis) === value)) return { ok: false, error: `unknown usage filter value '${value}' for '${axis}'` };
+    }
+  }
+  const filtered = query.filters ? filterUsage(records, query.filters) : records;
+  return { ok: true, since, until: now, by: query.by, aggregate: aggregateUsage(filtered, query.by), dir: usageLedgerDir() };
 }

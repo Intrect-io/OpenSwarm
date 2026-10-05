@@ -7,6 +7,7 @@ import { readFileSync, existsSync, watchFile, unwatchFile, type Stats } from 'no
 import { readdir, stat } from 'node:fs/promises';
 import { join, resolve as resolvePath, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { handleUsageRoute } from './usageRoute.js';
 import { atomicWriteFileSync } from './atomicFile.js';
 import { safeConsole as console } from './safeLog.js';
 import { execFile } from 'node:child_process';
@@ -313,7 +314,6 @@ export function setWebRunner(runner: AutonomousRunner | undefined): void {
   startReposWatcher();
 }
 
-// Read POST body helper
 // Start web server
 export async function startWebServer(port: number = 3847): Promise<void> {
   if (server) {
@@ -387,13 +387,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
       // ---- Usage ledger (AGT-4178) ----
       } else if (url === '/api/usage' && req.method === 'GET') {
-        const { queryUsage } = await import('./usageLedger.js');
-        const result = queryUsage({
-          since: requestUrl.searchParams.get('since') ?? '24h',
-          by: requestUrl.searchParams.get('by') ?? 'model',
-        });
-        if (!result.ok) { writeJson(res, 400, { error: result.error }); return; }
-        writeJson(res, 200, { since: new Date(result.since).toISOString(), until: new Date(result.until).toISOString(), ...result.aggregate });
+        await handleUsageRoute(requestUrl.searchParams, res);
 
       // ---- Stats ----
       } else if (url === '/api/stats') {

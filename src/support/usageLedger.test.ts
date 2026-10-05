@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   aggregateUsage,
+  parseUsageQuery,
+  queryUsage,
+  USAGE_RESERVED_PARAMS,
   parseUsageSince,
   readUsage,
   recordUsage,
@@ -46,6 +49,32 @@ describe('usage ledger', () => {
     else process.env.OPENSWARM_USAGE_DIR = prevDir;
     rmSync(dir, { recursive: true, force: true });
     vi.restoreAllMocks();
+  });
+
+  it('parses reserved parameters and cross-axis filters into a prototype-free map', () => {
+    expect(USAGE_RESERVED_PARAMS).toEqual(['since', 'by']);
+    const parsed = parseUsageQuery(new URLSearchParams('since=24h&by=stage&project=OpenSwarm'));
+    expect(parsed).toEqual({ ok: true, since: '24h', by: 'stage', filters: { project: 'OpenSwarm' } });
+    if (parsed.ok) expect(Object.getPrototypeOf(parsed.filters)).toBeNull();
+    expect(parseUsageQuery(new URLSearchParams('by=bogus')).ok).toBe(false);
+    expect(parseUsageQuery(new URLSearchParams('by=stage&project=')).ok).toBe(false);
+    expect(parseUsageQuery(new URLSearchParams('by=stage&stage=worker')).ok).toBe(false);
+  });
+
+  it('filters before grouping so a drilldown total exactly matches its parent row', () => {
+    const now = Date.parse('2026-09-02T03:00:00.000Z');
+    recordUsage(record({ ts: '2026-09-02T02:00:00.000Z', stage: 'worker', cwd: '/work/OpenSwarm' }));
+    recordUsage(record({ ts: '2026-09-02T02:30:00.000Z', stage: 'reviewer', cwd: '/work/OpenSwarm', costUsd: 2 }));
+    recordUsage(record({ ts: '2026-09-02T02:45:00.000Z', stage: 'worker', cwd: '/work/other' }));
+    const drilled = queryUsage({ since: '24h', by: 'stage', filters: { project: 'OpenSwarm' }, now });
+    const parent = queryUsage({ since: '24h', by: 'project', now });
+    expect(drilled.ok && parent.ok).toBe(true);
+    if (drilled.ok && parent.ok) {
+      const { key: _totalKey, ...total } = drilled.aggregate.total;
+      const { key: _parentKey, ...projectRow } = parent.aggregate.rows.find((row) => row.key === 'OpenSwarm')!;
+      expect(total).toEqual(projectRow);
+      expect(drilled.aggregate.rows.map((row) => row.key).sort()).toEqual(['reviewer', 'worker']);
+    }
   });
 
   it('appends one JSON line per call into the UTC day file of its timestamp', () => {
