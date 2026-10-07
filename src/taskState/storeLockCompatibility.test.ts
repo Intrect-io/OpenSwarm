@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
 import { buildLockPayload, getTaskState, resetTaskStateStoreForTests } from './store.js';
 
 describe('task state lock compatibility', () => {
@@ -25,6 +26,10 @@ describe('task state lock compatibility', () => {
 
   it('makes a dual-lock writer wait for a legacy dot-lock-only writer', async () => {
     const lockPath = `${stateFile}.lock`;
+    const mutexPath = `${stateFile}.mutex.db`;
+    const initializeMutex = new Database(mutexPath);
+    initializeMutex.exec('CREATE TABLE task_state_mutex (id INTEGER PRIMARY KEY CHECK (id = 1)); INSERT INTO task_state_mutex (id) VALUES (1)');
+    initializeMutex.close();
     writeFileSync(lockPath, JSON.stringify(buildLockPayload('legacy-writer')));
 
     const fixture = fileURLToPath(new URL('./storeClaimProcess.fixture.ts', import.meta.url));
@@ -47,11 +52,22 @@ describe('task state lock compatibility', () => {
 
     try {
       await attemptingWrite;
-      const resultWhileLocked = await Promise.race([
-        exit.then((code) => ({ kind: 'exit' as const, code })),
-        new Promise<{ kind: 'pending' }>((resolve) => setTimeout(() => resolve({ kind: 'pending' }), 150)),
-      ]);
-      expect(resultWhileLocked).toEqual({ kind: 'pending' });
+      const contender = new Database(mutexPath, { timeout: 0 });
+      const deadline = Date.now() + 5_000;
+      let observedMutexHeld = false;
+      while (Date.now() < deadline && !observedMutexHeld) {
+        try {
+          contender.exec('BEGIN IMMEDIATE');
+          contender.exec('ROLLBACK');
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        } catch (error) {
+          if ((error as { code?: string }).code !== 'SQLITE_BUSY') throw error;
+          observedMutexHeld = true;
+        }
+        if (child.exitCode !== null) break;
+      }
+      contender.close();
+      expect(observedMutexHeld).toBe(true);
       expect(child.exitCode).toBeNull();
     } finally {
       unlinkSync(lockPath);
