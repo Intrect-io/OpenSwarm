@@ -32,6 +32,13 @@ describe('task state lock compatibility', () => {
       stdio: 'pipe',
     });
     let stderr = '';
+    let stdout = '';
+    let readyResolve!: () => void;
+    const ready = new Promise<void>((resolve) => { readyResolve = resolve; });
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+      if (stdout.includes('READY')) readyResolve();
+    });
     child.stderr.on('data', (chunk) => { stderr += String(chunk); });
     const exit = new Promise<number>((resolve, reject) => {
       child.on('error', reject);
@@ -39,6 +46,7 @@ describe('task state lock compatibility', () => {
     });
 
     try {
+      await ready;
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(child.exitCode).toBeNull();
     } finally {
