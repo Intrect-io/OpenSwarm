@@ -18,6 +18,7 @@ import {
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import Database from 'better-sqlite3';
 import { z } from 'zod';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from '../support/processLiveness.js';
@@ -224,18 +225,19 @@ function withStoreLock<T>(operation: () => T): T {
   const directory = dirname(path);
   const lockPath = `${path}.lock`;
   mkdirSync(directory, { recursive: true });
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  let lockFd: number | undefined;
-  const lockToken = randomUUID();
+  // Transition mutex: SQLite first, then the legacy dot-lock for old CLI releases.
+  const mutexDb = new Database(`${path}.mutex.db`, { timeout: LOCK_TIMEOUT_MS }); mutexDb.exec('PRAGMA journal_mode = DELETE; CREATE TABLE IF NOT EXISTS task_state_mutex (id INTEGER PRIMARY KEY CHECK (id = 1)); INSERT OR IGNORE INTO task_state_mutex (id) VALUES (1); BEGIN IMMEDIATE');
+  const deadline = Date.now() + LOCK_TIMEOUT_MS; let lockFd: number | undefined; const lockToken = randomUUID();
 
-  while (lockFd === undefined) {
-    try {
-      lockFd = openSync(lockPath, 'wx', 0o600);
-      // `?? null` deliberately: an omitted key would be indistinguishable from
-      // a pre-field lock, which readers are entitled to probe locally.
-      writeFileSync(lockFd, JSON.stringify(buildLockPayload(lockToken)), 'utf8');
-      fsyncSync(lockFd);
-    } catch (error) {
+  try {
+    while (lockFd === undefined) {
+      try {
+        lockFd = openSync(lockPath, 'wx', 0o600);
+        // `?? null` deliberately: an omitted key would be indistinguishable from
+        // a pre-field lock, which readers are entitled to probe locally.
+        writeFileSync(lockFd, JSON.stringify(buildLockPayload(lockToken)), 'utf8');
+        fsyncSync(lockFd);
+      } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'EEXIST') throw error;
       try {
@@ -321,19 +323,16 @@ function withStoreLock<T>(operation: () => T): T {
         if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw statError;
       }
-      if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for task state lock: ${lockPath}`);
+        if (Date.now() >= deadline) throw new Error(`Timed out waiting for task state lock: ${lockPath}`);
+        Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
       }
-      Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
     }
-  }
 
-  try {
     // Another process may have committed since this process populated cache.
     cache = null;
     return operation();
   } finally {
-    closeSync(lockFd);
+    if (lockFd !== undefined) closeSync(lockFd);
     try {
       // Only the process/token that created the current path may unlink it. If
       // an operator or recovery path replaced the lock, leave the replacement.
@@ -343,6 +342,7 @@ function withStoreLock<T>(operation: () => T): T {
         console.warn(`[TaskState] Failed to remove lock ${lockPath}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    try { mutexDb.exec('ROLLBACK'); } finally { mutexDb.close(); }
   }
 }
 
