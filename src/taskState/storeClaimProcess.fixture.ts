@@ -15,7 +15,7 @@ await new Promise((resolve) => setTimeout(resolve, Number(delayText)));
 
 // Concurrent execution-state update and Linear reconciliation on the same issue.
 // Both paths take the store write lock; neither update may be lost.
-if (issueId === 'MIXED-CLIENT') console.log('READY');
+if (issueId === 'MIXED-CLIENT') console.log('ATTEMPTING_WRITE');
 await Promise.all([
   upsertTaskState(issueId, {
     title: issueId,
