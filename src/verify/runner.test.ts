@@ -115,6 +115,83 @@ describe('runVerify', () => {
     }
   });
 
+  it('runs a uv-locked pytest fixture for base and head in the real network-denied sandbox', async () => {
+    const fixture = join(root, 'uv-fixture');
+    const uv = execFileSync('which', ['uv'], { encoding: 'utf8' }).trim();
+    await mkdir(fixture, { recursive: true });
+    await writeFile(join(fixture, 'pyproject.toml'), [
+      '[project]', 'name = "verify-uv-fixture"', 'version = "0.1.0"',
+      'requires-python = ">=3.11"', 'dependencies = ["pytest==8.4.2"]', '',
+    ].join('\n'));
+    await writeFile(join(fixture, 'test_sample.py'), [
+      'import socket',
+      'def test_head_only():',
+      '    assert True',
+      'def test_network_is_denied():',
+      '    with socket.socket() as sock:',
+      '        sock.settimeout(0.5)',
+      '        try:',
+      '            sock.connect(("1.1.1.1", 443))',
+      '        except OSError:',
+      '            return',
+      '        assert False, "network unexpectedly reachable"',
+      '',
+    ].join('\n'));
+    execFileSync('uv', ['lock'], { cwd: fixture, stdio: 'pipe' });
+    execFileSync('uv', ['sync', '--frozen'], { cwd: fixture, stdio: 'pipe' });
+    await rm(join(fixture, '.venv'), { recursive: true, force: true });
+    execFileSync('git', ['init', '-b', 'main', fixture], { stdio: 'pipe' });
+    execFileSync('git', ['-C', fixture, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', fixture, 'config', 'user.name', 'Test']);
+    execFileSync('git', ['-C', fixture, 'add', '-A']);
+    execFileSync('git', ['-C', fixture, 'commit', '-m', 'base fixture']);
+    await writeFile(join(fixture, 'test_sample.py'), [
+      'import socket',
+      'def test_head_only():',
+      '    assert False',
+      'def test_network_is_denied():',
+      '    with socket.socket() as sock:',
+      '        sock.settimeout(0.5)',
+      '        try:',
+      '            sock.connect(("1.1.1.1", 443))',
+      '        except OSError:',
+      '            return',
+      '        assert False, "network unexpectedly reachable"',
+      '',
+    ].join('\n'));
+
+    const [evidence] = await runVerify({
+      projectPath: fixture,
+      commands: [verify(`${uv} run --frozen python -m pytest -q`, 30_000)],
+      baseRef: 'HEAD',
+    });
+
+    expect(evidence.baseStatus, evidence.rawOutputTail).toBe('pass');
+    expect(evidence.headStatus, evidence.rawOutputTail).toBe('fail');
+    expect(evidence.newFailure).toBe(true);
+    expect(evidence.rawOutputTail).toMatch(/2 passed/);
+    expect(evidence.rawOutputTail).toMatch(/1 failed/);
+
+    const originalHome = process.env.HOME;
+    const emptyHome = join(root, 'empty-cache-home');
+    await mkdir(join(emptyHome, '.cache', 'uv'), { recursive: true });
+    process.env.HOME = emptyHome;
+    try {
+      const [coldCache] = await runVerify({
+        projectPath: fixture,
+        commands: [verify(`${uv} run --frozen python -m pytest -q`, 30_000)],
+        baseRef: 'HEAD',
+      });
+      expect(coldCache, coldCache.rawOutputTail).toMatchObject({
+        baseStatus: 'fail', headStatus: 'fail', newFailure: false, environmentFailure: true,
+      });
+      expect(coldCache.rawOutputTail).toMatch(/offline|cache|download/i);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  }, 120_000);
+
   it('reports an offline uv cache miss as an environment failure rather than a pass', async () => {
     const execute = vi.fn(async () => ({
       output: 'error: Failed to download package: cache miss while offline',

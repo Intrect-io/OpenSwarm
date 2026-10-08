@@ -264,7 +264,7 @@ function isEnvironmentFailure(output: string): boolean {
     // uv / pip driven from inside the network-less verification sandbox: the
     // environment cannot be built, so neither run is a verdict. (AGT-4407)
     /Failed to initialize cache at/i,
-    /error: Failed to (?:download|fetch|prepare|sync)/i,
+    /(?:error: )?Failed to (?:download|fetch|prepare|sync)/i,
     /No solution found when resolving dependencies/i,
     /(?:Network is unreachable|Temporary failure in name resolution|Could not resolve host|nodename nor servname provided)/i,
     /No virtual environment found/i,
@@ -424,8 +424,8 @@ async function runCommand(
     CMAKE_BUILD_PARALLEL_LEVEL: env.CMAKE_BUILD_PARALLEL_LEVEL,
     GOMAXPROCS: env.GOMAXPROCS,
     UV_CONCURRENT_BUILDS: env.UV_CONCURRENT_BUILDS,
-    // The Linux sandbox bind-mounts `/` read-only, so uv can reuse the host's
-    // verified artifact cache without gaining network access or write access.
+    // uv needs to create lock and temporary files in its cache even in offline
+    // mode, so bind only this cache writable. Network access remains disabled.
     // Offline mode makes a missing artifact an explicit environment failure.
     ...(env.HOME && existsSync(join(env.HOME, '.cache', 'uv'))
       ? { UV_CACHE_DIR: join(env.HOME, '.cache', 'uv'), UV_OFFLINE: '1' }
@@ -463,7 +463,11 @@ async function runCommand(
     if (!sandbox.available) return { status: 'fail', output: formatSandboxUnavailable(sandbox) };
     executable = sandbox.executable;
     const writableRoot = dirname(root);
-    invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', boundedCommand.run];
+    invocationArgs = [
+      '--ro-bind', '/', '/', '--bind', writableRoot, writableRoot,
+      ...(safeEnv.UV_CACHE_DIR ? ['--bind', safeEnv.UV_CACHE_DIR, safeEnv.UV_CACHE_DIR] : []),
+      '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', boundedCommand.run,
+    ];
   } else if (process.platform === 'win32') {
     return { status: 'fail', output: '[security] OS verification sandbox is unavailable on this Windows host' };
   }
