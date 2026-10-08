@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -23,6 +23,8 @@ function git(...args: string[]): string {
 function verify(run: string, timeoutMs = 2_000): VerifyCommand {
   return { name: 'fixture', run, kind: 'test', timeoutMs };
 }
+
+const uvAvailable = spawnSync('uv', ['--version'], { stdio: 'ignore' }).status === 0;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'openswarm-verify-runner-'));
@@ -115,7 +117,7 @@ describe('runVerify', () => {
     }
   });
 
-  it('runs a uv-locked pytest fixture for base and head in the real network-denied sandbox', async () => {
+  it.skipIf(!uvAvailable)('runs a uv-locked pytest fixture for base and head in the real network-denied sandbox', async () => {
     const fixture = join(root, 'uv-fixture');
     const uv = execFileSync('which', ['uv'], { encoding: 'utf8' }).trim();
     await mkdir(fixture, { recursive: true });
