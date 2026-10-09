@@ -45,6 +45,42 @@ export interface ResolvePROptions {
 }
 
 /**
+ * A provider lookup failure while finding the current branch's PR — network
+ * outage, expired auth, permission failure. Distinct from "the branch simply
+ * has no PR" (which is normal flow) so a caller never reads an actionable
+ * GitHub error as "open a new PR" (AGT-3474).
+ */
+export class PRProviderLookupError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'PRProviderLookupError';
+  }
+}
+
+/**
+ * gh reports "this branch has no open PR" by exiting non-zero with that phrase
+ * in its output (usually `no pull requests found for branch "X"`). Match
+ * conservatively against message + stderr so formatting differences between
+ * gh versions still classify, while every other failure stays a lookup
+ * failure instead of being silently read as no-PR.
+ */
+export function isNoPullRequestsError(error: unknown): boolean {
+  const err = error as { message?: unknown; stderr?: unknown } | null;
+  const text = [
+    err?.message,
+    typeof err?.stderr === 'string' ? err.stderr : '',
+  ]
+    .filter((part) => typeof part === 'string' && part.length > 0)
+    .join('\n');
+  return /no (?:open )?pull requests/i.test(text);
+}
+
+function describeCause(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+/**
  * Parse `owner/repo#123`, `#123`, or bare `123` into parts.
  * Pure — no I/O.
  */
@@ -94,6 +130,46 @@ export async function resolveOriginRepo(cwd: string): Promise<string> {
 }
 
 /**
+ * Look up the open PR for the current branch, if any.
+ * Returns null when gh reports no PR on the branch. A provider lookup failure
+ * (network, auth, permissions) throws `PRProviderLookupError` so callers can
+ * surface the actionable error rather than treat it as "no PR" (AGT-3474).
+ */
+export async function resolveCurrentBranchPR(cwd: string, repo: string): Promise<ResolvedPR | null> {
+  try {
+    const stdout = await gh(
+      cwd,
+      'pr', 'view',
+      '--json', 'number,title,headRefName,url,author',
+    );
+    const view = JSON.parse(stdout) as {
+      number: number;
+      title: string;
+      headRefName: string;
+      url: string;
+      author?: { login?: string };
+    };
+    return {
+      repo,
+      number: view.number,
+      title: view.title,
+      branch: view.headRefName,
+      url: view.url,
+      author: view.author?.login,
+    };
+  } catch (error) {
+    if (!isNoPullRequestsError(error)) {
+      throw new PRProviderLookupError(
+        `Could not look up the open PR for the current branch in ${repo}: ${describeCause(error)} — ` +
+        `check network/gh auth (gh auth status) and retry; this is not a "no PR" answer.`,
+        { cause: error },
+      );
+    }
+    return null;
+  }
+}
+
+/**
  * Resolve the PR to operate on: explicit number → current branch's PR → error.
  */
 export async function resolvePR(opts: ResolvePROptions = {}): Promise<ResolvedPR> {
@@ -124,34 +200,13 @@ export async function resolvePR(opts: ResolvePROptions = {}): Promise<ResolvedPR
     };
   }
 
-  // Current branch open PR (gh fails when none).
-  try {
-    const stdout = await gh(
-      cwd,
-      'pr', 'view',
-      '--json', 'number,title,headRefName,url,author',
-    );
-    const view = JSON.parse(stdout) as {
-      number: number;
-      title: string;
-      headRefName: string;
-      url: string;
-      author?: { login?: string };
-    };
-    return {
-      repo,
-      number: view.number,
-      title: view.title,
-      branch: view.headRefName,
-      url: view.url,
-      author: view.author?.login,
-    };
-  } catch {
-    const branch = (await git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
-    throw new Error(
-      `No open PR for branch "${branch}" in ${repo}. Pass --number <n> or create one with: openswarm pr create`,
-    );
-  }
+  const current = await resolveCurrentBranchPR(cwd, repo);
+  if (current) return current;
+
+  const branch = (await git(cwd, 'rev-parse', '--abbrev-ref', 'HEAD')).trim();
+  throw new Error(
+    `No open PR for branch "${branch}" in ${repo}. Pass --number <n> or create one with: openswarm pr create`,
+  );
 }
 
 /** Convert ResolvedPR → github.PRInfo. */
