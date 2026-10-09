@@ -9,6 +9,7 @@ import { theme, ICON } from '../theme.js';
 import { sanitizeTerminalText } from '../sanitize.js';
 import { inputDebugEnabled, appendInputDebug } from '../inputDebug.js';
 import { dedupeDoubledGrapheme } from '../chatModel.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
 // Read once at module load — toggling mid-session isn't a use case. (INT-1964)
 const INPUT_DEBUG = inputDebugEnabled();
@@ -25,13 +26,25 @@ export function deleteLastGrapheme(value: string): string {
   return value.slice(0, lastIndex);
 }
 
+/** Prompt icon (2) + cursor (1) + border padding (4) + border (2). */
+export const CHAT_INPUT_DISPLAY_OVERHEAD = 2 + 1 + 4 + 2;
+
+/**
+ * Clip displayed chat input to the terminal-column budget while leaving the
+ * full controlled value untouched for submit/editing.
+ */
+export function clipChatInputDisplay(value: string, columns: number): string {
+  const maxDisplayLen = Math.max(10, columns - CHAT_INPUT_DISPLAY_OVERHEAD);
+  return value.length > maxDisplayLen ? value.slice(0, maxDisplayLen - 1) + '…' : value;
+}
+
 export interface ChatInputProps {
   value: string;
   active: boolean;
   busy?: boolean;
   onChange: (value: string) => void;
   onSubmit: (value: string) => void;
-  /** Command palette is open — ↑/↓ navigate, Enter/Tab select instead of submit. (INT-1959) */
+  /** Command palette open state — Tab/arrows are consumed by the palette */
   paletteOpen?: boolean;
   onPaletteMove?: (delta: number) => void;
   onPaletteSelect?: () => void;
@@ -41,27 +54,48 @@ export interface ChatInputProps {
 export function ChatInput({
   value,
   active,
-  busy,
+  busy = false,
   onChange,
   onSubmit,
-  paletteOpen,
+  paletteOpen = false,
   onPaletteMove,
   onPaletteSelect,
   onPaletteClose,
 }: ChatInputProps) {
+  const { columns } = useTerminalSize();
+
   useInput(
     (input, key) => {
-      // Diagnostics for mobile-SSH multibyte doubling (OPENSWARM_DEBUG_INPUT). (INT-1964)
       if (INPUT_DEBUG) appendInputDebug(input, key);
-      // When the palette is open it claims navigation + selection keys (INT-1959).
+
       if (paletteOpen) {
-        if (key.upArrow) return onPaletteMove?.(-1);
-        if (key.downArrow) return onPaletteMove?.(1);
-        if (key.tab || key.return) return onPaletteSelect?.();
-        if (key.escape) return onPaletteClose?.();
+        if (key.escape) {
+          onPaletteClose?.();
+          return;
+        }
+        if (key.return) {
+          onPaletteSelect?.();
+          return;
+        }
+        if (key.upArrow) {
+          onPaletteMove?.(-1);
+          return;
+        }
+        if (key.downArrow) {
+          onPaletteMove?.(1);
+          return;
+        }
+        // Tab cycles forward; Shift+Tab cycles backward
+        if (key.tab) {
+          onPaletteMove?.(key.shift ? -1 : 1);
+          return;
+        }
+        // Any other key closes the palette and falls through to input
+        onPaletteClose?.();
       }
+
       if (key.return) {
-        onSubmit(value);
+        if (value.trim()) onSubmit(value);
         return;
       }
       if (key.backspace || key.delete) {
@@ -75,6 +109,11 @@ export function ChatInput({
     { isActive: active && !busy },
   );
 
+  // Clip displayed text to available terminal width, preserving the full
+  // controlled value. Account for prompt icon (2 chars) + cursor (1 char)
+  // + border padding (2 chars left/right = 4 chars) + border (2 chars).
+  const displayValue = clipChatInputDisplay(value, columns);
+
   return (
     <Box borderStyle="round" borderColor={active ? theme.borderActive : theme.border} paddingX={1}>
       {busy ? (
@@ -87,7 +126,7 @@ export function ChatInput({
       ) : (
         <Box>
           <Text color={theme.accent}>{`${ICON.prompt} `}</Text>
-          {value ? <Text>{sanitizeTerminalText(value)}</Text> : <Text color={theme.dim}>{'type a message…   / for commands'}</Text>}
+          {value ? <Text>{sanitizeTerminalText(displayValue)}</Text> : <Text color={theme.dim}>{'type a message…   / for commands'}</Text>}
           {active ? <Text inverse> </Text> : null}
         </Box>
       )}

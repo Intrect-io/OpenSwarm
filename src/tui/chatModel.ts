@@ -37,6 +37,24 @@ export interface ChatState {
 
 export const initialChatState: ChatState = { history: [], streaming: null };
 
+/** Retained / persisted / prompt chat-history budget (newest kept). */
+export const MAX_CHAT_HISTORY = 200;
+
+/** Keep the newest `MAX_CHAT_HISTORY` lines; no-op when already within budget. */
+export function boundChatHistory<T>(history: T[], max = MAX_CHAT_HISTORY): T[] {
+  return history.length <= max ? history : history.slice(-max);
+}
+
+/** Build a multi-turn prompt from messages (caller should already apply history budget). */
+export function buildConversationPrompt(messages: Message[]): string {
+  if (messages.length <= 1) return messages[0]?.content ?? '';
+  return [
+    'Use the following conversation history as context. Continue by answering the latest user message.',
+    '',
+    messages.map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${m.content}`).join('\n\n'),
+  ].join('\n');
+}
+
 export type ChatAction =
   | { type: 'user'; content: string }
   | { type: 'system'; content: string }
@@ -47,15 +65,24 @@ export type ChatAction =
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case 'user':
-      return { ...state, history: [...state.history, { role: 'user', content: action.content }] };
+      return {
+        ...state,
+        history: boundChatHistory([...state.history, { role: 'user', content: action.content }]),
+      };
     case 'system':
-      return { ...state, history: [...state.history, { role: 'system', content: action.content }] };
+      return {
+        ...state,
+        history: boundChatHistory([...state.history, { role: 'system', content: action.content }]),
+      };
     case 'stream':
       return { ...state, streaming: (state.streaming ?? '') + action.chunk };
     case 'commit':
       return state.streaming === null
         ? state
-        : { history: [...state.history, { role: 'assistant', content: state.streaming }], streaming: null };
+        : {
+            history: boundChatHistory([...state.history, { role: 'assistant', content: state.streaming }]),
+            streaming: null,
+          };
     case 'clear':
       return initialChatState;
   }
