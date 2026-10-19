@@ -230,8 +230,8 @@
   --danger-subtle: rgba(196, 50, 26, 0.1);
   --warning: #a85400;
   --warning-subtle: rgba(168, 84, 0, 0.1);
-  --success: #17773a;
-  --success-subtle: rgba(23, 119, 58, 0.1);
+  --success: #146f35;  /* clears 4.5:1 on its own subtle tint too (step 10) */
+  --success-subtle: rgba(20, 111, 53, 0.1);
   --info: #1d4fbf;
 
   --needs: #ffd400;

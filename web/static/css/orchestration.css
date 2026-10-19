@@ -201,3 +201,9 @@ body.page-orchestration {
   .transcript { flex: none; max-height: 50dvh; }
   .composer .textarea { min-height: 44px; font-size: 16px; }
 }
+
+/* Touch: the idle filter's whole label is the target, checkbox sized up. */
+@media (pointer: coarse) {
+  label[for="filter-idle"] { display: inline-flex; align-items: center; gap: var(--space-2); min-height: 44px; }
+  #filter-idle { width: 20px; height: 20px; }
+}

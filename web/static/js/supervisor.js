@@ -718,7 +718,7 @@ function renderProjects() {
           (p.pending.length ? "<span class=\"cnt cnt-pnd\">" + p.pending.length + "p</span>" : "") +
         "</div>" +
         "<div class=\"proj-toggle\" onclick=\"event.stopPropagation()\" style=\"display:flex;align-items:center;gap:4px\">" +
-          "<button class=\"btn\" style=\"font-size:11px;padding:1px 4px;opacity:.5\" data-path=\"" + escapeAttr(p.path) + "\" onclick=\"handleUnpin(this)\">✕</button>" +
+          "<button class=\"btn btn-ghost btn-icon unpin\" aria-label=\"Unpin project\" title=\"Unpin project\" data-path=\"" + escapeAttr(p.path) + "\" onclick=\"handleUnpin(this)\"><svg viewBox=\"0 0 16 16\" width=\"12\" height=\"12\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"><path d=\"M4 4l8 8M12 4l-8 8\"/></svg></button>" +
           "<label class=\"toggle\">" +
             "<input type=\"checkbox\" " + checked + " data-path=\"" + escapeAttr(p.path) + "\" onchange=\"handleToggleProject(this)\">" +
             "<span class=\"slider\"></span>" +
@@ -1022,11 +1022,9 @@ function classifyLog(line) {
   if (/^⟳|Fetching|Decomposing|Running|Scheduling|Spawning/.test(line)) return { cls: "", icon: "⟳" };
   if (/^⛔|Blocked|Time window|blocked/.test(line)) return { cls: "log-warn", icon: "⛔" };
   if (/^—|No task|already completed|no log/.test(line)) return { cls: "log-system", icon: "—" };
-  if (/Cost:|\$[\.0-9]/.test(line)) return { cls: "", icon: "💲" };
-  if (/Git detected|files changed|filesChanged/.test(line)) return { cls: "", icon: "📁" };
-  if (/Selected [0-9]+ tasks/.test(line)) return { cls: "", icon: "🎯" };
-  if (/Enqueued|executePipeline/.test(line)) return { cls: "", icon: "📋" };
-  if (/Direct path|Project|path found/.test(line)) return { cls: "log-system", icon: "📂" };
+  // Marks stay typographic (the board's craft floor bans emoji icons); the
+  // remaining categories differ by colour class alone.
+  if (/Direct path|Project|path found/.test(line)) return { cls: "log-system", icon: "·" };
   return { cls: "", icon: "·" };
 }
 
@@ -1304,7 +1302,7 @@ function renderScanPaths(data) {
     rows.push(
       "<div class=\"scan-path-row\">" +
         "<span class=\"path\">" + escapeHtml(p) + "</span>" +
-        "<button class=\"scan-path-remove\" title=\"remove\" onclick=\"removeScanPath(" + escapeJsArgAttr(p) + ")\">✕</button>" +
+        "<button class=\"scan-path-remove\" aria-label=\"Remove scan path\" title=\"Remove scan path\" onclick=\"removeScanPath(" + escapeJsArgAttr(p) + ")\"><svg viewBox=\"0 0 16 16\" width=\"12\" height=\"12\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"><path d=\"M4 4l8 8M12 4l-8 8\"/></svg></button>" +
       "</div>"
     );
   }
@@ -1312,7 +1310,7 @@ function renderScanPaths(data) {
     rows.push(
       "<div class=\"scan-path-row\">" +
         "<span class=\"path\">" + escapeHtml(p) + "</span>" +
-        "<button class=\"scan-path-remove\" onclick=\"removeScanPath(" + escapeJsArgAttr(p) + ")\">✕</button>" +
+        "<button class=\"scan-path-remove\" aria-label=\"Remove scan path\" title=\"Remove scan path\" onclick=\"removeScanPath(" + escapeJsArgAttr(p) + ")\"><svg viewBox=\"0 0 16 16\" width=\"12\" height=\"12\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"><path d=\"M4 4l8 8M12 4l-8 8\"/></svg></button>" +
       "</div>"
     );
   }
@@ -1398,8 +1396,7 @@ async function loadFolderBrowser(path) {
       return "<div class=\"fb-row\" data-name=\"" + escapeAttr(e.name) + "\" onclick=\"folderBrowserEnter(this.getAttribute('data-name'))\"" +
         " style=\"padding:7px 18px;cursor:pointer;font-size:13px;color:var(--fg-primary);display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);transition:background .12s\"" +
         " onmouseover=\"this.style.background='var(--bg-elevated)'\" onmouseout=\"this.style.background=''\">" +
-        "<span style=\"color:var(--accent)\">📁</span>" +
-        "<span>" + escapeHtml(e.name) + "</span>" +
+        "<span>" + escapeHtml(e.name) + "/</span>" +
         "</div>";
     }).join("");
   } catch (e) {
@@ -1575,10 +1572,16 @@ function renderCoordination() {
   Object.values(agents).forEach(function(role) { roles[role] = (roles[role] || 0) + 1; });
   var roleLine = Object.keys(roles).sort().map(function(role) { return roles[role] + " " + escapeHtml(role); }).join(" · ");
   el.innerHTML =
-    '<div style="padding:8px 6px;font-size:11px">' +
-    '<div style="color:var(--fg-primary)"><b style="font-size:15px">' + Object.keys(agents).length + '</b> agents placed <span style="color:var(--fg-muted)">(' + roleLine + ')</span></div>' +
-    '<div style="margin-top:4px;color:' + (questions > 0 ? 'var(--warning)' : 'var(--fg-muted)') + '">' + questions + ' question(s) waiting on you · ' + pending.length + ' open exchange(s)</div>' +
+    '<div style="padding:8px 6px;font-size:var(--text-xs)">' +
+    '<div style="color:var(--fg-primary)"><b style="font-size:var(--text-base)">' + Object.keys(agents).length + '</b> agents placed <span style="color:var(--fg-muted)">(' + roleLine + ')</span></div>' +
+    // Questions are the one thing here that waits on the operator: needs-yellow.
+    '<div style="margin-top:4px;color:' + (questions > 0 ? 'var(--needs)' : 'var(--fg-muted)') + '">' +
+      plural(questions, 'question') + ' waiting on you · ' + plural(pending.length, 'open exchange') + '</div>' +
     '</div>';
+}
+
+function plural(count, noun) {
+  return count + ' ' + noun + (count === 1 ? '' : 's');
 }
 
 async function fetchCoordination() {

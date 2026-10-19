@@ -65,6 +65,21 @@ describe('shell navigation', () => {
     expect(actions.lastElementChild!.getAttribute('aria-label')).toMatch(/Switch to (light|dark) theme/);
   });
 
+  it('gives the page one h1 named after its tab, without replacing a page\'s own', () => {
+    const doc = page();
+    mounted = mountShell(doc, { fetchImpl: vi.fn(async () => respond(200, status())), location: { pathname: '/orchestration' } });
+    const headings = doc.querySelectorAll('h1');
+    expect(headings).toHaveLength(1);
+    expect(headings[0].textContent).toBe('Orchestration');
+    expect(headings[0].className).toBe('sr-only');
+    mounted.stop();
+
+    document.body.innerHTML = '<header class="topbar" data-shell></header><main><h1>Settings</h1></main>';
+    mounted = mountShell(document, { fetchImpl: vi.fn(async () => respond(200, status())), location: { pathname: '/settings' } });
+    expect(document.querySelectorAll('h1')).toHaveLength(1);
+    expect(document.querySelector('h1')!.className).toBe('');
+  });
+
   it('closes More on Escape', () => {
     const doc = page();
     mounted = mountShell(doc, { fetchImpl: vi.fn(async () => respond(200, status())), location: { pathname: '/' } });

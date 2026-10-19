@@ -195,6 +195,7 @@
 
 @media (max-width: 900px), (pointer: coarse) {
   .console-toggle, .issue-row { min-height: 44px; }
+  .issue-row input[type="checkbox"] { width: 20px; height: 20px; }
   .repo-picker select { min-height: 44px; font-size: 16px; }
 }
 

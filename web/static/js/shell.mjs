@@ -154,6 +154,17 @@ export function mountShell(doc, { fetchImpl, pollMs = POLL_MS, location } = {}) 
   shared.innerHTML = navMarkup(current) + '<div class="topbar-spacer"></div>';
   header.replaceChildren(...(leading ? [leading] : []), shared.content, actions);
 
+  // One h1 per page for heading navigation. The active tab already names the
+  // page on screen, so the heading is for assistive tech only (step 10).
+  const main = doc.querySelector('main');
+  const entry = [...PRIMARY_NAV, ...MORE_NAV].find((item) => item.href === current);
+  if (main && entry && !doc.querySelector('h1')) {
+    const heading = doc.createElement('h1');
+    heading.className = 'sr-only';
+    heading.textContent = entry.label;
+    main.prepend(heading);
+  }
+
   const toggle = doc.createElement('button');
   toggle.type = 'button';
   toggle.id = 'theme-toggle';
