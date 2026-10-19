@@ -66,6 +66,13 @@ body.page-supervisor {
 .control-spacer { flex: 1; }
 .control-label { font-size: var(--text-xs); color: var(--fg-muted); }
 .effort-select { min-height: 28px; width: auto; padding: 0 var(--space-6) 0 var(--space-2); font-size: var(--text-xs); }
+/* Fleet-wide changes confirm in place: a staged thinking level and an armed
+   provider read as "pending", not as danger. */
+.effort-confirm { min-height: 28px; color: var(--warning); border-color: var(--warning); background: var(--warning-subtle); }
+.effort-confirm[hidden] { display: none; }
+.provider-btn.is-armed { color: var(--warning); background: var(--warning-subtle); border-color: transparent; font-weight: 600; }
+/* An action's outcome, said on the button for a few seconds. */
+.btn.is-flashing.is-failed { color: var(--danger); border-color: var(--danger); background: var(--danger-subtle); }
 
 .svc-status {
   display: inline-flex;

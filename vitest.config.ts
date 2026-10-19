@@ -106,6 +106,10 @@ const integrationBoundaryCoverageExcludes = [
   // already outside the measured set when it lived in web.ts. Moving code
   // between files must not change what the threshold is computed over.
   'src/support/webExecTasks.ts',
+  // Same reason: the /api/service/* routes moved out of web.ts so the
+  // dashboard harden change fit under the size gate. They shell out to
+  // systemctl, and were outside the measured set while they lived in web.ts.
+  'src/support/webServiceControl.ts',
   'src/support/dev.ts',
   'src/support/chatBackend.ts',
   'src/support/gitStatus.ts',

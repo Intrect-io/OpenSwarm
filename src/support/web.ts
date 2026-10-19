@@ -11,6 +11,7 @@ import { handleUsageRoute } from './usageRoute.js';
 import { atomicWriteFileSync } from './atomicFile.js';
 import { safeConsole as console } from './safeLog.js';
 import { execFile } from 'node:child_process';
+import { handleServiceControl, safeErrorMessage } from './webServiceControl.js';
 import { getChatHistory } from '../discord/index.js';
 import { addSSEClient, getActiveSSECount, broadcastEvent, getLogBuffer, getStageBuffer, getChatBuffer } from '../core/eventHub.js';
 import { formatCost } from './costTracker.js';
@@ -74,19 +75,6 @@ let gitStatusPoller: NodeJS.Timeout | null = null;
 
 
 
-// `systemctl` talking to a wedged user service manager can hang past any
-// caller's patience; bound it so a stuck call surfaces as a controlled error
-// instead of leaving the HTTP request open indefinitely.
-const SYSTEMCTL_TIMEOUT_MS = 10_000;
-
-// Never leak raw Error objects (which include stack traces in many runtimes)
-// or arbitrary thrown values to HTTP responses.
-function safeErrorMessage(err: unknown): string {
-  if (err instanceof Error && typeof err.message === 'string' && err.message) {
-    return err.message;
-  }
-  return 'Internal error';
-}
 
 
 
@@ -692,10 +680,18 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
       // ---- Heartbeat (manual trigger) ----
       } else if (url === '/api/heartbeat' && req.method === 'POST') {
+        // `openswarm dash` serves this page with no runner attached. Answering
+        // 202 there left the button on "Running…" forever, waiting for a start
+        // signal nothing could send.
+        if (!runnerRef) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'No daemon runner is attached to this dashboard' }));
+          return;
+        }
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         // Non-blocking heartbeat
-        runnerRef?.heartbeat().catch((e: Error) => console.error('[Web] Heartbeat error:', e));
+        runnerRef.heartbeat().catch((e: Error) => console.error('[Web] Heartbeat error:', e));
 
       // ---- Provider toggle ----
       } else if (url === '/api/provider' && req.method === 'POST') {
@@ -935,50 +931,9 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, response, provider: result.provider, model: result.model }));
 
-      // ---- Service control: status ----
-      } else if (url === '/api/service/status' && req.method === 'GET') {
-        try {
-          const result = await new Promise<string>((resolve) => {
-            execFile('systemctl', ['--user', 'is-active', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err, stdout) => {
-              resolve(err ? 'unknown' : stdout.trim());
-            });
-          });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: result }));
-        } catch {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'unknown' }));
-        }
-
-      // ---- Service control: stop ----
-      } else if (url === '/api/service/stop' && req.method === 'POST') {
-        try {
-          await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'stop', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err) => {
-              if (err) reject(err); else resolve();
-            });
-          });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        } catch (e) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: safeErrorMessage(e) }));
-        }
-
-      // ---- Service control: restart ----
-      } else if (url === '/api/service/restart' && req.method === 'POST') {
-        try {
-          await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'restart', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err) => {
-              if (err) reject(err); else resolve();
-            });
-          });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        } catch (e) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: safeErrorMessage(e) }));
-        }
+      // ---- Service control: status / stop / restart ----
+      } else if (url.startsWith('/api/service/') && await handleServiceControl(url, req.method, res)) {
+        // handled
 
       // ---- Knowledge Graph: project health ----
       } else if (url.startsWith('/api/knowledge/') && req.method === 'GET') {

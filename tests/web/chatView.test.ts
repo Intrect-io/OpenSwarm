@@ -459,6 +459,75 @@ describe('startChatView composer outcome (AGT-4026)', () => {
   });
 });
 
+// The composer used to address whoever spoke last, so a message drafted for one
+// agent left addressed to another that spoke mid-sentence. The recipient is now
+// pinned and moves only when the operator picks someone else.
+describe('composer recipient pin', () => {
+  const worker = boardEvent({ id: 'w', seq: 1, kind: 'advice-request', status: 'open', actor: 'sable', actorName: 'Sable', correlationId: 'c-sable', taskId: 't-sable', taskLabel: 'AX-1' });
+  const reviewer = boardEvent({ id: 'r', seq: 2, kind: 'advice-response', status: 'open', actor: 'thistle', actorName: 'Thistle', actorRole: 'reviewer', correlationId: 'c-thistle', taskId: 't-thistle', taskLabel: 'AX-2' });
+
+  function sseStub() {
+    const sources: { onmessage: ((m: { data: string }) => void) | null }[] = [];
+    class FakeSource { onmessage: ((m: { data: string }) => void) | null = null; constructor() { sources.push(this); } close() {} }
+    return { FakeSource, push: (event: unknown) => sources[0]!.onmessage!({ data: JSON.stringify({ type: 'coordination:event', data: event }) }) };
+  }
+
+  it('keeps the pinned agent when someone else speaks later', async () => {
+    const doc = shell();
+    const sse = sseStub();
+    const view = startChatView(doc, { fetchImpl: fetchWith([worker]), eventSourceImpl: sse.FakeSource });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line')).toHaveLength(1));
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    expect(input.placeholder).toBe('Message Sable…');
+
+    sse.push(reviewer);
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line')).toHaveLength(2));
+    expect(input.placeholder).toBe('Message Sable…');
+    const select = doc.getElementById('composer-recipient') as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual(['Thistle · reviewer · AX-2', 'Sable · worker · AX-1']);
+    expect(select.options[select.selectedIndex]?.textContent).toBe('Sable · worker · AX-1');
+    view.stop();
+  });
+
+  it('sends to the agent the operator picked', async () => {
+    const doc = shell();
+    const fetchImpl = fetchWith([worker, reviewer]);
+    const view = startChatView(doc, { fetchImpl, eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.querySelectorAll('#room .line')).toHaveLength(2));
+    const select = doc.getElementById('composer-recipient') as HTMLSelectElement;
+    expect(select.options[select.selectedIndex]?.textContent).toBe('Thistle · reviewer · AX-2');
+
+    select.value = [...select.options].find((o) => o.textContent!.startsWith('Sable'))!.value;
+    select.dispatchEvent(new window.Event('change', { bubbles: true }));
+    const input = doc.getElementById('composer-text') as HTMLInputElement;
+    expect(input.placeholder).toBe('Message Sable…');
+    input.value = 'Rebase first.';
+    doc.getElementById('composer')!.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(fetchImpl.mock.calls.some((c) => c[0] === '/api/coordination/message')).toBe(true));
+    const [, init] = fetchImpl.mock.calls.find((c) => c[0] === '/api/coordination/message')!;
+    expect(JSON.parse((init as { body: string }).body)).toMatchObject({ recipient: 'sable', taskId: 't-sable', correlationId: 'c-sable' });
+    view.stop();
+  });
+
+  it('warns, without refusing, when the pinned agent has failed', async () => {
+    const doc = shell();
+    const failed = boardEvent({ id: 'f', seq: 3, actor: 'sable', actorName: 'Sable', correlationId: 'c-sable', taskId: 't-sable', status: 'failed', summary: 'Worker execution failed' });
+    const view = startChatView(doc, { fetchImpl: fetchWith([worker, failed]), eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.getElementById('composer-target-warning')?.textContent).toBe('Sable failed on this task and may not read this.'));
+    expect((doc.getElementById('composer-text') as HTMLInputElement).disabled).toBe(false);
+    view.stop();
+  });
+
+  it('says nothing while the pinned agent is still in an open exchange', async () => {
+    const doc = shell();
+    const view = startChatView(doc, { fetchImpl: fetchWith([worker]), eventSourceImpl: null });
+    await vi.waitFor(() => expect(doc.getElementById('composer-recipient')).not.toBeNull());
+    expect(doc.getElementById('composer-target-warning')!.textContent).toBe('');
+    view.stop();
+  });
+});
+
 describe('answering a parked agent from chat (AGT-4030)', () => {
   // Ten agents sat on human-question with no way to answer them: the composer
   // addressed the newest stage exchange, so the daemon filed the reply as a
