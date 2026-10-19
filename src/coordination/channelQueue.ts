@@ -68,10 +68,12 @@ export function sendChannelMessage(input: SendChannelMessage): ChannelDelivery {
       input.taskId ?? null, input.recipient ?? null, input.correlationId ?? null, input.idempotencyKey, fingerprint, now, now);
     if (input.correlationId) {
       const questions = (db.prepare(`SELECT t.* FROM coordination_trace t LEFT JOIN coordination_channel_aliases a
-        ON a.repository=t.repository WHERE COALESCE(t.repo_key,a.repo_key)=? AND COALESCE(t.source_task_id,t.task_id)=? AND t.correlation_id=?
+        ON a.repository=t.repository LEFT JOIN coordination_channel_aliases k ON k.repository=t.repo_key
+        WHERE COALESCE(k.repo_key,t.repo_key,a.repo_key)=? AND COALESCE(t.source_task_id,t.task_id)=? AND t.correlation_id=?
         AND t.id=(SELECT MAX(t2.id) FROM coordination_trace t2 LEFT JOIN coordination_channel_aliases a2
-          ON a2.repository=t2.repository WHERE t2.correlation_id=t.correlation_id
-          AND COALESCE(t2.repo_key,a2.repo_key)=COALESCE(t.repo_key,a.repo_key))
+          ON a2.repository=t2.repository LEFT JOIN coordination_channel_aliases k2 ON k2.repository=t2.repo_key
+          WHERE t2.correlation_id=t.correlation_id
+          AND COALESCE(k2.repo_key,t2.repo_key,a2.repo_key)=COALESCE(k.repo_key,t.repo_key,a.repo_key))
         AND t.kind='human-question' AND t.status IN ('waiting','open','running')`).all(input.repoKey, input.taskId, input.correlationId) as Array<Parameters<typeof toEvent>[0]>).map(toEvent);
       const exact = questions.find((q) => q.correlationId === input.correlationId && q.actor === input.recipient);
       if (!exact) throw new Error('Question scope conflict or already answered');
@@ -204,8 +206,11 @@ export function interruptEndedTaskDeliveries(sessions: readonly ProjectSession[]
   for (const row of rows) {
     if (row.correlation_id && row.status === 'queued') continue;
     const active = sessions.find((s) => s.repoKey === row.repo_key && s.taskId === row.task_id);
-    const role = db.prepare(`SELECT actor_role FROM coordination_trace WHERE repo_key=?
-      AND COALESCE(source_task_id,task_id)=? AND actor=? ORDER BY id DESC LIMIT 1`)
+    const role = db.prepare(`SELECT t.actor_role FROM coordination_trace t
+      LEFT JOIN coordination_channel_aliases a ON a.repository=t.repository
+      LEFT JOIN coordination_channel_aliases k ON k.repository=t.repo_key
+      WHERE COALESCE(k.repo_key,t.repo_key,a.repo_key)=?
+      AND COALESCE(t.source_task_id,t.task_id)=? AND t.actor=? ORDER BY t.id DESC LIMIT 1`)
       .get(row.repo_key, row.task_id, row.recipient) as { actor_role: string | null } | undefined;
     const run = row.run_id ? db.prepare(`SELECT started_at FROM coordination_channel_runs WHERE id=?`)
       .get(row.run_id) as { started_at: number } | undefined : undefined;

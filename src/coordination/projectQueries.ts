@@ -32,8 +32,11 @@ export function queryProjectSnapshot(paths: readonly string[], runner?: ProjectR
   try {
     const byId = new Map(events.map((e) => [e.id, e]));
     for (const e of getCoordinationStore().snapshot().events) byId.set(e.id, e);
-    events = [...byId.values()].map((e) => ({ ...e, repoKey: repositoryKey(e.repoKey, e.repository) }));
+    events = [...byId.values()];
   } catch { unavailable.push('live board'); }
+  const aliases = new Map((db.prepare('SELECT repository,repo_key FROM coordination_channel_aliases').all() as Array<{ repository: string; repo_key: string }>)
+    .map((a) => [a.repository, a.repo_key]));
+  events = events.map((e) => ({ ...e, repoKey: aliases.get(e.repoKey ?? e.repository) ?? repositoryKey(e.repoKey, e.repository) }));
   if (runner) {
     try {
       sessions.push(...runningProjectSessions(runner));
@@ -70,7 +73,8 @@ export function queryTaskRelations(repoKey: string, taskId: string): { nodes: Ar
 }>; edges: Array<{ source: string; target: string; count: number }> } {
   const db = channelDatabase();
   const rows = db.prepare(`SELECT t.* FROM coordination_trace t LEFT JOIN coordination_channel_aliases a
-    ON a.repository=t.repository WHERE COALESCE(t.repo_key,a.repo_key)=?
+    ON a.repository=t.repository LEFT JOIN coordination_channel_aliases k ON k.repository=t.repo_key
+    WHERE COALESCE(k.repo_key,t.repo_key,a.repo_key)=?
     AND (COALESCE(t.source_task_id,t.task_id)=? OR t.target_task_id=?) ORDER BY t.id`)
     .all(repoKey, taskId, taskId) as Array<Parameters<typeof toEvent>[0]>;
   const nodes = new Map<string, {id: string; address: string; name: string; role?: string}>();

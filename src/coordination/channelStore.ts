@@ -55,8 +55,11 @@ export function syncChannels(paths: readonly string[]): Channel[] {
           const path = expandPath(repository);
           const cell = isAbsolute(path) ? repositoryCell(path) : undefined;
           const known = db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(repository) as { repo_key: string } | undefined;
-          const key = explicitKey ?? known?.repo_key ?? cell?.repoKey ?? repository;
-          for (const alias of [repository, ...(cell ? [path, cell.worktreePath, cell.repositoryPath] : [])]) {
+          const explicit = explicitKey ? db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(explicitKey) as { repo_key: string } | undefined : undefined;
+          const explicitCell = explicitKey && isAbsolute(expandPath(explicitKey)) ? repositoryCell(expandPath(explicitKey)) : undefined;
+          const key = explicit?.repo_key ?? explicitCell?.repoKey ?? explicitKey ?? known?.repo_key ?? cell?.repoKey ?? repository;
+          for (const alias of [repository, ...(cell ? [path, cell.worktreePath, cell.repositoryPath] : []),
+            ...(explicitCell ? [explicitKey!, explicitCell.worktreePath, explicitCell.repositoryPath] : [])]) {
             db.prepare('INSERT OR IGNORE INTO coordination_channel_aliases VALUES (?,?)').run(alias, key);
           }
           db.prepare('INSERT OR IGNORE INTO coordination_channels(repo_key,repository,name) VALUES (?,?,?)')

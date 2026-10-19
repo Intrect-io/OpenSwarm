@@ -140,3 +140,10 @@ reported query p95 3.36/14.61ms and loopback HTTP p95 4.02/14.68ms at 10/100 and
 100/1,000 (25 observations each); initialization took 73/581ms, process RSS
 281/299 MiB. The earlier busier-host observations above remain part of the record;
 these fixture samples do not establish production latency.
+
+The next migration review reproduced older traces whose explicit repo_key also
+contained a filesystem path. That regression failed before repair. Known/path
+identities now fold consistently in trace projection, project/relationship
+queries, exact question answers and recipient-role reconciliation, while opaque
+keys and original trace rows remain intact. Durable normalization also runs when
+the live board is unavailable. The related five-suite check passes 77 tests.

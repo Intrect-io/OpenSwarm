@@ -44,6 +44,24 @@ afterEach(() => { resetTraceDbForTests(); resetCoordinationStoreForTests();
   process.env.OPENSWARM_AUTOMATION_DB = originalDb; process.env.OPENSWARM_COORDINATION_FILE = originalBoard; vi.restoreAllMocks(); });
 
 describe('durable project channels', () => {
+  it('folds explicit historical path repo_keys for entries, needs, answers and live recipient reconciliation', async () => {
+    recordTraceEvent(e({ repoKey: repo }));
+    resetTraceDbForTests(); syncChannels([repo]);
+    expect(listChannelEntries(key).items).toHaveLength(1);
+    expect(queryProjectSnapshot([repo]).needs.map((n) => n.repoKey)).toEqual([key]);
+    const board = vi.spyOn(getCoordinationStore(), 'snapshot').mockImplementation(() => { throw new Error('Board offline'); });
+    const partial = queryProjectSnapshot([repo]); expect(partial.needs.map((n) => n.repoKey)).toEqual([key]);
+    expect(partial.unavailable).toContain('live board'); board.mockRestore();
+    const answer = await route(`/api/coordination/channels/${key}/messages`, 'POST', {
+      body: 'Exact old-path answer', idempotencyKey: 'path-answer', taskId: 'task', recipient: 'sable', correlationId: 'question' });
+    expect(answer.status).toBe(202); expect(queryProjectSnapshot([repo]).needs).toHaveLength(0);
+    const taskMessage = send({ taskId: 'task', recipient: 'sable', idempotencyKey: 'old-path-task' });
+    interruptEndedTaskDeliveries([{ repoKey: key, taskId: 'task', title: 'Still running', status: 'running', stage: 'worker' }]);
+    expect(getChannelDelivery(taskMessage.id).status).toBe('queued');
+    recordTraceEvent(e({ id: 'future-legacy', seq: 20, repoKey: repo, kind: 'advice-response', status: 'completed', correlationId: 'future' }));
+    expect(listChannelEntries(key).items.some((e) => e.sourceId === 'future-legacy')).toBe(true);
+    expect(channelDatabase().prepare('SELECT repo_key FROM coordination_trace WHERE event_id=?').get('q1')).toEqual({ repo_key: repo });
+  });
   it('preserves legacy path-backed discussion IDs while folding history, task lists, replies and resolution into the canonical project', () => {
     channelDatabase().exec('DROP TRIGGER channel_project_message; DELETE FROM coordination_channels; DELETE FROM coordination_channel_aliases;');
     const thread = createCoordinationThread({ repository: repo, subject: 'Legacy path discussion', actor: 'legacy', taskId: 'task-a',

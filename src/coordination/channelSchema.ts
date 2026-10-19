@@ -48,15 +48,17 @@ export function channelDatabase(): Database.Database {
         response_id TEXT, error TEXT,
         FOREIGN KEY(delivery_id) REFERENCES coordination_channel_deliveries(id)
       );
-      CREATE TRIGGER IF NOT EXISTS channel_project_trace AFTER INSERT ON coordination_trace
+      DROP TRIGGER IF EXISTS channel_project_trace;
+      CREATE TRIGGER channel_project_trace AFTER INSERT ON coordination_trace
       WHEN NEW.kind != 'thread-update' AND json_extract(COALESCE(NEW.metadata_json,'{}'),'$.channelMessageId') IS NULL
       BEGIN
         INSERT OR IGNORE INTO coordination_channel_entries
           (repo_key, source_kind, source_id, task_id, created_at)
-        SELECT COALESCE(NEW.repo_key, a.repo_key), 'trace', NEW.event_id,
+        SELECT COALESCE(k.repo_key, NEW.repo_key, a.repo_key), 'trace', NEW.event_id,
           COALESCE(NEW.source_task_id, NEW.task_id), NEW.timestamp
         FROM (SELECT 1) LEFT JOIN coordination_channel_aliases a ON a.repository = NEW.repository
-        WHERE COALESCE(NEW.repo_key, a.repo_key) IS NOT NULL;
+        LEFT JOIN coordination_channel_aliases k ON k.repository=NEW.repo_key
+        WHERE COALESCE(k.repo_key, NEW.repo_key, a.repo_key) IS NOT NULL;
       END;
       DROP TRIGGER IF EXISTS channel_project_message;
       CREATE TRIGGER channel_project_message AFTER INSERT ON coordination_thread_messages
@@ -95,11 +97,12 @@ export function backfillChannelEntries(db: Database.Database): void {
       FROM coordination_thread_messages m JOIN coordination_threads t ON t.thread_id=m.thread_id
       LEFT JOIN coordination_channel_aliases a ON a.repository=t.repository
       UNION ALL
-      SELECT COALESCE(t.repo_key,a.repo_key), 'trace', t.event_id, NULL,
+      SELECT COALESCE(k.repo_key,t.repo_key,a.repo_key), 'trace', t.event_id, NULL,
         COALESCE(t.source_task_id,t.task_id), t.timestamp, t.id
       FROM coordination_trace t LEFT JOIN coordination_channel_aliases a ON a.repository=t.repository
+      LEFT JOIN coordination_channel_aliases k ON k.repository=t.repo_key
       WHERE t.kind!='thread-update' AND json_extract(COALESCE(t.metadata_json,'{}'),'$.channelMessageId') IS NULL
-        AND COALESCE(t.repo_key,a.repo_key) IS NOT NULL
+        AND COALESCE(k.repo_key,t.repo_key,a.repo_key) IS NOT NULL
     ) ORDER BY created_at,source_kind,original_order;
   `);
 }
