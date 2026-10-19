@@ -27,11 +27,11 @@ const e = (over: Partial<CoordinationEvent> = {}): CoordinationEvent => ({ id: '
   repository: repo, repoKey: key, taskId: 'task', taskLabel: 'DEMO-1', actor: 'sable', actorName: 'Sable', actorRole: 'worker',
   kind: 'human-question', status: 'waiting', correlationId: 'question', summary: 'Which branch?', fingerprint: 'fp', ...over });
 const send = (over = {}) => sendChannelMessage({ repoKey: key, body: 'Please review this project.', idempotencyKey: 'send-1', ...over });
-const route = async (path: string, method = 'GET', body?: object, runner?: any) => {
+const route = async (path: string, method = 'GET', body?: object, runner?: any, paths = [repo]) => {
   const output = { code: 0, body: '' };
   const response = { writeHead: (code: number) => { output.code = code; }, end: (data: string) => { output.body = data; } } as unknown as ServerResponse;
   const url = new URL(path, 'http://localhost');
-  await tryHandleProjectRoutes({ method } as IncomingMessage, response, url.pathname, url, runner, [repo], async () => JSON.stringify(body));
+  await tryHandleProjectRoutes({ method } as IncomingMessage, response, url.pathname, url, runner, paths, async () => JSON.stringify(body));
   return { status: output.code, data: JSON.parse(output.body) };
 };
 beforeEach(() => {
@@ -44,6 +44,47 @@ afterEach(() => { resetTraceDbForTests(); resetCoordinationStoreForTests();
   process.env.OPENSWARM_AUTOMATION_DB = originalDb; process.env.OPENSWARM_COORDINATION_FILE = originalBoard; vi.restoreAllMocks(); });
 
 describe('durable project channels', () => {
+  it('repairs a reachable non-Git path alias without merging its opaque question or rewriting sources', async () => {
+    const db = channelDatabase(), opaque = 'git:old-opaque';
+    db.prepare('UPDATE coordination_channel_aliases SET repo_key=? WHERE repository=?').run(opaque, repo);
+    recordTraceEvent(e({ id: 'opaque', repoKey: opaque })); recordTraceEvent(e({ repoKey: repo }));
+    const before = db.prepare('SELECT source_id,seq FROM coordination_channel_entries ORDER BY seq').all();
+    expect(queryProjectSnapshot([repo]).needs.map((n) => n.repoKey).sort()).toEqual([key, opaque].sort());
+    expect(listChannelEntries(key).items.map((e) => e.sourceId)).toEqual(['q1']);
+    expect(listChannelEntries(opaque).items.map((e) => e.sourceId)).toEqual(['opaque']);
+    const answer = await route(`/api/coordination/channels/${key}/messages`, 'POST', {
+      body: 'Answer the physical project only', idempotencyKey: 'non-git-answer', taskId: 'task', recipient: 'sable', correlationId: 'question' });
+    expect(answer.status).toBe(202); expect(queryProjectSnapshot([repo]).needs.map((n) => n.repoKey)).toEqual([opaque]);
+    expect(db.prepare('SELECT source_id,seq FROM coordination_channel_entries WHERE source_kind=\'trace\' ORDER BY seq').all()).toEqual(before);
+    expect(db.prepare('SELECT repo_key FROM coordination_trace WHERE event_id=?').get('q1')).toEqual({ repo_key: repo });
+  });
+  it('corrects an old non-Git alias when configuration changes even with no newly appended records', async () => {
+    const other = join(root, 'later-configured'); mkdirSync(other); const physical = repositoryCell(other).repoKey, opaque = 'git:old-opaque';
+    recordTraceEvent(e({ repository: other, repoKey: other })); recordTraceEvent(e({ id: 'opaque', repository: other, repoKey: opaque }));
+    syncChannels([repo]); const db = channelDatabase();
+    db.prepare('UPDATE coordination_channel_aliases SET repo_key=? WHERE repository=?').run(opaque, other);
+    db.prepare('UPDATE coordination_channel_entries SET repo_key=? WHERE source_id=?').run(opaque, 'q1');
+    const before = db.prepare('SELECT source_id,seq FROM coordination_channel_entries ORDER BY seq').all();
+    syncChannels([repo, other]);
+    expect(listChannelEntries(physical).items.map((e) => e.sourceId)).toEqual(['q1']);
+    expect(listChannelEntries(opaque).items.map((e) => e.sourceId)).toEqual(['opaque']);
+    expect(readChannels().find((c) => c.repoKey === physical)?.configured).toBe(true);
+    expect(readChannels().find((c) => c.repoKey === opaque)?.configured).toBe(false);
+    const answer = await route(`/api/coordination/channels/${physical}/messages`, 'POST', {
+      body: 'Physical scope answer', idempotencyKey: 'configured-answer', taskId: 'task', recipient: 'sable', correlationId: 'question' }, undefined, [repo, other]);
+    expect(answer.status).toBe(202);
+    expect(queryProjectSnapshot([repo, other]).needs.map((n) => n.repoKey)).toEqual([opaque]);
+    expect(db.prepare('SELECT source_id,seq FROM coordination_channel_entries WHERE source_kind=\'trace\' ORDER BY seq').all()).toEqual(before);
+  });
+  it('preserves the known alias of a missing archived worktree instead of guessing a new fallback identity', () => {
+    const missing = join(root, 'deleted-worktree'), archived = 'git:archived-project';
+    channelDatabase().prepare('INSERT INTO coordination_channel_aliases VALUES (?,?)').run(missing, archived);
+    recordTraceEvent(e({ repository: missing, repoKey: missing }));
+    expect(queryProjectSnapshot([repo]).needs.map((n) => n.repoKey)).toEqual([archived]);
+    expect(listChannelEntries(archived).items.map((e) => e.sourceId)).toEqual(['q1']);
+    expect(readChannels().find((c) => c.repoKey === archived)?.configured).toBe(false);
+    expect(readChannels().some((c) => c.repoKey === repositoryCell(missing).repoKey)).toBe(false);
+  });
   it('discovers new legacy sibling paths after initial sync without restarting or marking their messages read', () => {
     execFileSync('git', ['init', '-q', repo]); execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=t@e.test', 'commit', '--allow-empty', '-qm', 'base']);
     resetRepositoryCellCacheForTests(); resetTraceDbForTests(); key = repositoryCell(repo).repoKey; syncChannels([repo]);

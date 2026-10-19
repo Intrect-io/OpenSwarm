@@ -1,6 +1,7 @@
 import { basename, isAbsolute } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { expandPath } from '../core/config.js';
-import { repositoryCell } from './repositoryCell.js';
+import { repositoryCell, type RepositoryCell } from './repositoryCell.js';
 import { backfillChannelEntries, channelDatabase } from './channelSchema.js';
 
 export interface Channel {
@@ -36,6 +37,17 @@ interface EntryRow {
 
 let configuration: { db: unknown; signature: string; traceId: number; threadRowId: number } | undefined;
 
+function physicalAliasKey(cell: RepositoryCell, known?: string): string {
+  if (!known || known === cell.repoKey || cell.repoKey.startsWith('git:')) return cell.repoKey;
+  // path: fallback에는 삭제/접근 실패도 포함된다. 비Git임이 확인된 경로만 기존 alias를 교정한다.
+  const probe = spawnSync('git', ['-C', cell.worktreePath, 'rev-parse', '--git-common-dir'], {
+    encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024,
+    env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return probe.status === 128 && probe.stderr?.startsWith('fatal: not a git repository (or any ')
+    ? cell.repoKey : known;
+}
+
 function registerHistoricalChannel(db: ReturnType<typeof channelDatabase>, repository: string, explicitKey?: string): boolean {
   const path = expandPath(repository);
   const cell = isAbsolute(path) ? repositoryCell(path) : undefined;
@@ -43,8 +55,8 @@ function registerHistoricalChannel(db: ReturnType<typeof channelDatabase>, repos
   const explicit = explicitKey ? db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(explicitKey) as { repo_key: string } | undefined : undefined;
   const explicitCell = explicitKey && isAbsolute(expandPath(explicitKey)) ? repositoryCell(expandPath(explicitKey)) : undefined;
   // opaque 이벤트 키는 경로 alias의 소유권을 바꾸지 않는다. Git 공통 경로는 실제 cell로 확인한다.
-  const physicalKey = cell ? cell.repoKey.startsWith('git:') ? cell.repoKey : known?.repo_key ?? cell.repoKey : repository;
-  const explicitPathKey = explicitCell ? explicitCell.repoKey.startsWith('git:') ? explicitCell.repoKey : explicit?.repo_key ?? explicitCell.repoKey : undefined;
+  const physicalKey = cell ? physicalAliasKey(cell, known?.repo_key) : repository;
+  const explicitPathKey = explicitCell ? physicalAliasKey(explicitCell, explicit?.repo_key) : undefined;
   const key = explicitPathKey ?? explicitKey ?? physicalKey;
   let changed = false;
   const aliases: Array<[string, string]> = [repository, ...(cell ? [path, cell.worktreePath, cell.repositoryPath] : [])].map((alias) => [alias, physicalKey]);
@@ -73,7 +85,10 @@ export function syncChannels(paths: readonly string[]): Channel[] {
       let aliasesChanged = configurationChanged;
       for (const [index, cell] of cells.entries()) {
         for (const alias of [expandPath(paths[index]), cell.worktreePath, cell.repositoryPath]) {
-          db.prepare('INSERT OR IGNORE INTO coordination_channel_aliases VALUES (?,?)').run(alias, cell.repoKey);
+          const known = db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(alias) as { repo_key: string } | undefined;
+          db.prepare(`INSERT INTO coordination_channel_aliases VALUES (?,?) ON CONFLICT(repository)
+            DO UPDATE SET repo_key=excluded.repo_key WHERE repo_key!=excluded.repo_key`)
+            .run(alias, physicalAliasKey(cell, known?.repo_key));
         }
       }
       // 새 기록의 경로만 확인한다. 실행 중 생긴 sibling도 재시작 없이 같은 채널로 묶는다.

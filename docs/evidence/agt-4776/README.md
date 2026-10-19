@@ -17,6 +17,7 @@ Captures await the operator's visual approval; automated checks do not grant it.
 - [Real provider receipts](live-receipts.json): coordinator response and exact task/actor/delivery reply, independently read back from canonical Threads. This is isolated native-provider proof, not production scheduler/deployment proof.
 - [Legacy repair readback](legacy-repair.json): the independent review's original failed database, repaired with original thread/message IDs and projection seq intact; exact delivery reply and resolution verified. Regression tests also assert the original repository string and read position remain intact.
 - [Incremental alias repair](alias-repair.json): independent normal-refresh readback of the opaque-first failure database; original IDs/seq/read position, opaque separation, shared-correlation answer scope and readonly configuration verified. Independent verdict APPROVE, separate from CI and visual approval.
+- [Non-Git alias repair](nongit-repair.json): independent original-failure readback and configuration transition without new records; physical answers return 202, opaque questions stay separate, missing archived aliases and original IDs/seq/read positions remain intact. Independent verdict APPROVE.
 - [Scale HTTP measurements](scale-http.json): 25 samples at 10/100 and 100/1,000. RSS includes the complete instrumented Node process.
 - [UI performance](ui-performance.json): five contexts at each fixture scale. This is read-only fixture rendering, not a live fleet.
 

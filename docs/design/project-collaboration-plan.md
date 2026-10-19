@@ -166,7 +166,7 @@ from their original trace/thread sources, preserving both opaque rows and origin
 IDs/seq. Both regressions and the related five suites passed (115 tests); lint,
 typecheck and build passed with the same 12 existing warnings. Native coordinator
 and exact task-delivery receipts passed again. With concurrent checks on the host,
-the final 25-sample fixture run reported query p95 18.01/140.32ms and HTTP p95
+that 25-sample fixture run reported query p95 18.01/140.32ms and HTTP p95
 25.17/82.68ms, initialization 146/1,021ms and total process RSS 290/309 MiB.
 These measurements and the earlier samples do not establish production latency.
 The independent reviewer reopened the opaque-first failure DB with a normal
@@ -174,3 +174,23 @@ refresh and approved its scope: original seq 1/3, raw source fields and readSeq 
 remained unchanged, path/opaque sources separated, a new Thread increased unread
 by one, and cross-project question/Threads and readonly checks passed. The
 sanitized [receipt](../evidence/agt-4776/alias-repair.json) records that result.
+
+The working-tree review at 02931fb returned APPROVE, but a further independent
+non-Git migration probe found old opaque contamination survived normal refresh
+and even explicit configuration, leaving a canonical question answer at HTTP 409.
+Two new regression checks failed before repair. Physical path aliases now use a
+bounded Git probe only when a fallback cell conflicts with a known alias: confirmed
+non-Git directories can be corrected; missing, inaccessible or other failed
+lookups preserve their known archived identity. Configuration uses conditional
+upserts instead of ignoring old aliases. Original opaque event identities and
+source rows remain intact. All five related suites passed (118 tests), including
+the missing-worktree preservation check; lint/typecheck/build passed, and the two
+browser HTTP proof and real native coordinator/task receipts passed again.
+The independent reviewer reopened its original non-Git failure DB, verified normal
+refresh and configuration with unchanged trace/thread high-water marks, received
+HTTP 202 for both physical-project answers while opaque questions stayed open,
+and confirmed missing archived aliases, original seq 1/2 and readSeq 0 were
+preserved. Its verdict is APPROVE; [receipt](../evidence/agt-4776/nongit-repair.json).
+The last 25-sample fixture run after this change reported query p95 3.11/15.80ms
+and HTTP p95 6.06/14.60ms, initialization 68/543ms and total process RSS
+279/300 MiB. Earlier busier-host samples remain recorded above.

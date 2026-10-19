@@ -1,5 +1,5 @@
 {
-  "verifiedAt": "2026-10-19T09:20:59.957Z",
+  "verifiedAt": "2026-10-19T10:49:45.802Z",
   "readPosition": {
     "readSeq": 50,
     "unread": 20,
@@ -9,15 +9,15 @@
   "bodyLimit": 413,
   "responseLost": true,
   "receipt": {
-    "id": "c91ef3d4-4815-4b99-8638-356345a914e9",
-    "repoKey": "path:54b0abe958b9b19b01e988f7da75c99d",
-    "threadId": "7990706c-29e6-42c3-8b34-01ef23647f91",
-    "messageId": "17b59a9c-3850-4a09-aeec-62ac3fc0f4a1",
+    "id": "d78e0beb-77e2-42e7-8868-fa69ca5f0e3d",
+    "repoKey": "path:cf62769a38a3d6c831a53f6a3e8e935f",
+    "threadId": "5c909bde-78dd-49cd-8868-43b9d2a1ec0d",
+    "messageId": "b8e1f76b-50ae-4b27-a5dc-07a94d4c7cb6",
     "status": "queued",
-    "createdAt": 1792401659940
+    "createdAt": 1792406985782
   },
   "rows": {
-    "repoKey": "path:54b0abe958b9b19b01e988f7da75c99d",
+    "repoKey": "path:cf62769a38a3d6c831a53f6a3e8e935f",
     "name": "validation-project",
     "configured": true,
     "readSeq": 50,
