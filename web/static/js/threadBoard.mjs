@@ -101,7 +101,7 @@ export function renderThreadList(doc, holder, threads, selectedId, onSelect) {
     const meta = text(
       doc,
       'div',
-      `${repoName(thread.repository)} · ${tasks} · ${thread.messageCount} messages · ${thread.participantCount} participants · ${time(thread.updatedAt)}`,
+      `${repoName(thread.repository)} · ${tasks} · ${count(thread.messageCount, 'message')} · ${count(thread.participantCount, 'participant')} · ${time(thread.updatedAt)}`,
       'meta',
     );
     meta.title = thread.repository ?? '';
@@ -395,4 +395,9 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
       if (timer) clearInterval(timer);
     },
   };
+}
+
+function count(n, noun) {
+  const value = Number(n) || 0;
+  return `${value} ${noun}${value === 1 ? '' : 's'}`;
 }

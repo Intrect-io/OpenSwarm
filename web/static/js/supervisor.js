@@ -170,11 +170,26 @@ async function fetchSvcStatus() {
     const status = data.status || "unknown";
     el.textContent = status;
     el.className = "svc-status " + (status === "active" ? "active" : "inactive");
+    syncServiceButtons(status);
   } catch {
     const el = document.getElementById("svc-status");
     el.textContent = "unknown";
     el.className = "svc-status inactive";
+    syncServiceButtons("unknown");
   }
+}
+
+// Stop/restart act on the service manager; when it cannot even report the
+// service's state, the buttons would act blind.
+function syncServiceButtons(status) {
+  const unknown = status === "unknown";
+  ["svc-stop-btn", "svc-restart-btn"].forEach(function(id) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.disabled = unknown;
+    if (unknown) btn.title = "The service manager did not report this daemon's state";
+    else btn.removeAttribute("title");
+  });
 }
 
 // ---- Stuck/Failed Issues ----
@@ -1584,11 +1599,13 @@ function renderCoordination() {
   Object.values(agents).forEach(function(role) { roles[role] = (roles[role] || 0) + 1; });
   var roleLine = Object.keys(roles).sort().map(function(role) { return roles[role] + " " + escapeHtml(role); }).join(" · ");
   el.innerHTML =
-    '<div style="padding:8px 6px;font-size:var(--text-xs)">' +
-    '<div style="color:var(--fg-primary)"><b style="font-size:var(--text-base)">' + Object.keys(agents).length + '</b> agents placed <span style="color:var(--fg-muted)">(' + roleLine + ')</span></div>' +
-    // Questions are the one thing here that waits on the operator: needs-yellow.
-    '<div style="margin-top:4px;color:' + (questions > 0 ? 'var(--needs)' : 'var(--fg-muted)') + '">' +
-      plural(questions, 'question') + ' waiting on you · ' + plural(pending.length, 'open exchange') + '</div>' +
+    '<div class="coord-summary">' +
+    '<div class="coord-placed"><b>' + Object.keys(agents).length + '</b> agents placed <span class="muted">(' + roleLine + ')</span></div>' +
+    // Questions are the one thing here that waits on the operator: a yellow
+    // fill, never yellow text (Yellow Means You).
+    '<div class="coord-pending">' +
+      (questions > 0 ? '<span class="needs-tag">' + plural(questions, 'question') + ' waiting on you</span>' : '0 questions waiting on you') +
+      ' · ' + plural(pending.length, 'open exchange') + '</div>' +
     '</div>';
 }
 
@@ -1860,7 +1877,31 @@ async function fetchShellStatus() {
     if (!res.ok) return;
     shellStatus = await res.json();
     renderNotice();
+    syncDaemonControls();
   } catch {}
+}
+
+// A dashboard with no daemon runner attached can serve pages but cannot run a
+// heartbeat, review PRs or switch providers: those controls would only answer
+// with an error, so they are disabled and say why (step 10).
+const DAEMON_CONTROL_IDS = ["hb-btn", "pr-proc-btn", "provider-select", "reasoning-effort"];
+const NO_DAEMON_NOTE = "No daemon runner is attached to this dashboard";
+
+function syncDaemonControls() {
+  const detached = shellStatus && shellStatus.daemon && shellStatus.daemon.state === "dashboard-only";
+  DAEMON_CONTROL_IDS.forEach(function(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (detached) {
+      el.disabled = true;
+      el.title = NO_DAEMON_NOTE;
+      el.dataset.detached = "true";
+    } else if (el.dataset.detached) {
+      el.disabled = false;
+      el.removeAttribute("title");
+      delete el.dataset.detached;
+    }
+  });
 }
 
 function openQuestions() {

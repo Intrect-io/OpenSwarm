@@ -302,3 +302,40 @@ describe('Supervisor notice band', () => {
     expect(links).toEqual(['https://linear.app/x/AX-1']);
   });
 });
+
+describe('Supervisor controls tell the truth about the daemon', () => {
+  const ROUTINE = ['hb-btn', 'pr-proc-btn', 'provider-select', 'reasoning-effort'];
+
+  it('disables the routine controls, and says why, when no daemon runner is attached', async () => {
+    const page = load((url) => (url === '/api/shell-status'
+      ? { status: 200, body: { daemon: { state: 'dashboard-only', reason: 'No daemon runner is attached' }, needsYou: { questions: 0, parked: 0, total: 0 } } }
+      : undefined));
+    await page.settle();
+    for (const id of ROUTINE) {
+      const el = page.doc.getElementById(id) as HTMLButtonElement;
+      expect(el.disabled, id).toBe(true);
+      expect(el.title, id).toMatch(/No daemon runner/);
+    }
+  });
+
+  it('leaves them usable when a daemon is running', async () => {
+    const page = load((url) => (url === '/api/shell-status'
+      ? { status: 200, body: { daemon: { state: 'running', reason: null }, needsYou: { questions: 0, parked: 0, total: 0 } } }
+      : url === '/api/service/status' ? { status: 200, body: { status: 'active' } } : undefined));
+    await page.settle();
+    page.fire(3000);
+    await page.settle();
+    for (const id of [...ROUTINE, 'svc-stop-btn', 'svc-restart-btn']) {
+      expect((page.doc.getElementById(id) as HTMLButtonElement).disabled, id).toBe(false);
+    }
+  });
+
+  it('does not offer stop or restart when the service manager cannot report the state', async () => {
+    const page = load((url) => (url === '/api/service/status' ? { status: 200, body: {} } : undefined));
+    await page.settle();
+    page.fire(3000);
+    await page.settle();
+    expect((page.doc.getElementById('svc-stop-btn') as HTMLButtonElement).disabled).toBe(true);
+    expect((page.doc.getElementById('svc-restart-btn') as HTMLButtonElement).disabled).toBe(true);
+  });
+});

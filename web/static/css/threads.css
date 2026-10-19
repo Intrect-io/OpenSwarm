@@ -49,7 +49,8 @@ body.page-threads {
 }
 .thread-card:hover { background: var(--bg-hover); }
 .thread-card.selected { background: var(--bg-active); }
-.subject { display: flex; gap: var(--space-2); align-items: center; font-weight: 600; }
+.subject { display: flex; gap: var(--space-2); align-items: baseline; font-weight: 600; }
+.subject .badge { margin-left: auto; flex-shrink: 0; }
 .thread-card .badge { font-size: var(--text-xs); }
 .badge.open { color: var(--success); border-color: var(--success); background: var(--success-subtle); }
 .badge.resolved { color: var(--fg-muted); }

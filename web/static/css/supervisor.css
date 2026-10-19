@@ -638,3 +638,10 @@ tr.is-failed .c-title { text-decoration: line-through; text-decoration-color: va
   .ref-foot { display: flex; align-items: center; }
   .unpin, .scan-path-remove { min-width: 44px; min-height: 44px; }
 }
+
+/* Coordination summary under the agent chat. */
+.coord-summary { padding: var(--space-2) var(--space-1); font-size: var(--text-xs); }
+.coord-placed { color: var(--fg-primary); }
+.coord-placed b { font-size: var(--text-base); font-variant-numeric: tabular-nums; }
+.coord-pending { margin-top: var(--space-1); color: var(--fg-muted); }
+.needs-tag { padding: 1px var(--space-1); background: var(--needs); color: var(--needs-ink); font-weight: 600; }
