@@ -306,16 +306,23 @@ describe('Supervisor notice band', () => {
 describe('Supervisor controls tell the truth about the daemon', () => {
   const ROUTINE = ['hb-btn', 'pr-proc-btn', 'provider-select', 'reasoning-effort'];
 
-  it('disables the routine controls, and says why, when no daemon runner is attached', async () => {
+  it('disables only runner actions while keeping persistent settings usable without a runner', async () => {
     const page = load((url) => (url === '/api/shell-status'
       ? { status: 200, body: { daemon: { state: 'dashboard-only', reason: 'No daemon runner is attached' }, needsYou: { questions: 0, parked: 0, total: 0 } } }
       : undefined));
     await page.settle();
-    for (const id of ROUTINE) {
+    for (const id of ['hb-btn', 'pr-proc-btn']) {
       const el = page.doc.getElementById(id) as HTMLButtonElement;
       expect(el.disabled, id).toBe(true);
       expect(el.title, id).toMatch(/No daemon runner/);
     }
+    for (const id of ['provider-select', 'reasoning-effort']) {
+      expect((page.doc.getElementById(id) as HTMLSelectElement).disabled, id).toBe(false);
+    }
+    await call(page, 'applyProvider', 'openrouter');
+    await call(page, 'setReasoningEffort', 'high');
+    expect(posts(page, '/api/provider')).toHaveLength(1);
+    expect(posts(page, '/api/reasoning-effort')).toHaveLength(1);
   });
 
   it('leaves them usable when a daemon is running', async () => {
@@ -330,12 +337,19 @@ describe('Supervisor controls tell the truth about the daemon', () => {
     }
   });
 
-  it('does not offer stop or restart when the service manager cannot report the state', async () => {
-    const page = load((url) => (url === '/api/service/status' ? { status: 200, body: {} } : undefined));
+  it('keeps recovery available when unknown status could mean an inactive service', async () => {
+    const page = load((url) => (url === '/api/service/status' ? { status: 200, body: { status: 'unknown' } } : undefined));
     await page.settle();
     page.fire(3000);
     await page.settle();
-    expect((page.doc.getElementById('svc-stop-btn') as HTMLButtonElement).disabled).toBe(true);
-    expect((page.doc.getElementById('svc-restart-btn') as HTMLButtonElement).disabled).toBe(true);
+    expect((page.doc.getElementById('svc-stop-btn') as HTMLButtonElement).disabled).toBe(false);
+    const restart = page.doc.getElementById('svc-restart-btn') as HTMLButtonElement;
+    expect(restart.disabled).toBe(false);
+    restart.click();
+    expect(posts(page, '/api/service/restart')).toHaveLength(0);
+    restart.click();
+    await page.settle();
+    expect(posts(page, '/api/service/restart')).toHaveLength(1);
+    expect(restart.textContent).toBe('Restart sent');
   });
 });

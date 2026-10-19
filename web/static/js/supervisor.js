@@ -179,15 +179,14 @@ async function fetchSvcStatus() {
   }
 }
 
-// Stop/restart act on the service manager; when it cannot even report the
-// service's state, the buttons would act blind.
+// A nonzero systemctl is-active exit also covers inactive/failed services.
+// Unknown status must not block the recovery action.
 function syncServiceButtons(status) {
   const unknown = status === "unknown";
   ["svc-stop-btn", "svc-restart-btn"].forEach(function(id) {
     const btn = document.getElementById(id);
     if (!btn) return;
-    btn.disabled = unknown;
-    if (unknown) btn.title = "The service manager did not report this daemon's state";
+    if (unknown) btn.title = "Service status unavailable; you can still attempt recovery";
     else btn.removeAttribute("title");
   });
 }
@@ -1882,9 +1881,9 @@ async function fetchShellStatus() {
 }
 
 // A dashboard with no daemon runner attached can serve pages but cannot run a
-// heartbeat, review PRs or switch providers: those controls would only answer
-// with an error, so they are disabled and say why (step 10).
-const DAEMON_CONTROL_IDS = ["hb-btn", "pr-proc-btn", "provider-select", "reasoning-effort"];
+// heartbeat or review PRs: those controls would only answer with an error.
+// Provider and thinking settings persist without a runner and remain usable.
+const DAEMON_CONTROL_IDS = ["hb-btn", "pr-proc-btn"];
 const NO_DAEMON_NOTE = "No daemon runner is attached to this dashboard";
 
 function syncDaemonControls() {
