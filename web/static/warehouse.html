@@ -15,6 +15,17 @@
   </header>
 
   <main class="warehouse-main">
+    <!-- First run: shown by warehouse.mjs when the folder does not exist. -->
+    <section id="setup" class="setup" aria-labelledby="setup-title" hidden>
+      <h2 id="setup-title">Set up the warehouse</h2>
+      <p>The warehouse is a folder you share with agents: they read it, you upload to it here. This daemon looks for it at <code id="setup-folder">/warehouse</code>, which does not exist yet.</p>
+      <ol>
+        <li>Create that folder, or choose another one with <code>OPENSWARM_WAREHOUSE_ROOT</code> in the daemon's environment.</li>
+        <li>To let this page upload while agents keep read-only access, set <code>OPENSWARM_WAREHOUSE_WRITE_ROOT</code> to the same folder seen from the daemon's side (in Docker, the writable mount).</li>
+        <li>Restart the daemon, then refresh this page.</li>
+      </ol>
+    </section>
+
     <section class="browser" aria-label="Warehouse files">
       <div class="toolbar">
         <button id="up" type="button" class="btn btn-secondary btn-sm">Parent folder</button>

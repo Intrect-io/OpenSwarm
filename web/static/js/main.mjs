@@ -17,7 +17,7 @@ import { Nav } from './nav.mjs';
 import { resolveSelection } from './sessionSelection.mjs';
 import { mountShell } from './shell.mjs';
 
-mountShell(document);
+const shell = mountShell(document);
 
 const statusDot = document.querySelector('#daemon-status .dot');
 const statusLabel = document.querySelector('#daemon-status .label');
@@ -169,6 +169,8 @@ const board = new IssueBoard({
     return result;
   },
 });
+
+shell.ready.then((outcome) => board.setTracker(outcome?.status?.tracker));
 
 const picker = new RepoPicker(document.getElementById('repo-picker'), {
   onSelect: (path) => {
