@@ -1,8 +1,11 @@
-// The Supervisor page (served at `/`), moved verbatim out of the
-// server-rendered src/support/dashboardHtml.ts. It stays a classic script for
-// now because its markup calls these functions from inline `onclick`
-// attributes, which is also why the linter sees them as unused; the
-// Departure Board redesign replaces both with modules and listeners.
+// The Supervisor page (served at `/`): the Departure Board.
+//
+// Top to bottom it answers, in order, what an operator glancing at a phone
+// needs: what waits on me (the notice band), how the fleet is doing (counts),
+// what I can do (routine controls apart from the daemon service), and what is
+// running right now (the board). References sit beside it, each naming its
+// source. It is a classic script because its markup calls these functions from
+// inline `onclick` attributes, which is also why the linter sees them as unused.
 /* eslint-disable no-unused-vars */
 
 const MAX_LOG = 200;
@@ -22,19 +25,31 @@ const taskProjectMap = new Map();
 const taskTitleMap = new Map();
 // taskId → start timestamp for elapsed time
 const taskStartMap = new Map();
+// The board: the scheduler's running/queued snapshot plus runs that ended
+// while this page was open (or are still in the event buffer it replays).
+let boardTasks = { running: [], queued: [] };
+const endedRuns = [];
+const MAX_ENDED = 8;
+// Same source as the shell status line, so the two never disagree.
+let shellStatus = null;
+let streamLive = false;
+
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
 
 // ---- SSE ----
 function connectSSE(skipReplay) {
   const url = skipReplay ? "/api/events?skipReplay=1" : "/api/events";
   const es = new EventSource(url);
-  const statusEl = document.getElementById("sse-status");
-  es.onopen = () => { statusEl.textContent = "LIVE"; statusEl.className = "connected"; };
+  es.onopen = () => { streamLive = true; renderBoardSource(); };
   es.onmessage = e => {
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
     handleEvent(ev);
   };
   es.onerror = () => {
-    statusEl.textContent = "RECONNECTING"; statusEl.className = "disconnected";
+    streamLive = false; renderBoardSource();
     es.close(); setTimeout(function() { connectSSE(false); }, 3000);
   };
 }
@@ -46,20 +61,24 @@ function handleEvent(ev) {
       taskProjectMap.set(ev.data.taskId, ev.data.projectPath);
       taskTitleMap.set(ev.data.taskId, { title: ev.data.title, issueIdentifier: ev.data.issueIdentifier });
       updateProjectTask(ev.data.projectPath, ev.data.taskId, ev.data.title, ev.data.priority, "queued");
+      scheduleTasksRefresh();
       break;
     case "task:started": {
       const p = taskProjectMap.get(ev.data.taskId);
       if (ev.data.title) taskTitleMap.set(ev.data.taskId, { title: ev.data.title, issueIdentifier: ev.data.issueIdentifier });
       taskStartMap.set(ev.data.taskId, Date.now());
       if (p) updateProjectTask(p, ev.data.taskId, ev.data.title, null, "running");
+      scheduleTasksRefresh();
       break;
     }
     case "task:completed": {
       const p = taskProjectMap.get(ev.data.taskId);
       if (p) removeProjectTask(p, ev.data.taskId);
+      recordEndedRun(ev.data);
+      scheduleTasksRefresh();
       break;
     }
-    case "pipeline:stage": addStageRow(ev.data); break;
+    case "pipeline:stage": addStageRow(ev.data); renderBoard(); break;
     case "coordination:event": addCoordinationEvent(ev.data); break;
     case "pipeline:fanout":
       addStageRow({
@@ -84,7 +103,7 @@ function handleEvent(ev) {
     }
     case "task:cost": {
       totalCostUsd += ev.data.cost?.costUsd ?? 0;
-      document.getElementById("stat-cost").textContent = "$" + totalCostUsd.toFixed(2);
+      setText("stat-cost", "$" + totalCostUsd.toFixed(2));
       break;
     }
     case "chat:agent": appendChatMsg("agent", ev.data.text, null, ev.data.ts); break;
@@ -123,34 +142,22 @@ function updateStats(data) {
     return model.length > 18 ? model.slice(0, 15) + "..." : model;
   }
 
-  document.getElementById("stat-running").textContent = data.runningTasks ?? 0;
-  document.getElementById("stat-queued").textContent = data.queuedTasks ?? 0;
-  document.getElementById("stat-completed").textContent = data.completedToday ?? 0;
-  const defaultAdapter = data.adapters?.defaultAdapter ?? "-";
-  const workerAdapter = data.adapters?.worker?.adapter ?? "-";
-  const workerModel = shortModel(data.adapters?.worker?.model);
-  const reviewerAdapter = data.adapters?.reviewer?.adapter ?? "-";
-  const reviewerModel = shortModel(data.adapters?.reviewer?.model);
-  const chatModel = workerModel || "-";
-  document.getElementById("stat-adapter").textContent = defaultAdapter;
-  document.getElementById("stat-pair-adapters").textContent =
-    "W " + workerAdapter + ":" + workerModel + " / R " + reviewerAdapter + ":" + reviewerModel;
-  document.getElementById("chat-status").textContent = defaultAdapter + ":" + chatModel;
-  document.querySelectorAll(".provider-btn").forEach(btn => {
-    const name = btn.id.slice("provider-".length);
-    btn.classList.toggle("active", defaultAdapter === name);
-  });
-  if (data.uptime != null) {
-    const s = Math.floor(data.uptime / 1000);
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
-    document.getElementById("stat-uptime").textContent =
-      (h ? h + "h " : "") + (m ? m + "m " : "") + ss + "s";
-  }
-  // Daily pace (informational count of tasks completed today; not an enforced cap)
-  const paceEl = document.getElementById("stat-pace");
-  if (paceEl && data.dailyPace) {
-    paceEl.textContent = data.dailyPace.completedToday + " today";
-    paceEl.className = "stat-val";
+  setText("stat-running", data.runningTasks ?? 0);
+  setText("stat-queued", data.queuedTasks ?? 0);
+  setText("stat-completed", data.completedToday ?? 0);
+  const adapters = data.adapters || {};
+  const defaultAdapter = adapters.defaultAdapter ?? "";
+  // Say which model each role runs, in words: "Pair W/R" meant nothing.
+  const role = (name, r) => r && r.adapter
+    ? name + " " + shortModel(r.model) + " (" + r.adapter + ")"
+    : "";
+  setText("fleet-models", [role("Worker", adapters.worker), role("Reviewer", adapters.reviewer)].filter(Boolean).join(" · "));
+  setText("chat-status", defaultAdapter ? "supervisor agent · " + defaultAdapter : "supervisor agent");
+  const select = document.getElementById("provider-select");
+  if (select && defaultAdapter) {
+    select.dataset.applied = defaultAdapter;
+    // Do not yank a staged choice out from under the operator.
+    if (document.getElementById("provider-confirm").hidden) select.value = defaultAdapter;
   }
 }
 
@@ -174,6 +181,8 @@ async function fetchSvcStatus() {
 async function fetchStuckIssues() {
   try {
     const res = await fetch("/api/stuck-issues");
+    // A 500 carries { error }, which would otherwise read as "nothing stuck".
+    if (!res.ok) throw new Error((await failureOf(res)) || "HTTP " + res.status);
     const data = await res.json();
     const list = document.getElementById("stuck-list");
     const badge = document.getElementById("stuck-badge");
@@ -183,54 +192,29 @@ async function fetchStuckIssues() {
     const total = totalStuck + totalFailed;
 
     badge.textContent = total;
-    badge.style.color = total > 0 ? "var(--danger)" : "var(--fg-muted)";
+    stuckData = data;
+    renderNotice();
+    if (total === 0) { list.innerHTML = ""; return; }
 
-    if (total === 0) {
-      list.innerHTML = '<div style="color: var(--accent); padding: 4px;">✓ All issues healthy</div>';
-      return;
-    }
-
-    let html = '';
-
-    // Stuck issues (In Progress for >7 days)
-    if (totalStuck > 0) {
-      html += '<div style="color: var(--warning); font-weight: bold; margin-bottom: 4px; font-size:11px; text-transform: uppercase;">⏱ Stuck (' + totalStuck + ')</div>';
-      data.stuckIssues.forEach(issue => {
-        const priorityColor = issue.priority === 1 ? 'var(--danger)' : issue.priority === 2 ? 'var(--warning)' : 'var(--fg-muted)';
-        html += '<div style="margin-bottom: 6px; padding: 4px; border-left: 2px solid ' + priorityColor + '; background: rgba(255, 170, 0, 0.05);">';
-        const title = String(issue.title || '');
-        const issueTitle = escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '');
-        html += '<div style="color: var(--fg-primary); font-size:12px; margin-bottom: 2px;">' + issueTitle + '</div>';
-        html += '<div style="color: var(--warning); font-size:11px;">' + escapeHtml(issue.reason) + '</div>';
-        if (issue.project?.name) {
-          html += '<div style="color: var(--fg-muted); font-size:11px; margin-top: 2px;">📁 ' + escapeHtml(issue.project.name) + '</div>';
-        }
-        html += '</div>';
-      });
-    }
-
-    // Failed issues (retry, failed, blocked labels)
-    if (totalFailed > 0) {
-      if (totalStuck > 0) html += '<div style="height: 8px;"></div>';
-      html += '<div style="color: var(--danger); font-weight: bold; margin-bottom: 4px; font-size:11px; text-transform: uppercase;">✖ Failed (' + totalFailed + ')</div>';
-      data.failedIssues.forEach(issue => {
-        const priorityColor = issue.priority === 1 ? 'var(--danger)' : issue.priority === 2 ? 'var(--warning)' : 'var(--fg-muted)';
-        html += '<div style="margin-bottom: 6px; padding: 4px; border-left: 2px solid ' + priorityColor + '; background: rgba(255, 51, 51, 0.05);">';
-        const title = String(issue.title || '');
-        const issueTitle = escapeHtml(issue.identifier) + ': ' + escapeHtml(title.substring(0, 40)) + (title.length > 40 ? '...' : '');
-        html += '<div style="color: var(--fg-primary); font-size:12px; margin-bottom: 2px;">' + issueTitle + '</div>';
-        html += '<div style="color: var(--danger); font-size:11px;">' + escapeHtml(issue.reason) + '</div>';
-        if (issue.project?.name) {
-          html += '<div style="color: var(--fg-muted); font-size:11px; margin-top: 2px;">📁 ' + escapeHtml(issue.project.name) + '</div>';
-        }
-        html += '</div>';
-      });
-    }
-
-    list.innerHTML = html;
+    const row = function(issue, kind) {
+      const title = String(issue.title || "");
+      return "<div class=\"nrow\">" +
+        "<span class=\"tag " + (kind === "failed" ? "tag-f" : "tag-s") + "\">" + (kind === "failed" ? "Failed" : "Stuck") + "</span>" +
+        "<span class=\"mono\">" + escapeHtml(issue.identifier) + "</span>" +
+        "<span class=\"nrow-repo\">" + escapeHtml(issue.project && issue.project.name || "") + "</span>" +
+        "<span class=\"msg\" title=\"" + escapeAttr(title) + "\">" + escapeHtml(title) + "</span>" +
+        "<span class=\"when\">" + escapeHtml(issue.reason || "") + "</span>" +
+        "<span class=\"acts\">" + (/^https?:\/\//.test(issue.url || "") ? "<a class=\"nb-outline\" href=\"" + escapeAttr(issue.url) + "\" target=\"_blank\" rel=\"noopener\">Open issue</a>" : "") + "</span>" +
+      "</div>";
+    };
+    list.innerHTML = (data.failedIssues || []).map(function(i) { return row(i, "failed"); }).join("")
+      + (data.stuckIssues || []).map(function(i) { return row(i, "stuck"); }).join("");
   } catch (err) {
     console.error("Failed to fetch stuck issues:", err);
-    document.getElementById("stuck-list").innerHTML = '<div style="color: var(--danger);">Error loading</div>';
+    const list = document.getElementById("stuck-list");
+    list.innerHTML = "<div class=\"nrow\"><span class=\"tag tag-f\">Error</span><span class=\"msg nrow-wide\">The tracker did not answer, so stuck and failed issues are unknown.</span></div>";
+    document.getElementById("notice-tracker").hidden = false;
+    document.getElementById("notice").hidden = false;
   }
 }
 
@@ -244,14 +228,11 @@ async function fetchPRProcessorStatus() {
 
     if (!data) {
       body.innerHTML = '<div style="color: var(--fg-muted);">Not configured</div>';
-      badge.textContent = "OFF";
-      badge.style.color = "var(--fg-muted)";
+      badge.textContent = "config · off";
       return;
     }
 
-    const status = data.processing ? "RUNNING" : "IDLE";
-    badge.textContent = status;
-    badge.style.color = data.processing ? "var(--accent)" : "var(--info)";
+    badge.textContent = "config · " + (data.processing ? "running" : "idle");
 
     const formatTime = (ts) => {
       if (!ts) return "N/A";
@@ -364,7 +345,7 @@ async function svcAction(action) {
 // run that never started (one already in flight, a dropped stream) left
 // the button on "Running…" with nothing to say it was stuck.
 const HEARTBEAT_START_TIMEOUT_MS = 15000;
-const HEARTBEAT_LABEL = "▶ Heartbeat";
+const HEARTBEAT_LABEL = "Heartbeat";
 let heartbeatStartTimer = null;
 
 function resetHeartbeatButton() {
@@ -378,7 +359,7 @@ function resetHeartbeatButton() {
 
 async function triggerHeartbeat() {
   const btn = document.getElementById("hb-btn");
-  btn.disabled = true; btn.textContent = "⟳ Running…";
+  btn.disabled = true; btn.textContent = "Starting…";
   addLogLine({ taskId: "system", stage: "manual", line: "Heartbeat triggered by user" });
   let failure = null;
   try {
@@ -402,16 +383,29 @@ async function triggerHeartbeat() {
   }, HEARTBEAT_START_TIMEOUT_MS);
 }
 
-// Switching the default provider re-routes every agent, so it takes the
-// same two presses as Stop: the first says what the second will do.
-function switchProvider(provider) {
-  const btn = document.getElementById("provider-" + provider);
-  if (!btn || btn.classList.contains("active")) return;
-  document.querySelectorAll(".provider-btn.is-armed").forEach(function(other) {
-    if (other !== btn) armButton(other);
-  });
-  if (armButton(btn, "Switch fleet?")) return;
-  applyProvider(provider);
+// Switching the default provider re-routes every agent, so, like Thinking,
+// picking one only stages it; a confirm button beside the select applies it.
+let providerStageTimer = null;
+function stageProvider(value) {
+  const select = document.getElementById("provider-select");
+  const confirmBtn = document.getElementById("provider-confirm");
+  clearTimeout(providerStageTimer);
+  if (value === (select.dataset.applied || "")) {
+    confirmBtn.hidden = true;
+    return;
+  }
+  confirmBtn.textContent = "Switch fleet to " + select.options[select.selectedIndex].textContent + "?";
+  confirmBtn.hidden = false;
+  providerStageTimer = setTimeout(function() {
+    confirmBtn.hidden = true;
+    select.value = select.dataset.applied || "";
+  }, 6000);
+}
+
+function confirmProvider() {
+  clearTimeout(providerStageTimer);
+  document.getElementById("provider-confirm").hidden = true;
+  applyProvider(document.getElementById("provider-select").value);
 }
 
 async function applyProvider(provider) {
@@ -430,6 +424,8 @@ async function applyProvider(provider) {
     updateStats(stats);
   } catch (e) {
     addLogLine({ taskId: "system", stage: "error", line: "Provider switch failed: " + e.message });
+    const select = document.getElementById("provider-select");
+    select.value = select.dataset.applied || "";
   }
 }
 
@@ -495,7 +491,7 @@ async function setReasoningEffort(value) {
 // ---- PR Processor trigger ----
 async function triggerPRProcessor() {
   const btn = document.getElementById("pr-proc-btn");
-  btn.disabled = true; btn.textContent = "⟳ Processing…";
+  btn.disabled = true; btn.textContent = "Starting…";
   addLogLine({ taskId: "system", stage: "manual", line: "PR Processor triggered by user" });
   try {
     const res = await fetch("/api/trigger-pr-processor", { method: "POST" });
@@ -506,11 +502,11 @@ async function triggerPRProcessor() {
     addLogLine({ taskId: "system", stage: "manual", line: "PR Processor started successfully" });
     setTimeout(() => {
       btn.disabled = false;
-      btn.textContent = "↻ PR review";
+      btn.textContent = "PR review";
     }, 3000);
   } catch(e) {
     addLogLine({ taskId: "system", stage: "error", line: "PR Processor failed: " + e.message });
-    btn.disabled = false; btn.textContent = "↻ PR review";
+    btn.disabled = false; btn.textContent = "PR review";
   }
 }
 
@@ -520,17 +516,17 @@ async function restartStuckIssues() {
   // Two-step, in the page: the first click says what the second will do.
   if (!btn.classList.contains("is-armed")) {
     btn.classList.add("is-armed", "btn-danger");
-    btn.textContent = "Move all to Todo?";
+    btn.textContent = "Move every one to Todo?";
     setTimeout(function() {
       if (btn.classList.contains("is-armed") && !btn.disabled) {
-        btn.classList.remove("is-armed", "btn-danger"); btn.textContent = "↻ Restart all";
+        btn.classList.remove("is-armed", "btn-danger"); btn.textContent = "Move all to Todo";
       }
     }, 6000);
     return;
   }
   btn.classList.remove("is-armed", "btn-danger");
   btn.disabled = true;
-  btn.textContent = "⟳ Processing…";
+  btn.textContent = "Moving…";
 
   try {
     const res = await fetch("/api/stuck-issues");
@@ -566,7 +562,7 @@ async function restartStuckIssues() {
   }
 
   btn.disabled = false;
-  btn.textContent = "↻ Restart all";
+  btn.textContent = "Move all to Todo";
 }
 
 // ---- Project task updates ----
@@ -621,7 +617,7 @@ function renderProjects() {
   const sumEl = document.getElementById("proj-summary");
   if (!projects.length) { el.innerHTML = "<div class=\"empty\">no repositories</div>"; return; }
   const on = projects.filter(p => p.enabled).length;
-  if (sumEl) sumEl.textContent = on + "/" + projects.length;
+  if (sumEl) sumEl.textContent = "config · " + on + " of " + projects.length + " enabled";
 
   el.innerHTML = projects.map(p => {
     // Use path as key, fall back to __n:name for unmapped projects
@@ -1496,13 +1492,13 @@ function renderMonitorsAndProcesses() {
   if (!hasMonitors && !hasProcesses) {
     el.innerHTML = "<div class=\"empty\">no monitors or processes</div>";
     var counts = [];
-    if (countEl) countEl.textContent = "";
+    if (countEl) countEl.textContent = "process table";
     return;
   }
   var parts = [];
-  if (processesData.length) parts.push(processesData.length + "p");
-  if (monitorsData.length) parts.push(monitorsData.length + "m");
-  if (countEl) countEl.textContent = parts.join(" ");
+  if (processesData.length) parts.push(processesData.length + " process" + (processesData.length === 1 ? "" : "es"));
+  if (monitorsData.length) parts.push(monitorsData.length + " monitor" + (monitorsData.length === 1 ? "" : "s"));
+  if (countEl) countEl.textContent = "process table · " + parts.join(" · ");
   var html = "";
   // Processes section
   if (hasProcesses) {
@@ -1563,7 +1559,8 @@ function renderCoordination() {
   // question at a glance — how many agents are placed and what is waiting.
   var el = document.getElementById("coordination-summary");
   var events = Array.from(coordinationById.values());
-  document.getElementById("coordination-count").textContent = events.length ? String(events.length) : "";
+  setText("coordination-count", "coordination board" + (events.length ? " · " + events.length + " events" : ""));
+  renderNotice();
   if (!events.length) { el.innerHTML = '<div class="empty">no coordination events</div>'; return; }
   var agents = {};
   var latestByCorrelation = {};
@@ -1603,7 +1600,6 @@ async function loadInitial() {
     ]);
     const stats = await statsRes.json();
     updateStats(stats);
-    document.getElementById("stat-sse").textContent = stats.sseClients ?? "-";
 
     projects = await projectsRes.json();
     renderProjects();
@@ -1645,7 +1641,6 @@ setInterval(async () => {
   try {
     const [sRes, pRes] = await Promise.all([fetch("/api/stats"), fetch("/api/projects")]);
     const stats = await sRes.json();
-    document.getElementById("stat-sse").textContent = stats.sseClients ?? "-";
     updateStats(stats);
     const fresh = await pRes.json();
     fresh.forEach(p => {
@@ -1657,20 +1652,17 @@ setInterval(async () => {
   } catch {}
 }, 60000);
 
-// ---- Mobile Tab Navigation ----
-function switchTab(idx) {
-  const cols = document.querySelectorAll(".main-grid > .col");
-  const tabs = document.querySelectorAll(".tab-bar .tab");
-  cols.forEach((c, i) => c.classList.toggle("mob-active", i === idx));
-  tabs.forEach((t, i) => t.classList.toggle("active", i === idx));
-}
-document.querySelector(".tab-bar").addEventListener("click", e => {
-  const tab = e.target.closest(".tab");
+// ---- Activity tabs: log or the raw stage events ----
+document.querySelector(".activity-tabs").addEventListener("click", function(e) {
+  const tab = e.target.closest(".activity-tab");
   if (!tab) return;
-  switchTab(parseInt(tab.dataset.tab, 10));
+  document.querySelectorAll(".activity-tab").forEach(function(t) {
+    const on = t === tab;
+    t.classList.toggle("is-active", on);
+    t.setAttribute("aria-selected", on ? "true" : "false");
+    document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+  });
 });
-// Activate first tab on load
-switchTab(0);
 
 // Knowledge graph data fetcher
 async function fetchKnowledgeData() {
@@ -1689,45 +1681,233 @@ async function fetchKnowledgeData() {
   } catch {}
 }
 
-/** Short labels for the provider toggle; registry names stay on the id. */
-const PROVIDER_BUTTON_LABELS = {
-  claude: "Claude",
-  codex: "Codex",
-  "codex-responses": "Codex-R",
-  gpt: "GPT",
-  openrouter: "OpenRouter",
-  atlascloud: "Atlas",
-  lmstudio: "LM Studio",
-  "ollama-cloud": "Ollama Cloud",
-  local: "Local",
-};
-
 /**
- * Build the provider toggle from the live registry so it cannot drift from
- * isKnownAdapter / POST /api/provider validation. (INT-3284)
+ * Fill the provider select from the live registry so it cannot drift from
+ * isKnownAdapter / POST /api/provider validation (INT-3284). The registry
+ * name is the label: "Codex-R" was a nickname nobody could look up.
  */
-async function renderProviderButtons() {
-  const group = document.getElementById("provider-toggle");
-  if (!group) return;
+async function renderProviderOptions() {
+  const select = document.getElementById("provider-select");
+  if (!select) return;
   let providers = [];
   try {
     const res = await fetch("/api/providers");
     if (res.ok) providers = (await res.json()).providers ?? [];
   } catch {}
-  group.replaceChildren(...providers.map(function(name) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "provider-btn";
-    btn.id = "provider-" + name;
-    btn.textContent = PROVIDER_BUTTON_LABELS[name] ?? name;
-    btn.addEventListener("click", function() { switchProvider(name); });
-    return btn;
+  select.replaceChildren(...providers.map(function(name) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    return option;
   }));
 }
 
+// ---- The board ----
+const STAGE_CHAIN = [
+  { key: "worker", label: "worker" },
+  { key: "reviewer", label: "review" },
+  { key: "tester", label: "test" },
+  { key: "documenter", label: "docs" },
+];
+
+function fmtClock(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+}
+
+function fmtSince(ts) {
+  if (!ts) return "";
+  const min = Math.max(0, Math.floor((Date.now() - ts) / 60000));
+  if (min < 60) return min + "m";
+  return Math.floor(min / 60) + "h " + (min % 60) + "m";
+}
+
+function latestStageOf(taskId) {
+  for (let i = stageRows.length - 1; i >= 0; i -= 1) {
+    if (stageRows[i].taskId === taskId && STAGE_CHAIN.some(function(s) { return s.key === stageRows[i].stage; })) return stageRows[i];
+  }
+  return null;
+}
+
+function stageChain(current, failed) {
+  const at = STAGE_CHAIN.findIndex(function(s) { return s.key === current; });
+  if (at === -1) return current ? "<span class=\"stg now\">" + escapeHtml(current) + "</span>" : "";
+  return STAGE_CHAIN.map(function(s, i) {
+    const cls = i < at ? "stg done" : i === at ? "stg now" + (failed ? " is-failed" : "") : "stg";
+    return "<span class=\"" + cls + "\">" + s.label + "</span>";
+  }).join("");
+}
+
+function recordEndedRun(data) {
+  if (!data || !data.taskId) return;
+  const info = taskTitleMap.get(data.taskId) || {};
+  const last = latestStageOf(data.taskId);
+  const at = endedRuns.findIndex(function(r) { return r.taskId === data.taskId; });
+  if (at !== -1) endedRuns.splice(at, 1);
+  endedRuns.unshift({
+    taskId: data.taskId,
+    identifier: info.issueIdentifier,
+    title: info.title,
+    projectPath: taskProjectMap.get(data.taskId),
+    startedAt: taskStartMap.get(data.taskId) || (data.duration ? Date.now() - data.duration : null),
+    endedAt: Date.now(),
+    success: data.success !== false,
+    stage: last ? last.stage : null,
+    model: last ? last.model : null,
+  });
+  endedRuns.length = Math.min(endedRuns.length, MAX_ENDED);
+  renderBoard();
+}
+
+let tasksRefreshTimer = null;
+function scheduleTasksRefresh() {
+  clearTimeout(tasksRefreshTimer);
+  tasksRefreshTimer = setTimeout(fetchTasks, 400);
+}
+
+async function fetchTasks() {
+  try {
+    const res = await fetch("/api/tasks");
+    if (!res.ok) return;
+    const data = await res.json();
+    boardTasks = { running: data.running || [], queued: data.queued || [] };
+    for (const r of boardTasks.running) {
+      if (r.task && r.task.id && r.startedAt) taskStartMap.set(r.task.id, r.startedAt);
+    }
+    renderBoard();
+  } catch {}
+}
+
+function renderBoardSource() {
+  setText("board-src", "scheduler · " + (streamLive ? "live" : "updates paused, reconnecting"));
+}
+
+function boardRow(row) {
+  const repo = row.projectPath ? row.projectPath.split("/").pop() : "";
+  const agent = row.model ? escapeHtml(row.agent || "") + "<span class=\"sub\">" + (row.agent ? " · " : "") + escapeHtml(shortModel(row.model)) + "</span>" : escapeHtml(row.agent || "");
+  return "<tr class=\"" + row.cls + "\">" +
+    "<td class=\"c-time\">" + escapeHtml(fmtClock(row.startedAt)) + "</td>" +
+    "<td class=\"c-run mono\">" + escapeHtml(row.identifier || (row.taskId || "").slice(0, 8)) + "</td>" +
+    "<td class=\"c-title\" title=\"" + escapeAttr(row.title || "") + "\">" + escapeHtml(row.title || "") + "</td>" +
+    "<td class=\"c-repo\">" + escapeHtml(repo) + "</td>" +
+    "<td class=\"c-agent\">" + agent + "</td>" +
+    "<td class=\"c-stage\">" + row.stage + "</td>" +
+    "<td class=\"c-status\">" + row.status + "</td>" +
+  "</tr>";
+}
+
+function renderBoard() {
+  const body = document.getElementById("board-rows");
+  if (!body) return;
+  const rows = [];
+  for (const r of boardTasks.running) {
+    const t = r.task || {};
+    const last = latestStageOf(t.id);
+    const stage = r.stage || (last && last.stage) || "";
+    rows.push({
+      cls: "is-running", taskId: t.id, identifier: t.issueIdentifier, title: t.title,
+      projectPath: r.projectPath, startedAt: r.startedAt, agent: stage, model: last && last.model,
+      stage: stageChain(stage, false),
+      status: "<span class=\"st\">Running · " + fmtSince(r.startedAt) + "</span>",
+    });
+  }
+  for (const q of boardTasks.queued) {
+    const t = q.task || {};
+    rows.push({
+      cls: "is-queued", taskId: t.id, identifier: t.issueIdentifier, title: t.title,
+      projectPath: q.projectPath, startedAt: null, agent: "", model: null, stage: "",
+      status: "<span class=\"st st-quiet\">Queued · " + fmtSince(q.queuedAt) + "</span>",
+    });
+  }
+  for (const e of endedRuns) {
+    rows.push({
+      cls: e.success ? "is-done" : "is-failed", taskId: e.taskId, identifier: e.identifier, title: e.title,
+      projectPath: e.projectPath, startedAt: e.startedAt, agent: e.stage, model: e.model,
+      stage: stageChain(e.stage, !e.success),
+      status: e.success
+        ? "<span class=\"st st-quiet\">Done " + escapeHtml(fmtClock(e.endedAt)) + "</span>"
+        : "<span class=\"tag-failed\">Failed</span>",
+    });
+  }
+  body.innerHTML = rows.map(boardRow).join("");
+  document.getElementById("board-empty").hidden = rows.length > 0;
+  const failedCount = endedRuns.filter(function(e) { return !e.success; }).length;
+  setText("stat-failed", failedCount);
+  document.querySelector(".k-failed").classList.toggle("has-value", failedCount > 0);
+}
+
+// ---- The notice band: what waits on the operator ----
+let stuckData = { stuckIssues: [], failedIssues: [] };
+
+async function fetchShellStatus() {
+  try {
+    const res = await fetch("/api/shell-status");
+    if (!res.ok) return;
+    shellStatus = await res.json();
+    renderNotice();
+  } catch {}
+}
+
+function openQuestions() {
+  const latest = {};
+  coordinationById.forEach(function(ev) {
+    const prev = latest[ev.correlationId];
+    if (!prev || Number(ev.seq || 0) > Number(prev.seq || 0)) latest[ev.correlationId] = ev;
+  });
+  return Object.values(latest).filter(function(ev) {
+    return ev.kind === "human-question" && ["open", "waiting", "running"].includes(ev.status);
+  });
+}
+
+function renderNotice() {
+  const band = document.getElementById("notice");
+  if (!band) return;
+  const questions = openQuestions();
+  // Prefer the shell's counts so the band and the status line agree; fall
+  // back to the board's own questions until the first poll answers.
+  const needs = shellStatus && shellStatus.needsYou
+    ? shellStatus.needsYou
+    : { questions: questions.length, parked: 0, total: questions.length };
+  const trackerCount = (stuckData.stuckIssues || []).length + (stuckData.failedIssues || []).length;
+  setText("stat-needs", needs.total);
+  document.querySelector(".k-needs").classList.toggle("has-value", needs.total > 0);
+  band.hidden = needs.total === 0 && trackerCount === 0;
+  setText("notice-title", needs.total === 0 ? "Nothing waits on you" : needs.total + (needs.total === 1 ? " needs you" : " need you"));
+  const parts = [];
+  if (needs.questions) parts.push(needs.questions + " question" + (needs.questions === 1 ? "" : "s"));
+  if (needs.parked) parts.push(needs.parked + " parked run" + (needs.parked === 1 ? "" : "s"));
+  setText("notice-breakdown", parts.join(" · "));
+  let html = questions.map(function(q) {
+    const repo = q.repository ? q.repository.split("/").pop() : "";
+    const who = (q.actorName || q.actor || "agent") + (q.actorRole ? " (" + q.actorRole + ")" : "");
+    return "<div class=\"nrow\">" +
+      "<span class=\"tag tag-q\">Question</span>" +
+      "<span class=\"mono\">" + escapeHtml(q.taskLabel || (q.taskId || "").slice(0, 8)) + "</span>" +
+      "<span class=\"nrow-repo\">" + escapeHtml(repo) + "</span>" +
+      "<span class=\"msg\">" + escapeHtml(who) + ": " + escapeHtml(q.summary || "") + "</span>" +
+      "<span class=\"when\">waiting " + fmtSince(q.timestamp) + "</span>" +
+      "<span class=\"acts\"><a class=\"nb\" href=\"/chat\">Answer in Chat</a></span>" +
+    "</div>";
+  }).join("");
+  if (needs.parked) {
+    html += "<div class=\"nrow\">" +
+      "<span class=\"tag tag-q\">Parked</span>" +
+      "<span class=\"msg nrow-wide\">" + needs.parked + (needs.parked === 1 ? " run is" : " runs are") + " parked until someone resolves " + (needs.parked === 1 ? "it" : "them") + ".</span>" +
+      "<span class=\"acts\"><a class=\"nb\" href=\"/orchestration\">Open orchestration</a></span>" +
+    "</div>";
+  }
+  document.getElementById("notice-rows").innerHTML = html;
+  document.getElementById("notice-tracker").hidden = trackerCount === 0;
+}
+
 // 성능 최적화: 초기 로드 후 2단계 페칭 (렌더링 블로킹 방지)
-// The provider buttons exist before the first stats render marks the active one.
-renderProviderButtons().then(loadInitial).then(function() { connectSSE(true); });
+// The provider options exist before the first stats render selects the default.
+renderProviderOptions().then(loadInitial).then(function() { connectSSE(true); });
+renderBoardSource();
+fetchTasks();
+fetchShellStatus();
+setInterval(fetchTasks, 5000);
+setInterval(fetchShellStatus, 15000);
 
 // 1단계: 초기화 후 즉시 필수 폴링만 시작
 setInterval(fetchSvcStatus, 15000);
