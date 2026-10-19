@@ -1,0 +1,907 @@
+{
+  "schemaVersion": 1,
+  "receiptType": "independent-channel-method-review",
+  "createdAt": "2026-10-19T11:53:22.716Z",
+  "sanitized": true,
+  "sourceRevision": "c97b085f",
+  "boundary": "Production project route handler on isolated SQLite state; auth and HTTP body gates intentionally evaluated separately after the fix.",
+  "expectedContracts": {
+    "entries": {
+      "allowed": [
+        "GET"
+      ],
+      "others": 405,
+      "mutation": "none"
+    },
+    "messages": {
+      "allowed": [
+        "POST"
+      ],
+      "success": 202,
+      "mutation": "exactly one original message, projection, and queued delivery"
+    },
+    "read": {
+      "allowed": [
+        "GET",
+        "POST"
+      ],
+      "success": 200,
+      "mutation": "POST advances only read cursor monotonically; no message or delivery creation"
+    }
+  },
+  "preFix": {
+    "results": [
+      {
+        "endpoint": "entries",
+        "method": "GET",
+        "status": 200,
+        "expectedStatus": 200,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "POST",
+        "status": 202,
+        "expectedStatus": 405,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 1,
+          "messages": 1,
+          "entries": 1,
+          "deliveries": 1,
+          "queued": 1,
+          "readSeq": 0
+        },
+        "responseDeliveryStatus": "queued"
+      },
+      {
+        "endpoint": "entries",
+        "method": "PUT",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "PATCH",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "DELETE",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "HEAD",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "OPTIONS",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "POST",
+        "status": 400,
+        "expectedStatus": 405,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "GET",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "POST",
+        "status": 202,
+        "expectedStatus": 202,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 1,
+          "messages": 1,
+          "entries": 1,
+          "deliveries": 1,
+          "queued": 1,
+          "readSeq": 0
+        },
+        "responseDeliveryStatus": "queued"
+      },
+      {
+        "endpoint": "messages",
+        "method": "PUT",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "PATCH",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "DELETE",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "HEAD",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "OPTIONS",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "GET",
+        "status": 200,
+        "expectedStatus": 200,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        },
+        "returnedReadSeq": 0
+      },
+      {
+        "endpoint": "read",
+        "method": "POST",
+        "status": 200,
+        "expectedStatus": 200,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 3
+        },
+        "returnedReadSeq": 3
+      },
+      {
+        "endpoint": "read",
+        "method": "POST",
+        "status": 200,
+        "expectedStatus": 200,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        },
+        "returnedReadSeq": 3
+      },
+      {
+        "endpoint": "read",
+        "method": "PUT",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "PATCH",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "DELETE",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "HEAD",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "OPTIONS",
+        "status": 405,
+        "expectedStatus": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      }
+    ],
+    "unexpectedResults": [
+      {
+        "endpoint": "entries",
+        "method": "POST",
+        "status": 202,
+        "expectedStatus": 405,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 1,
+          "messages": 1,
+          "entries": 1,
+          "deliveries": 1,
+          "queued": 1,
+          "readSeq": 0
+        },
+        "responseDeliveryStatus": "queued"
+      },
+      {
+        "endpoint": "entries",
+        "method": "POST",
+        "status": 400,
+        "expectedStatus": 405,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      }
+    ],
+    "verdict": "REVISE"
+  },
+  "sourceFilesModified": false,
+  "visualInspectionOrScreenshots": false,
+  "postFix": {
+    "verdict": "APPROVE",
+    "directHandlerChecks": [
+      {
+        "endpoint": "entries",
+        "method": "POST",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "POST",
+        "payloadType": "invalid-json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "PUT",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "PATCH",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "DELETE",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "HEAD",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "entries",
+        "method": "OPTIONS",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "GET",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "PUT",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "PATCH",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "DELETE",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "HEAD",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "messages",
+        "method": "OPTIONS",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "PUT",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "PATCH",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "DELETE",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "HEAD",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "endpoint": "read",
+        "method": "OPTIONS",
+        "payloadType": "json",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      }
+    ],
+    "httpChecks": [
+      {
+        "name": "entries rejects before body",
+        "endpoint": "entries",
+        "method": "POST",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "name": "entries rejects before body",
+        "endpoint": "entries",
+        "method": "POST",
+        "status": 405,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "name": "untrusted Origin rejected",
+        "endpoint": "entries",
+        "method": "POST",
+        "status": 403,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "name": "untrusted Origin rejected",
+        "endpoint": "messages",
+        "method": "POST",
+        "status": 403,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "name": "untrusted Origin rejected",
+        "endpoint": "read",
+        "method": "POST",
+        "status": 403,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "name": "authorized entries read",
+        "endpoint": "entries",
+        "method": "GET",
+        "status": 200,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "name": "request body limit enforced",
+        "endpoint": "messages",
+        "method": "POST",
+        "status": 413,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "name": "request body limit enforced",
+        "endpoint": "read",
+        "method": "POST",
+        "status": 413,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      },
+      {
+        "name": "monotonic read advance",
+        "endpoint": "read",
+        "method": "POST",
+        "status": 200,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 3
+        },
+        "returnedReadSeq": 3
+      },
+      {
+        "name": "monotonic read refuses regression",
+        "endpoint": "read",
+        "method": "POST",
+        "status": 200,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        },
+        "returnedReadSeq": 3
+      },
+      {
+        "name": "intended message enqueues once",
+        "endpoint": "messages",
+        "method": "POST",
+        "status": 202,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 1,
+          "messages": 1,
+          "entries": 1,
+          "deliveries": 1,
+          "queued": 1,
+          "readSeq": 0
+        },
+        "deliveryStatus": "queued"
+      },
+      {
+        "name": "idempotent normal message",
+        "endpoint": "messages",
+        "method": "POST",
+        "status": 202,
+        "bodyReads": 1,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        },
+        "deliveryStatus": "queued"
+      },
+      {
+        "name": "outer web preflight bypasses handler",
+        "endpoint": "entries",
+        "method": "OPTIONS",
+        "status": 204,
+        "bodyReads": 0,
+        "delta": {
+          "threads": 0,
+          "messages": 0,
+          "entries": 0,
+          "deliveries": 0,
+          "queued": 0,
+          "readSeq": 0
+        }
+      }
+    ],
+    "boundary": "Isolated loopback HTTP using production app router, channel handler, Origin authorization helpers and bounded body reader; no production daemon or browser attached.",
+    "authenticatedOriginAndBodyGatesVerified": true,
+    "additionalBlockingDefectsFound": 0,
+    "sourceScope": "Working-tree method guard following c97b085f",
+    "focusedRegressionTests": {
+      "passed": 1,
+      "skipped": 41
+    }
+  },
+  "verdict": "APPROVE"
+}

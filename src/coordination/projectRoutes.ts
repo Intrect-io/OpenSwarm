@@ -124,7 +124,7 @@ export async function tryHandleProjectRoutes(
       json(res, 200, { readSeq: channel.readSeq, unread: channel.unread, latestSeq: channel.latestSeq });
       return true;
     }
-    if (req.method !== 'POST') { json(res, 405, { error: 'Method not allowed' }); return true; }
+    if (req.method !== 'POST' || match[2] === 'entries') { json(res, 405, { error: 'Method not allowed' }); return true; }
     const raw: unknown = JSON.parse(await readBody(req));
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid request body');
     const body = raw as Record<string, unknown>;

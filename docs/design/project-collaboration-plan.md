@@ -251,3 +251,23 @@ and no JavaScript errors or backend writes occurred. This added zero screenshots
 and no manual visual pass; the existing 16 captures still await user approval.
 The [zoom receipt](../evidence/agt-4776/browser-zoom.json) is separate from the
 earlier equivalent-reflow check and from visual acceptance.
+
+At c97b085, all seven standard CI jobs passed: 7,564 tests / 12 platform skips,
+plus three Windows process-tree tests; coverage was statements 90.15%, branches
+81.91%, functions 91.04% and lines 92.60%. The fresh PR review correctly returned
+REVISE on one additional dispatch defect: POST to the read-only entries resource
+fell through to message creation. Both parent and independent isolated production
+handler probes returned 202 and created one original message/projection/delivery.
+The direct regression failed before repair. The route now returns 405 before
+reading a body; unsupported methods create no messages or queue items, while
+normal POST messages still returns 202. The five related suites pass 126 tests,
+and lint/typecheck/build pass with the same existing warnings. The two-browser
+HTTP proof passed again with readSeq50 after stale10, Origin403, oversized-body413,
+one delivery after a lost-response retry, pages50/21 and ended-recipient409.
+The independent reviewer also approved 18 direct handler cases and 13 isolated
+HTTP checks using the production app router and existing auth/body helpers:
+normal/invalid JSON POST entries returns405 without parsing or mutations,
+untrusted Origins return403, oversized valid write endpoints return413, normal
+messages and idempotent retries work, and read positions never regress.
+The [method receipt](../evidence/agt-4776/method-guard.json) preserves the original
+failure alongside the corrected readback. No screenshots or visual pass were added.

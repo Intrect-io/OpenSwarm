@@ -404,6 +404,22 @@ describe('identity, aggregate and page contracts', () => {
 });
 
 describe('HTTP and supervisor integration', () => {
+  it('rejects unsupported channel methods before reading a body or enqueueing a message', async () => {
+    for (const [endpoint, method] of [['entries', 'POST'], ['entries', 'PUT'], ['messages', 'GET'], ['messages', 'PUT'], ['read', 'PUT']]) {
+      const path = `/api/coordination/channels/${encodeURIComponent(key)}/${endpoint}`;
+      const out = { status: 0 };
+      const readBody = vi.fn(async () => JSON.stringify({ body: 'No unintended writes', idempotencyKey: 'method-probe' }));
+      await tryHandleProjectRoutes({ method } as IncomingMessage,
+        { writeHead: (status: number) => { out.status = status; }, end: () => {} } as unknown as ServerResponse,
+        path, new URL(path, 'http://localhost'), undefined, [repo], readBody);
+      expect(out.status, `${method} ${endpoint}`).toBe(405); expect(readBody).not.toHaveBeenCalled();
+    }
+    expect(listChannelEntries(key).items).toHaveLength(0); expect(pendingCoordinatorMessages(key)).toHaveLength(0);
+    const accepted = await route(`/api/coordination/channels/${encodeURIComponent(key)}/messages`, 'POST',
+      { body: 'Intended message', idempotencyKey: 'method-probe' });
+    expect(accepted.status).toBe(202); expect(listChannelEntries(key).items).toHaveLength(1);
+    expect(pendingCoordinatorMessages(key)).toHaveLength(1);
+  });
   it('wires configured dashboard-only channels through the app router and retains removed history read-only', async () => {
     let configured = [repo];
     const app = async (path: string, method = 'GET', body?: object) => {
