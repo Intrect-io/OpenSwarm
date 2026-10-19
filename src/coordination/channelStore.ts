@@ -35,7 +35,7 @@ interface EntryRow {
   run_id: string | null; error: string | null;
 }
 
-let configuration: { db: unknown; signature: string; traceId: number; threadRowId: number } | undefined;
+let configuration: { db: unknown; signature: string | undefined; traceId: number; threadRowId: number } | undefined;
 
 function physicalAliasKey(cell: RepositoryCell, known?: string): string {
   if (!known || known === cell.repoKey || cell.repoKey.startsWith('git:')) return cell.repoKey;
@@ -70,21 +70,22 @@ function registerHistoricalChannel(db: ReturnType<typeof channelDatabase>, repos
   return changed;
 }
 
-/** 실행 대상은 서버 설정에서만 등록한다. 클라이언트의 경로는 받지 않는다. */
-export function syncChannels(paths: readonly string[]): Channel[] {
+/** 설정 경로가 없는 Threads 호출도 기록 이관을 준비하되 configured 상태는 보존한다. */
+export function syncChannelState(paths?: readonly string[]): void {
   const db = channelDatabase();
-  const signature = JSON.stringify([...new Set(paths)].sort());
   const previous = configuration?.db === db ? configuration : undefined;
-  const configurationChanged = !previous || previous.signature !== signature;
+  const configuredPaths = paths ?? [];
+  const signature = paths === undefined ? previous?.signature : JSON.stringify([...new Set(configuredPaths)].sort());
+  const configurationChanged = paths !== undefined && (!previous || previous.signature !== signature);
   const traceId = (db.prepare('SELECT COALESCE(MAX(id),0) position FROM coordination_trace').get() as { position: number }).position;
   const threadRowId = (db.prepare('SELECT COALESCE(MAX(rowid),0) position FROM coordination_threads').get() as { position: number }).position;
-  if (configurationChanged || traceId !== previous?.traceId || threadRowId !== previous?.threadRowId) {
+  if (!previous || configurationChanged || traceId !== previous.traceId || threadRowId !== previous.threadRowId) {
     db.transaction(() => {
       const oldKeys = new Set((db.prepare('SELECT repo_key FROM coordination_channels').all() as Array<{ repo_key: string }>).map((r) => r.repo_key));
-      const cells = configurationChanged ? paths.map((path) => repositoryCell(expandPath(path))) : [];
+      const cells = configurationChanged ? configuredPaths.map((path) => repositoryCell(expandPath(path))) : [];
       let aliasesChanged = configurationChanged;
       for (const [index, cell] of cells.entries()) {
-        for (const alias of [expandPath(paths[index]), cell.worktreePath, cell.repositoryPath]) {
+        for (const alias of [expandPath(configuredPaths[index]), cell.worktreePath, cell.repositoryPath]) {
           const known = db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(alias) as { repo_key: string } | undefined;
           db.prepare(`INSERT INTO coordination_channel_aliases VALUES (?,?) ON CONFLICT(repository)
             DO UPDATE SET repo_key=excluded.repo_key WHERE repo_key!=excluded.repo_key`)
@@ -123,6 +124,11 @@ export function syncChannels(paths: readonly string[]): Channel[] {
     }).immediate();
     configuration = { db, signature, traceId, threadRowId };
   }
+}
+
+/** 실행 대상은 서버 설정에서만 등록한다. 클라이언트의 경로는 받지 않는다. */
+export function syncChannels(paths: readonly string[]): Channel[] {
+  syncChannelState(paths);
   return readChannels();
 }
 

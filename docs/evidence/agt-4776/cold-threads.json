@@ -1,0 +1,259 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-19T12:28:18.086Z",
+  "head": "8246ab8a112550234144f3e089603442229dcddb",
+  "reviewScope": "Independent real HTTP cold Threads compatibility; no source mutations or visual review",
+  "failureDatabase": {
+    "sourceThreadId": "888fa343-624d-4bcc-bbd9-edcd59c142c3",
+    "sourceMessageIdsAndSequences": [
+      {
+        "sourceId": "1f8bec4a-cafa-4d90-9f37-db361bab14d6",
+        "seq": 1
+      }
+    ],
+    "independentReadOnlyReadback": {
+      "threadStatus": "open",
+      "threadVersion": 2,
+      "messageCount": 1,
+      "aliasesPresent": false,
+      "sourceIdsAndSequencesMatch": true
+    }
+  },
+  "command": "node --import tsx /tmp/agt4776-independent-cold-threads-run.mjs <review-worktree>",
+  "script": "/tmp/agt4776-independent-cold-threads-run.mjs",
+  "startup": {
+    "actualProductionServer": true,
+    "ephemeralPort": true,
+    "configuredRepoViaProductionApplyReposConfig": true,
+    "projectChannelShellQueriesBeforeColdCases": 0,
+    "beforeImportAliases": false,
+    "beforeStartupAliases": false,
+    "afterStartupAliases": false,
+    "afterColdCasesAliases": false
+  },
+  "httpCases": [
+    {
+      "label": "cold-canonical-list",
+      "method": "GET",
+      "status": 200,
+      "itemCount": 0,
+      "containsLegacy": false
+    },
+    {
+      "label": "cold-canonical-lookup",
+      "method": "GET",
+      "status": 404,
+      "error": "Coordination thread not found"
+    },
+    {
+      "label": "cold-path-list",
+      "method": "GET",
+      "status": 200,
+      "itemCount": 0,
+      "containsLegacy": false
+    },
+    {
+      "label": "cold-path-lookup",
+      "method": "GET",
+      "status": 404,
+      "error": "Coordination thread not found"
+    },
+    {
+      "label": "cold-canonical-reply",
+      "method": "POST",
+      "status": 404,
+      "error": "Coordination thread not found"
+    },
+    {
+      "label": "cold-canonical-resolve",
+      "method": "POST",
+      "status": 404,
+      "error": "Coordination thread not found"
+    },
+    {
+      "label": "cold-unscoped-list",
+      "method": "GET",
+      "status": 200,
+      "itemCount": 1,
+      "containsLegacy": true
+    },
+    {
+      "label": "warm-canonical-list",
+      "method": "GET",
+      "status": 200,
+      "itemCount": 1,
+      "containsLegacy": true
+    },
+    {
+      "label": "warm-canonical-lookup",
+      "method": "GET",
+      "status": 200,
+      "threadId": "888fa343-624d-4bcc-bbd9-edcd59c142c3"
+    },
+    {
+      "label": "warm-canonical-reply",
+      "method": "POST",
+      "status": 201
+    },
+    {
+      "label": "warm-detail-before-resolve",
+      "method": "GET",
+      "status": 200,
+      "threadId": "888fa343-624d-4bcc-bbd9-edcd59c142c3"
+    },
+    {
+      "label": "warm-canonical-resolve",
+      "method": "POST",
+      "status": 200,
+      "threadId": "888fa343-624d-4bcc-bbd9-edcd59c142c3"
+    }
+  ],
+  "readback": {
+    "coldDatabaseUnchanged": true,
+    "rawPathPublicApiAccessible": true,
+    "warmAfterExplicitSyncSucceeds": true,
+    "sourceIdsAndMessageSequencesPreserved": true,
+    "originalThreadRepositoryPreserved": true,
+    "configuredBefore": true,
+    "configuredAfter": true
+  },
+  "verdict": "APPROVE",
+  "finding": {
+    "severity": "blocking",
+    "premiseReproduced": true,
+    "summary": "Configured legacy path-backed Threads are unavailable through canonical or path-normalizing HTTP API until a project/channel/shell query registers aliases. Production web startup does not initialize alias state.",
+    "minimalBoundary": "Initialize or discover canonical repository aliases for standalone Threads before lookup/list/reply/resolve; preserve original source rows and do not call syncChannels([]) in a way that archives configured channels."
+  },
+  "preFixVerdict": "REVISE",
+  "postFix": {
+    "generatedAt": "2026-10-19T12:35:16.080Z",
+    "head": "8246ab8a112550234144f3e089603442229dcddb",
+    "workingTreeDiffSha256": "bfed88fc6180d92ce0f679b929dbb0d91a3f256951705f0c5c3180bbe89ae65b",
+    "fixtureCopies": {
+      "sourceWasCopiedNotChanged": true
+    },
+    "command": "node --import tsx /tmp/agt4776-independent-cold-threads-postfix-run.mjs <review-worktree>",
+    "script": "/tmp/agt4776-independent-cold-threads-postfix-run.mjs",
+    "http": {
+      "productionServer": true,
+      "projectChannelShellQueriesBeforeFirstThreadsRequest": 0,
+      "aliasesAbsentThroughStartup": true,
+      "firstThreadsRequestPreparedAliases": true,
+      "firstCanonicalAndPathListGetSucceeded": true,
+      "canonicalAndPathRepliesSucceeded": true,
+      "canonicalResolveSucceeded": true,
+      "baselineReadSeq": 1,
+      "unreadAgentMessageCountAfterRepeatedReads": 1,
+      "originalSourceIdsAndMessageSequencesPreserved": true,
+      "originalProjectionIdsAndSequencesPreserved": true,
+      "originalRepositoryPreserved": true,
+      "unrelatedConfiguredPreserved": true,
+      "undefinedConfigurationPreservedFlagsAndRead": true,
+      "explicitRemovalReflected": true,
+      "explicitEmptyConfigurationArchivedBoth": true,
+      "cases": [
+        {
+          "label": "first-canonical-list",
+          "method": "GET",
+          "status": 200,
+          "items": 1,
+          "containsSource": true
+        },
+        {
+          "label": "first-canonical-get",
+          "method": "GET",
+          "status": 200
+        },
+        {
+          "label": "first-path-list",
+          "method": "GET",
+          "status": 200,
+          "items": 1,
+          "containsSource": true
+        },
+        {
+          "label": "first-path-get",
+          "method": "GET",
+          "status": 200
+        },
+        {
+          "label": "canonical-reply",
+          "method": "POST",
+          "status": 201
+        },
+        {
+          "label": "path-reply",
+          "method": "POST",
+          "status": 201
+        },
+        {
+          "label": "before-resolve",
+          "method": "GET",
+          "status": 200
+        },
+        {
+          "label": "canonical-resolve",
+          "method": "POST",
+          "status": 200
+        },
+        {
+          "label": "explicit-config-removes-source-get",
+          "method": "GET",
+          "status": 200
+        },
+        {
+          "label": "explicit-empty-config-list",
+          "method": "GET",
+          "status": 200,
+          "items": 1,
+          "containsSource": true
+        }
+      ]
+    },
+    "coreAndTransaction": {
+      "coldCanonicalLibraryGetSucceeded": true,
+      "noConfigurationDidNotInventActiveConfig": true,
+      "laterExplicitConfigurationApplied": true,
+      "deliveryFailureRolledBackThreadMessageProjectionAndQueue": true,
+      "schemaAndAliasStateSurvivedRollback": true,
+      "retrySucceededOnce": true,
+      "repeatedIdempotentSendUnchanged": true,
+      "unrelatedConfiguredChannelsPreserved": true,
+      "sourceIdsSequencesAndRepositoryPreserved": true,
+      "moduleCycleFailureObserved": false
+    },
+    "verdict": "APPROVE",
+    "scope": "Independent cold Threads fix and configuration/transaction boundaries; no source changes or visual review",
+    "standaloneHttp": {
+      "configuredPathsArgumentOmitted": true,
+      "cases": [
+        {
+          "label": "undefined-config-canonical-list",
+          "status": 200
+        },
+        {
+          "label": "undefined-config-path-get",
+          "status": 200
+        },
+        {
+          "label": "undefined-config-path-resolve",
+          "status": 200
+        }
+      ],
+      "openThreadResolvedViaOriginalPath": true,
+      "bothActiveChannelsAndReadCursorsPreserved": true,
+      "originalRepositorySourceIdsAndSequencesPreserved": true,
+      "command": "node --import tsx /tmp/agt4776-independent-cold-threads-standalone-run.mjs <review-worktree>"
+    },
+    "focusedTests": {
+      "command": "node --experimental-vm-modules node_modules/vitest/vitest.mjs run src/coordination/projectCollaboration.test.ts -t 'cold|rolls back the thread|atomically saves a canonical' --reporter=dot",
+      "passed": 4,
+      "skipped": 40,
+      "failed": 0
+    },
+    "originalColdFailureDatabaseUnchanged": true,
+    "reviewedSourceUnchangedDuringVerification": true,
+    "finalVerdict": "APPROVE"
+  },
+  "sanitized": true
+}

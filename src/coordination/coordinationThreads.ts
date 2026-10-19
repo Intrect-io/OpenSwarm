@@ -10,6 +10,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { getTraceDb } from './coordinationTrace.js';
+import { syncChannelState } from './channelStore.js';
 import {
   enqueueCoordinationThreadMutation,
   migrateCoordinationThreadOutbox,
@@ -175,6 +176,8 @@ function database(): Database.Database {
   const handle = getTraceDb();
   if (!handle) throw new Error('Coordination thread store is unavailable');
   migrateCoordinationThreads(handle);
+  // 단독 Threads 사용도 과거 경로를 찾는다. 전달의 외부 원자 트랜잭션은 이미 준비된 상태를 쓴다.
+  if (!handle.inTransaction) syncChannelState();
   return handle;
 }
 

@@ -100,9 +100,10 @@ export async function tryHandleAppRoutes(
     if (await tryHandlePriorityCouncilRoutes(req, res, url, requestUrl, readBody)) return true;
   }
 
-  {
+  if (/^\/api\/coordination\/threads(?:\/|$)/.test(url)) {
     const { tryHandleCoordinationThreadRoutes } = await import('../coordination/coordinationThreadRoutes.js');
-    if (await tryHandleCoordinationThreadRoutes(req, res, url, requestUrl, readBody)) return true;
+    if (await tryHandleCoordinationThreadRoutes(req, res, url, requestUrl, readBody,
+      configuredProjects?.() ?? runner?.getAllowedProjects())) return true;
   }
 
   {

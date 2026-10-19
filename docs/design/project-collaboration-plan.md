@@ -271,3 +271,36 @@ untrusted Origins return403, oversized valid write endpoints return413, normal
 messages and idempotent retries work, and read positions never regress.
 The [method receipt](../evidence/agt-4776/method-guard.json) preserves the original
 failure alongside the corrected readback. No screenshots or visual pass were added.
+
+At 8246ab8, the working-tree review returned APPROVE and standard CI passed all
+seven jobs: 7,565 tests / 12 platform skips plus three Windows process-tree tests;
+coverage was statements 90.15%, branches 81.91%, functions 91.02% and lines 92.60%.
+The fresh Sol PR review could not finish because the provider was overloaded.
+A task-local retry using the adapter's supported default Terra model returned
+REVISE on a real compatibility gap: a first legacy Threads HTTP request could
+normalize its repository before aliases were initialized. The independent real
+server probe reproduced empty lists and 404 lookup/reply/resolve without any
+preceding project/channel/shell query; a warm channel-query control passed.
+
+Threads now prepares shared alias/projection state before standalone library and
+HTTP operations. Omitting configured paths preserves existing flags and reads;
+an explicit empty configuration still archives removed channels. Preparation is
+outside the already-prepared delivery transaction, preserving its atomic rollback.
+Two regressions failed before repair. The six related suites now pass 131 tests,
+and lint/typecheck/build pass with the same 12 existing warnings and no errors.
+Independent review reopened copies of its original cold failure DB using the
+actual production server: all 13 HTTP cases passed from the first Threads request,
+including standalone HTTP with no configuration argument. Original source and
+projection IDs/seq/repository, the migration read baseline, later unread messages
+and unrelated active channels were preserved. Explicit configuration removal,
+forced delivery rollback, one successful retry and idempotent resend also passed.
+The original failure DB was not changed. Its verdict is APPROVE; the
+[sanitized receipt](../evidence/agt-4776/cold-threads.json) keeps the failure and
+corrected readback together. No new screenshots or visual inspection were added.
+
+Native coordinator and exact task/actor/delivery responses, plus the two-browser
+HTTP read/idempotency/Origin/body/ended-recipient proof, passed again after this
+change. The latest 25-sample fixture run measured query p95 3.25/16.86ms and HTTP
+p95 7.21/14.93ms at 10/100 and 100/1,000 projects/agents, initialization 75/567ms
+and total process RSS 302/323 MiB. Earlier samples above remain valid observations;
+these isolated fixture measurements are not production or live-fleet benchmarks.

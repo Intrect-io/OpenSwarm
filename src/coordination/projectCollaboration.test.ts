@@ -4,13 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { resetTraceDbForTests, recordTraceEvent, queryTrace } from './coordinationTrace.js';
+import { getTraceDb, resetTraceDbForTests, recordTraceEvent, queryTrace } from './coordinationTrace.js';
 import { getCoordinationStore, resetCoordinationStoreForTests, type CoordinationEvent } from './coordinationStore.js';
 import { syncChannels, listChannelEntries, markChannelRead, readChannels } from './channelStore.js';
 import { channelDatabase } from './channelSchema.js';
 import { claimChannelDelivery, consumeChannelTaskInbox, findChannelDeliveryByKey, finishChannelDelivery, getChannelDelivery, interruptEndedTaskDeliveries,
   pendingCoordinatorMessages, recoverCoordinatorDeliveries, respondToChannelDelivery, retryChannelDelivery, sendChannelMessage } from './channelQueue.js';
-import { createCoordinationThread, getCoordinationThread, listCoordinationThreads, postCoordinationThreadMessage, resolveCoordinationThread } from './coordinationThreads.js';
+import { createCoordinationThread, getCoordinationThread, listCoordinationThreads, migrateCoordinationThreads, postCoordinationThreadMessage, resolveCoordinationThread } from './coordinationThreads.js';
 import { repositoryCell, resetRepositoryCellCacheForTests } from './repositoryCell.js';
 import { buildProjectSnapshot, participantId } from './projectModel.js';
 import { queryProjectSnapshot } from './projectQueries.js';
@@ -34,6 +34,20 @@ const route = async (path: string, method = 'GET', body?: object, runner?: any, 
   await tryHandleProjectRoutes({ method } as IncomingMessage, response, url.pathname, url, runner, paths, async () => JSON.stringify(body));
   return { status: output.code, data: JSON.parse(output.body) };
 };
+const coldThread = () => {
+  resetTraceDbForTests(); process.env.OPENSWARM_AUTOMATION_DB = join(root, 'cold-threads.db');
+  const db = getTraceDb()!; migrateCoordinationThreads(db); const now = Date.now();
+  // 채널 스키마가 없던 구버전의 원본 행을 그대로 재현한다.
+  db.prepare(`INSERT INTO coordination_threads(thread_id,repository,subject,status,created_by_actor,created_by_task_id,
+    fingerprint,created_at,updated_at) VALUES ('cold-thread',?,'Legacy discussion','open','legacy','task-a','fixture',?,?)`).run(repo, now, now);
+  db.prepare(`INSERT INTO coordination_thread_tasks VALUES ('cold-thread','task-a')`).run();
+  db.prepare(`INSERT INTO coordination_thread_messages(message_id,thread_id,actor,task_id,body,fingerprint,created_at)
+    VALUES ('cold-message','cold-thread','legacy','task-a','Original source','fixture',?)`).run(now);
+  db.prepare(`INSERT INTO coordination_thread_subscriptions(thread_id,actor,task_id,followed_at)
+    VALUES ('cold-thread','legacy','task-a',?)`).run(now);
+  expect(db.prepare("SELECT 1 FROM sqlite_master WHERE name='coordination_channel_aliases'").get()).toBeUndefined();
+  return db;
+};
 beforeEach(() => {
   originalDb = process.env.OPENSWARM_AUTOMATION_DB; originalBoard = process.env.OPENSWARM_COORDINATION_FILE;
   root = mkdtempSync(join(tmpdir(), 'project-collaboration-')); repo = join(root, 'repo'); mkdirSync(repo);
@@ -44,6 +58,21 @@ afterEach(() => { resetTraceDbForTests(); resetCoordinationStoreForTests();
   process.env.OPENSWARM_AUTOMATION_DB = originalDb; process.env.OPENSWARM_COORDINATION_FILE = originalBoard; vi.restoreAllMocks(); });
 
 describe('durable project channels', () => {
+  it('bootstraps cold Thread library aliases without a channel query or changing configured channels', () => {
+    const db = coldThread();
+    const detail = getCoordinationThread({ repository: key, threadId: 'cold-thread' });
+    expect(detail.thread.repository).toBe(repo); expect(detail.messages.items[0]).toMatchObject({ id: 'cold-message', seq: 1 });
+    expect(listCoordinationThreads({ repository: key }).items.map((t) => t.id)).toEqual(['cold-thread']);
+    const other = join(root, 'other'); mkdirSync(other); const otherKey = repositoryCell(other).repoKey;
+    syncChannels([repo, other]);
+    postCoordinationThreadMessage({ repository: key, threadId: 'cold-thread', actor: 'legacy', taskId: 'task-a', body: 'Cold reply' });
+    const updated = getCoordinationThread({ repository: key, threadId: 'cold-thread' });
+    expect(resolveCoordinationThread({ repository: key, threadId: 'cold-thread', actor: 'legacy', taskId: 'task-a',
+      expectedVersion: updated.thread.version }).status).toBe('resolved');
+    expect(readChannels().filter((c) => c.configured).map((c) => c.repoKey).sort()).toEqual([key, otherKey].sort());
+    expect(db.prepare('SELECT repository FROM coordination_threads WHERE thread_id=?').get('cold-thread')).toEqual({ repository: repo });
+    expect(db.prepare('SELECT message_id,seq FROM coordination_thread_messages WHERE message_id=?').get('cold-message')).toEqual({ message_id: 'cold-message', seq: 1 });
+  });
   it('repairs a reachable non-Git path alias without merging its opaque question or rewriting sources', async () => {
     const db = channelDatabase(), opaque = 'git:old-opaque';
     db.prepare('UPDATE coordination_channel_aliases SET repo_key=? WHERE repository=?').run(opaque, repo);
@@ -404,6 +433,27 @@ describe('identity, aggregate and page contracts', () => {
 });
 
 describe('HTTP and supervisor integration', () => {
+  it('initializes cold Threads HTTP lookup, list, reply and resolve without visiting a project channel', async () => {
+    const db = coldThread();
+    const app = async (path: string, method = 'GET', body?: object) => {
+      const out = { status: 0, body: '' }; const url = new URL(path, 'http://localhost');
+      const response = { writeHead: (status: number) => { out.status = status; }, end: (text: string) => { out.body = text; } } as unknown as ServerResponse;
+      expect(await tryHandleAppRoutes({ method } as IncomingMessage, response, url.pathname, url, undefined,
+        async () => JSON.stringify(body), () => [repo])).toBe(true);
+      return { status: out.status, data: JSON.parse(out.body) };
+    };
+    const scope = `?repository=${encodeURIComponent(key)}`;
+    expect((await app(`/api/coordination/threads/cold-thread${scope}`)).status).toBe(200);
+    expect((await app(`/api/coordination/threads${scope}`)).data.items.map((t: any) => t.id)).toEqual(['cold-thread']);
+    expect((await app('/api/coordination/threads/cold-thread/messages', 'POST',
+      { repository: repo, body: 'Reply before opening channels', idempotencyKey: 'cold-reply' })).status).toBe(201);
+    const updated = await app(`/api/coordination/threads/cold-thread${scope}`);
+    expect((await app('/api/coordination/threads/cold-thread/resolve', 'POST',
+      { repository: key, expectedVersion: updated.data.thread.version })).status).toBe(200);
+    expect(readChannels().find((c) => c.repoKey === key)?.configured).toBe(true);
+    expect(db.prepare('SELECT repository FROM coordination_threads WHERE thread_id=?').get('cold-thread')).toEqual({ repository: repo });
+    expect(db.prepare('SELECT message_id,seq FROM coordination_thread_messages WHERE message_id=?').get('cold-message')).toEqual({ message_id: 'cold-message', seq: 1 });
+  });
   it('rejects unsupported channel methods before reading a body or enqueueing a message', async () => {
     for (const [endpoint, method] of [['entries', 'POST'], ['entries', 'PUT'], ['messages', 'GET'], ['messages', 'PUT'], ['read', 'PUT']]) {
       const path = `/api/coordination/channels/${encodeURIComponent(key)}/${endpoint}`;

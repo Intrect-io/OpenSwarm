@@ -16,6 +16,7 @@ import {
 } from './coordinationThreads.js';
 import { repositoryKey } from './repositoryCell.js';
 import { publishCoordinationThreadUpdate } from './coordinationThreadTools.js';
+import { syncChannelState } from './channelStore.js';
 
 type BodyReader = (req: IncomingMessage) => Promise<string>;
 
@@ -103,8 +104,10 @@ export async function tryHandleCoordinationThreadRoutes(
   url: string,
   requestUrl: URL,
   readBody?: BodyReader,
+  configuredProjects?: readonly string[],
 ): Promise<boolean> {
   try {
+    if (/^\/api\/coordination\/threads(?:\/|$)/.test(url)) syncChannelState(configuredProjects);
     if (url === '/api/coordination/threads' && req.method === 'GET') {
       const repository = requestUrl.searchParams.get('repository');
       const statusRaw = requestUrl.searchParams.get('status') ?? undefined;
