@@ -56,11 +56,14 @@ export class WorkCards {
       glyph.className = 'glyph';
       const label = document.createElement('span');
       label.className = 'label';
-      line.append(glyph, label);
+      const status = document.createElement('span');
+      status.className = 'stage-status sr-only';
+      line.append(glyph, status, label);
       card.stagesEl.appendChild(line);
       card.stages.set(data.stage, line);
     }
     line.dataset.status = data.status;
+    line.querySelector('.stage-status').textContent = `${data.status}: `;
     line.querySelector('.glyph').innerHTML = ICONS[STATUS_ICON[data.status] ?? 'dot'];
     const details = [];
     if (data.status === 'complete' && data.summary) details.push(data.summary);

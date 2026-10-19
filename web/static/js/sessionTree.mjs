@@ -96,6 +96,7 @@ export class SessionTree {
     time.textContent = formatRelativeTime(session.completedAt ?? session.startedAt ?? session.updatedAt, nowMs);
 
     row.append(glyph, label, time);
+    row.setAttribute('aria-label', `${label.textContent}, ${session.phase}, ${time.textContent}`);
     row.title = `${session.issueIdentifier ? `${session.issueIdentifier} — ` : ''}${session.title ?? ''}`;
     row.addEventListener('click', () => this.#onSelect(session.taskId));
     return row;
