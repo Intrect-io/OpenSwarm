@@ -18,7 +18,6 @@ import { formatCost } from './costTracker.js';
 import { getRateLimiterMetrics } from './rateLimiter.js';
 import { scanLocalProjects, invalidateProjectCache } from './projectMapper.js';
 import type { AutonomousRunner } from '../automation/autonomousRunner.js';
-import { buildDashboardHtml } from './dashboardHtml.js';
 import { getGraph, toProjectSlug, getProjectHealth, scanAndCache, listGraphs } from '../knowledge/index.js';
 import { getProjectGitInfo, startGitStatusPoller, stopGitStatusPoller } from './gitStatus.js';
 import { getActiveMonitors, registerMonitor, unregisterMonitor } from '../automation/longRunningMonitor.js';
@@ -351,12 +350,10 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(ISSUE_BOARD_HTML);
 
-      // ---- Dashboard ----
-      } else if (url === '/' || url === '/index.html') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        // Build buttons from the live registry so the toggle never drifts from
-        // isKnownAdapter validation (INT-1901 / INT-3284).
-        res.end(buildDashboardHtml(listAdapterNames()));
+      // ---- Provider registry: the Supervisor builds its toggle from this so
+      // it never drifts from isKnownAdapter validation (INT-1901 / INT-3284) ----
+      } else if (url === '/api/providers' && req.method === 'GET') {
+        writeJson(res, 200, { providers: listAdapterNames() });
 
       // ---- Desktop-app routes (/app, /static/*, /api/work*) → webAppRoutes.ts (INT-3388) ----
       } else if (await tryHandleAppRoutes(req, res, url, requestUrl, runnerRef, readBody)) {

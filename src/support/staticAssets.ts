@@ -159,6 +159,11 @@ export async function readAppShell(): Promise<Buffer | null> {
   return readShellFile('app.html');
 }
 
+/** The Supervisor document served at `/`, or null when assets are not present. */
+export async function readSupervisorShell(): Promise<Buffer | null> {
+  return readShellFile('supervisor.html');
+}
+
 /** The /settings document (web token, appearance), or null when assets are not present. */
 export async function readSettingsShell(): Promise<Buffer | null> {
   return readShellFile('settings.html');

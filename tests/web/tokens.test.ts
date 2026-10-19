@@ -146,7 +146,6 @@ describe('page shells (AGT-4201)', () => {
     // page script, or the first requests go out unauthenticated.
     const repoRoot = join(__dirname, '..', '..');
     const serverRendered = [
-      join(repoRoot, 'src', 'support', 'dashboardHtml.ts'),
       join(repoRoot, 'src', 'issues', 'issueBoardHtml.ts'),
     ];
     const pages = [...html, ...serverRendered];
@@ -197,14 +196,14 @@ describe('page shells (AGT-4201)', () => {
   });
 });
 
-// The two server-rendered pages (`/` supervisor, `/issues` board) keep their
-// inline stylesheets — their scripts are asserted by name elsewhere — but
-// they draw every colour from the shared tokens and follow the same theme.
+// The server-rendered `/issues` board keeps its inline stylesheet, and the
+// Supervisor's classic script still writes markup as strings; both draw every
+// colour from the shared tokens and follow the same theme.
 describe('server-rendered legacy pages (AGT-4201)', () => {
   const pages = [
-    join(__dirname, '..', '..', 'src', 'support', 'dashboardHtml.ts'),
     join(__dirname, '..', '..', 'src', 'issues', 'issueBoardHtml.ts'),
   ];
+  const markupSources = [...pages, join(ROOT, 'js', 'supervisor.js')];
 
   it('link tokens.css, boot the theme first, and offer a toggle', () => {
     for (const file of pages) {
@@ -224,7 +223,7 @@ describe('server-rendered legacy pages (AGT-4201)', () => {
 
   it('carry no colour literal in their <style> or markup', () => {
     const hex = /(?:['"`]|:\s*)(#[0-9a-fA-F]{3,8})\b/g;
-    for (const file of pages) {
+    for (const file of markupSources) {
       const source = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
       const offenders = [...source.matchAll(hex)].map((m) => `${relative(join(__dirname, '..', '..'), file)}: ${m[1]}`);
       expect(offenders).toEqual([]);
@@ -238,7 +237,7 @@ describe('server-rendered legacy pages (AGT-4201)', () => {
     // indirections; what the page references must be declared somewhere.
     const declaredInCss = new Set(css.flatMap((file) =>
       [...readFileSync(file, 'utf8').matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1])));
-    for (const file of pages) {
+    for (const file of markupSources) {
       const source = readFileSync(file, 'utf8');
       const local = new Set([...source.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
       const missing = referencedTokens(source)
