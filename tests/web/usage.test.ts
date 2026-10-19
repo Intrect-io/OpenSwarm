@@ -484,30 +484,6 @@ describe('loading', () => {
     expect(document.querySelector('#status')?.textContent).toContain('웹 토큰');
   });
 
-  it('applies a pasted token through the wrapper, not a second storage key', async () => {
-    // The panel markup shipped with warehouse.html; copying it without wiring
-    // it would leave a field that looks like it does something and does not.
-    // Attach to the real jsdom window and take it back off. Replacing
-    // `globalThis.window` outright would clobber the document every later test
-    // in this file renders into.
-    const storeToken = vi.fn();
-    (window as unknown as Record<string, unknown>).OpenSwarmWebToken = { storeToken };
-    onTestFinished(() => { delete (window as unknown as Record<string, unknown>).OpenSwarmWebToken; });
-    const fetchImpl = vi.fn(async (url: string) => ok(new URL(url, 'http://x').searchParams.get('by')!));
-    startUsageView({ fetchImpl: fetchImpl as never, location: { search: '' } as never });
-
-    (document.querySelector('#web-token') as HTMLInputElement).value = 'secret';
-    (document.querySelector('#save-token') as HTMLButtonElement).click();
-
-    expect(storeToken).toHaveBeenCalledWith('secret');
-    // Cleared from the field so the credential does not sit in the DOM.
-    expect((document.querySelector('#web-token') as HTMLInputElement).value).toBe('');
-    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled());
-
-    (document.querySelector('#clear-token') as HTMLButtonElement).click();
-    expect(storeToken).toHaveBeenLastCalledWith('');
-  });
-
   it('lets the newest window win when a slow one lands second', async () => {
     // Pick 7d, change your mind, pick 24h. The 7d response arrives last and
     // would paint over the 24h one — leaving the select, the URL and the
@@ -535,27 +511,6 @@ describe('loading', () => {
     await first;
 
     expect(document.querySelector('#table-model tbody td')?.textContent).toBe('model-from-24h');
-  });
-
-  it('refuses an empty 적용 instead of deleting the token that is working', async () => {
-    // `storeToken('')` is the wrapper's REMOVE path, and the field is empty in
-    // exactly the case that matters — it is cleared after each use and the
-    // wrapper's own prompt never fills it. One stray click would log a
-    // Tailscale operator out page-wide.
-    const storeToken = vi.fn();
-    (window as unknown as Record<string, unknown>).OpenSwarmWebToken = { storeToken };
-    onTestFinished(() => { delete (window as unknown as Record<string, unknown>).OpenSwarmWebToken; });
-    const fetchImpl = vi.fn(async (url: string) => ok(new URL(url, 'http://x').searchParams.get('by')!));
-    startUsageView({ fetchImpl: fetchImpl as never, location: { search: '' } as never });
-
-    (document.querySelector('#web-token') as HTMLInputElement).value = '   ';
-    (document.querySelector('#save-token') as HTMLButtonElement).click();
-
-    expect(storeToken).not.toHaveBeenCalled();
-    expect(document.querySelector('#status')?.textContent).toContain('입력한 뒤');
-    // 지우기 is still an explicit, separate action.
-    (document.querySelector('#clear-token') as HTMLButtonElement).click();
-    expect(storeToken).toHaveBeenCalledWith('');
   });
 
   it('rewrites a window the API would accept but the page does not offer', async () => {

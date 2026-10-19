@@ -158,3 +158,8 @@ export async function readUsageShell(): Promise<Buffer | null> {
 export async function readAppShell(): Promise<Buffer | null> {
   return readShellFile('app.html');
 }
+
+/** The /settings document (web token, appearance), or null when assets are not present. */
+export async function readSettingsShell(): Promise<Buffer | null> {
+  return readShellFile('settings.html');
+}

@@ -378,6 +378,11 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         await handleUsageRoute(requestUrl.searchParams, res);
 
       // ---- Stats ----
+      } else if (url === '/api/shell-status' && req.method === 'GET') {
+        const { buildShellStatus } = await import('./webShellStatus.js');
+        const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
+        writeJson(res, 200, await buildShellStatus({ runner: runnerRef, pendingEvents: () => getCoordinationStore().snapshot().pending }));
+
       } else if (url === '/api/stats') {
         const stats = runnerRef?.getStats();
         const state = runnerRef?.getState();

@@ -14,7 +14,9 @@ assert(baseUrl && outputDir, 'Usage: <base-url> <output-dir> [--live]');
 const origin = new URL(baseUrl).origin;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const staticRoot = resolve(root, 'web/static');
-const paths = ['/', '/app', '/chat', '/orchestration', '/threads', '/warehouse'];
+const paths = ['/', '/app', '/chat', '/orchestration', '/threads', '/warehouse', '/usage', '/settings'];
+// Reference pages that scroll as documents rather than fit a console viewport.
+const documentPages = new Set(['/warehouse', '/usage', '/settings']);
 const results: object[] = [];
 await mkdir(outputDir, { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -61,10 +63,18 @@ try {
         }));
         assert.equal(size.inner, width, `${label}: mobile viewport expanded`);
         assert(size.scroll <= width + 1, `${label}: page overflow ${size.scroll}`);
-        if (width >= 1024 && path !== '/warehouse') {
+        if (width >= 1024 && !documentPages.has(path)) {
           assert(size.height <= 845, `${label}: desktop panels escape the viewport (${size.height}px)`);
         }
         assert.deepEqual(errors, [], `${label}: JavaScript errors`);
+        // The shared shell reserves exactly the header's height for every layout.
+        const shell = await page.evaluate(() => ({
+          header: Math.round(document.querySelector('header.topbar')!.getBoundingClientRect().height),
+          reserved: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--topbar-h')),
+          status: Boolean(document.querySelector('header.topbar > .shell-status')),
+        }));
+        assert(shell.status, `${label}: shell status line missing`);
+        assert.equal(shell.reserved, shell.header, `${label}: --topbar-h ${shell.reserved} ≠ header ${shell.header}`);
         const nav = page.locator('.topbar-nav');
         assert(await nav.isVisible(), `${label}: navigation hidden`);
         const initialNavScroll = await nav.evaluate((element) => element.scrollLeft);

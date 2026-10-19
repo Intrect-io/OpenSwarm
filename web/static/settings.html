@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>OpenSwarm · Settings</title>
+  <script src="/static/js/themeBoot.js"></script>
+  <script src="/static/js/webToken.js"></script>
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <link rel="stylesheet" href="/static/css/shell.css" />
+  <link rel="stylesheet" href="/static/css/settings.css" />
+</head>
+<body class="page-settings">
+  <header class="topbar" data-shell></header>
+
+  <main class="settings-main">
+    <h1>Settings</h1>
+
+    <section class="settings-section" aria-labelledby="token-title">
+      <h2 id="token-title">Web token</h2>
+      <p class="settings-help">
+        A browser that is not on this machine needs the web token the daemon was started with
+        (<code>OPENSWARM_WEB_TOKEN</code>). It is kept in this tab's session storage only and sent
+        to this daemon alone; closing the tab forgets it.
+      </p>
+      <form id="token-form" class="settings-form" autocomplete="off">
+        <label for="web-token">Token</label>
+        <div class="token-row">
+          <input id="web-token" class="input" type="password" spellcheck="false" />
+          <button id="save-token" type="submit" class="btn btn-primary">Apply</button>
+          <button id="clear-token" type="button" class="btn btn-secondary">Forget in this tab</button>
+        </div>
+        <p id="token-state" class="settings-state" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+  </main>
+
+  <script type="module" src="/static/js/settings.mjs"></script>
+</body>
+</html>

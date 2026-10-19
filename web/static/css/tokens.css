@@ -196,7 +196,7 @@
   /* ── Layout ───────────────────────────────────────────────────────── */
   --sidebar-w: 272px;
   --content-max: 800px;   /* readable measure for prose columns (§1.1) */
-  --topbar-h: 52px;
+  --topbar-h: 87px;       /* 52px shell row + 34px status line + 1px rule */
 }
 
 /* Light: the printed timetable. A value swap, never a reversal (§8.1). */

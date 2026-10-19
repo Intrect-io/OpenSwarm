@@ -537,30 +537,6 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
     }
   }
 
-  // The token panel. `webToken.js` already wraps fetch and prompts on a 403,
-  // so this is the explicit path rather than the only one — but shipping the
-  // markup without wiring it would leave a field that silently does nothing.
-  // Go through the wrapper's own store so there is one definition of where a
-  // token lives, not a second copy of the storage key.
-  const tokenStore = () => globalThis.window?.OpenSwarmWebToken;
-  const tokenInput = root.querySelector('#web-token');
-  root.querySelector('#save-token')?.addEventListener('click', () => {
-    // `storeToken('')` is the wrapper's REMOVE path, and this field is empty in
-    // exactly the case that matters: it is cleared after each use and the
-    // wrapper's own prompt never fills it. One stray click would otherwise
-    // delete a working credential page-wide — and if the prompt had been
-    // dismissed once, `declined` is latched and it does not come back.
-    const token = tokenInput?.value?.trim();
-    if (!token) { say('토큰을 입력한 뒤 적용을 누르세요.'); return; }
-    tokenStore()?.storeToken(token);
-    if (tokenInput) tokenInput.value = '';
-    refresh();   // says '불러오는 중…' itself; a confirmation here would be overwritten
-  });
-  root.querySelector('#clear-token')?.addEventListener('click', () => {
-    tokenStore()?.storeToken('');
-    say('이 탭의 토큰을 지웠습니다.');
-  });
-
   windowSelect?.addEventListener('change', () => {
     writeWindowToUrl(windowSelect.value);
     refresh();
