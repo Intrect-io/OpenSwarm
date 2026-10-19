@@ -11,24 +11,7 @@
   <link rel="stylesheet" href="/static/css/chat.css" />
 </head>
 <body class="page-chat">
-  <header class="topbar">
-    <a class="brand" href="/app">🐝 OpenSwarm</a>
-    <span class="page-title">Chat room</span>
-    <nav class="topbar-nav" aria-label="Pages">
-      <a href="/app">Cockpit</a>
-      <a href="/chat" aria-current="page">Chat</a>
-      <a href="/orchestration">Orchestration</a>
-      <a href="/threads">Threads</a>
-      <a href="/warehouse">Warehouse</a>
-      <a href="/usage">Usage</a>
-      <a href="/">Supervisor</a>
-    </nav>
-    <div class="topbar-spacer"></div>
-    <div class="topbar-actions">
-      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
-        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
-      </button>
-    </div>
+  <header class="topbar" data-shell>
   </header>
 
   <main class="chat-main">
@@ -53,8 +36,8 @@
 
   <script type="module">
     import { startChatView } from '/static/js/chatView.mjs';
-    import { installThemeToggle } from '/static/js/theme.mjs';
-    installThemeToggle(document, document.getElementById('theme-toggle'));
+    import { mountShell } from '/static/js/shell.mjs';
+    mountShell(document);
     startChatView(document);
   </script>
 </body>

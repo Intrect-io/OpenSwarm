@@ -11,24 +11,7 @@
   <link rel="stylesheet" href="/static/css/warehouse.css" />
 </head>
 <body class="page-warehouse">
-  <header class="topbar">
-    <a class="brand" href="/app">🐝 OpenSwarm</a>
-    <span class="page-title">Warehouse</span>
-    <nav class="topbar-nav" aria-label="Pages">
-      <a href="/app">Cockpit</a>
-      <a href="/chat">Chat</a>
-      <a href="/orchestration">Orchestration</a>
-      <a href="/threads">Threads</a>
-      <a href="/warehouse" aria-current="page">Warehouse</a>
-      <a href="/usage">Usage</a>
-      <a href="/">Supervisor</a>
-    </nav>
-    <div class="topbar-spacer"></div>
-    <div class="topbar-actions">
-      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="테마 전환" aria-pressed="false">
-        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
-      </button>
-    </div>
+  <header class="topbar" data-shell>
   </header>
 
   <main class="warehouse-main">
@@ -47,17 +30,6 @@
     </section>
 
     <aside class="upload" aria-label="Upload">
-      <section class="access" aria-labelledby="access-title">
-        <h2 id="access-title">원격 접근</h2>
-        <p>로컬이 아닌 브라우저에서는 배포 시 설정한 웹 토큰이 필요합니다.</p>
-        <label for="web-token">OpenSwarm 웹 토큰</label>
-        <div class="token-row">
-          <input id="web-token" class="input" type="password" autocomplete="off" spellcheck="false" />
-          <button id="save-token" type="button" class="btn btn-secondary">적용</button>
-        </div>
-        <button id="clear-token" class="text-button" type="button">이 탭의 토큰 지우기</button>
-      </section>
-
       <h2>파일 올리기</h2>
       <p>현재 폴더: <code id="upload-directory">/</code></p>
       <label class="dropzone" for="file">

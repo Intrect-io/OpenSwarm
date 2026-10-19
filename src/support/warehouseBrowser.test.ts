@@ -20,7 +20,6 @@ beforeAll(async () => {
     <input id="file" type="file"><span id="file-label"></span>
     <input id="overwrite" type="checkbox"><button id="upload"></button>
     <span id="upload-directory"></span><p id="status"></p>
-    <input id="web-token" type="password"><button id="save-token"></button><button id="clear-token"></button>
   `;
   sessionStorage.setItem('openswarm.webToken', 'browser-secret');
   vi.stubGlobal('fetch', fetchMock);

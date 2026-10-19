@@ -38,6 +38,7 @@ const PAGE_SHELLS: Record<string, () => Promise<Buffer | null>> = {
   '/chat': async () => (await import('./staticAssets.js')).readChatShell(),
   '/warehouse': async () => (await import('./staticAssets.js')).readWarehouseShell(),
   '/usage': async () => (await import('./staticAssets.js')).readUsageShell(),
+  '/settings': async () => (await import('./staticAssets.js')).readSettingsShell(),
   '/threads': async () => (await import('./staticAssets.js')).readThreadBoardShell(),
   '/app': async () => (await import('./staticAssets.js')).readAppShell(),
 };

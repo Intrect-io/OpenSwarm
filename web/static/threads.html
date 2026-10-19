@@ -11,24 +11,9 @@
   <link rel="stylesheet" href="/static/css/threads.css" />
 </head>
 <body class="page-threads">
-  <header class="topbar">
-    <a class="brand" href="/app">🐝 OpenSwarm</a>
-    <span class="page-title">Repository threads</span>
-    <nav class="topbar-nav" aria-label="Pages">
-      <a href="/app">Cockpit</a>
-      <a href="/chat">Chat</a>
-      <a href="/orchestration">Orchestration</a>
-      <a href="/threads" aria-current="page">Threads</a>
-      <a href="/warehouse">Warehouse</a>
-      <a href="/usage">Usage</a>
-      <a href="/">Supervisor</a>
-    </nav>
-    <div class="topbar-spacer"></div>
+  <header class="topbar" data-shell>
     <div class="topbar-actions">
       <select id="repo" class="select" aria-label="Repository"><option value="">Select repository…</option></select>
-      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
-        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
-      </button>
     </div>
   </header>
 
@@ -103,8 +88,8 @@
 
   <script type="module">
     import { startThreadBoard } from '/static/js/threadBoard.mjs';
-    import { installThemeToggle } from '/static/js/theme.mjs';
-    installThemeToggle(document, document.getElementById('theme-toggle'));
+    import { mountShell } from '/static/js/shell.mjs';
+    mountShell(document);
     startThreadBoard(document);
   </script>
 </body>

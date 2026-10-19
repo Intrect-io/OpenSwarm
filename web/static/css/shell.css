@@ -135,37 +135,44 @@ button:disabled { cursor: default; }
   background: var(--shell-bg);
   color: var(--shell-fg);
   border-bottom: 1px solid var(--shell-rule);
+  flex-wrap: wrap;
+  /* The rows stack flush: --topbar-h is the sum of their heights, and every
+     page layout reserves exactly that much. */
+  row-gap: 0;
+  column-gap: var(--space-6);
 }
+.topbar > :not(.shell-status) { min-height: 52px; }
 .topbar .brand {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
   color: var(--fg-primary);
   font-weight: 600;
-  font-size: var(--text-base);
+  font-size: var(--text-lg);
+  letter-spacing: 0.01em;
   white-space: nowrap;
   text-decoration: none;
 }
 .topbar .brand:hover { color: var(--fg-primary); text-decoration: none; }
-.topbar .page-title {
-  color: var(--fg-secondary);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  white-space: nowrap;
-}
+.topbar-nav-group { display: flex; align-items: stretch; min-width: 0; }
 .topbar-nav {
   display: flex;
-  align-items: center;
-  gap: var(--space-1);
+  align-items: stretch;
   overflow-x: auto;
+  scrollbar-width: none;
   min-width: 0;
 }
-.topbar-nav a {
+.topbar-nav::-webkit-scrollbar { display: none; }
+/* Whichever edge still hides links fades out, so a scrolled nav says it scrolls. */
+.topbar-nav.fade-end { mask-image: linear-gradient(to right, black calc(100% - 40px), transparent); }
+.topbar-nav.fade-start { mask-image: linear-gradient(to left, black calc(100% - 40px), transparent); }
+.topbar-nav.fade-start.fade-end {
+  mask-image: linear-gradient(to right, transparent, black 40px, black calc(100% - 40px), transparent);
+}
+.topbar-nav a, .nav-more > summary {
   display: inline-flex;
   align-items: center;
-  align-self: stretch;
-  min-height: 32px;
-  padding: 0 var(--space-3);
+  gap: var(--space-1);
+  padding: 3px var(--space-3) 0;
   border-bottom: 3px solid transparent;
   color: var(--fg-muted);
   font-size: var(--text-sm);
@@ -174,23 +181,104 @@ button:disabled { cursor: default; }
   white-space: nowrap;
   transition: color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
-.topbar-nav a:hover { color: var(--fg-primary); text-decoration: none; }
+.topbar-nav a:hover, .nav-more > summary:hover { color: var(--fg-primary); text-decoration: none; }
 /* Active: white type over a white rule, like the board's current line. */
-.topbar-nav a[aria-current="page"] { color: var(--fg-primary); border-bottom-color: var(--fg-primary); }
+.topbar-nav a[aria-current="page"], .nav-more > summary.is-current {
+  color: var(--fg-primary);
+  border-bottom-color: var(--fg-primary);
+}
+.nav-more { position: relative; display: flex; }
+.nav-more > summary { cursor: pointer; list-style: none; }
+.nav-more > summary::-webkit-details-marker { display: none; }
+.nav-more[open] > summary { color: var(--fg-primary); }
+.nav-more[open] > summary svg { transform: rotate(180deg); }
+.nav-more-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: var(--z-dropdown);
+  display: grid;
+  min-width: 180px;
+  padding: var(--space-1) 0;
+  background: var(--shell-bg);
+  border: 1px solid var(--shell-rule);
+  border-top: 0;
+}
+.nav-more-menu a {
+  padding: var(--space-2) var(--space-4);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-decoration: none;
+}
+.nav-more-menu a:hover { color: var(--fg-primary); background: var(--bg-hover); }
+.nav-more-menu a[aria-current="page"] { color: var(--fg-primary); box-shadow: inset 3px 0 0 var(--fg-primary); }
 .topbar-spacer { flex: 1; }
 .topbar-actions { display: flex; align-items: center; gap: var(--space-2); }
 
-/* Keep page navigation on its own, scrollable row before the header crowds
-   out the links. The cockpit's mobile drawer uses this same header height. */
-@media (max-width: 1100px) {
-  :root { --topbar-h: 89px; }
-  .topbar { flex-wrap: wrap; gap: 0 var(--space-2); padding: 0 var(--space-3); }
-  .topbar > .brand, .topbar > .page-title, .topbar-actions { min-height: 44px; }
-  .topbar-nav { order: 2; flex: 0 0 100%; height: 44px; }
-  .topbar-nav a { flex-shrink: 0; min-height: 44px; }
+/* ── Status line: four sourced facts under the nav, on every page ───── */
+.shell-status {
+  /* Full bleed: the rule above it spans the band, not the padded box. */
+  flex: 0 0 calc(100% + 2 * var(--space-4));
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  min-height: 34px;
+  margin: 0 calc(-1 * var(--space-4));
+  padding: 0 var(--space-4);
+  border-top: 1px solid var(--shell-rule);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
 }
-@media (max-width: 480px) {
-  .topbar .page-title { display: none; }
+.status-item { display: inline-flex; align-items: baseline; gap: var(--space-1); }
+.status-key { text-transform: uppercase; letter-spacing: var(--tracking-caps); }
+.status-value { color: var(--fg-primary); font-size: var(--text-sm); font-weight: 500; }
+.status-source { color: var(--fg-muted); }
+.status-item[data-tone="ok"] .status-value::before,
+.status-item[data-tone="warn"] .status-value::before,
+.status-item[data-tone="bad"] .status-value::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: var(--radius-full);
+  vertical-align: 1px;
+  background: var(--success);
+}
+.status-item[data-tone="warn"] .status-value::before { background: var(--warning); }
+.status-item[data-tone="bad"] .status-value::before { background: var(--danger); }
+.status-needs {
+  margin-left: auto;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+/* Timetable yellow is reserved for this: something waits on the operator. */
+.status-needs[data-tone="needs"] { background: var(--needs); color: var(--needs-ink); }
+.status-needs[data-tone="needs"]:hover { color: var(--needs-ink); text-decoration: underline; }
+.status-needs[data-tone="warn"] { color: var(--fg-primary); text-decoration: underline; }
+.status-needs[data-tone="calm"] { color: var(--fg-muted); font-weight: 500; }
+
+/* Narrow: brand and actions on one row, the nav on its own scrolling row,
+   the status line keeps only what an on-call glance needs. */
+@media (max-width: 1100px) {
+  :root { --topbar-h: 123px; }
+  .topbar { column-gap: var(--space-2); padding: 0 var(--space-3); }
+  .topbar > :not(.shell-status) { min-height: 44px; }
+  .topbar-nav-group { order: 2; flex: 0 0 calc(100% + 2 * var(--space-3)); margin: 0 calc(-1 * var(--space-3)); padding: 0 var(--space-1); border-top: 1px solid var(--shell-rule); }
+  .topbar-nav { flex: 1; }
+  .shell-status { order: 3; flex-basis: calc(100% + 2 * var(--space-3)); margin: 0 calc(-1 * var(--space-3)); padding: 0 var(--space-3); gap: var(--space-4); }
+}
+@media (max-width: 600px) {
+  /* An on-call glance: the daemon's state and what waits on you. A healthy
+     link says nothing; a broken one still shows. */
+  .status-source, .status-key, .status-item[data-key="provider"],
+  .status-item[data-key="link"][data-tone="ok"] { display: none; }
 }
 
 /* ── Buttons ─────────────────────────────────────────────────────────── */

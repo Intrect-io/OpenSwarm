@@ -1,4 +1,4 @@
-import { installThemeToggle } from './theme.mjs';
+import { mountShell } from './shell.mjs';
 
 const entriesBody = document.querySelector('#entries');
 const breadcrumbs = document.querySelector('#breadcrumbs');
@@ -10,9 +10,6 @@ const overwriteInput = document.querySelector('#overwrite');
 const uploadButton = document.querySelector('#upload');
 const uploadDirectory = document.querySelector('#upload-directory');
 const status = document.querySelector('#status');
-const webTokenInput = document.querySelector('#web-token');
-const saveTokenButton = document.querySelector('#save-token');
-const clearTokenButton = document.querySelector('#clear-token');
 
 const TOKEN_KEY = 'openswarm.webToken';
 
@@ -201,23 +198,7 @@ uploadButton.addEventListener('click', async () => {
   }
 });
 
-saveTokenButton.addEventListener('click', () => {
-  const token = webTokenInput.value.trim();
-  if (token) sessionStorage.setItem(TOKEN_KEY, token);
-  else sessionStorage.removeItem(TOKEN_KEY);
-  webTokenInput.value = '';
-  setStatus(token ? '이 탭에 웹 토큰을 적용했습니다.' : '웹 토큰을 지웠습니다.', 'success');
-  loadTree(currentPath);
-});
-
-clearTokenButton.addEventListener('click', () => {
-  sessionStorage.removeItem(TOKEN_KEY);
-  webTokenInput.value = '';
-  setStatus('이 탭의 웹 토큰을 지웠습니다.');
-  loadTree(currentPath);
-});
-
 upButton.addEventListener('click', () => loadTree(parts(currentPath).slice(0, -1).join('/')));
 refreshButton.addEventListener('click', () => loadTree(currentPath));
-installThemeToggle(document, document.querySelector('#theme-toggle'));
+mountShell(document);
 loadTree('');

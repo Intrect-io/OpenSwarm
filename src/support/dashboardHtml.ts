@@ -12,25 +12,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <link rel="stylesheet" href="/static/css/supervisor.css">
 </head>
 <body class="page-supervisor">
-  <header class="topbar">
-    <a class="brand" href="/app">🐝 OpenSwarm</a>
-    <span class="page-title">Supervisor</span>
-    <nav class="topbar-nav" aria-label="Pages">
-      <a href="/" aria-current="page">Supervisor</a>
-      <a href="/app">Cockpit</a>
-      <a href="/chat">Chat</a>
-      <a href="/orchestration">Orchestration</a>
-      <a href="/threads">Threads</a>
-      <a href="/warehouse">Warehouse</a>
-      <a href="/usage">Usage</a>
-      <a href="/issues">Issues</a>
-    </nav>
-    <div class="topbar-spacer"></div>
+  <header class="topbar" data-shell>
     <div class="topbar-actions">
       <span id="sse-status" role="status" aria-live="polite">Connecting</span>
-      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
-        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
-      </button>
     </div>
   </header>
 
@@ -1940,8 +1924,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     // setInterval(() => { if (stageRows.length) renderStages(); }, 10000);
   </script>
   <script type="module">
-    import { installThemeToggle } from '/static/js/theme.mjs';
-    installThemeToggle(document, document.getElementById('theme-toggle'));
+    import { mountShell } from '/static/js/shell.mjs';
+    mountShell(document);
   </script>
 </body>
 </html>`;
