@@ -7,7 +7,7 @@
 // it asserted the class name and jsdom computes no colours. The grid floor was
 // set to 38rem, which looked right and was not: `auto-fit` answers a higher
 // floor with MORE tracks, so the panel stayed narrower than its table and the
-// 비용 column stayed off-screen.
+// Cost column stayed off-screen.
 //
 // A real-browser check belongs in a rendering run, not the unit suite. These
 // are the tripwires that fire when someone edits the two declarations that
@@ -63,8 +63,8 @@ describe('usage.css invariants', () => {
 
   it('keeps the grid floor wide enough for the table it holds', () => {
     // Measured in Chromium against the real ledger: the widest table needs
-    // 774px, and auto-fit pins a track at its floor. Below ~48rem the 비용 and
-    // 점유 columns clip at every desktop width.
+    // 774px, and auto-fit pins a track at its floor. Below ~48rem the Cost and
+    // Share columns clip at every desktop width.
     // Anchored to `.grid`: `.summary` uses auto-fit too and comes first in the
     // file, so an unanchored match would report the wrong rule.
     const m = /\.grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\((\d+)rem/.exec(CSS);

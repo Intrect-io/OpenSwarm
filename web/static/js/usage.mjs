@@ -17,6 +17,8 @@
 // 34.1% over 24h and 66.8% over the last two hours, and only the second one
 // described the code actually running.
 
+import { formatDateTime, formatHour } from './format.mjs';
+
 /** Axes fetched for every window. The time axis is chosen per window. */
 const AXES = ['model', 'stage', 'adapter', 'project', 'task'];
 
@@ -47,7 +49,7 @@ export function formatBucket(key) {
   if (!text.includes('T')) return text;
   const at = new Date(`${text}:00:00Z`);
   if (Number.isNaN(at.getTime())) return text;
-  return at.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', hour12: false });
+  return formatHour(at);
 }
 
 /** `YYYY-MM-DD` of a UTC hour key (`2026-09-10T14`) on the reader's clock. */
@@ -71,7 +73,7 @@ function addRow(into, row) {
 /**
  * The day series, built on the reader's clock from the server's UTC hours.
  *
- * The server's `day` axis buckets on UTC midnight while the `기준` line beside
+ * The server's `day` axis buckets on UTC midnight while the `As of` line beside
  * it is local time. In KST that put every call between 00:00 and 09:00 into
  * yesterday's bar, so a morning reading of "today" was missing nine hours.
  * Re-bucketing the hour axis client-side keeps the ledger and the API UTC and
@@ -137,8 +139,8 @@ export function cacheRate(row) {
  * Null, not 0, for the reason `cacheRate` gives above: an unmetered window has
  * no cost to divide, and printing 0.0% puts every row of it beside rows that
  * genuinely cost nothing relative to their peers. On the ledger this was
- * written against all four attributed tasks are unmetered, so the whole 점유
- * column read 0.0% while 호출당 in the same row honestly read `—`.
+ * written against all four attributed tasks are unmetered, so the whole Share
+ * column read 0.0% while Per call in the same row honestly read `—`.
  */
 export function share(value, total) {
   if (!total || total <= 0) return null;
@@ -151,7 +153,7 @@ export function share(value, total) {
  * `share` alone answers the aggregate-level question — is there a total to
  * divide? This answers the row-level one, and they are different: on the live
  * ledger `gpt-5.6-terra` carries 65% of all calls with no price reported, so
- * it read `—` under 호출당 ("we have no price") and `0.0%` under 점유 ("we
+ * it read `—` under Per call ("we have no price") and `0.0%` under Share ("we
  * know its price and it is nothing") in the same row. Same gate `costPerCall`
  * uses, for the same reason.
  */
@@ -235,7 +237,7 @@ function cell(text, className, { titled = false } = {}) {
  */
 export function truncationNote(hidden) {
   if (!hidden || hidden.count <= 0) return '';
-  return `그 외 ${formatCount(hidden.count)}개 항목(${formatCost(hidden.costUsd)})은 표시하지 않았습니다.`;
+  return `${formatCount(hidden.count)} more row${hidden.count === 1 ? '' : 's'} (${formatCost(hidden.costUsd)}) not shown.`;
 }
 
 export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', label = '', excludeUnattributed = false } = {}) {
@@ -256,8 +258,8 @@ export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', lab
     const body = document.createElement('tbody');
     const tr = document.createElement('tr');
     const td = cell(filteredAll
-      ? '이 기간의 호출은 모두 작업에 귀속되지 않았습니다.'
-      : '이 기간에 기록된 사용량이 없습니다.', 'usage-empty');
+      ? 'No call in this window was attributed to a task.'
+      : 'No usage recorded in this window.', 'usage-empty');
     td.colSpan = 7;
     tr.append(td);
     body.append(tr);
@@ -272,7 +274,7 @@ export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', lab
 
   const head = document.createElement('thead');
   const headRow = document.createElement('tr');
-  for (const heading of [label || aggregate?.by || '', '호출', '토큰', '캐시', '호출당', '비용', '점유']) {
+  for (const heading of [label || aggregate?.by || '', 'Calls', 'Tokens', 'Cache', 'Per call', 'Cost', 'Share']) {
     const th = document.createElement('th');
     th.textContent = heading;
     th.scope = 'col';
@@ -314,7 +316,7 @@ export function renderDays(container, aggregate) {
   if (rows.length === 0 || rows.every(r => (r.calls ?? 0) === 0)) {
     const p = document.createElement('p');
     p.className = 'usage-empty';
-    p.textContent = '이 기간에 기록된 사용량이 없습니다.';
+    p.textContent = 'No usage recorded in this window.';
     container.append(p);
     return;
   }
@@ -352,7 +354,7 @@ export function renderDays(container, aggregate) {
 
     const value = document.createElement('span');
     value.className = 'bar-value';
-    value.textContent = `${formatCost(row.costUsd)} · ${formatCount(row.calls)}회`;
+    value.textContent = `${formatCost(row.costUsd)} · ${formatCount(row.calls)} call${row.calls === 1 ? '' : 's'}`;
 
     line.append(day, track, value);
     container.append(line);
@@ -377,7 +379,7 @@ export function renderSummary(root, { model, task }) {
   };
   set('sum-cost', formatCost(total.costUsd));
   const unmetered = (total.calls ?? 0) - (total.meteredCalls ?? 0);
-  set('sum-cost-note', unmetered > 0 ? `${formatCount(unmetered)}회는 가격 미보고` : '');
+  set('sum-cost-note', unmetered > 0 ? `${formatCount(unmetered)} call${unmetered === 1 ? '' : 's'} reported no price` : '');
 
   set('sum-calls', formatCount(total.calls));
   // The AGT-4288 number. It is the ratio, not the total, that reads as wrong —
@@ -386,17 +388,17 @@ export function renderSummary(root, { model, task }) {
   // one, and its calls as task calls, read 340.6 against a true 53.3 on the
   // ledger this was written from.
   const attributed = attributedTasks(task);
-  // Name the remainder, the way the 비용 card names its unmetered calls. The
+  // Name the remainder, the way the Cost card names its unmetered calls. The
   // headline is every call; the ratio is over attributed calls only, and a
   // reader dividing the headline by the task count lands 8x off.
   const loose = (total.calls ?? 0) - attributed.calls;
   set('sum-calls-note', attributed.tasks > 0
-    ? `${formatCount(attributed.tasks)}개 작업 · 작업당 ${(attributed.calls / attributed.tasks).toFixed(1)}회`
-      + (loose > 0 ? ` · ${formatCount(loose)}회 미귀속` : '')
+    ? `${formatCount(attributed.tasks)} tasks · ${(attributed.calls / attributed.tasks).toFixed(1)} calls per task`
+      + (loose > 0 ? ` · ${formatCount(loose)} not attributed` : '')
     : '');
 
   set('sum-tokens', formatTokens((total.promptTokens ?? 0) + (total.completionTokens ?? 0)));
-  set('sum-tokens-note', `프롬프트 ${formatTokens(total.promptTokens)} · 출력 ${formatTokens(total.completionTokens)}`);
+  set('sum-tokens-note', `${formatTokens(total.promptTokens)} prompt · ${formatTokens(total.completionTokens)} output`);
 
   const rate = cacheRate(total);
   set('sum-cache', formatPercent(rate));
@@ -479,18 +481,18 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
   async function refresh() {
     const since = windowSelect?.value ?? '24h';
     const seq = ++latest;
-    say('불러오는 중…');
+    say('Loading…');
     try {
       const data = await loadUsage(since, fetchImpl);
       if (seq !== latest) return;   // a newer window is already in flight
       renderSummary(root, data);
       renderDays(root.querySelector('#days'), data.time);
       // The card is headed by whoever knows which axis was chosen. Left fixed
-      // it read 일별 over hourly labels like `9. 10. 23시`, on first load for
+      // it read "By day" over hourly labels, on first load for
       // every reader, because the default window is 24h.
       const daysTitle = root.querySelector('#days-title');
-      if (daysTitle) daysTitle.textContent = data.timeAxis === 'hour' ? '시간별' : '일별';
-      const LABELS = { model: '모델', stage: '스테이지', adapter: '어댑터', project: '프로젝트' };
+      if (daysTitle) daysTitle.textContent = data.timeAxis === 'hour' ? 'By hour' : 'By day';
+      const LABELS = { model: 'Model', stage: 'Stage', adapter: 'Adapter', project: 'Project' };
       for (const axis of ['model', 'stage', 'adapter', 'project']) {
         const table = root.querySelector(`#table-${axis}`);
         if (!table) continue;
@@ -501,23 +503,23 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
       const taskTable = root.querySelector('#table-task');
       if (taskTable) {
         const drew = renderTable(taskTable, data.task,
-          { sortBy: 'calls', limit: 30, label: '작업', excludeUnattributed: true });
+          { sortBy: 'calls', limit: 30, label: 'Task', excludeUnattributed: true });
         // Excluded, not hidden: name what was left out and how big it was.
         const loose = (data.task?.rows ?? []).find(r => r.key === UNATTRIBUTED);
         const note = root.querySelector('#task-note');
         if (note) {
           const parts = [];
-          if (loose) parts.push(`작업에 귀속되지 않은 호출 ${formatCount(loose.calls)}회(${formatCost(loose.costUsd)})는 제외했습니다.`);
+          if (loose) parts.push(`Left out: ${formatCount(loose.calls)} call${loose.calls === 1 ? '' : 's'} (${formatCost(loose.costUsd)}) not attributed to a task.`);
           const cut = truncationNote(drew.hidden);
           if (cut) parts.push(cut);
           note.textContent = parts.join(' ');
         }
       }
       rendered = since;
-      // `기준` names when the data ends. Falling back to `since` would print
+      // `As of` names when the data ends. Falling back to `since` would print
       // the window's START under that label, which is the opposite.
       const until = data.model?.until;
-      say(until ? `기준 ${new Date(until).toLocaleString('ko-KR')}` : '');
+      say(until ? `As of ${formatDateTime(until)}` : '');
     } catch (err) {
       if (seq !== latest) return;
       // Put the controls back on the window the numbers actually came from.
@@ -530,10 +532,10 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
       }
       // A 403 here is the token case, not a dead daemon — say which.
       const message = String(err?.message ?? err);
-      const scope = rendered && rendered !== since ? `${since} 조회 실패 — ${rendered} 데이터를 유지합니다. ` : '';
+      const scope = rendered && rendered !== since ? `Could not load ${since}; still showing ${rendered}. ` : '';
       say(message.includes('403')
-        ? `${scope}접근 권한이 없습니다. 아래에서 웹 토큰을 입력하세요.`
-        : `${scope}사용량을 불러오지 못했습니다: ${message}`);
+        ? `${scope}This browser needs a web token. Add it in Settings.`
+        : `${scope}Usage did not load: ${message}`);
     }
   }
 

@@ -67,8 +67,8 @@ describe('derived numbers', () => {
 
   it('has no share to report for a row that reported no price', () => {
     // The row-level twin of the case below. On the live ledger gpt-5.6-terra
-    // carries 65% of all calls unmetered, and read `—` under 호출당 while
-    // reading 0.0% under 점유 in the same row.
+    // carries 65% of all calls unmetered, and read `—` under Per call while
+    // reading 0.0% under Share in the same row.
     expect(rowShare(row('a', { meteredCalls: 0, costUsd: 0 }), 10)).toBeNull();
     expect(formatPercent(rowShare(row('a', { meteredCalls: 0 }), 10))).toBe('—');
     expect(rowShare(row('a', { meteredCalls: 4, costUsd: 2.5 }), 10)).toBe(0.25);
@@ -119,8 +119,8 @@ describe('tables', () => {
 
   it('names the axis in the header instead of leaving the corner blank', () => {
     const table = document.querySelector('#t')!;
-    renderTable(table, { by: 'model', rows: [row('qwen')], total: row('total') }, { label: '모델' });
-    expect(table.querySelector('thead th')?.textContent).toBe('모델');
+    renderTable(table, { by: 'model', rows: [row('qwen')], total: row('total') }, { label: 'Model' });
+    expect(table.querySelector('thead th')?.textContent).toBe('Model');
     // Falls back to the axis the aggregate names when no label is given.
     renderTable(table, { by: 'stage', rows: [row('draft')], total: row('total') });
     expect(table.querySelector('thead th')?.textContent).toBe('stage');
@@ -144,7 +144,7 @@ describe('tables', () => {
   it('says so when the window holds nothing', () => {
     const table = document.querySelector('#t')!;
     renderTable(table, { rows: [], total: row('total', { calls: 0, costUsd: 0 }) });
-    expect(table.querySelector('td')?.textContent).toContain('사용량이 없습니다');
+    expect(table.querySelector('td')?.textContent).toContain('No usage recorded');
   });
 
   it('colours a low cache rate so it stands out from its peers', () => {
@@ -169,7 +169,7 @@ describe('tables', () => {
 
   it('keeps a non-task out of a ranking of tasks', () => {
     // The unattributed bucket outweighs every real task, so without this it
-    // sits at the top of "호출이 많은 순" and pushes them all below the fold.
+    // sits at the top of "most calls first" and pushes them all below the fold.
     const table = document.querySelector('#t')!;
     renderTable(table, {
       rows: [row(UNATTRIBUTED, { calls: 1499 }), row('audit-3-4', { calls: 66 })],
@@ -198,7 +198,7 @@ describe('tables', () => {
   it('names the rows it cut instead of dropping their spend silently', () => {
     // Live state, not hypothetical: the project axis returns 67 rows over 30
     // days and the panel draws 25 — 13% of spend, absent with no mention.
-    expect(truncationNote({ count: 5, costUsd: 5 })).toContain('5개 항목');
+    expect(truncationNote({ count: 5, costUsd: 5 })).toContain('5 more rows');
     expect(truncationNote({ count: 5, costUsd: 5 })).toContain('$5.00');
     expect(truncationNote({ count: 0, costUsd: 0 })).toBe('');
     expect(truncationNote(undefined)).toBe('');
@@ -253,10 +253,10 @@ describe('tables', () => {
     const table = document.querySelector('#t')!;
     renderTable(table, { rows: [row(UNATTRIBUTED, { calls: 9 })], total: row('total') },
       { excludeUnattributed: true });
-    expect(table.querySelector('td')?.textContent).toContain('작업에 귀속되지 않았습니다');
+    expect(table.querySelector('td')?.textContent).toContain('attributed to a task');
 
     renderTable(table, { rows: [], total: row('total') }, { excludeUnattributed: true });
-    expect(table.querySelector('td')?.textContent).toContain('사용량이 없습니다');
+    expect(table.querySelector('td')?.textContent).toContain('No usage recorded');
   });
 
   it('measures share against what the panel ranks, not the global total', () => {
@@ -317,7 +317,7 @@ describe('day series', () => {
   it('says so when the window holds nothing', () => {
     const days = document.querySelector('#days')!;
     renderDays(days, { rows: [], total: row('total') });
-    expect(days.textContent).toContain('사용량이 없습니다');
+    expect(days.textContent).toContain('No usage recorded');
   });
 });
 
@@ -413,11 +413,11 @@ describe('summary', () => {
       },
     });
     expect(document.querySelector('#sum-calls')?.textContent).toBe('13,287');
-    expect(document.querySelector('#sum-calls-note')?.textContent).toContain('239개 작업');
-    expect(document.querySelector('#sum-calls-note')?.textContent).toContain('55.0회');
+    expect(document.querySelector('#sum-calls-note')?.textContent).toContain('239 tasks');
+    expect(document.querySelector('#sum-calls-note')?.textContent).toContain('55.0 calls per task');
     // The headline is every call; the ratio is over attributed calls only.
     // Without naming the remainder a reader divides 13,287/239 and lands 4x off.
-    expect(document.querySelector('#sum-calls-note')?.textContent).toContain('미귀속');
+    expect(document.querySelector('#sum-calls-note')?.textContent).toContain('not attributed');
     expect(document.querySelector('#sum-cost')?.textContent).toBe('$57.09');
   });
 
@@ -472,8 +472,8 @@ describe('loading', () => {
     // window rather than dropped (AGT-4293).
     const labels = [...document.querySelectorAll('#days .bar-day')].map(el => el.textContent);
     expect(labels).toContain('hour-a');
-    expect(document.querySelector('#days-title')?.textContent).toBe('시간별');
-    expect(document.querySelector('#status')?.textContent).toContain('기준');
+    expect(document.querySelector('#days-title')?.textContent).toBe('By hour');
+    expect(document.querySelector('#status')?.textContent).toContain('As of');
   });
 
   it('names the token case instead of reading as a dead daemon', async () => {
@@ -481,7 +481,7 @@ describe('loading', () => {
     // as a generic failure is what made the dashboard look dead before.
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 403, json: async () => ({}) }));
     await startUsageView({ fetchImpl: fetchImpl as never }).refresh();
-    expect(document.querySelector('#status')?.textContent).toContain('웹 토큰');
+    expect(document.querySelector('#status')?.textContent).toContain('web token');
   });
 
   it('lets the newest window win when a slow one lands second', async () => {
@@ -532,7 +532,7 @@ describe('loading', () => {
   });
 
   it('orders the task table by calls at the call site, not just when asked directly', async () => {
-    // The heading says "호출이 많은 순". Dropping the option at the call site
+    // The heading says "most calls first". Dropping the option at the call site
     // silently orders by cost and no existing test noticed.
     const fetchImpl = vi.fn(async (url: string) => {
       const by = new URL(url, 'http://x').searchParams.get('by')!;
@@ -589,7 +589,7 @@ describe('loading', () => {
 
     expect(select.value).toBe('24h');
     expect(String(replaceState.mock.calls.at(-1)?.[2])).toContain('since=24h');
-    expect(document.querySelector('#status')?.textContent).toContain('24h 데이터를 유지합니다');
+    expect(document.querySelector('#status')?.textContent).toContain('still showing 24h');
     expect(document.querySelector('#table-model tbody td')?.textContent).toBe('model-a');
   });
 
@@ -612,11 +612,11 @@ describe('loading', () => {
     release!();
     await first;
 
-    expect(document.querySelector('#status')?.textContent).toContain('기준');
+    expect(document.querySelector('#status')?.textContent).toContain('As of');
     expect(select.value).toBe('24h');
   });
 
-  it('reports a failed axis rather than leaving the page on 불러오는 중', async () => {
+  it('reports a failed axis rather than leaving the page on Loading', async () => {
     const fetchImpl = vi.fn(async () => { throw new Error('network down'); });
     await startUsageView({ fetchImpl: fetchImpl as never }).refresh();
     expect(document.querySelector('#status')?.textContent).toContain('network down');
@@ -694,8 +694,8 @@ describe('windows and the time axis (AGT-4296)', () => {
   it("renders a UTC hour bucket on the reader's clock, and leaves a day alone", () => {
     // A literal, not the implementation's own expression: recomputing the
     // expected value with the code under test says "the code equals the code"
-    // and would not notice a wrong `timeZone`. 14:00Z is 23시 in the pinned zone.
-    expect(formatBucket('2026-09-10T14')).toBe('9. 10. 23시');
+    // and would not notice a wrong `timeZone`. 14:00Z is 11 PM in the pinned zone.
+    expect(formatBucket('2026-09-10T14')).toBe('Sep 10, 11 PM');
     // A day key must NOT be converted — shifting it by the offset relabels the
     // day, which is AGT-4293's scope, not this change's.
     expect(formatBucket('2026-09-10')).toBe('2026-09-10');
@@ -708,7 +708,7 @@ describe('windows and the time axis (AGT-4296)', () => {
     renderDays(document.querySelector('#d')!, { rows: [row('2026-09-10T14')], total: row('total') });
     const label = document.querySelector('#d .bar-day') as HTMLElement;
     expect(label.title).toBe('2026-09-10T14');
-    expect(label.textContent).toBe('9. 10. 23시');
+    expect(label.textContent).toBe('Sep 10, 11 PM');
   });
 
   it('heads the card with the axis it actually drew', async () => {
@@ -716,10 +716,10 @@ describe('windows and the time axis (AGT-4296)', () => {
     const view = startUsageView({ fetchImpl: fetchImpl as never, location: { search: '' } as never });
     (document.querySelector('#window') as HTMLSelectElement).value = '7d';
     await view.refresh();
-    expect(document.querySelector('#days-title')?.textContent).toBe('일별');
+    expect(document.querySelector('#days-title')?.textContent).toBe('By day');
 
     (document.querySelector('#window') as HTMLSelectElement).value = '1h';
     await view.refresh();
-    expect(document.querySelector('#days-title')?.textContent).toBe('시간별');
+    expect(document.querySelector('#days-title')?.textContent).toBe('By hour');
   });
 });

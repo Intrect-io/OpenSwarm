@@ -53,8 +53,10 @@ export class SessionTree {
     for (const [projectPath, group] of byProject) {
       const head = document.createElement('div');
       head.className = 'tree-project';
-      head.textContent = projectPath.split('/').filter(Boolean).pop() ?? projectPath;
-      head.title = projectPath;
+      head.textContent = projectPath === 'unknown'
+        ? 'No repository recorded'
+        : projectPath.split('/').filter(Boolean).pop() ?? projectPath;
+      head.title = projectPath === 'unknown' ? 'The daemon did not report a repository for these runs' : projectPath;
 
       const runningCount = group.filter((s) => s.phase === 'running').length;
       if (runningCount) {

@@ -27,12 +27,16 @@ function setDaemonStatus(state, label) {
   statusLabel.textContent = label;
 }
 
+// /health only proves the dashboard server answers; whether the daemon is
+// running is the shell status line's job. Calling this "daemon" put a green
+// "daemon v0.24.4" under a status line saying "dashboard only" (audit
+// 2026-10-19), so it is named for what it measures.
 async function pollHealth() {
   try {
     const health = await api.health();
-    setDaemonStatus('ok', `daemon v${health.backend_version}`);
+    setDaemonStatus('ok', `server v${health.backend_version}`);
   } catch {
-    setDaemonStatus('down', 'daemon unreachable');
+    setDaemonStatus('down', 'server unreachable');
   }
 }
 

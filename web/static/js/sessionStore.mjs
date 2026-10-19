@@ -46,6 +46,11 @@ export function repoRootFromPath(path) {
   return path.replace(/\/worktree\/[^/]+\/?$/, '');
 }
 
+/** The worktree a path names, or undefined when it already is a repo root. */
+function worktreeOf(path) {
+  return typeof path === 'string' && repoRootFromPath(path) !== path ? path : undefined;
+}
+
 export class SessionStore extends EventTarget {
   #sessions = new Map(); // taskId -> session record
 
@@ -72,8 +77,12 @@ export class SessionStore extends EventTarget {
         phase: entry.status === 'queued' ? 'queued' : 'running',
         issueIdentifier: entry.issueIdentifier,
         title: entry.title,
-        projectPath: entry.projectPath,
-        worktreePath: entry.worktreePath,
+        // Live stage events already fold a worktree path back to its repo
+        // (below); the snapshot did not, so a seeded session was grouped under
+        // its worktree's issue UUID instead of the repository name (audit
+        // 2026-10-19).
+        projectPath: repoRootFromPath(entry.projectPath),
+        worktreePath: entry.worktreePath ?? worktreeOf(entry.projectPath),
         branch: entry.branch,
         currentStage: entry.stage,
         model: entry.model,
@@ -91,7 +100,8 @@ export class SessionStore extends EventTarget {
           phase: entry.status,
           issueIdentifier: entry.issueIdentifier,
           title: entry.title,
-          projectPath: entry.projectPath,
+          projectPath: repoRootFromPath(entry.projectPath),
+          worktreePath: worktreeOf(entry.projectPath),
           costUsd: entry.costUsd,
           durationMs: entry.durationMs,
           failureCause: entry.failureCause,

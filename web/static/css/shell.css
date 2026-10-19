@@ -361,6 +361,21 @@ button:disabled { cursor: default; }
 
 /* ── Chips & badges ──────────────────────────────────────────────────── */
 
+/* A long id shown short, the full value behind Copy (idChip.mjs). */
+.id-chip { display: inline-flex; align-items: baseline; gap: var(--space-1); font-family: var(--font-mono); font-size: var(--text-xs); }
+.id-chip-copy {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-secondary);
+  font: inherit;
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+.id-chip-copy:hover { color: var(--fg-primary); border-color: var(--border-strong); }
+.id-chip-copy:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
 .chip {
   display: inline-flex;
   align-items: center;
