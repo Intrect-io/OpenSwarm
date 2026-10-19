@@ -45,7 +45,8 @@ function safeRelativePath(raw: string | null, allowEmpty: boolean): string {
 }
 
 function existingRoot(root: string): string {
-  if (!existsSync(root)) throw new WarehouseHttpError(503, 'Warehouse is not provisioned');
+  // Name the folder: the page turns this into setup steps (redesign step 9).
+  if (!existsSync(root)) throw new WarehouseHttpError(503, `Warehouse is not provisioned: ${root} does not exist`);
   return realpathSync(root);
 }
 

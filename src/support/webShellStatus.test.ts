@@ -22,8 +22,14 @@ describe('buildShellStatus', () => {
       daemon: { state: 'dashboard-only', reason: 'No daemon runner is attached to this dashboard', uptimeMs: null },
       provider: null,
       needsYou: { questions: 1, parked: 0, total: 1 },
+      tracker: 'local',
       generatedAt: 5_000,
     });
+  });
+
+  it('names the tracker the daemon reads issues from', async () => {
+    expect((await buildShellStatus({ pendingEvents: () => [], linearConfigured: () => true })).tracker).toBe('linear');
+    expect((await buildShellStatus({ runner: runner(), pendingEvents: () => [], linearConfigured: () => false })).tracker).toBe('local');
   });
 
   it('counts parked runs and open human questions, not other pending exchanges', async () => {

@@ -44,7 +44,9 @@ async function api(url, options) {
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
     try { message = (await response.json()).error || message; } catch { /* non-JSON */ }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   return response;
 }
@@ -148,9 +150,27 @@ async function loadTree(path) {
     renderBreadcrumbs();
     renderEntries(payload.entries);
   } catch (error) {
+    if (error.status === 503 && /not provisioned/.test(error.message) && showSetup(error.message)) return;
     entriesBody.innerHTML = `<tr><td colspan="5" class="empty error"></td></tr>`;
     entriesBody.querySelector('td').textContent = error.message;
   }
+}
+
+/**
+ * First run: the folder does not exist yet. A red "Warehouse is not
+ * provisioned" told the operator something was wrong but not what to do, and
+ * left an upload form that could only fail.
+ */
+function showSetup(message) {
+  const folder = message.match(/: (.+) does not exist$/)?.[1] ?? '/warehouse';
+  const setup = document.querySelector('#setup');
+  // A page from before the setup panel existed (a stale cache) keeps the
+  // plain error instead of throwing.
+  if (!setup) return false;
+  setup.querySelector('#setup-folder').textContent = folder;
+  setup.hidden = false;
+  for (const panel of document.querySelectorAll('.browser, .upload')) panel.hidden = true;
+  return true;
 }
 
 fileInput.addEventListener('change', () => {

@@ -18,6 +18,12 @@ export interface ShellStatus {
   daemon: { state: DaemonState; reason: string | null; uptimeMs: number | null };
   provider: { adapter: string; model: string | null } | null;
   needsYou: { questions: number; parked: number; total: number };
+  /**
+   * Where the daemon reads issues from: Linear when a key is configured,
+   * otherwise its built-in local tracker (selectTaskSource). First-run copy
+   * depends on it — Cockpit lists Linear issues only.
+   */
+  tracker: 'linear' | 'local';
   generatedAt: number;
 }
 
@@ -31,8 +37,10 @@ export interface ShellStatusRunner {
 export async function buildShellStatus(deps: {
   runner?: ShellStatusRunner;
   pendingEvents: () => readonly CoordinationEvent[];
+  linearConfigured?: () => boolean;
   now?: () => number;
 }): Promise<ShellStatus> {
+  const tracker = deps.linearConfigured?.() ? 'linear' : 'local';
   const now = deps.now?.() ?? Date.now();
   // A human question is the one pending exchange that waits on the operator;
   // the board holds it until a human-answer or an expiry settles it.
@@ -43,6 +51,7 @@ export async function buildShellStatus(deps: {
       daemon: { state: 'dashboard-only', reason: 'No daemon runner is attached to this dashboard', uptimeMs: null },
       provider: null,
       needsYou: { questions, parked: 0, total: questions },
+      tracker,
       generatedAt: now,
     };
   }
@@ -62,6 +71,7 @@ export async function buildShellStatus(deps: {
     },
     provider: summary ? { adapter: summary.defaultAdapter, model: summary.worker?.model ?? null } : null,
     needsYou: { questions, parked, total: questions + parked },
+    tracker,
     generatedAt: now,
   };
 }

@@ -378,7 +378,12 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url === '/api/shell-status' && req.method === 'GET') {
         const { buildShellStatus } = await import('./webShellStatus.js');
         const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
-        writeJson(res, 200, await buildShellStatus({ runner: runnerRef, pendingEvents: () => getCoordinationStore().snapshot().pending }));
+        const { isLinearInitialized } = await import('../linear/linear.js');
+        writeJson(res, 200, await buildShellStatus({
+          runner: runnerRef,
+          pendingEvents: () => getCoordinationStore().snapshot().pending,
+          linearConfigured: isLinearInitialized,
+        }));
 
       } else if (url === '/api/stats') {
         const stats = runnerRef?.getStats();

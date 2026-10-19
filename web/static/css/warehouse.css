@@ -110,3 +110,10 @@ td.empty { padding: var(--space-12); text-align: center; white-space: normal; }
   .overwrite { min-height: 44px; }
   th:nth-child(2), td:nth-child(2), th:nth-child(4), td:nth-child(4) { display: none; }
 }
+
+/* First-run setup, in place of the browser and upload panels. */
+.setup { max-width: 64ch; padding: var(--space-6) 0; }
+.setup[hidden], .browser[hidden], .upload[hidden] { display: none; }
+.setup h2 { margin: 0 0 var(--space-2); font-size: var(--text-lg); font-weight: 600; color: var(--fg-primary); }
+.setup p, .setup li { color: var(--fg-secondary); line-height: var(--leading-body); }
+.setup ol { margin: var(--space-3) 0 0; padding-left: var(--space-6); display: grid; gap: var(--space-2); }
