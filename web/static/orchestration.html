@@ -1,63 +1,16 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>OpenSwarm · Orchestration</title>
-  <script src="/static/js/themeBoot.js"></script>
-  <script src="/static/js/webToken.js"></script>
-  <link rel="stylesheet" href="/static/css/tokens.css" />
-  <link rel="stylesheet" href="/static/css/shell.css" />
-  <link rel="stylesheet" href="/static/css/orchestration.css" />
-</head>
-<body class="page-orchestration">
-  <header class="topbar" data-shell>
-  </header>
-
-  <div id="waiting" class="waiting" role="status" aria-live="polite"></div>
-
-  <div class="orch-toolbar">
-    <div id="controls" role="group" aria-label="Filter the board">
-      <input id="filter-search" class="input" type="search" autocomplete="off" placeholder="Search agents…" aria-label="Search agents" />
-      <select id="filter-task" class="select" aria-label="Filter by task" data-options="">
-        <option value="">All tasks</option>
-      </select>
-      <select id="filter-role" class="select" aria-label="Filter by role">
-        <option value="">All roles</option>
-        <option value="worker">worker</option>
-        <option value="reviewer">reviewer</option>
-        <option value="orchestrator">orchestrator</option>
-        <option value="review-agent">review agent</option>
-        <option value="daemon">daemon</option>
-        <option value="human">operator</option>
-      </select>
-      <label for="filter-idle">
-        <input id="filter-idle" type="checkbox" /> Show idle <span id="idle-count"></span>
-      </label>
-    </div>
-    <div id="stats" aria-label="Board statistics"></div>
-  </div>
-
-  <main class="orch-main">
-    <div id="graph-wrap">
-      <div id="legend" aria-label="Legend"></div>
-      <svg id="graph" role="img" aria-label="Agent interaction graph"></svg>
-    </div>
-    <aside class="orch-aside" aria-label="Selection details">
-      <h2>Agent detail</h2>
-      <div id="detail"><div class="empty">Select a node</div></div>
-      <h2>Event feed</h2>
-      <div id="feed"><div class="empty">Loading…</div></div>
-      <h2>Conversation</h2>
-      <div id="thread"><div class="empty">Select an event to read its conversation</div></div>
-    </aside>
-  </main>
-
-  <script type="module">
-    import { startOrchestrationView } from '/static/js/orchestrationView.mjs';
-    import { mountShell } from '/static/js/shell.mjs';
-    mountShell(document);
-    startOrchestrationView(document);
-  </script>
-</body>
-</html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>OpenSwarm · Orchestration</title>
+<script src="/static/js/themeBoot.js"></script><script src="/static/js/webToken.js"></script>
+<link rel="stylesheet" href="/static/css/tokens.css"><link rel="stylesheet" href="/static/css/shell.css"><link rel="stylesheet" href="/static/css/project-workspace.css"></head>
+<body class="page-orchestration"><header class="topbar" data-shell></header>
+<main data-project-workspace="orchestration" data-level="projects">
+<div id="workspace-demo" class="demo-banner" hidden></div>
+<div class="workspace-toolbar"><button id="workspace-back" type="button" hidden>Back to projects</button><span id="workspace-location">All projects</span><span id="workspace-totals" class="meta">Loading project summary…</span><button id="workspace-needs" type="button">Needs you</button><button id="workspace-refresh" type="button">Refresh</button></div>
+<p id="workspace-notice" class="workspace-notice" role="status" hidden></p>
+<section id="needs-inbox" class="needs-inbox" aria-labelledby="needs-heading" hidden><div class="pane-title"><h2 id="needs-heading">Needs you</h2><button id="needs-close" type="button">Close inbox</button></div><div id="needs-list"></div><button id="needs-more" type="button" hidden>More requests</button></section>
+<div class="workspace-panes"><section class="project-directory" aria-labelledby="projects-heading"><div class="pane-title"><h2 id="projects-heading">Projects</h2></div><div class="project-table-scroll"><table class="project-table"><thead><tr><th scope="col">Project</th><th scope="col">Running tasks</th><th scope="col">Recent participants · 30m</th><th scope="col">Needs you</th></tr></thead><tbody id="project-list"></tbody></table></div><button id="project-load-more" type="button" hidden>More projects</button></section>
+<section class="project-conversation" aria-labelledby="channel-title"><div class="pane-title channel-heading"><h2 id="channel-title">Choose a project</h2><p id="channel-description" class="meta">Each project keeps its own tasks and discussions.</p></div><details id="project-task-picker" open><summary>Project tasks</summary><div id="project-tasks"><p class="empty">Select a project to see its tasks.</p></div><button id="task-load-more" type="button" hidden>More tasks</button></details><div class="history-controls"><button id="channel-older" type="button" hidden>Load older entries</button><button id="channel-latest" type="button" hidden>Jump to latest</button></div><div id="channel-entries" class="channel-entries" tabindex="0" aria-label="Channel conversation"><p class="empty">Select a project to read its conversation.</p></div></section>
+<aside class="project-detail" aria-labelledby="detail-heading"><div class="pane-title"><h2 id="detail-heading">Task details</h2></div><div id="thread-content" class="thread-content"><p class="empty">Open a discussion or task to read its context.</p></div></aside></div>
+<form id="workspace-compose" class="workspace-compose" hidden><p id="compose-scope" class="compose-scope"></p><button id="compose-toggle" type="button" aria-expanded="false" aria-controls="compose-fields">Write a message</button><div id="compose-fields" class="compose-fields"><label class="field-label" for="workspace-recipient">Recipient<select id="workspace-recipient"><option value="">Project coordinator</option></select></label><label class="field-label message-label" for="workspace-message">Message<textarea id="workspace-message" rows="3" maxlength="4000" dir="auto" placeholder="Share a question, decision or result…"></textarea></label><div class="compose-actions"><label class="file-label" for="workspace-files">Attach files<input id="workspace-files" type="file" multiple></label><button id="workspace-send" type="submit" disabled>Send message</button></div></div><p id="compose-files" class="meta"></p><p id="compose-result" role="status"></p></form>
+<p id="workspace-status" class="sr-only" role="status" aria-live="polite"></p></main>
+<script type="module" src="/static/js/projectWorkspaceBoot.mjs"></script></body></html>

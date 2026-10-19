@@ -1,0 +1,70 @@
+{
+  "fixtureOnly": true,
+  "boundary": "Local read-only demo data with the production UI; does not measure production API or fleet latency.",
+  "results": [
+    {
+      "scenario": "normal",
+      "projects": 10,
+      "agents": 100,
+      "samples": [
+        {
+          "renderMs": 752.8579169999994,
+          "selectionMs": 830.467290999999,
+          "jsHeapUsedBytes": 2616320
+        },
+        {
+          "renderMs": 410.1243340000001,
+          "selectionMs": 890.6098750000001,
+          "jsHeapUsedBytes": 2616308
+        },
+        {
+          "renderMs": 366.1231250000001,
+          "selectionMs": 690.5715830000008,
+          "jsHeapUsedBytes": 2616308
+        },
+        {
+          "renderMs": 312.68595800000185,
+          "selectionMs": 755.2715829999979,
+          "jsHeapUsedBytes": 2616344
+        },
+        {
+          "renderMs": 333.1415840000009,
+          "selectionMs": 766.0115000000005,
+          "jsHeapUsedBytes": 2616400
+        }
+      ]
+    },
+    {
+      "scenario": "stress",
+      "projects": 100,
+      "agents": 1000,
+      "samples": [
+        {
+          "renderMs": 274.3435000000027,
+          "selectionMs": 220.35970799999996,
+          "jsHeapUsedBytes": 3591932
+        },
+        {
+          "renderMs": 327.7282500000001,
+          "selectionMs": 671.0023330000004,
+          "jsHeapUsedBytes": 3623000
+        },
+        {
+          "renderMs": 386.09466699999757,
+          "selectionMs": 410.96199999999953,
+          "jsHeapUsedBytes": 3580700
+        },
+        {
+          "renderMs": 496.58054099999936,
+          "selectionMs": 260.072750000003,
+          "jsHeapUsedBytes": 3572336
+        },
+        {
+          "renderMs": 302.7984170000018,
+          "selectionMs": 757.8882080000003,
+          "jsHeapUsedBytes": 3572632
+        }
+      ]
+    }
+  ]
+}

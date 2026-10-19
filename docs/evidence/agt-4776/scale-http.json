@@ -1,0 +1,37 @@
+{
+  "fixtureOnly": true,
+  "results": [
+    {
+      "projects": 10,
+      "agents": 100,
+      "loops": 25,
+      "initMs": 250.401292,
+      "queryP50Ms": 1.4514580000000024,
+      "queryP95Ms": 18.83479099999977,
+      "queryMaxMs": 71.55304100000012,
+      "httpP50Ms": 5.107916999999816,
+      "httpP95Ms": 42.45554200000015,
+      "httpMaxMs": 56.05149999999958,
+      "heapDeltaBytes": -10576840,
+      "rssBytes": 312164352,
+      "aggregateScope": "complete durable records; two synthetic sessions per project",
+      "stateDir": "/var/folders/x4/5ltqqh6921176w4qz_gr6pr00000gn/T/project-scale-5fgHWu"
+    },
+    {
+      "projects": 100,
+      "agents": 1000,
+      "loops": 25,
+      "initMs": 959.827667,
+      "queryP50Ms": 53.43220800000017,
+      "queryP95Ms": 114.23233400000026,
+      "queryMaxMs": 118.5585000000001,
+      "httpP50Ms": 55.875207999999475,
+      "httpP95Ms": 219.8179999999993,
+      "httpMaxMs": 305.43604200000027,
+      "heapDeltaBytes": -10349168,
+      "rssBytes": 267075584,
+      "aggregateScope": "complete durable records; two synthetic sessions per project",
+      "stateDir": "/var/folders/x4/5ltqqh6921176w4qz_gr6pr00000gn/T/project-scale-5fgHWu"
+    }
+  ]
+}

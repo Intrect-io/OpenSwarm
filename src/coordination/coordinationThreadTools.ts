@@ -99,6 +99,7 @@ export const COORDINATION_THREAD_TOOL_DEFINITIONS: ToolDefinition[] = [
           thread_id: { type: 'string' },
           body: { type: 'string' },
           acknowledges_correlation_id: { type: 'string', description: 'Correlation ID of one useful advice response this reply records as incorporated.' },
+          delivery_id: { type: 'string', description: 'For a project-channel request, copy metadata.deliveryId from the inbox message. Only this delivery is settled; unrelated thread replies do not acknowledge a delivery.' },
           idempotency_key: { type: 'string', description: 'Stable key unique to this intended reply, reused on retries.' },
         },
         required: ['thread_id', 'body', 'idempotency_key'],
@@ -295,6 +296,7 @@ export async function executeCoordinationThreadTool(
         taskLabel: context.taskLabel,
         body: requiredString(args, 'body'),
         idempotencyKey: requiredString(args, 'idempotency_key'),
+        replyToDeliveryId: optionalString(args, 'delivery_id'),
         notification: {
           repository: context.repository,
           repoKey: threadRepository(context),

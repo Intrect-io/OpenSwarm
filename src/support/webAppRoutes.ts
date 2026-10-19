@@ -79,7 +79,12 @@ export async function tryHandleAppRoutes(
   requestUrl: URL,
   runner: AutonomousRunner | undefined,
   readBody: (req: IncomingMessage) => Promise<string>,
+  configuredProjects?: () => readonly string[],
 ): Promise<boolean> {
+  if (/^\/api\/coordination\/(?:projects|channels|needs-you)(?:\/|$)/.test(url)) {
+    const { tryHandleProjectRoutes } = await import('../coordination/projectRoutes.js');
+    return tryHandleProjectRoutes(req, res, url, requestUrl, runner, configuredProjects?.() ?? runner?.getAllowedProjects() ?? [], readBody);
+  }
   {
     const { tryHandleReasoningEffortRoutes } = await import('./reasoningEffortRoutes.js');
     if (await tryHandleReasoningEffortRoutes(req, res, url, () => {})) return true;

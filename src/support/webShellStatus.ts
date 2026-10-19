@@ -18,6 +18,8 @@ export interface ShellStatus {
   daemon: { state: DaemonState; reason: string | null; uptimeMs: number | null };
   provider: { adapter: string; model: string | null } | null;
   needsYou: { questions: number; parked: number; total: number };
+  partial?: boolean;
+  unavailable?: string[];
   /**
    * Where the daemon reads issues from: Linear when a key is configured,
    * otherwise its built-in local tracker (selectTaskSource). First-run copy
@@ -39,18 +41,22 @@ export async function buildShellStatus(deps: {
   pendingEvents: () => readonly CoordinationEvent[];
   linearConfigured?: () => boolean;
   now?: () => number;
+  projectNeeds?: () => { questions: number; parked: number; needsYou: number | null; unavailable: string[] };
 }): Promise<ShellStatus> {
   const tracker = deps.linearConfigured?.() ? 'linear' : 'local';
   const now = deps.now?.() ?? Date.now();
   // A human question is the one pending exchange that waits on the operator;
   // the board holds it until a human-answer or an expiry settles it.
-  const questions = deps.pendingEvents().filter((event) => event.kind === 'human-question').length;
+  const common = deps.projectNeeds?.();
+  const questions = common?.questions ?? deps.pendingEvents().filter((event) => event.kind === 'human-question').length;
+  const partial = common ? { partial: common.unavailable.length > 0, unavailable: common.unavailable } : {};
 
   if (!deps.runner) {
     return {
       daemon: { state: 'dashboard-only', reason: 'No daemon runner is attached to this dashboard', uptimeMs: null },
       provider: null,
-      needsYou: { questions, parked: 0, total: questions },
+      needsYou: { questions, parked: common?.parked ?? 0, total: common?.needsYou ?? questions },
+      ...partial,
       tracker,
       generatedAt: now,
     };
@@ -61,7 +67,7 @@ export async function buildShellStatus(deps: {
   const summary = await deps.runner.getAdapterSummary().catch(() => null);
   // NEEDS_HUMAN is the run ledger's operator park: the run will not move
   // until someone resolves it, which is exactly "needs you".
-  const parked = stats.automationLedger?.byState?.NEEDS_HUMAN ?? 0;
+  const parked = common?.parked ?? stats.automationLedger?.byState?.NEEDS_HUMAN ?? 0;
   const running = stats.isRunning === true;
   return {
     daemon: {
@@ -70,7 +76,8 @@ export async function buildShellStatus(deps: {
       uptimeMs: running && startedAt ? Math.max(0, now - startedAt) : null,
     },
     provider: summary ? { adapter: summary.defaultAdapter, model: summary.worker?.model ?? null } : null,
-    needsYou: { questions, parked, total: questions + parked },
+    needsYou: { questions, parked, total: common?.needsYou ?? questions + parked },
+    ...partial,
     tracker,
     generatedAt: now,
   };

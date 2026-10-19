@@ -8,6 +8,7 @@ import { postHumanQuestion } from './humanQuestions.js';
 import { callSignAddress } from './agentNames.js';
 import { repositoryKey } from './repositoryCell.js';
 import { getCoordinationThread } from './coordinationThreads.js';
+import { consumeChannelTaskInbox } from './channelQueue.js';
 import {
   COORDINATION_THREAD_GUIDANCE_PROMPT,
   COORDINATION_THREAD_TOOL_DEFINITIONS,
@@ -87,7 +88,7 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'coordination_read',
-      description: 'Read new advice, delegation, and response messages addressed to this agent on the repository board. Each message names the agent that sent it.',
+      description: 'Read new advice, delegation, and response messages addressed to this agent. Each message names its sender. An inbox-source-unavailable record identifies a source that could not be read; other returned messages remain valid.',
       parameters: { type: 'object', properties: {} },
     },
   },
@@ -212,6 +213,11 @@ you initiated, acknowledge it with \`coordination_publish\` before you finish
 your work — do not just silently fold it into your next edit with no
 response. Use \`coordination_peers\` to find an active worker or reviewer on a
 dependency/conflict task before starting a cross-task exchange.
+
+For a project-channel inbox message with metadata.deliveryId, use
+\`coordination_thread_reply\` on metadata.threadId and pass that exact ID as
+\`delivery_id\`. This acknowledges only the addressed delivery, not every
+message in the discussion. Do not drop or infer delivery IDs.
 ` + COORDINATION_THREAD_GUIDANCE_PROMPT + PRIORITY_COUNCIL_GUIDANCE_PROMPT;
 
 export async function executeCoordinationTool(
@@ -231,7 +237,7 @@ export async function executeCoordinationTool(
   const store = getCoordinationStore();
   const repoKey = repositoryKey(context.repoKey, context.repository);
   if (name === 'coordination_read') {
-    const events = await store.consume(context.actor, { repository: context.repository, repoKey, taskId: context.taskId });
+    const events = await consumeProjectInbox(store, context);
     return { content: JSON.stringify(events), isError: false };
   }
   if (name === 'coordination_wait') {
@@ -486,16 +492,32 @@ export async function executeCoordinationTool(
  */
 const COORDINATION_WAIT_POLL_MS = 2_000;
 
+async function consumeProjectInbox(
+  store: { consume: (actor: string, options: { repository: string; repoKey?: string; taskId: string }) => Promise<unknown[]> },
+  context: CoordinationToolContext,
+): Promise<unknown[]> {
+  const repoKey = repositoryKey(context.repoKey, context.repository);
+  // 두 source 모두 소비 상태를 바꾼다. 한쪽 장애로 다른 쪽에서 이미 받은 메시지를 버리지 않는다.
+  const results = await Promise.allSettled([
+    store.consume(context.actor, { repository: context.repository, repoKey, taskId: context.taskId }),
+    Promise.resolve().then(() => consumeChannelTaskInbox(repoKey, context.taskId, context.actor)),
+  ]);
+  const messages = results.flatMap((r) => r.status === 'fulfilled' ? r.value : []);
+  const failures = results.flatMap((r, i) => r.status === 'rejected'
+    ? [{ kind: 'inbox-source-unavailable', source: i === 0 ? 'board' : 'channels',
+      error: r.reason instanceof Error ? r.reason.message : String(r.reason) }] : []);
+  if (!messages.length && failures.length) {
+    throw new Error(failures.map((f) => `${f.source}: ${f.error}`).join('; '));
+  }
+  return [...messages, ...failures];
+}
+
 export async function waitForInbox(
   store: { consume: (actor: string, options: { repository: string; repoKey?: string; taskId: string }) => Promise<unknown[]> },
   context: CoordinationToolContext,
   timeoutMs: number,
 ): Promise<unknown[]> {
-  const drain = () => store.consume(context.actor, {
-    repository: context.repository,
-    repoKey: repositoryKey(context.repoKey, context.repository),
-    taskId: context.taskId,
-  });
+  const drain = () => consumeProjectInbox(store, context);
   if (timeoutMs <= 0) return drain();
 
   const { getEventHub } = await import('../core/eventHub.js');
@@ -524,6 +546,7 @@ export async function waitForInbox(
       clearTimeout(deadline);
       clearInterval(poll);
       hub.off('coordination:published', check);
+      hub.off('coordination:channel', check);
     };
     const finish = (events: unknown[]) => { if (!settled) { stop(); resolve(events); } };
     const fail = (error: unknown) => { if (!settled) { stop(); reject(error); } };
@@ -575,6 +598,7 @@ export async function waitForInbox(
       // Detach first: no new wake-ups may be recorded past the deadline, which
       // is what bounds the catch-up above to a single extra drain.
       hub.off('coordination:published', check);
+      hub.off('coordination:channel', check);
       clearInterval(poll);
       if (draining) return;
       if (again) { again = false; check(); return; }
@@ -588,6 +612,7 @@ export async function waitForInbox(
     // already bounded by `deadline`, which is the clamped timeout.
     // (Caught by the PR review.)
     hub.on('coordination:published', check);
+    hub.on('coordination:channel', check);
     // Now that something is listening, look at what is already there.
     check();
   });

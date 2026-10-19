@@ -60,6 +60,7 @@ export interface CoordinationThreadMessage {
   taskLabel?: string;
   body: string;
   createdAt: number;
+  replyToDeliveryId?: string;
 }
 
 export interface CreateThreadInput {
@@ -91,6 +92,7 @@ export interface PostThreadMessageInput {
   idempotencyKey?: string;
   notification?: ThreadNotificationContext;
   now?: number;
+  replyToDeliveryId?: string;
 }
 
 export interface ThreadNotificationContext {
@@ -156,6 +158,7 @@ interface MessageRow {
   body: string;
   created_at: number;
   fingerprint: string;
+  reply_to_delivery_id: string | null;
 }
 
 interface ParticipantRow {
@@ -171,11 +174,11 @@ interface ParticipantRow {
 function database(): Database.Database {
   const handle = getTraceDb();
   if (!handle) throw new Error('Coordination thread store is unavailable');
-  migrate(handle);
+  migrateCoordinationThreads(handle);
   return handle;
 }
 
-function migrate(db: Database.Database): void {
+export function migrateCoordinationThreads(db: Database.Database): void {
   db.pragma('foreign_keys = ON');
   db.exec(`
     CREATE TABLE IF NOT EXISTS coordination_threads (
@@ -223,7 +226,8 @@ function migrate(db: Database.Database): void {
       body TEXT NOT NULL,
       idempotency_key TEXT,
       fingerprint TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      reply_to_delivery_id TEXT
     );
     CREATE UNIQUE INDEX IF NOT EXISTS coordination_thread_message_key
       ON coordination_thread_messages(thread_id, idempotency_key)
@@ -245,6 +249,10 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS coordination_thread_subscriptions_actor
       ON coordination_thread_subscriptions(actor, task_id, thread_id);
   `);
+  const messageColumns = db.pragma('table_info(coordination_thread_messages)') as Array<{ name: string }>;
+  if (!messageColumns.some((c) => c.name === 'reply_to_delivery_id')) {
+    db.exec('ALTER TABLE coordination_thread_messages ADD COLUMN reply_to_delivery_id TEXT');
+  }
   migrateCoordinationThreadOutbox(db);
 }
 
@@ -340,6 +348,7 @@ function toMessage(row: MessageRow): CoordinationThreadMessage {
     taskLabel: row.task_label ?? undefined,
     body: row.body,
     createdAt: row.created_at,
+    ...(row.reply_to_delivery_id ? { replyToDeliveryId: row.reply_to_delivery_id } : {}),
   };
 }
 
@@ -437,7 +446,8 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
   const taskLabel = optionalText(input.taskLabel, 'taskLabel', 240);
   const body = boundedText(input.body, 'body', MAX_BODY);
   const key = idempotencyKey(input.idempotencyKey);
-  const fingerprint = digest({ threadId, actor, taskId, body });
+  const replyToDeliveryId = input.replyToDeliveryId ? identity(input.replyToDeliveryId, 'replyToDeliveryId') : undefined;
+  const fingerprint = digest({ threadId, actor, taskId, body, ...(replyToDeliveryId ? { replyToDeliveryId } : {}) });
   if (key) {
     const existing = db.prepare(`
       SELECT * FROM coordination_thread_messages WHERE thread_id = ? AND idempotency_key = ?
@@ -445,6 +455,16 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
     if (existing) {
       if (existing.fingerprint !== fingerprint) throw new Error('Thread message idempotency key collision');
       return toMessage(existing);
+    }
+  }
+  if (replyToDeliveryId) {
+    const addressed = db.prepare(`SELECT repo_key,thread_id,task_id,recipient,status
+      FROM coordination_channel_deliveries WHERE id=?`).get(replyToDeliveryId) as {
+        repo_key: string; thread_id: string; task_id: string; recipient: string; status: string;
+      } | undefined;
+    if (!addressed || addressed.repo_key !== repo || addressed.thread_id !== threadId
+      || addressed.task_id !== taskId || addressed.recipient !== actor || addressed.status !== 'processing') {
+      throw new Error('Channel delivery reply scope conflict');
     }
   }
   const count = (db.prepare(`
@@ -459,8 +479,8 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
   const result = db.prepare(`
     INSERT INTO coordination_thread_messages(
       message_id, thread_id, actor, actor_name, actor_role, task_id, task_label,
-      body, idempotency_key, fingerprint, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      body, idempotency_key, fingerprint, created_at, reply_to_delivery_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     messageId,
     threadId,
@@ -473,6 +493,7 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
     key ?? null,
     fingerprint,
     now,
+    replyToDeliveryId ?? null,
   );
   db.prepare(`
     UPDATE coordination_threads SET version = version + 1, updated_at = ? WHERE thread_id = ?
@@ -494,6 +515,7 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
     body,
     created_at: now,
     fingerprint,
+    reply_to_delivery_id: replyToDeliveryId ?? null,
   });
 }
 

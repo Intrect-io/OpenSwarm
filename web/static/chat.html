@@ -1,44 +1,16 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>OpenSwarm · Chat room</title>
-  <script src="/static/js/themeBoot.js"></script>
-  <script src="/static/js/webToken.js"></script>
-  <link rel="stylesheet" href="/static/css/tokens.css" />
-  <link rel="stylesheet" href="/static/css/shell.css" />
-  <link rel="stylesheet" href="/static/css/chat.css" />
-</head>
-<body class="page-chat">
-  <header class="topbar" data-shell>
-  </header>
-
-  <main class="chat-main">
-    <div class="room-wrap">
-      <div id="room" class="room" aria-label="Agent chat room"><div class="empty">Loading the room…</div></div>
-      <div id="drop-overlay" class="drop-overlay" hidden>Drop to attach</div>
-      <button type="button" id="scroll-latest" class="scroll-latest" hidden>↓ Latest</button>
-      <div id="room-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
-    </div>
-
-    <form class="composer" id="composer" aria-label="Message the agents">
-      <div id="composer-files" class="composer-files" aria-label="Attached files"></div>
-      <div class="composer-row">
-        <input id="composer-file" type="file" multiple hidden aria-hidden="true" />
-        <button type="button" id="composer-attach" class="btn btn-ghost btn-icon" aria-label="Attach files" title="Attach files"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></svg></button>
-        <textarea id="composer-text" class="textarea composer-text" rows="1" autocomplete="off" placeholder="Loading…" aria-label="Message the agents"></textarea>
-        <button type="submit" id="composer-send" class="btn btn-primary" disabled>Send</button>
-      </div>
-      <div id="composer-status" class="status-line composer-status" role="status" aria-live="polite"></div>
-    </form>
-  </main>
-
-  <script type="module">
-    import { startChatView } from '/static/js/chatView.mjs';
-    import { mountShell } from '/static/js/shell.mjs';
-    mountShell(document);
-    startChatView(document);
-  </script>
-</body>
-</html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>OpenSwarm · Chat</title>
+<script src="/static/js/themeBoot.js"></script><script src="/static/js/webToken.js"></script>
+<link rel="stylesheet" href="/static/css/tokens.css"><link rel="stylesheet" href="/static/css/shell.css"><link rel="stylesheet" href="/static/css/project-workspace.css"></head>
+<body class="page-chat"><header class="topbar" data-shell></header>
+<main data-project-workspace="chat" data-level="projects">
+<div id="workspace-demo" class="demo-banner" hidden></div>
+<div class="workspace-toolbar"><button id="workspace-back" type="button" hidden>Back to projects</button><span id="workspace-location">All projects</span><span id="workspace-totals" class="meta">Loading project summary…</span><button id="workspace-needs" type="button">Needs you</button><button id="workspace-refresh" type="button">Refresh</button></div>
+<p id="workspace-notice" class="workspace-notice" role="status" hidden></p>
+<section id="needs-inbox" class="needs-inbox" aria-labelledby="needs-heading" hidden><div class="pane-title"><h2 id="needs-heading">Needs you</h2><button id="needs-close" type="button">Close inbox</button></div><div id="needs-list"></div><button id="needs-more" type="button" hidden>More requests</button></section>
+<div class="workspace-panes"><section class="project-directory" aria-labelledby="projects-heading"><div class="pane-title"><h2 id="projects-heading">Project channels</h2></div><div id="project-list" class="channel-list" aria-label="Project channels"></div><button id="project-load-more" type="button" hidden>More projects</button></section>
+<section class="project-conversation" aria-labelledby="channel-title"><div class="pane-title channel-heading"><h2 id="channel-title">Choose a project</h2><p id="channel-description" class="meta">Each project keeps its own tasks and discussions.</p></div><details id="project-task-picker"><summary>Project tasks</summary><div id="project-tasks"><p class="empty">Select a project to see its tasks.</p></div><button id="task-load-more" type="button" hidden>More tasks</button></details><div class="history-controls"><button id="channel-older" type="button" hidden>Load older entries</button><button id="channel-latest" type="button" hidden>Jump to latest</button></div><div id="channel-entries" class="channel-entries" tabindex="0" aria-label="Channel conversation"><p class="empty">Select a project to read its conversation.</p></div></section>
+<aside class="project-detail" aria-labelledby="detail-heading"><div class="pane-title"><h2 id="detail-heading">Discussion & task context</h2></div><div id="thread-content" class="thread-content"><p class="empty">Open a discussion or task to read its context.</p></div></aside></div>
+<form id="workspace-compose" class="workspace-compose" hidden><p id="compose-scope" class="compose-scope"></p><button id="compose-toggle" type="button" aria-expanded="false" aria-controls="compose-fields">Write a message</button><div id="compose-fields" class="compose-fields"><label class="field-label" for="workspace-recipient">Recipient<select id="workspace-recipient"><option value="">Project coordinator</option></select></label><label class="field-label message-label" for="workspace-message">Message<textarea id="workspace-message" rows="3" maxlength="4000" dir="auto" placeholder="Share a question, decision or result…"></textarea></label><div class="compose-actions"><label class="file-label" for="workspace-files">Attach files<input id="workspace-files" type="file" multiple></label><button id="workspace-send" type="submit" disabled>Send message</button></div></div><p id="compose-files" class="meta"></p><p id="compose-result" role="status"></p></form>
+<p id="workspace-status" class="sr-only" role="status" aria-live="polite"></p></main>
+<script type="module" src="/static/js/projectWorkspaceBoot.mjs"></script></body></html>
