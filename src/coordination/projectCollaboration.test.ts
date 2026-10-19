@@ -44,6 +44,52 @@ afterEach(() => { resetTraceDbForTests(); resetCoordinationStoreForTests();
   process.env.OPENSWARM_AUTOMATION_DB = originalDb; process.env.OPENSWARM_COORDINATION_FILE = originalBoard; vi.restoreAllMocks(); });
 
 describe('durable project channels', () => {
+  it('discovers new legacy sibling paths after initial sync without restarting or marking their messages read', () => {
+    execFileSync('git', ['init', '-q', repo]); execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=t@e.test', 'commit', '--allow-empty', '-qm', 'base']);
+    resetRepositoryCellCacheForTests(); resetTraceDbForTests(); key = repositoryCell(repo).repoKey; syncChannels([repo]);
+    const sibling = join(root, 'future-sibling'); execFileSync('git', ['-C', repo, 'worktree', 'add', '-qb', 'future-sibling', sibling]);
+    const opaque = 'git:separate-project'; recordTraceEvent(e({ id: 'opaque', repository: sibling, repoKey: opaque }));
+    syncChannels([repo]);
+    recordTraceEvent(e({ repository: sibling, repoKey: sibling }));
+    const originalSeq = (channelDatabase().prepare('SELECT seq FROM coordination_channel_entries WHERE source_id=?').get('q1') as { seq: number }).seq;
+    const snapshot = queryProjectSnapshot([repo]);
+    expect(snapshot.needs.map((n) => n.repoKey).sort()).toEqual([key, opaque].sort());
+    expect(readChannels().find((c) => c.repoKey === key)).toMatchObject({ readSeq: 0, unread: 1 });
+    expect(readChannels().some((c) => c.repoKey === sibling)).toBe(false);
+    expect(listChannelEntries(key).items).toEqual([expect.objectContaining({ sourceId: 'q1', seq: originalSeq })]);
+    send({ taskId: 'task', recipient: 'sable', correlationId: 'question' });
+    expect(queryProjectSnapshot([repo]).needs.map((n) => n.repoKey)).toEqual([opaque]);
+    recordTraceEvent(e({ id: 'after-alias', repository: sibling, repoKey: sibling, kind: 'advice-response', status: 'completed', correlationId: 'new' }));
+    expect(listChannelEntries(key).items.some((e) => e.sourceId === 'after-alias')).toBe(true);
+    expect(channelDatabase().prepare('SELECT repository,repo_key FROM coordination_trace WHERE event_id=?').get('q1'))
+      .toEqual({ repository: sibling, repo_key: sibling });
+    const other = join(root, 'future-discussion'); execFileSync('git', ['-C', repo, 'worktree', 'add', '-qb', 'future-discussion', other]);
+    const thread = createCoordinationThread({ repository: other, subject: 'New sibling discussion', actor: 'legacy', taskId: 'discussion', body: 'Original body' });
+    const message = getCoordinationThread({ repository: other, threadId: thread.id }).messages.items[0];
+    syncChannels([repo]);
+    expect(getCoordinationThread({ repository: key, threadId: thread.id }).thread.repository).toBe(other);
+    expect(listChannelEntries(key).items.some((e) => e.sourceId === message.id)).toBe(true);
+    expect(listCoordinationThreads({ repository: key }).items.map((t) => t.id)).toContain(thread.id);
+    expect(readChannels().some((c) => c.repoKey === other)).toBe(false);
+  });
+  it('repairs path aliases and projections previously contaminated by an opaque-first trace without rewriting opaque events', () => {
+    execFileSync('git', ['init', '-q', repo]); execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=t@e.test', 'commit', '--allow-empty', '-qm', 'base']);
+    resetRepositoryCellCacheForTests(); resetTraceDbForTests(); key = repositoryCell(repo).repoKey; syncChannels([repo]);
+    const sibling = join(root, 'contaminated'); execFileSync('git', ['-C', repo, 'worktree', 'add', '-qb', 'contaminated', sibling]);
+    const db = channelDatabase(), opaque = 'git:separate-project';
+    db.prepare('INSERT INTO coordination_channel_aliases VALUES (?,?)').run(sibling, opaque);
+    recordTraceEvent(e({ id: 'opaque', repository: sibling, repoKey: opaque }));
+    recordTraceEvent(e({ repository: sibling, repoKey: sibling }));
+    const thread = createCoordinationThread({ repository: sibling, subject: 'Previously misrouted', actor: 'sable', taskId: 'task', body: 'Original source' });
+    const before = db.prepare('SELECT source_id,seq FROM coordination_channel_entries ORDER BY seq').all();
+    syncChannels([repo]);
+    expect(listChannelEntries(key).items.map((e) => e.sourceId)).toContain('q1');
+    expect(listChannelEntries(key).items.some((e) => e.threadId === thread.id)).toBe(true);
+    expect(listChannelEntries(opaque).items.map((e) => e.sourceId)).toEqual(['opaque']);
+    expect(db.prepare('SELECT source_id,seq FROM coordination_channel_entries ORDER BY seq').all()).toEqual(before);
+    expect(db.prepare('SELECT repo_key FROM coordination_trace WHERE event_id=?').get('q1')).toEqual({ repo_key: sibling });
+    expect(db.prepare('SELECT repository FROM coordination_threads WHERE thread_id=?').get(thread.id)).toEqual({ repository: sibling });
+  });
   it('folds explicit historical path repo_keys for entries, needs, answers and live recipient reconciliation', async () => {
     recordTraceEvent(e({ repoKey: repo }));
     resetTraceDbForTests(); syncChannels([repo]);

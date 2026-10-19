@@ -147,3 +147,30 @@ identities now fold consistently in trace projection, project/relationship
 queries, exact question answers and recipient-role reconciliation, while opaque
 keys and original trace rows remain intact. Durable normalization also runs when
 the live board is unavailable. The related five-suite check passes 77 tests.
+
+A live migration probe also reproduced a sibling path first appearing after the
+initial configuration sync. Incremental trace/thread high-water marks now register
+new aliases without restarting; known aliases use their projection triggers and
+do not repeatedly backfill history. A new sibling's unread messages, original
+source IDs/seq/repository values and opaque-project isolation survive a normal
+refresh. The expanded five-suite check passed 114 tests; lint, typecheck and build
+passed again. That 25-sample fixture run reported query p95 3.73/17.08ms and
+HTTP p95 6.58/18.56ms, initialization 77/584ms and total process RSS 289/308 MiB
+at 10/100 and 100/1,000. All previous samples above remain documented.
+
+The opaque-first ordering probe then failed two regression checks: registering an
+opaque explicit event key could claim a new physical sibling alias, and later
+path-key records inherited that wrong identity. Physical Git aliases and opaque
+event identities are now independent. Backfill derives repaired projection keys
+from their original trace/thread sources, preserving both opaque rows and original
+IDs/seq. Both regressions and the related five suites passed (115 tests); lint,
+typecheck and build passed with the same 12 existing warnings. Native coordinator
+and exact task-delivery receipts passed again. With concurrent checks on the host,
+the final 25-sample fixture run reported query p95 18.01/140.32ms and HTTP p95
+25.17/82.68ms, initialization 146/1,021ms and total process RSS 290/309 MiB.
+These measurements and the earlier samples do not establish production latency.
+The independent reviewer reopened the opaque-first failure DB with a normal
+refresh and approved its scope: original seq 1/3, raw source fields and readSeq 0
+remained unchanged, path/opaque sources separated, a new Thread increased unread
+by one, and cross-project question/Threads and readonly checks passed. The
+sanitized [receipt](../evidence/agt-4776/alias-repair.json) records that result.

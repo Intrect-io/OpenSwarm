@@ -34,48 +34,66 @@ interface EntryRow {
   run_id: string | null; error: string | null;
 }
 
-let configuration: { db: unknown; signature: string } | undefined;
+let configuration: { db: unknown; signature: string; traceId: number; threadRowId: number } | undefined;
+
+function registerHistoricalChannel(db: ReturnType<typeof channelDatabase>, repository: string, explicitKey?: string): boolean {
+  const path = expandPath(repository);
+  const cell = isAbsolute(path) ? repositoryCell(path) : undefined;
+  const known = db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(repository) as { repo_key: string } | undefined;
+  const explicit = explicitKey ? db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(explicitKey) as { repo_key: string } | undefined : undefined;
+  const explicitCell = explicitKey && isAbsolute(expandPath(explicitKey)) ? repositoryCell(expandPath(explicitKey)) : undefined;
+  // opaque 이벤트 키는 경로 alias의 소유권을 바꾸지 않는다. Git 공통 경로는 실제 cell로 확인한다.
+  const physicalKey = cell ? cell.repoKey.startsWith('git:') ? cell.repoKey : known?.repo_key ?? cell.repoKey : repository;
+  const explicitPathKey = explicitCell ? explicitCell.repoKey.startsWith('git:') ? explicitCell.repoKey : explicit?.repo_key ?? explicitCell.repoKey : undefined;
+  const key = explicitPathKey ?? explicitKey ?? physicalKey;
+  let changed = false;
+  const aliases: Array<[string, string]> = [repository, ...(cell ? [path, cell.worktreePath, cell.repositoryPath] : [])].map((alias) => [alias, physicalKey]);
+  if (explicitCell) aliases.push(...[explicitKey!, explicitCell.worktreePath, explicitCell.repositoryPath].map((alias): [string, string] => [alias, explicitPathKey!]));
+  for (const [alias, aliasKey] of aliases) {
+    if (db.prepare(`INSERT INTO coordination_channel_aliases VALUES (?,?) ON CONFLICT(repository)
+      DO UPDATE SET repo_key=excluded.repo_key WHERE repo_key!=excluded.repo_key`).run(alias, aliasKey).changes) changed = true;
+  }
+  if (db.prepare('INSERT OR IGNORE INTO coordination_channels(repo_key,repository,name) VALUES (?,?,?)')
+    .run(key, cell?.repositoryPath ?? '', cell ? basename(cell.repositoryPath) : `Archived ${key.slice(-8)}`).changes) changed = true;
+  return changed;
+}
 
 /** 실행 대상은 서버 설정에서만 등록한다. 클라이언트의 경로는 받지 않는다. */
 export function syncChannels(paths: readonly string[]): Channel[] {
   const db = channelDatabase();
   const signature = JSON.stringify([...new Set(paths)].sort());
-  if (configuration?.db !== db || configuration.signature !== signature) {
-    const initial = configuration?.db !== db;
+  const previous = configuration?.db === db ? configuration : undefined;
+  const configurationChanged = !previous || previous.signature !== signature;
+  const traceId = (db.prepare('SELECT COALESCE(MAX(id),0) position FROM coordination_trace').get() as { position: number }).position;
+  const threadRowId = (db.prepare('SELECT COALESCE(MAX(rowid),0) position FROM coordination_threads').get() as { position: number }).position;
+  if (configurationChanged || traceId !== previous?.traceId || threadRowId !== previous?.threadRowId) {
     db.transaction(() => {
       const oldKeys = new Set((db.prepare('SELECT repo_key FROM coordination_channels').all() as Array<{ repo_key: string }>).map((r) => r.repo_key));
-      const cells = paths.map((path) => repositoryCell(expandPath(path)));
+      const cells = configurationChanged ? paths.map((path) => repositoryCell(expandPath(path))) : [];
+      let aliasesChanged = configurationChanged;
       for (const [index, cell] of cells.entries()) {
         for (const alias of [expandPath(paths[index]), cell.worktreePath, cell.repositoryPath]) {
           db.prepare('INSERT OR IGNORE INTO coordination_channel_aliases VALUES (?,?)').run(alias, cell.repoKey);
         }
       }
-      if (initial) {
-        const historicalChannel = (repository: string, explicitKey?: string) => {
-          const path = expandPath(repository);
-          const cell = isAbsolute(path) ? repositoryCell(path) : undefined;
-          const known = db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(repository) as { repo_key: string } | undefined;
-          const explicit = explicitKey ? db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(explicitKey) as { repo_key: string } | undefined : undefined;
-          const explicitCell = explicitKey && isAbsolute(expandPath(explicitKey)) ? repositoryCell(expandPath(explicitKey)) : undefined;
-          const key = explicit?.repo_key ?? explicitCell?.repoKey ?? explicitKey ?? known?.repo_key ?? cell?.repoKey ?? repository;
-          for (const alias of [repository, ...(cell ? [path, cell.worktreePath, cell.repositoryPath] : []),
-            ...(explicitCell ? [explicitKey!, explicitCell.worktreePath, explicitCell.repositoryPath] : [])]) {
-            db.prepare('INSERT OR IGNORE INTO coordination_channel_aliases VALUES (?,?)').run(alias, key);
-          }
-          db.prepare('INSERT OR IGNORE INTO coordination_channels(repo_key,repository,name) VALUES (?,?,?)')
-            .run(key, cell?.repositoryPath ?? '', cell ? basename(cell.repositoryPath) : `Archived ${key.slice(-8)}`);
-        };
-        const historical = db.prepare(`SELECT DISTINCT repository, repo_key FROM coordination_trace`).all() as Array<{ repository: string; repo_key: string | null }>;
-        for (const row of historical) historicalChannel(row.repository, row.repo_key ?? undefined);
-        const oldThreads = db.prepare(`SELECT DISTINCT repository FROM coordination_threads`).all() as Array<{ repository: string }>;
-        for (const { repository } of oldThreads) historicalChannel(repository);
+      // 새 기록의 경로만 확인한다. 실행 중 생긴 sibling도 재시작 없이 같은 채널로 묶는다.
+      const historical = db.prepare(`SELECT DISTINCT repository, repo_key FROM coordination_trace WHERE id>? AND id<=?`)
+        .all(previous?.traceId ?? 0, traceId) as Array<{ repository: string; repo_key: string | null }>;
+      for (const row of historical) {
+        if (registerHistoricalChannel(db, row.repository, row.repo_key ?? undefined)) aliasesChanged = true;
       }
-      db.prepare('UPDATE coordination_channels SET configured = 0').run();
+      const oldThreads = db.prepare(`SELECT DISTINCT repository FROM coordination_threads WHERE rowid>? AND rowid<=?`)
+        .all(previous?.threadRowId ?? 0, threadRowId) as Array<{ repository: string }>;
+      for (const { repository } of oldThreads) {
+        if (registerHistoricalChannel(db, repository)) aliasesChanged = true;
+      }
+      if (configurationChanged) db.prepare('UPDATE coordination_channels SET configured = 0').run();
       for (const cell of cells) {
         db.prepare(`INSERT INTO coordination_channels(repo_key,repository,name,configured) VALUES (?,?,?,1)
           ON CONFLICT(repo_key) DO UPDATE SET repository=excluded.repository,name=excluded.name,configured=1`)
           .run(cell.repoKey, cell.repositoryPath, basename(cell.repositoryPath));
       }
+      if (!aliasesChanged) return;
       backfillChannelEntries(db);
       // 잘못 분리됐던 경로 채널의 읽음 위치를 병합하되 원본과 projection seq는 유지한다.
       db.exec(`UPDATE coordination_channels SET read_seq=MAX(read_seq,COALESCE((
@@ -88,7 +106,7 @@ export function syncChannels(paths: readonly string[]): Channel[] {
         if (!oldKeys.has(row.repo_key)) baseline.run(row.repo_key, row.repo_key);
       }
     }).immediate();
-    configuration = { db, signature };
+    configuration = { db, signature, traceId, threadRowId };
   }
   return readChannels();
 }

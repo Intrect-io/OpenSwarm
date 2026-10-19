@@ -85,10 +85,15 @@ export function channelDatabase(): Database.Database {
 /** 이관은 원본을 복제하지 않는다. 고유 인덱스로 재접속/중복 publish를 흡수한다. */
 export function backfillChannelEntries(db: Database.Database): void {
   db.exec(`
-    UPDATE coordination_channel_entries SET repo_key=(SELECT a.repo_key FROM coordination_channel_aliases a
-      WHERE a.repository=coordination_channel_entries.repo_key)
-    WHERE EXISTS(SELECT 1 FROM coordination_channel_aliases a
-      WHERE a.repository=coordination_channel_entries.repo_key AND a.repo_key!=coordination_channel_entries.repo_key);
+    UPDATE coordination_channel_entries AS e SET repo_key=COALESCE(k.repo_key,t.repo_key,a.repo_key)
+    FROM coordination_trace t LEFT JOIN coordination_channel_aliases a ON a.repository=t.repository
+      LEFT JOIN coordination_channel_aliases k ON k.repository=t.repo_key
+    WHERE e.source_kind='trace' AND e.source_id=t.event_id AND COALESCE(k.repo_key,t.repo_key,a.repo_key) IS NOT NULL
+      AND e.repo_key!=COALESCE(k.repo_key,t.repo_key,a.repo_key);
+    UPDATE coordination_channel_entries AS e SET repo_key=COALESCE(a.repo_key,t.repository)
+    FROM coordination_thread_messages m JOIN coordination_threads t ON t.thread_id=m.thread_id
+      LEFT JOIN coordination_channel_aliases a ON a.repository=t.repository
+    WHERE e.source_kind='message' AND e.source_id=m.message_id AND e.repo_key!=COALESCE(a.repo_key,t.repository);
     INSERT OR IGNORE INTO coordination_channel_entries
       (repo_key, source_kind, source_id, thread_id, task_id, created_at)
     SELECT repo_key,source_kind,source_id,thread_id,task_id,created_at FROM (

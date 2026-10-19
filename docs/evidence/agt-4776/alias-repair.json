@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "receiptType": "independent-alias-repair-review",
+  "verificationDate": "2026-10-19",
+  "receiptCreatedAt": "2026-10-19T10:35:39.518Z",
+  "evidenceBasis": "Previously completed independent execution against the preserved opaque-first failure fixture; no additional source changes or rechecks during receipt creation.",
+  "sanitized": true,
+  "projects": {
+    "canonical": "canonical-project",
+    "opaque": "opaque-project"
+  },
+  "originalFailureFixture": {
+    "sources": [
+      {
+        "sourceId": "opaque-before-path",
+        "seq": 1,
+        "repairedProject": "opaque-project"
+      },
+      {
+        "sourceId": "path-after-opaque",
+        "seq": 3,
+        "repairedProject": "canonical-project"
+      }
+    ],
+    "refreshMode": "Normal project snapshot refresh",
+    "physicalAliasCorrected": true,
+    "sourceIdsPreserved": true,
+    "projectionSeqPreserved": true,
+    "rawTraceRepositoryPreserved": true,
+    "rawTraceRepoKeyPreserved": true,
+    "opaqueEventIdentityPreserved": true
+  },
+  "scopeIsolation": {
+    "opaqueFirstThenPath": "passed",
+    "pathFirstThenOpaque": "passed",
+    "canonicalAndOpaqueSourcesSeparated": true,
+    "sameTaskActorAndCorrelationQuestionsRemainSeparate": true,
+    "canonicalAnswerLeavesOnlyOpaqueQuestionForSharedCorrelation": true,
+    "crossProjectThreadRead": "rejected"
+  },
+  "thread": {
+    "originalThreadId": "56f0d7a1-7fc3-4547-b8fe-ef54415bae0c",
+    "canonicalScopeRead": "passed",
+    "originalSourceRepositoryPreserved": true,
+    "originalMessageIdentityPreserved": true
+  },
+  "readState": {
+    "readSeqBeforeRepair": 0,
+    "readSeqAfterRepair": 0,
+    "unreadDeltaForNewThread": 1,
+    "newThreadAutomaticallyMarkedRead": false
+  },
+  "configuration": {
+    "canonicalConfiguredBeforeExplicitRemoval": true,
+    "opaqueConfigured": false,
+    "opaqueWritableRequest": "rejected-read-only",
+    "canonicalWritableRequestAfterExplicitRemoval": "rejected-read-only"
+  },
+  "focusedRegressionTests": {
+    "passed": 2,
+    "skipped": 36
+  },
+  "review": {
+    "verdict": "APPROVE",
+    "additionalBlockingDefectsFound": 0,
+    "scope": "Independent alias repair and project isolation review; separate from automated review, CI, visual approval, and merge gates.",
+    "sourceFilesModified": false
+  }
+}
