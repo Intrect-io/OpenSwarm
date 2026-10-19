@@ -1593,7 +1593,7 @@ async function fetchCoordination() {
 // ---- Init ----
 async function loadInitial() {
   try {
-    // 1단계: 필수 데이터 먼저 로드 (성능 개선)
+    // First pass: the data the page cannot render without.
     const [statsRes, projectsRes] = await Promise.all([
       fetch("/api/stats"),
       fetch("/api/projects"),
@@ -1604,14 +1604,14 @@ async function loadInitial() {
     projects = await projectsRes.json();
     renderProjects();
 
-    // 2단계: 추가 데이터는 비동기로 지연 로드 (브라우저 렌더링 블로킹 제거)
+    // Second pass: history, loaded after first paint so it never blocks it.
     loadSupplementalData();
   } catch(e) {
     console.error("Init failed:", e);
   }
 }
 
-// 추가 데이터 지연 로드 (초기 렌더링을 방해하지 않음)
+// History (chat, log, stage events), loaded after first paint.
 async function loadSupplementalData() {
   try {
     const [chatRes, logsRes, stagesRes] = await Promise.all([
@@ -1636,7 +1636,7 @@ async function loadSupplementalData() {
   }
 }
 
-// 성능 최적화: stats + projects 폴링을 60초로 증가 (변화 빈도 낮음)
+// Stats and projects change slowly; poll them once a minute.
 setInterval(async () => {
   try {
     const [sRes, pRes] = await Promise.all([fetch("/api/stats"), fetch("/api/projects")]);
@@ -1900,7 +1900,7 @@ function renderNotice() {
   document.getElementById("notice-tracker").hidden = trackerCount === 0;
 }
 
-// 성능 최적화: 초기 로드 후 2단계 페칭 (렌더링 블로킹 방지)
+// Load in two passes so nothing blocks the first render.
 // The provider options exist before the first stats render selects the default.
 renderProviderOptions().then(loadInitial).then(function() { connectSSE(true); });
 renderBoardSource();
@@ -1909,16 +1909,16 @@ fetchShellStatus();
 setInterval(fetchTasks, 5000);
 setInterval(fetchShellStatus, 15000);
 
-// 1단계: 초기화 후 즉시 필수 폴링만 시작
+// Polling that starts right away.
 setInterval(fetchSvcStatus, 15000);
-setInterval(fetchPRProcessorStatus, 60000);  // 성능 최적화: 30초 → 60초 (변화 빈도 낮음)
-setInterval(fetchStuckIssues, 60000);        // 성능 최적화: 30초 → 60초 (Linear API 부하 감소)
+setInterval(fetchPRProcessorStatus, 60000);  // changes rarely
+setInterval(fetchStuckIssues, 60000);        // every call is a tracker API query
 setInterval(fetchKnowledgeData, 60000);
 setInterval(fetchMonitors, 60000);
 setInterval(fetchProcesses, 30000);
 setInterval(fetchCoordination, 30000);
 
-// 2단계: 렌더링 안정화 후 비필수 데이터 로드 (3초 지연)
+// Secondary panels, three seconds after load.
 setTimeout(function() {
   fetchSvcStatus();
   fetchPRProcessorStatus();
@@ -1929,5 +1929,5 @@ setTimeout(function() {
   fetchReasoningEffort();
 }, 3000);
 
-// 렌더링 성능: 스테이지 업데이트 폴링 제거 (SSE 이벤트 활용)
+// Stage rows update from the event stream; there is no stage poll.
 // setInterval(() => { if (stageRows.length) renderStages(); }, 10000);

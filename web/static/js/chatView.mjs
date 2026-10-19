@@ -10,6 +10,7 @@
 
 import { addressKeyOf, addressableTargets, buildChatThreads, chatLineOf, openQuestionFor, targetEndedReason } from './conversationModel.mjs';
 import { ROLE_COLORS } from './orchestrationView.mjs';
+import { formatClock } from './format.mjs';
 import { autogrow, bindDraft, bindEnterToSubmit, setSendEnabled, setSendingState } from './composer.mjs';
 import { createScrollFollow } from './scrollFollow.mjs';
 
@@ -27,7 +28,7 @@ function escapeHtml(text) {
 }
 
 function clockOf(timestamp) {
-  return new Date(timestamp).toLocaleTimeString();
+  return formatClock(timestamp, { seconds: true });
 }
 
 function mentionMarkup(name, role = '') {
@@ -207,7 +208,7 @@ export function renderThread(thread, mentionTargets = [], taskReferences = new M
     .join('');
   return `<section class="chat-thread thread-${system ? 'system' : 'chat'}" data-correlation="${escapeHtml(thread.correlationId)}">
     <div class="thread-head">
-      <span class="channel-badge">${channel}</span>
+      <span class="channel-badge" title="${system ? 'Posted by the daemon about a run, not written by an agent' : 'Messages between agents, or between you and an agent'}">${channel}</span>
       ${issue}<span class="thread-kind">${escapeHtml(kind)}</span>
     </div>
     <div class="thread-lines">${lines}</div>

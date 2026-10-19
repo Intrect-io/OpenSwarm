@@ -3,7 +3,10 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error — browser ESM asset without type declarations
 import {
+  formatClock,
   formatCost,
+  formatDateTime,
+  formatHour,
   formatDuration,
   formatRelativeTime,
   formatTokens,
@@ -81,5 +84,28 @@ describe('truncate', () => {
     expect(truncate('short', 10)).toBe('short');
     expect(truncate('a much longer title', 8)).toBe('a much …');
     expect(truncate('x', 0)).toBe('x');
+  });
+});
+
+// One English time format on every page (redesign step 7). Pinned to a zone so
+// the assertions do not depend on the machine running them.
+describe('clock and calendar times', () => {
+  const at = Date.UTC(2026, 9, 19, 10, 7, 42);
+  const timeZone = 'Asia/Seoul';
+
+  it('formats a clock time in English regardless of the browser locale', () => {
+    expect(formatClock(at, { timeZone })).toBe('7:07 PM');
+    expect(formatClock(at, { seconds: true, timeZone })).toBe('7:07:42 PM');
+  });
+
+  it('formats a date-time and an hour bucket', () => {
+    expect(formatDateTime(at, { timeZone })).toBe('Oct 19, 7:07 PM');
+    expect(formatHour(at, { timeZone })).toBe('Oct 19, 7 PM');
+  });
+
+  it('says nothing for a missing or invalid time instead of "Invalid Date"', () => {
+    expect(formatClock(undefined)).toBe('');
+    expect(formatDateTime('not a date')).toBe('');
+    expect(formatHour(Number.NaN)).toBe('');
   });
 });

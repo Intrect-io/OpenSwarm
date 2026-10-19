@@ -17,33 +17,33 @@
   <main class="warehouse-main">
     <section class="browser" aria-label="Warehouse files">
       <div class="toolbar">
-        <button id="up" type="button" class="btn btn-secondary btn-sm">← 상위</button>
+        <button id="up" type="button" class="btn btn-secondary btn-sm">Parent folder</button>
         <nav id="breadcrumbs" class="breadcrumbs" aria-label="Current path"></nav>
-        <button id="refresh" type="button" class="btn btn-secondary btn-sm">새로고침</button>
+        <button id="refresh" type="button" class="btn btn-secondary btn-sm">Refresh</button>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>이름</th><th>종류</th><th>크기</th><th>수정 시각</th><th><span class="sr-only">동작</span></th></tr></thead>
-          <tbody id="entries"><tr><td colspan="5" class="empty">불러오는 중…</td></tr></tbody>
+          <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody id="entries"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </section>
 
     <aside class="upload" aria-label="Upload">
-      <h2>파일 올리기</h2>
-      <p>현재 폴더: <code id="upload-directory">/</code></p>
+      <h2>Upload a file</h2>
+      <p>Into folder <code id="upload-directory">/</code></p>
       <label class="dropzone" for="file">
-        <span id="file-label">파일을 선택하세요</span>
+        <span id="file-label">Choose a file</span>
         <input id="file" type="file" />
       </label>
-      <label class="overwrite"><input id="overwrite" type="checkbox" /> 같은 이름이면 덮어쓰기</label>
-      <button id="upload" class="btn btn-primary" type="button" disabled>업로드</button>
+      <label class="overwrite"><input id="overwrite" type="checkbox" /> Overwrite a file with the same name</label>
+      <button id="upload" class="btn btn-primary" type="button" disabled>Upload</button>
       <p id="status" class="status-line status" role="status" aria-live="polite"></p>
       <div class="rules">
-        <strong>안전 경계</strong>
-        <span>에이전트 경로 <code>/warehouse</code>는 읽기 전용입니다.</span>
-        <span>삭제 기능은 제공하지 않습니다.</span>
-        <span>기존 파일은 체크박스를 켜고 한 번 더 확인해야 덮어씁니다.</span>
+        <strong>Safety limits</strong>
+        <span>Agents see <code>/warehouse</code> read-only.</span>
+        <span>Nothing here can delete a file.</span>
+        <span>Replacing an existing file needs the checkbox and a second press.</span>
       </div>
     </aside>
   </main>
