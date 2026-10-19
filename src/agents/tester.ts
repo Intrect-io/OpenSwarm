@@ -12,6 +12,7 @@ import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
 import type { VerifyEvidence } from '../verify/runner.js';
+import type { ExecutionBoundarySignals } from './stageExecutionBoundary.js';
 import {
   PROMPT_FEEDBACK_LIMIT,
   PROMPT_FAILED_TESTS_LIMIT,
@@ -40,7 +41,7 @@ export interface TesterOptions {
   toolDeny?: string[];
 }
 
-export interface TesterResult {
+export interface TesterResult extends ExecutionBoundarySignals {
   success: boolean;
   terminationCause?: 'no_progress';
   executedCommands?: string[];
@@ -145,6 +146,15 @@ export async function runTester(options: TesterOptions): Promise<TesterResult> {
     });
 
     const result = parseTesterOutput(raw.stdout);
+    if (raw.blockedOnOperator || raw.executionOutcomeUnknown) {
+      result.success = false;
+      result.blockedOnOperator = raw.blockedOnOperator;
+      result.executionOutcomeUnknown = raw.executionOutcomeUnknown;
+      result.operatorQuestionCorrelationIds = raw.operatorQuestionCorrelationIds;
+      result.error = raw.executionOutcomeUnknown
+        ? 'OUTCOME_UNKNOWN_DO_NOT_RETRY: tester sandbox command outcome requires operator inspection'
+        : 'Tester is blocked on an operator decision';
+    }
     if (raw.terminationCause) result.terminationCause = raw.terminationCause;
     if (raw.executedCommands) result.executedCommands = raw.executedCommands;
     if (raw.costInfo && !result.costInfo) result.costInfo = raw.costInfo;

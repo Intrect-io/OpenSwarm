@@ -956,9 +956,12 @@ async function runAgenticLoopInner(
     // Progress-based stop: if every tool call this turn repeats a prior one
     // (same name+args → no new info or change), count it as a stalled turn.
     // N consecutive stalled turns → wrap up via the final-answer turn.
-    const observed = toolCalls.flatMap((call, index) => EXTERNALLY_CHANGING_TOOLS.has(call.function.name) ? [] : [toolCallKey(call) + ':' + createHash('sha256')
-      .update(JSON.stringify([results[index]?.content, results[index]?.is_error])).digest('hex')]);
-    if (observed.length > 0 && observed.every((key) => seenToolResults.has(key))) {
+    const observed = toolCalls.map((call, index) => toolCallKey(call) + ':' + createHash('sha256')
+      .update(JSON.stringify([results[index]?.content, results[index]?.is_error])).digest('hex'));
+    // Preserve the inbox exemption for the whole turn: a repeated file read
+    // must not hide newly received peer evidence in the same batch.
+    const checkedInbox = toolCalls.some((call, index) => EXTERNALLY_CHANGING_TOOLS.has(call.function.name) && results[index] && !results[index].is_error);
+    if (!checkedInbox && observed.length > 0 && observed.every((key) => seenToolResults.has(key))) {
       noProgressTurns++;
       if (noProgressTurns >= NO_PROGRESS_LIMIT) {
         terminationCause = 'no_progress';

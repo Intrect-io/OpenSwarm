@@ -395,7 +395,13 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
     });
 
     // Parse result via adapter
-    const parsedResult = adapter.parseReviewerOutput(raw);
+    const parsedResult: ReviewResult = raw.blockedOnOperator || raw.executionOutcomeUnknown
+      ? { decision: 'revise', feedback: raw.executionOutcomeUnknown
+        ? 'OUTCOME_UNKNOWN_DO_NOT_RETRY: reviewer sandbox command outcome requires operator inspection'
+        : 'Reviewer is blocked on an operator decision',
+      blockedOnOperator: raw.blockedOnOperator, executionOutcomeUnknown: raw.executionOutcomeUnknown,
+      operatorQuestionCorrelationIds: raw.operatorQuestionCorrelationIds }
+      : adapter.parseReviewerOutput(raw);
     if (raw.terminationCause) parsedResult.terminationCause = raw.terminationCause;
     // Backfill loop-measured usage for adapters that don't extract their own. (INT-2508)
     if (raw.costInfo && !parsedResult.costInfo) {

@@ -24,6 +24,7 @@ import { broadcastEvent } from '../core/eventHub.js';
 import { safeConsole } from '../support/safeLog.js';
 import type { StuckDetector } from '../support/stuckDetector.js';
 import type { ModelRole } from '../adapters/modelCompat.js';
+import { pipelineExecutionBoundary } from './stageExecutionBoundary.js';
 
 export interface PipelineLoopHost {
   config: PipelineConfig;
@@ -36,6 +37,16 @@ export interface PipelineLoopHost {
 }
 
 function dropStaleTestVerdict(context: PipelineContext): void { context.testerResult = undefined; }
+
+function stopAtExecutionBoundary(host: PipelineLoopHost, context: PipelineContext): boolean {
+  const boundary = pipelineExecutionBoundary(context);
+  if (!boundary) return false;
+  agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
+  safeConsole.log(`[${context.taskPrefix}] ${boundary.reason} — stopping without retry`);
+  host.emit('halt', { confidence: 0, haltReason: boundary.reason, sessionId: context.session.id,
+    iteration: context.currentIteration, context });
+  return true;
+}
 
 /** 단계 정책을 분리해 실행·복구 코드가 같은 반복 루프를 공유한다. */
 export async function runFullIterationLoop(host: PipelineLoopHost, context: PipelineContext, stages: StageResult[]): Promise<{ success: boolean }> {
@@ -139,6 +150,7 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
       agentPair.updateSessionStatus(context.session.id, 'working');
       const workerResult = await host.runStage('worker', context, workerOverrides);
       stages.push(workerResult);
+      if (stopAtExecutionBoundary(host, context)) return { success: false };
 
       // Record Worker result in stuck detector
       host.getStuck().addEntry({
@@ -151,28 +163,6 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
 
       if (!workerResult.success) {
         const failedWorker = workerResult.result as WorkerResult;
-        // Blocked-on-operator is terminal for this run, not a retryable
-        // failure: every further iteration re-runs the same worker into the
-        // same unanswered question, burning the iteration budget to end up
-        // where we already are. The question stays open on the board; the task
-        // resumes when the Discord answer lands.
-        if (failedWorker.blockedOnOperator || failedWorker.executionOutcomeUnknown) {
-          safeConsole.log(failedWorker.executionOutcomeUnknown ? `[${context.taskPrefix}] Worker sandbox outcome is unknown — quarantining without retry` : `[${context.taskPrefix}] Worker is waiting on an operator decision — stopping without retry`);
-          // First-class status: buildResult derives finalStatus from the
-          // session, and anything else here surfaces as a plain 'failed' the
-          // scheduler failure-counts and backoff-retries into the same
-          // unanswered question.
-          context.workerResult = failedWorker;
-          agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
-          host.emit('halt', {
-            confidence: failedWorker.confidencePercent ?? 0,
-            haltReason: failedWorker.haltReason ?? 'Blocked on an operator decision',
-            sessionId: context.session.id,
-            iteration: context.currentIteration,
-            context,
-          });
-          return { success: false };
-        }
         const detail = failedWorker.error
           ?? failedWorker.haltReason
           ?? failedWorker.noChangesReason
@@ -437,6 +427,7 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
         } else {
         const testerResult = await host.runStage('tester', context);
         stages.push(testerResult);
+        if (stopAtExecutionBoundary(host, context)) return { success: false };
 
         const hasNewSecurityFindings = (context.newSecurityFindings?.length ?? 0) > 0;
         // Only a configured reviewer can judge a deterministic verdict; without
@@ -505,6 +496,7 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
 
         const reviewerResult = await host.runStage('reviewer', context, reviewerOverrides);
         stages.push(reviewerResult);
+        if (stopAtExecutionBoundary(host, context)) return { success: false };
 
         const decision = (reviewerResult.result as ReviewResult).decision;
 

@@ -164,9 +164,14 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     internal.durableRuns.close();
   });
 
-  it('never turns a quarantined sandbox outcome into RETRY_AT or heartbeat backoff', async () => {
+  it.each(['worker', 'tester', 'reviewer'] as const)('keeps a quarantined %s outcome parked through idle fill until explicit dispatch', async (stage) => {
     const internal = await makeRunner();
     const quarantined = pipelineResult([], true);
+    if (stage !== 'worker') {
+      quarantined.workerResult = { success: true, summary: 'Changed behavior', filesChanged: ['value.ts'], commands: [], output: '' };
+      if (stage === 'tester') quarantined.testerResult = { success: false, testsPassed: 0, testsFailed: 0, output: '', executionOutcomeUnknown: true };
+      else quarantined.reviewResult = { decision: 'revise', feedback: 'Unknown execution', executionOutcomeUnknown: true };
+    }
     await internal.durableRuns.execute(TASK, REPO, async () => quarantined);
     expect(internal.durableRuns.getRun('AGT-1')).toMatchObject({
       state: 'NEEDS_HUMAN',
@@ -180,8 +185,14 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     });
 
     expect(internal.failedTaskRetryTimes.has('AGT-1')).toBe(false);
-    // AGT-4257: idle_fill resumes even a sandbox-quarantine park so slots work.
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    const premature = vi.fn(async () => quarantined);
+    await internal.durableRuns.execute(TASK, REPO, premature);
+    expect(premature).not.toHaveBeenCalled();
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    expect((internal as unknown as { readmitForExplicitDispatch(task: TaskItem): boolean })
+      .readmitForExplicitDispatch({ ...TASK, explicitDispatch: true })).toBe(true);
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });

@@ -143,6 +143,24 @@ describe('recovery policy and bounded intervention', () => {
     expect(mocks.advisor).not.toHaveBeenCalled();
   });
 
+  it.each(['tester', 'reviewer'] as const)('preserves %s execution boundaries through the pipeline even with continueOnTestFail', async (stage) => {
+    for (const flag of ['executionOutcomeUnknown', 'blockedOnOperator'] as const) {
+      mocks[stage].mockResolvedValueOnce(stage === 'tester'
+        ? { success: true, testsPassed: 0, testsFailed: 0, output: '', [flag]: true, operatorQuestionCorrelationIds: ['exact-question'] }
+        : { decision: 'approve', feedback: 'Claimed success', [flag]: true, operatorQuestionCorrelationIds: ['exact-question'] });
+      const result = await run({ maxIterations: 3, continueOnTestFail: true, loopAdvisor: { mode: 'active' } });
+      expect(result.success).toBe(false); expect(result.finalStatus).toBe('waiting_on_operator');
+      expect(result.iterations).toBe(1);
+      expect(result.recovery?.progress?.cause).toBe(flag === 'executionOutcomeUnknown' ? 'outcome_unknown' : 'operator_wait');
+      expect(result.stages.at(-1)).toMatchObject({ stage, success: false });
+      expect(result.failureDetail).toContain(stage);
+      retry();
+    }
+    expect(mocks.worker).toHaveBeenCalledTimes(2);
+    expect(mocks.advisor).not.toHaveBeenCalled();
+    if (stage === 'tester') expect(mocks.reviewer).not.toHaveBeenCalled();
+  });
+
   it('rejects an unconfigured model switch', async () => {
     mocks.advisor.mockResolvedValueOnce({ decision: { ...advice, action: 'switch_model', model: 'unapproved' } });
     const result = await twoFailures('active');

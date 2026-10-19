@@ -26,6 +26,15 @@ beforeEach(() => {
 afterEach(() => { ledger.close(); rmSync(root, { recursive: true, force: true }); });
 
 describe('durable recovery ownership and progress', () => {
+  it('requires explicit operator dispatch to resume an unknown command outcome', () => {
+    expect(ledger.transition(claim, 'NEEDS_HUMAN', { errorCode: 'execution_outcome_unknown' }, clock)).toBe(true);
+    for (const trigger of ['idle_fill', 'tracker_todo', 'unspecified'] as const) {
+      expect(ledger.resumeNeedsHuman('task', clock, trigger)).toBeNull();
+    }
+    expect(ledger.claimRun('task', { ownerInstanceId: 'idle', leaseMs: 60_000, now: clock })).toBeNull();
+    expect(ledger.resumeNeedsHuman('task', clock, 'explicit_dispatch')).toBe('READY');
+  });
+
   it('keeps advisor parks out of idle fill and consumes the stop only on explicit operator resume', () => {
     const advice = hooks().reserveAdvice('stop', 'active', 2)!;
     hooks().finishAdvice(advice.id, { status: 'completed', applied: true, decision: { action: 'stop', diagnosis: 'Needs a decision', evidence: ['failure'], condition: 'Operator changes the input', verification: 'Run the required checks' } });

@@ -25,6 +25,7 @@ import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktre
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { WORKER_NO_CHANGES_PARK_REASON, WORKER_NO_CHANGES_STATEMENT_PREFIX } from '../agents/pairPipelineTypes.js';
 import type { VerifyConfig } from '../core/types.js';
+import { pipelineExecutionBoundary, type StageBoundaryResults } from '../agents/stageExecutionBoundary.js';
 
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 
@@ -46,7 +47,7 @@ export const SENSITIVE_DATA_PARK_REASON = 'sensitive_data_on_branch';
 export { WORKER_NO_CHANGES_PARK_REASON } from '../agents/pairPipelineTypes.js';
 
 /** The fields these paths read; narrower than the full pipeline result. */
-export interface PublishableResult {
+export interface PublishableResult extends StageBoundaryResults {
   success?: boolean;
   finalStatus?: string;
   prUrl?: string;
@@ -77,7 +78,7 @@ export function shouldPublishParkedWork(
   hasWorktree: boolean,
   result: PublishableResult,
 ): boolean {
-  if (!hasWorktree || result.workerResult?.executionOutcomeUnknown === true || result.prUrl) return false;
+  if (!hasWorktree || pipelineExecutionBoundary(result)?.executionOutcomeUnknown === true || result.prUrl) return false;
   // `waiting_on_operator` is one way a run stops for a person; an
   // `operatorPark` — the publication-scope fence, a worker that delivered
   // nothing — is another, and it was added without this. vega-agent AGT-3844
@@ -455,7 +456,7 @@ export function shouldPublishUnfinishedWork(
   opts: { approvedAttempt?: boolean; lifecycleFailed?: boolean } = {},
 ): boolean {
   if (!hasWorktree || opts.approvedAttempt || opts.lifecycleFailed) return false;
-  if (result.prUrl || result.operatorPark || result.workerResult?.executionOutcomeUnknown === true) return false;
+  if (result.prUrl || result.operatorPark || pipelineExecutionBoundary(result)?.executionOutcomeUnknown === true) return false;
   return UNFINISHED_STATUSES.has(result.finalStatus ?? '');
 }
 

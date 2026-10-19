@@ -12,6 +12,7 @@ import { broadcastEvent } from '../core/eventHub.js';
 import { safeConsole } from '../support/safeLog.js';
 import { guardWarningsForResult } from './guardWarningRecord.js';
 import { ITERATION_BUDGET_PARK_REASON } from '../orchestration/taskBudget.js';
+import { pipelineExecutionBoundary } from './stageExecutionBoundary.js';
 import {
   VERIFIED_WORKER_BLOCKER_PARK_REASON,
   WORKER_NO_CHANGES_PARK_REASON,
@@ -51,7 +52,7 @@ export function composePipelineResult(
   // the durable ledger tells an operator why another iteration never began.
   const stopReason = context.budgetParkReason
     ?? context.stuckReason
-    ?? (finalStatus === 'waiting_on_operator' ? context.workerResult?.haltReason : undefined);
+    ?? (finalStatus === 'waiting_on_operator' ? pipelineExecutionBoundary(context)?.reason : undefined);
   // Aggregate costs from all stages
   const totalCost = pipelineCosts(context, stages);
   if (totalCost) {

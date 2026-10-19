@@ -2,6 +2,7 @@ import { reconcileExpiredRowsInDb } from './runLedgerExpired.js';
 import Database from 'better-sqlite3';
 import { RunRecoveryStore } from './runRecoveryStore.js';
 import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
+import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -377,6 +378,8 @@ export class RunLedger {
       const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?').get(issueId) as RunRow | undefined;
       if (!row || row.state !== 'NEEDS_HUMAN') return null;
       if (row.last_error_code === RECOVERY_ADVISOR_PARK_REASON && trigger === 'idle_fill') return null;
+      if (row.last_error_code === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON
+          && trigger !== 'explicit_dispatch' && trigger !== 'sandbox_quarantine_dispatch') return null;
       // An ask_human park carries its own exact-correlation resume contract.
       // Linear state changes and generic operator recovery must not bypass it.
       // idle_fill is the exception: empty slots + in-scope work beat the wait

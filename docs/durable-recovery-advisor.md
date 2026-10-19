@@ -17,13 +17,15 @@ The existing automation SQLite database gains additive `automation_recovery`, `a
 
 The execution contract hashes task text, authoritative operator input, stage/role/guard/verify/security policy, file scope, acceptance criteria and task budget. A progress snapshot contains the actual Git tree digest, stable identifiers for adapter-observed commands or deterministic verification results, failure classification and consecutive unchanged failures. Self-reported `commands` and conversational activity are not execution evidence. A successful different stage does not erase another stage's repeated failure history.
 
-Native repeated-call detection compares the call and its observed result. It emits `terminationCause: no_progress`; delegated CLIs retain stage-level observability. Reading changed output is progress. A successful stage retains its termination signal as metadata; the signal alone never reclassifies successful work as a recovery failure or triggers an advisor park. A completed pipeline clears its resume boundary, so a reopened issue cannot reuse a former completion.
+Native repeated-call detection compares the call and its observed result. It emits `terminationCause: no_progress`; delegated CLIs retain stage-level observability. Reading changed output is progress. Inbox read/wait turns retain their existing exemption, including batches that also reread an unchanged file. A successful stage retains its termination signal as metadata; the signal alone never reclassifies successful work as a recovery failure or triggers an advisor park. A completed pipeline clears its resume boundary, so a reopened issue cannot reuse a former completion.
 
 ## Recovery boundaries
 
 Only a known reviewer/tester infrastructure or quota exception can preserve a successful worker checkpoint for the next attempt. A crash during a command does not mark that command reusable. The current contract, artifact tree and verification environment must match exactly. A changed tracked or untracked file, intent, acceptance criterion, role/guard setting or trusted verification input invalidates reuse. A failed stage is never restored. Only the successful worker is restored. Required tests and the reviewer run again in the current environment: external services and undeclared installed-dependency changes cannot be completely attested by a Git/manifest fingerprint. The identity includes Node/platform/architecture, a hash of the sorted process environment, trusted verification inputs/commands and policy; raw environment values are never stored.
 
 Quality/configuration failures, operator waits, unknown side effects, cancellations and changed policy do not authorize stage reuse. Existing durable publication/outbox reconciliation continues separately from implementation. Reusing a stage emits lifecycle and `pipeline:recovery` events and does not charge its earlier model cost again.
+
+Trusted Native unknown-outcome and operator-wait flags survive worker, tester and reviewer parsing. They override a success/approve claim, stop the pipeline even with `continueOnTestFail`, and retain their stage and exact question correlations. Unknown side effects quarantine the run in `NEEDS_HUMAN` without a retry deadline and prohibit parked/unfinished publication. Idle fill, ephemeral-path heuristics and tracker Todo cannot release an unknown-outcome quarantine; explicit operator dispatch can. No successful checkpoint or advisor consultation is recorded for that boundary.
 
 ## Advisor policy
 
@@ -57,6 +59,6 @@ The human-question producer rechecks answered state after notification, and the 
 
 ## Verification and limits
 
-Run `npm test -- src/agents/pairPipeline.recovery.test.ts src/automation/runRecoveryStore.test.ts src/agents/recoveryAdvisor.test.ts src/adapters/agenticLoop.turns.test.ts src/coordination/humanQuestions.test.ts src/coordination/orchestratorSupervisor.test.ts --maxWorkers=2` for restart, stale lease, modes, limits, changed artifacts, model policy, no-progress and notification-race controls.
+Run `npm test -- src/agents/pairPipeline.recovery.test.ts src/automation/runRecoveryStore.test.ts src/agents/recoveryAdvisor.test.ts src/adapters/agenticLoop.turns.test.ts src/adapters/agenticLoop.coordinationProgress.test.ts src/coordination/humanQuestions.test.ts src/coordination/orchestratorSupervisor.test.ts --maxWorkers=2` for restart, stale lease, modes, limits, changed artifacts, model policy, no-progress and notification-race controls.
 
 Fault fixtures establish deterministic policy and delivery behavior. Actual-provider consultation is recorded separately; fixture success alone is not evidence of real model quality or unattended production reliability. No production activation or deployment is part of this change.

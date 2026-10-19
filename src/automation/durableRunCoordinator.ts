@@ -7,6 +7,7 @@ import {
   infraFailureFingerprint,
 } from './infraFailureCircuit.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
+import { pipelineExecutionBoundary } from '../agents/stageExecutionBoundary.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
@@ -877,7 +878,8 @@ export class DurableRunCoordinator {
     }
 
     if (result.finalStatus === 'waiting_on_operator') {
-      if (result.workerResult?.executionOutcomeUnknown) {
+      const boundary = pipelineExecutionBoundary(result);
+      if (boundary?.executionOutcomeUnknown) {
         const reason = 'Sandbox command outcome unknown; inspect the preserved worktree and explicitly redispatch to resume';
         return this.ledger.transition(claim, 'NEEDS_HUMAN', {
           errorCode: SANDBOX_OUTCOME_UNKNOWN_PARK_REASON,
@@ -887,7 +889,7 @@ export class DurableRunCoordinator {
         }, now) ? result : fencedResult(result);
       }
       const correlationIds = normalizeOperatorQuestionCorrelations(
-        result.workerResult?.operatorQuestionCorrelationIds ?? [],
+        boundary?.operatorQuestionCorrelationIds ?? [],
       );
       if (correlationIds.length > 0) {
         const reason = `Waiting for operator answer (${correlationIds.join(', ')})`;

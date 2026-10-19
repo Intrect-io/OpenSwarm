@@ -93,10 +93,12 @@ export class LoopRecovery {
 
   async complete(result: StageResult, failedModel?: string, transportError?: unknown, label = result.stage as string): Promise<void> {
     const digest = await takeSnapshot(this.context.projectPath);
-    const nativeStall = (result.result as { terminationCause?: string }).terminationCause === 'no_progress';
-    const error = nativeStall ? 'Native execution stopped after repeated unchanged tool results' : result.success ? '' : stageFailure(result);
+    const boundary = result.result as { executionOutcomeUnknown?: boolean; blockedOnOperator?: boolean; terminationCause?: string };
+    const successful = result.success && !boundary.executionOutcomeUnknown && !boundary.blockedOnOperator;
+    const nativeStall = boundary.terminationCause === 'no_progress';
+    const error = nativeStall ? 'Native execution stopped after repeated unchanged tool results' : successful ? '' : stageFailure(result);
     // Native 종료 신호는 진단 자료다. 실제 단계 성공을 복구 실패로 재분류하지 않는다.
-    const cause = result.success ? undefined : recoveryCause(error, result.result, transportError);
+    const cause = successful ? undefined : recoveryCause(error, result.result, transportError);
     const fingerprint = cause ? failureFingerprint(cause, label, error) : undefined;
     const value = result.result as { terminationCause?: string; costInfo?: { model?: string; servedModels?: string[] } };
     const progress = this.hooks.observe({ stage: label, artifactDigest: digest || undefined,
@@ -104,11 +106,11 @@ export class LoopRecovery {
       terminationCause: nativeStall ? 'no_progress' : undefined,
       environmentDigest: this.environmentHash,
       observability: value.terminationCause ? 'native' : 'stage' });
-    if (result.success && digest && ['worker', 'reviewer', 'tester'].includes(result.stage)) {
+    if (successful && digest && ['worker', 'reviewer', 'tester'].includes(result.stage)) {
       this.hooks.checkpoint({ stage: result.stage, result, artifactDigest: digest, environmentHash: this.environmentHash,
         contractHash: this.contractHash, runSnapshotHash: this.context.runSnapshotHash });
     }
-    if (!result.success) this.hooks.resumable(transportError !== undefined && ['infra', 'quota'].includes(cause!)
+    if (!successful) this.hooks.resumable(transportError !== undefined && ['infra', 'quota'].includes(cause!)
       && ['reviewer', 'tester'].includes(result.stage) ? result.stage : undefined);
     broadcastEvent({ type: 'pipeline:recovery', data: { taskId: this.contract.issueId, progress } });
     if (!cause || ['operator_wait', 'outcome_unknown', 'cancelled'].includes(cause)) return;

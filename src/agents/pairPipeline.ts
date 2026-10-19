@@ -770,6 +770,8 @@ export class PairPipeline extends EventEmitter {
     stage: PipelineStage,
     result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult
   ): boolean {
+    const boundary = result as { executionOutcomeUnknown?: boolean; blockedOnOperator?: boolean };
+    if (boundary.executionOutcomeUnknown || boundary.blockedOnOperator) return false;
     switch (stage) {
       case 'worker':
         return (result as WorkerResult).success;

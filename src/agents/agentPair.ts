@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { CostInfo } from '../support/costTracker.js';
+import type { ExecutionBoundarySignals } from './stageExecutionBoundary.js';
 
 // Types
 
@@ -90,7 +91,7 @@ export interface RecommendedAction {
   location?: string;
 }
 
-export interface ReviewResult {
+export interface ReviewResult extends ExecutionBoundarySignals {
   decision: ReviewDecision;
   terminationCause?: 'no_progress';
   feedback: string;
