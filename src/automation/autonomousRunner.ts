@@ -2051,6 +2051,9 @@ export class AutonomousRunner {
     return {
       worker: { ...base.worker, ...projectConfig.roles.worker },
       reviewer: { ...base.reviewer, ...projectConfig.roles.reviewer },
+      advisor: projectConfig.roles.advisor
+        ? { ...base.advisor, ...projectConfig.roles.advisor }
+        : base.advisor,
       tester: projectConfig.roles.tester
         ? { ...base.tester, ...projectConfig.roles.tester }
         : base.tester,

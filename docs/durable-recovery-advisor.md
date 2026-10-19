@@ -33,13 +33,15 @@ Trusted Native unknown-outcome and operator-wait flags survive worker, tester an
 autonomous:
   loopAdvisor:
     mode: off # off | shadow | active
-    # adapter/model inherit defaultRoles.advisor when omitted
+    # adapter/model inherit the effective project/default advisor role when omitted
     timeoutMs: 45000
     triggerAfter: 2
     maxCallsPerIssue24h: 2
 ```
 
 `off` performs no consultation. `shadow` records a diagnosis without changing execution policy. `active` may supply strategy feedback, select only that role's configured `escalateModel`, retain the coordinator's infrastructure backoff, or park for an operator. No action grants permission, changes acceptance/file scope, makes an operator decision, executes an arbitrary model-suggested command, or approves a result.
+
+Explicit `loopAdvisor.adapter/model` take precedence; omitted fields inherit the advisor role after project overrides are merged with `defaultRoles.advisor`. The same effective role supplies the configured independent premise-verification tier.
 
 Calls require a native adapter that enforces tool restrictions and a separately resolved model from the failed stage. Shell, filesystem, web, memory, MCP and coordination tools are withheld. The structured response must reference supplied evidence keys. Unknown fields/actions/evidence, malformed output, unsupported enforcement, missing model provenance, cancellation, timeout or provider failure leave the original failure policy intact.
 

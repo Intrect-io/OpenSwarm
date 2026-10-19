@@ -1011,7 +1011,7 @@ export async function executePipeline(
         otherStagesTimeoutMs: otherStageTimeoutsMs(roles, ctx.verify),
       }),
       projectGoal,
-      ctx.loopAdvisor, ctx.advisorRole,
+      ctx.loopAdvisor, roles?.advisor ?? ctx.advisorRole,
     );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);
