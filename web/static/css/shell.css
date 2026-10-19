@@ -20,6 +20,7 @@ body {
   font-family: var(--font-sans);
   font-size: var(--text-base);
   line-height: var(--leading-body);
+  font-variant-numeric: tabular-nums;
   /* Korean/English mixed prose: never break inside a word, but never let an
      unbreakable token (a hash, a path) widen the column either (§8.2). */
   word-break: keep-all;
@@ -32,8 +33,19 @@ h1 { font-size: var(--text-xl); line-height: var(--leading-tight); font-weight: 
 h2 { font-size: var(--text-lg); line-height: var(--leading-tight); font-weight: 600; }
 h3 { font-size: var(--text-base); line-height: var(--leading-tight); font-weight: 600; }
 
-a { color: var(--accent); text-decoration: none; }
-a:hover { color: var(--accent-hover); text-decoration: underline; text-underline-offset: 2px; }
+/* The board's accent is its own ink colour, so a link is told apart by its
+   rule, not its hue (WCAG 1.4.1). */
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+a:hover { color: var(--accent-hover); text-decoration-color: currentColor; }
+
+::selection { background: var(--info); color: var(--bg-app); }
+input, textarea { caret-color: var(--fg-primary); }
 
 code, kbd, pre { font-family: var(--font-mono); font-size: 0.93em; }
 code {
@@ -104,10 +116,25 @@ button:disabled { cursor: default; }
   gap: var(--space-4);
   min-height: var(--topbar-h);
   padding: 0 var(--space-4);
-  background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--border);
+  /* The shell band stays navy in both themes (the printed timetable's
+     header), so everything inside it reads the shell's values through the
+     ordinary semantic names. */
+  --fg-primary: var(--shell-fg);
+  --fg-secondary: var(--shell-fg);
+  --fg-muted: var(--shell-muted);
+  --accent: var(--shell-fg);
+  --accent-hover: var(--shell-fg);
+  --accent-subtle: var(--bg-hover);
+  --fg-on-accent: var(--shell-bg);
+  --bg-app: var(--shell-bg);
+  --bg-elevated: var(--shell-bg);
+  --bg-hover: rgba(255, 255, 255, 0.08);
+  --bg-active: rgba(255, 255, 255, 0.14);
+  --border: var(--shell-rule);
+  --border-strong: var(--shell-muted);
+  background: var(--shell-bg);
+  color: var(--shell-fg);
+  border-bottom: 1px solid var(--shell-rule);
 }
 .topbar .brand {
   display: inline-flex;
@@ -136,17 +163,20 @@ button:disabled { cursor: default; }
 .topbar-nav a {
   display: inline-flex;
   align-items: center;
+  align-self: stretch;
   min-height: 32px;
   padding: 0 var(--space-3);
-  border-radius: var(--radius-md);
+  border-bottom: 3px solid transparent;
   color: var(--fg-muted);
   font-size: var(--text-sm);
+  font-weight: 500;
   text-decoration: none;
   white-space: nowrap;
-  transition: color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+  transition: color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
-.topbar-nav a:hover { color: var(--fg-primary); background: var(--bg-hover); text-decoration: none; }
-.topbar-nav a[aria-current="page"] { color: var(--accent); background: var(--accent-subtle); }
+.topbar-nav a:hover { color: var(--fg-primary); text-decoration: none; }
+/* Active: white type over a white rule, like the board's current line. */
+.topbar-nav a[aria-current="page"] { color: var(--fg-primary); border-bottom-color: var(--fg-primary); }
 .topbar-spacer { flex: 1; }
 .topbar-actions { display: flex; align-items: center; gap: var(--space-2); }
 

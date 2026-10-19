@@ -108,8 +108,12 @@ describe('design tokens (AGT-4201)', () => {
     expect(src, 'tokens.css must declare an @font-face src').not.toBeNull();
     const asset = join(ROOT, src![1].replace(/^\/static\//, ''));
     expect(existsSync(asset), `${src![1]} is not vendored under web/static`).toBe(true);
-    expect(existsSync(join(ROOT, 'fonts', 'LICENSE.inter'))).toBe(true);
-    expect(tokens).toMatch(/--font-sans:\s*'Inter Variable'/);
+    expect(existsSync(join(ROOT, 'fonts', 'LICENSE.barlow'))).toBe(true);
+    expect(tokens).toMatch(/--font-sans:\s*'Barlow'/);
+    // Every weight the Departure Board world sets is vendored, not just the first.
+    for (const m of tokens.matchAll(/src:\s*url\('([^']+)'\)/g)) {
+      expect(existsSync(join(ROOT, m[1].replace(/^\/static\//, ''))), m[1]).toBe(true);
+    }
   });
 });
 
