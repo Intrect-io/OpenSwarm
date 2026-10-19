@@ -1,0 +1,136 @@
+{
+  "verifiedAt": "2026-10-19T11:32:01.569Z",
+  "screenshots": 0,
+  "methodSource": "https://chromium.googlesource.com/chromium/src/+/lkgr/chrome/browser/ui/zoom/chrome_zoom_level_prefs.cc",
+  "boundary": "Non-visual DOM assertions with persistent Chrome page-zoom preferences; read-only demo, no manual visual pass.",
+  "results": [
+    {
+      "theme": "dark",
+      "factor": 1,
+      "path": "/orchestration",
+      "dimensions": {
+        "innerWidth": 1440,
+        "outerWidth": 1440,
+        "dpr": 1,
+        "visualScale": 1,
+        "scrollWidth": 1440
+      },
+      "detailReflow": true,
+      "keyboardReachable": true,
+      "errors": [],
+      "writes": []
+    },
+    {
+      "theme": "dark",
+      "factor": 1,
+      "path": "/chat",
+      "dimensions": {
+        "innerWidth": 1440,
+        "outerWidth": 1440,
+        "dpr": 1,
+        "visualScale": 1,
+        "scrollWidth": 1440
+      },
+      "detailReflow": true,
+      "keyboardReachable": true,
+      "errors": [],
+      "writes": []
+    },
+    {
+      "theme": "dark",
+      "factor": 2,
+      "path": "/orchestration",
+      "dimensions": {
+        "innerWidth": 720,
+        "outerWidth": 1440,
+        "dpr": 2,
+        "visualScale": 1,
+        "scrollWidth": 720
+      },
+      "detailReflow": true,
+      "keyboardReachable": true,
+      "errors": [],
+      "writes": []
+    },
+    {
+      "theme": "dark",
+      "factor": 2,
+      "path": "/chat",
+      "dimensions": {
+        "innerWidth": 720,
+        "outerWidth": 1440,
+        "dpr": 2,
+        "visualScale": 1,
+        "scrollWidth": 720
+      },
+      "detailReflow": true,
+      "keyboardReachable": true,
+      "errors": [],
+      "writes": []
+    },
+    {
+      "theme": "light",
+      "factor": 1,
+      "path": "/orchestration",
+      "dimensions": {
+        "innerWidth": 1440,
+        "outerWidth": 1440,
+        "dpr": 1,
+        "visualScale": 1,
+        "scrollWidth": 1440
+      },
+      "detailReflow": true,
+      "keyboardReachable": true,
+      "errors": [],
+      "writes": []
+    },
+    {
+      "theme": "light",
+      "factor": 1,
+      "path": "/chat",
+      "dimensions": {
+        "innerWidth": 1440,
+        "outerWidth": 1440,
+        "dpr": 1,
+        "visualScale": 1,
+        "scrollWidth": 1440
+      },
+      "detailReflow": true,
+      "keyboardReachable": true,
+      "errors": [],
+      "writes": []
+    },
+    {
+      "theme": "light",
+      "factor": 2,
+      "path": "/orchestration",
+      "dimensions": {
+        "innerWidth": 720,
+        "outerWidth": 1440,
+        "dpr": 2,
+        "visualScale": 1,
+        "scrollWidth": 720
+      },
+      "detailReflow": true,
+      "keyboardReachable": true,
+      "errors": [],
+      "writes": []
+    },
+    {
+      "theme": "light",
+      "factor": 2,
+      "path": "/chat",
+      "dimensions": {
+        "innerWidth": 720,
+        "outerWidth": 1440,
+        "dpr": 2,
+        "visualScale": 1,
+        "scrollWidth": 720
+      },
+      "detailReflow": true,
+      "keyboardReachable": true,
+      "errors": [],
+      "writes": []
+    }
+  ]
+}

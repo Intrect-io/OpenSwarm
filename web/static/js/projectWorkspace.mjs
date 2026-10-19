@@ -25,7 +25,7 @@ export async function startProjectWorkspace(doc, options = {}) {
   const drafts = new ProjectDrafts(storage);
   const state = { projects: [], projectCursor: null, repo: null, task: null, tasks: [], taskCursor: null,
     thread: null, threadData: null, need: null, entries: [], cursor: null, through: 0,
-    detail: null, generation: 0, threadGeneration: 0, detailGeneration: 0, navigationGeneration: 0, newActivity: false, needs: [], needsCursor: null,
+    detail: null, generation: 0, projectGeneration: 0, threadGeneration: 0, detailGeneration: 0, navigationGeneration: 0, activityGeneration: 0, newActivity: false, needs: [], needsCursor: null,
     selectedNode: null, disposed: false };
   const currentProject = () => state.projects.find((p) => p.repoKey === state.repo);
   const currentScope = () => ({ repoKey: state.repo, threadId: state.thread ?? undefined,
@@ -69,8 +69,34 @@ export async function startProjectWorkspace(doc, options = {}) {
     directory.scrollTop = scrollTop;
     updateNavigation();
   }
+  function signalActivity() {
+    state.activityGeneration++; state.newActivity = true; updateNavigation();
+  }
+  const observedActivity = new Map();
+  function observeActivity(repoKey, latestSeq) {
+    const project = state.projects.find((p) => p.repoKey === repoKey);
+    const known = Math.max(observedActivity.get(repoKey) ?? -1, project?.latestSeq ?? -1,
+      repoKey === state.repo ? state.through : -1);
+    observedActivity.set(repoKey, Math.max(known, latestSeq));
+    if (latestSeq > known) signalActivity();
+  }
+  async function loadedProjectPages() {
+    const missing = new Set(state.projects.map((p) => p.repoKey));
+    let page = await request('/api/coordination/projects');
+    const result = { ...page, items: [...page.items] };
+    for (const p of page.items) missing.delete(p.repoKey);
+    while (missing.size && page.nextCursor) {
+      page = await request(`/api/coordination/projects?cursor=${enc(page.nextCursor)}`);
+      result.items.push(...page.items);
+      for (const p of page.items) missing.delete(p.repoKey);
+    }
+    return { ...result, nextCursor: page.nextCursor };
+  }
   async function loadProjects(append = false) {
-    const result = await request(`/api/coordination/projects${append && state.projectCursor ? `?cursor=${enc(state.projectCursor)}` : ''}`);
+    const generation = ++state.projectGeneration;
+    const result = append ? await request(`/api/coordination/projects${state.projectCursor ? `?cursor=${enc(state.projectCursor)}` : ''}`)
+      : await loadedProjectPages();
+    if (state.disposed || generation !== state.projectGeneration) return false;
     state.projects = append ? [...state.projects, ...result.items] : result.items;
     state.projectCursor = result.nextCursor;
     doc.querySelector('#workspace-totals').textContent = `${count(result.totals.runningTasks)} running tasks · ${count(result.totals.recentParticipants)} recent participants · 30m`;
@@ -79,6 +105,7 @@ export async function startProjectWorkspace(doc, options = {}) {
     if (result.partial) notice(`Partial data · ${result.unavailable.join(', ')} unavailable. Refresh to retry.`);
     else notice('');
     projectRows();
+    return true;
   }
   const entryMarkup = (e, inThread = false) => {
     const label = deliveryLabel(e, e.delivery?.recipient ? true : currentProject()?.coordinatorAvailable);
@@ -170,7 +197,7 @@ export async function startProjectWorkspace(doc, options = {}) {
     if (navigation !== state.navigationGeneration) return;
     state.generation++; state.threadGeneration++;
     state.repo = repo; state.task = null; state.thread = null; state.threadData = null; state.need = null;
-    state.tasks = []; state.entries = []; state.cursor = null; state.taskCursor = null; state.selectedNode = null;
+    state.tasks = []; state.entries = []; state.cursor = null; state.through = 0; state.taskCursor = null; state.selectedNode = null;
     doc.querySelector('#workspace-recipient').value = '';
     doc.querySelector('#thread-content').innerHTML = '<p class="empty">Open a discussion or a task to read its context.</p>';
     doc.querySelector('#channel-entries').innerHTML = '<p class="empty">Loading conversation…</p>';
@@ -300,7 +327,7 @@ export async function startProjectWorkspace(doc, options = {}) {
       const result = await request(`${base(scope.repoKey)}/messages`, { method: 'POST', body: JSON.stringify({ ...scope, body, idempotencyKey: draft.idempotencyKey }) });
       if (draft.text === originalText) { draft.text = ''; draft.files = []; draft.idempotencyKey = undefined; draft.submittedBody = undefined; drafts.persist(scope); }
       draft.error = deliveryLabel(result.delivery, result.coordinatorAvailable);
-      if (state.repo === scope.repoKey) state.newActivity = true;
+      if (state.repo === scope.repoKey) signalActivity();
       if (draftKey(effectiveScope()) === key) {
         announce(`Message saved to ${currentProject()?.name}. ${draft.error}`);
         await loadEntries();
@@ -340,11 +367,12 @@ export async function startProjectWorkspace(doc, options = {}) {
       } else { state.generation++; state.repo = null; }
       renderComposer(); updateNavigation();
     } else if (target.id === 'workspace-refresh') void safe(async () => {
-      const repo = state.repo; const old = currentProject();
-      await loadProjects();
+      const repo = state.repo; const old = currentProject(); const activity = state.activityGeneration;
+      if (!await loadProjects()) return;
       if (repo && !state.projects.some((p) => p.repoKey === repo) && old) state.projects.push(old);
       if (repo === state.repo) { await Promise.all([loadEntries(), loadTasks()]); if (state.task) await loadTaskDetail(); }
-      state.newActivity = false; updateNavigation();
+      if (activity === state.activityGeneration) state.newActivity = false;
+      updateNavigation();
     });
     else if (target.id === 'workspace-needs') void safe(async () => { const inbox = doc.querySelector('#needs-inbox'); inbox.hidden = !inbox.hidden; if (!inbox.hidden) await loadNeeds(); });
     else if (target.id === 'needs-close') doc.querySelector('#needs-inbox').hidden = true;
@@ -384,16 +412,19 @@ export async function startProjectWorkspace(doc, options = {}) {
   let stream;
   if (!demo && options.events !== false) {
     stream = options.eventStream ?? new EventStream();
-    const changed = () => { state.newActivity = true; updateNavigation(); };
+    const changed = signalActivity;
     for (const name of ['coordination:channel', 'coordination:channel-status', 'coordination:published', 'coordination:event', 'task:started', 'task:completed', 'pipeline:stage', '$open']) stream.on(name, changed);
     stream.connect();
   }
   const poll = !demo && options.pollMs !== 0 ? win.setInterval(async () => {
     try {
-      const data = await request('/api/coordination/projects');
-      const repo = state.repo;
+      const data = await loadedProjectPages();
+      const repo = state.repo; const generation = state.generation;
       if (repo) {
         const position = await request(`${base(repo)}/read`);
+        if (repo === state.repo && generation === state.generation && position.latestSeq > state.through) {
+          observeActivity(repo, position.latestSeq);
+        }
         const project = state.projects.find((p) => p.repoKey === repo);
         if (project && position.readSeq > project.readSeq) {
           project.readSeq = position.readSeq; project.unread = position.unread;
@@ -409,7 +440,7 @@ export async function startProjectWorkspace(doc, options = {}) {
           if (label) label.textContent = `${next.unread} unread`;
         }
       }
-      if (data.items.some((p) => p.latestSeq !== state.projects.find((old) => old.repoKey === p.repoKey)?.latestSeq)) { state.newActivity = true; updateNavigation(); }
+      for (const p of data.items) observeActivity(p.repoKey, p.latestSeq);
     } catch { announce('Connection unavailable. Your drafts are preserved; refresh to reconnect.'); }
   }, options.pollMs ?? 15_000) : null;
   if (demo) {

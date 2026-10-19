@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "receiptType": "independent-project-polling-review",
+  "createdAt": "2026-10-19T11:31:36.220Z",
+  "sanitized": true,
+  "scope": "DOM and state verification only; no visual inspection or screenshots",
+  "cursorCoverage": {
+    "initialRows": 50,
+    "loadedRows": 100,
+    "pollFetchedSecondPage": true,
+    "explicitRefreshRetainedRows": 100,
+    "selectedProjectOrdinal": 76,
+    "sharedReadProjectOrdinal": 75,
+    "selectedProjectFixtureId": "demo:075",
+    "sharedReadProjectFixtureId": "demo:074"
+  },
+  "activity": {
+    "newActivityDetectedBeyondFirstPage": true,
+    "selectedReadDetectsActivityAfterSummaryWithUnchangedReadCursor": true,
+    "staleLowerSummaryDoesNotReopenNotice": true,
+    "stablePollAfterExplicitRefreshDoesNotReopenNotice": true
+  },
+  "preservationUntilExplicitRefresh": {
+    "entryIds": true,
+    "projectOrder": true,
+    "scrollPosition": true,
+    "draft": true
+  },
+  "channelSwitch": {
+    "lateSelectedReadDoesNotReplaceCurrentProject": true,
+    "lateReadDoesNotSetActivityOnDifferentSelection": true,
+    "currentEntryIdsAndDraftPreserved": true
+  },
+  "review": {
+    "verdict": "APPROVE",
+    "additionalBlockingDefectsFound": 0,
+    "sourceFilesModified": false,
+    "scope": "Independent narrow project-pagination and polling review; separate from automated review, CI, visual approval and merge gates."
+  },
+  "focusedRegressionTests": {
+    "uniqueTestsPassed": 7,
+    "runs": [
+      {
+        "passed": 2,
+        "skipped": 25
+      },
+      {
+        "passed": 1,
+        "skipped": 26
+      },
+      {
+        "passed": 7,
+        "skipped": 24,
+        "label": "latest focused polling boundary set"
+      }
+    ]
+  },
+  "lateExplicitRefresh": {
+    "olderFirstPageResponseIgnored": true,
+    "laterLoadedRowsRetained": 100,
+    "currentProjectFixtureId": "demo:075",
+    "currentChannelTitleAndEntriesPreserved": true,
+    "draftPreserved": true,
+    "unappliedRefreshDoesNotClearActivity": true,
+    "unappliedRefreshDoesNotFetchChannelOrTasks": true,
+    "subsequentAppliedRefreshAndStablePoll": "no-repeating-notice"
+  },
+  "activityDuringPendingRefresh": {
+    "passedCases": [
+      {
+        "source": "poll",
+        "activityDuringPendingRefreshPreserved": true,
+        "followingNormalRefreshClears": true,
+        "stablePollDoesNotReopen": true
+      },
+      {
+        "source": "SSE",
+        "activityDuringPendingRefreshPreserved": true,
+        "followingNormalRefreshClears": true,
+        "stablePollDoesNotReopen": true
+      },
+      {
+        "case": "channel-switch",
+        "currentProjectEntriesAndDraftPreserved": true,
+        "activityPreserved": true
+      }
+    ],
+    "remainingRepeatedKnownVersionCase": {
+      "case": "poll repeats already-known version while refresh loads that same version",
+      "knownLatestSeq": 13,
+      "loadedThroughAfterRefresh": 13,
+      "activityGenerationBeforeRefresh": 2,
+      "activityGenerationAfterRepeatedPoll": 3,
+      "newRecordsAfterRefreshStarted": 0,
+      "newActivityAfterRefresh": true,
+      "expectedNewActivityAfterRefresh": false,
+      "status": "resolved-by-observed-version-watermark",
+      "currentNewActivityAfterRefresh": false,
+      "measurementPhase": "Historical failure resolved by version watermark"
+    }
+  },
+  "activityWatermarkChannelSwitch": {
+    "case": "poll during channel switch from higher to lower cursor",
+    "sourceProjectFixtureId": "demo:000",
+    "sourceThrough": 112,
+    "destinationProjectFixtureId": "demo:001",
+    "destinationExpectedThrough": 12,
+    "throughWhileDestinationLoading": 112,
+    "destinationThroughAfterLoad": 12,
+    "newDestinationLatestSeq": 13,
+    "newActivityAfterDestinationAdvance": false,
+    "expectedNewActivity": true,
+    "previousFailureStatus": "resolved-by-through-reset-on-project-selection",
+    "currentValidation": {
+      "case": "poll and foreground scroll during higher-to-lower channel loading",
+      "sourceProjectFixtureId": "demo:000",
+      "sourceThrough": 112,
+      "destinationProjectFixtureId": "demo:001",
+      "destinationThroughWhileLoading": 0,
+      "destinationThroughAfterLateLoad": 12,
+      "newDestinationLatestSeq": 13,
+      "newActivityAfterDestinationAdvance": true,
+      "readCursorWhileLoading": 5,
+      "readCursorAfterLateLoad": 12,
+      "unseenLatestSeq13Read": false,
+      "remainingUnread": 1,
+      "requestedDestinationReadPositions": [
+        0,
+        12
+      ]
+    },
+    "measurementPhase": "Historical failure with current successful validation attached"
+  },
+  "activityWatermarkVersionChecks": {
+    "passed": true,
+    "results": [
+      {
+        "case": "known13 repeatedly observed during matching refresh",
+        "activityGenerationBefore": 1,
+        "activityGenerationDuring": 1,
+        "loadedThroughBeforeFollowingRefresh": 13,
+        "noticeAfterPendingRefresh": false,
+        "followingStableRefreshAndPollNotice": false
+      },
+      {
+        "case": "known13 then new14 during pending refresh",
+        "activityGenerationBefore": 1,
+        "activityGenerationDuring": 2,
+        "loadedThroughBeforeFollowingRefresh": 13,
+        "noticeAfterPendingRefresh": true,
+        "followingStableRefreshAndPollNotice": false
+      }
+    ]
+  }
+}

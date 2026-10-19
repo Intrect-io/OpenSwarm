@@ -247,6 +247,133 @@ describe('project collaboration workspace', () => {
     offline = true; await tick(); expect(document.querySelector('#workspace-status')!.textContent).toContain('Connection unavailable');
     expect(input.value).toBe('Preserved across reconnect'); expect(h.state.repo).toBe('demo:075');
   });
+  it('polls every loaded project page and applies new activity only on explicit refresh', async () => {
+    const fixture = createProjectFixture('stress'); const original = demoProjectFetch(fixture); let tick: any;
+    const requests: string[] = [];
+    vi.spyOn(window, 'setInterval').mockImplementation((callback: any) => { tick = callback; return 123; });
+    const h = await start(async (path: string, opts: any) => {
+      requests.push(path);
+      if (path.endsWith('/read')) {
+        const p = fixture.projects.find((p: any) => p.repoKey === decodeURIComponent(path.split('/')[4]));
+        return response({ readSeq: p.readSeq, unread: p.unread, latestSeq: p.latestSeq });
+      }
+      const result = await original(path, opts); return response(structuredClone(await result.json()));
+    }, 'chat', { pollMs: 1000 });
+    (document.querySelector('#project-load-more') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(h.state.projects).toHaveLength(100)); await h.selectProject('demo:075');
+    const ids = h.state.entries.map((e: any) => e.sourceId), order = h.state.projects.map((p: any) => p.repoKey);
+    const list = document.querySelector('#channel-entries') as HTMLElement; list.scrollTop = 40;
+    const input = document.querySelector('#workspace-message') as HTMLTextAreaElement;
+    input.value = 'Keep this draft'; input.dispatchEvent(new Event('input'));
+    fixture.projects[75].latestSeq = 13; fixture.projects[74].readSeq = 12; fixture.projects[74].unread = 0;
+    const entries = fixture.entries.get('demo:075'); entries.push({ ...entries[0], seq: 13, sourceId: 'new-project-75', body: 'New activity' });
+    requests.length = 0; await tick();
+    expect(h.state.newActivity).toBe(true); expect(requests).toContain('/api/coordination/projects?cursor=50');
+    expect(h.state.projects[74].readSeq).toBe(12); expect(document.querySelector('[data-unread="demo:074"]')!.textContent).toBe('0 unread');
+    expect(h.state.repo).toBe('demo:075'); expect(h.state.entries.map((e: any) => e.sourceId)).toEqual(ids);
+    expect(h.state.projects.map((p: any) => p.repoKey)).toEqual(order); expect(list.scrollTop).toBe(40); expect(input.value).toBe('Keep this draft');
+    (document.querySelector('#workspace-refresh') as HTMLButtonElement).click();
+    await vi.waitFor(() => { expect(h.state.entries).toHaveLength(13); expect(h.state.newActivity).toBe(false); });
+    expect(h.state.projects).toHaveLength(100); expect(h.state.projects[75].latestSeq).toBe(13);
+    expect(h.state.repo).toBe('demo:075'); expect(input.value).toBe('Keep this draft');
+    await tick(); expect(h.state.newActivity).toBe(false);
+  });
+  it('uses the selected channel cursor when activity arrives after its summary page without advancing the read cursor', async () => {
+    const fixture = createProjectFixture('stress'); const original = demoProjectFetch(fixture); let tick: any;
+    vi.spyOn(window, 'setInterval').mockImplementation((callback: any) => { tick = callback; return 123; });
+    const h = await start(async (path: string, opts: any) => path.endsWith('/read')
+      ? response({ readSeq: 5, unread: 2, latestSeq: 13 }) : original(path, opts), 'chat', { pollMs: 1000 });
+    (document.querySelector('#project-load-more') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(h.state.projects).toHaveLength(100)); await h.selectProject('demo:075');
+    await tick(); expect(h.state.newActivity).toBe(true);
+    expect(h.state.through).toBe(12); expect(h.state.entries).toHaveLength(12);
+    expect(h.state.projects.find((p: any) => p.repoKey === 'demo:075').readSeq).toBe(5);
+  });
+  it('does not let an older project refresh hide a later page selected while the request was pending', async () => {
+    const fixture = createProjectFixture('stress'); const original = demoProjectFetch(fixture); const slow = deferred(); let delay = false;
+    const h = await start(async (path: string, opts: any) => {
+      if (path === '/api/coordination/projects' && delay) { delay = false; return slow.promise; }
+      const result = await original(path, opts); return response(structuredClone(await result.json()));
+    });
+    await h.selectProject('demo:000'); delay = true;
+    (document.querySelector('#workspace-refresh') as HTMLButtonElement).click(); await settle();
+    (document.querySelector('#project-load-more') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(h.state.projects).toHaveLength(100)); await h.selectProject('demo:075');
+    const input = document.querySelector('#workspace-message') as HTMLTextAreaElement;
+    input.value = 'Later project draft'; input.dispatchEvent(new Event('input'));
+    const first = await original('/api/coordination/projects'); slow.done(response(structuredClone(await first.json()))); await settle();
+    expect(h.state.projects).toHaveLength(100); expect(h.state.repo).toBe('demo:075');
+    expect(document.querySelector('#channel-title')!.textContent).toBe(fixture.projects[75].name);
+    expect(input.value).toBe('Later project draft');
+  });
+  it.each(['poll', 'SSE'])('preserves %s activity detected after a pending refresh began', async (source) => {
+    const fixture = createProjectFixture(); const original = demoProjectFetch(fixture); const slow = deferred();
+    const handlers: Record<string, () => void> = {}; let tick: any; let delay = false;
+    vi.spyOn(window, 'setInterval').mockImplementation((callback: any) => { tick = callback; return 123; });
+    const h = await start(async (path: string, opts: any) => {
+      if (path.endsWith('/read')) return response({ readSeq: 5, unread: 8, latestSeq: fixture.projects[0].latestSeq });
+      const result = await original(path, opts); const snapshot = structuredClone(await result.json());
+      if (delay && path.includes('/entries')) { delay = false; return slow.promise.then(() => response(snapshot)); }
+      return response(snapshot);
+    }, 'chat', { pollMs: 1000, events: true, eventStream: {
+      on: (name: string, callback: () => void) => { handlers[name] = callback; }, connect() {}, close() {},
+    } });
+    await h.selectProject('demo:000'); delay = true;
+    (document.querySelector('#workspace-refresh') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(delay).toBe(false));
+    fixture.projects[0].latestSeq = 13;
+    if (source === 'poll') await tick(); else handlers['coordination:channel']();
+    expect(h.state.newActivity).toBe(true); slow.done(undefined); await settle(); await settle();
+    expect(h.state.through).toBe(12); expect(h.state.newActivity).toBe(true);
+    expect(document.querySelector('#workspace-refresh')!.textContent).toContain('New activity');
+    const entries = fixture.entries.get('demo:000'); entries.push({ ...entries[0], seq: 13, sourceId: 'after-refresh', body: 'Arrived during refresh' });
+    (document.querySelector('#workspace-refresh') as HTMLButtonElement).click();
+    await vi.waitFor(() => { expect(h.state.through).toBe(13); expect(h.state.newActivity).toBe(false); });
+  });
+  it('clears activity after refresh consumes the version repeatedly observed by polling', async () => {
+    const fixture = createProjectFixture(); const original = demoProjectFetch(fixture); const slow = deferred();
+    let tick: any; let delay = false;
+    vi.spyOn(window, 'setInterval').mockImplementation((callback: any) => { tick = callback; return 123; });
+    const h = await start(async (path: string, opts: any) => {
+      if (path.endsWith('/read')) return response({ readSeq: 5, unread: 8, latestSeq: fixture.projects[0].latestSeq });
+      const result = await original(path, opts); const snapshot = structuredClone(await result.json());
+      if (delay && path.includes('/entries')) { delay = false; return slow.promise.then(() => response(snapshot)); }
+      return response(snapshot);
+    }, 'chat', { pollMs: 1000 });
+    await h.selectProject('demo:000'); fixture.projects[0].latestSeq = 13;
+    const entries = fixture.entries.get('demo:000'); entries.push({ ...entries[0], seq: 13, sourceId: 'known-version', body: 'Known before refresh' });
+    await tick(); expect(h.state.newActivity).toBe(true); delay = true;
+    (document.querySelector('#workspace-refresh') as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(delay).toBe(false));
+    await tick(); slow.done(undefined); await settle(); await settle();
+    expect(h.state.through).toBe(13); expect(h.state.newActivity).toBe(false);
+    await tick(); expect(h.state.newActivity).toBe(false);
+  });
+  it('keeps observed cursors scoped when switching from a higher to a lower channel sequence', async () => {
+    const fixture = createProjectFixture(); const original = demoProjectFetch(fixture); const slow = deferred(); let tick: any;
+    const destinationReads: number[] = [];
+    fixture.projects[0].latestSeq = 112;
+    for (const entry of fixture.entries.get('demo:000')) entry.seq += 100;
+    vi.spyOn(window, 'setInterval').mockImplementation((callback: any) => { tick = callback; return 123; });
+    const h = await start(async (path: string, opts: any) => {
+      if (path.endsWith('/read')) {
+        const project = fixture.projects.find((p: any) => p.repoKey === decodeURIComponent(path.split('/')[4]));
+        if (opts?.method === 'POST' && project.repoKey === 'demo:001') destinationReads.push(JSON.parse(opts.body).throughSeq);
+        return response({ readSeq: 5, unread: 8, latestSeq: project.latestSeq });
+      }
+      const result = await original(path, opts); const snapshot = structuredClone(await result.json());
+      return path.includes('/demo%3A001/entries') ? slow.promise.then(() => response(snapshot)) : response(snapshot);
+    }, 'chat', { pollMs: 1000 });
+    await h.selectProject('demo:000'); expect(h.state.through).toBe(112);
+    const switching = h.selectProject('demo:001');
+    vi.mocked(document.hasFocus).mockReturnValue(true); window.dispatchEvent(new Event('focus')); await tick();
+    expect(destinationReads).toEqual([0]);
+    slow.done(undefined); await switching; expect(h.state.through).toBe(12);
+    expect(destinationReads).toEqual([0, 12]);
+    fixture.projects[1].latestSeq = 13; await tick();
+    expect(h.state.repo).toBe('demo:001'); expect(h.state.newActivity).toBe(true);
+    expect(h.state.through).toBe(12);
+  });
   it('does not attach a delayed Needs-you selection to a different project chosen while it loads', async () => {
     const fixture = createProjectFixture('questions'); const original = demoProjectFetch(fixture); const slow = deferred();
     const fetcher = async (path: string, opts: any) => path.includes('/demo%3A001/entries') ? slow.promise : original(path, opts);

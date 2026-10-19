@@ -75,6 +75,7 @@ Drafts and File objects are scoped in browser memory. Only text and retry identi
 - npm test -- src/coordination/projectCollaboration.test.ts tests/web/projectWorkspace.test.ts
 - node --import tsx scripts/project-chat-preview.ts 3900
 - node --import tsx scripts/check-project-collaboration.ts http://localhost:3900 <capture-dir>
+- node --import tsx scripts/check-project-zoom.ts http://localhost:3900 <evidence.json> (non-visual Chrome 100%/200% DOM assertions; no screenshots)
 - node --import tsx scripts/measure-project-collaboration.ts <output.json>
 - node --import tsx scripts/prove-channel-http.ts <evidence.json>
 - node --import tsx scripts/prove-project-collaboration.ts <evidence.json> (opt-in: real configured provider calls in an isolated temporary repository)
@@ -194,3 +195,59 @@ preserved. Its verdict is APPROVE; [receipt](../evidence/agt-4776/nongit-repair.
 The last 25-sample fixture run after this change reported query p95 3.11/15.80ms
 and HTTP p95 6.06/14.60ms, initialization 68/543ms and total process RSS
 279/300 MiB. Earlier busier-host samples remain recorded above.
+
+At b3f1096, standard GitHub CI passed all seven jobs with coverage at statements
+90.11%, branches 81.88%, functions 91.00% and lines 92.59%. The fresh PR review
+then correctly returned REVISE: without SSE, activity beyond the first 50 projects
+was not detected, and an unchanged read cursor hid a newer selected-channel seq.
+Three direct regressions also reproduced a delayed explicit refresh hiding a
+subsequently loaded page. Polling and refresh now follow cursor pages covering
+all already-loaded projects; the active channel's latestSeq independently signals
+New activity. Only advancing summary seq creates a notice, and project request
+generations discard older results. Polling does not apply new ordering or entries.
+All five related suites pass (121 tests), and lint/typecheck/build pass with the
+same 12 existing warnings. The independent DOM/state reviewer approved all three
+regressions, shared reads beyond page one, stale lower responses and channel
+switches; [receipt](../evidence/agt-4776/project-polling.json).
+
+The next working-tree review returned REVISE on a further pending-refresh race.
+Both polling and SSE regressions directly failed: an older entries response
+cleared a newer New activity notice. Activity notifications now advance a shared
+generation, and explicit refresh only clears the generation it started with.
+The two new cases pass, including a subsequent refresh consuming the new entry
+and clearing the notice. The related five suites now pass 123 tests, and
+lint/typecheck/build pass with the same existing warnings. This is separate from
+project-list request generations.
+
+Independent follow-up then found a repeated-known-version edge: poll could
+observe the same seq during a refresh, increment its activity generation and keep
+the notice after that seq was loaded. Its direct regression failed before repair.
+Polling now tracks per-project observed seq, compared with both loaded summaries
+and the selected channel's throughSeq. Only a newer observation advances activity;
+SSE notifications retain their independent generation. The five related suites
+pass 124 tests, including repeated known versions, new versions during refresh,
+the next successful refresh and late channel switching. Lint/typecheck/build pass
+with the same existing warnings.
+
+The independent uneven-cursor probe reproduced another boundary: during a switch
+from channel A through112 to B through12, B could inherit A's watermark and miss
+its subsequent seq13. Project selection now resets throughSeq with the entries
+and cursor. The direct regression failed before repair and passes afterward;
+foreground read writes during loading use 0, then 12 only after B's entries load.
+All five related suites pass 125 tests, and lint/typecheck/build pass with the
+same existing warnings.
+The independent reviewer approved the final scope after seven focused checks:
+known13 repeats clear, genuinely new14 stays visible, and a delayed A112-to-B12
+switch sends B read positions [0,12], leaving the unseen B13 unread. Previous
+failed observations remain in the receipt alongside the corrected readback.
+
+The remaining actual-browser zoom check passed eight non-visual assertions across
+both routes and themes. Temporary Chrome profiles use Chromium's
+[default partition zoom preference](https://chromium.googlesource.com/chromium/src/+/lkgr/chrome/browser/ui/zoom/chrome_zoom_level_prefs.cc).
+Runtime dimensions confirm 100%/200% page zoom: outer width stayed 1440, inner
+width changed 1440 to 720, DPR changed 1 to 2 and visual viewport scale stayed 1.
+Initial/detail views had no horizontal overflow, keyboard focus was reachable,
+and no JavaScript errors or backend writes occurred. This added zero screenshots
+and no manual visual pass; the existing 16 captures still await user approval.
+The [zoom receipt](../evidence/agt-4776/browser-zoom.json) is separate from the
+earlier equivalent-reflow check and from visual acceptance.
