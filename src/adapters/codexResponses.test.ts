@@ -233,6 +233,9 @@ describe('toolsToResponsesTools', () => {
 });
 
 describe('reduceResponsesEvents', () => {
+  it('preserves the provider-reported model independently of the requested model', () => {
+    expect(reduceResponsesEvents([{ type: 'response.completed', response: { model: 'actual-model', usage: { input_tokens: 1 } } }]).model).toBe('actual-model');
+  });
   it('accumulates output_text deltas into assistant content with finish_reason stop', () => {
     const res = reduceResponsesEvents([
       { type: 'response.output_text.delta', delta: 'Hel' },

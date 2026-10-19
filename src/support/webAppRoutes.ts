@@ -105,6 +105,19 @@ export async function tryHandleAppRoutes(
     if (await tryHandleCoordinationRoutes(req, res, url, requestUrl, readBody)) return true;
   }
 
+  const runMatch = /^\/api\/automation\/runs\/([^/]+)$/.exec(url);
+  if (runMatch) {
+    if (req.method !== 'GET') { writeJson(res, 405, { error: 'Method not allowed' }); return true; }
+    let issueId: string;
+    try { issueId = decodeURIComponent(runMatch[1]); }
+    catch { writeJson(res, 400, { error: 'Invalid issue identifier' }); return true; }
+    try {
+      const run = runner?.getRunStatus(issueId);
+      writeJson(res, run ? 200 : 404, run ?? { error: 'Run not found' });
+    } catch { writeJson(res, 503, { error: 'Run data unavailable' }); }
+    return true;
+  }
+
   // Cockpit read surface (sessions/transcript/diff/quota) lives in its own
   // module (INT-3402); web.ts's auth gates already ran before this delegation.
   {

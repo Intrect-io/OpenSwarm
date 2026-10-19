@@ -49,6 +49,16 @@ describe('config', () => {
   // ============================================
 
   describe('loadConfig', () => {
+    it('defaults recovery advice off and validates the hard consultation limits', () => {
+      const base = { language: 'en', agents: [{ name: 'main', projectPath: '/p' }], autonomous: {} };
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify(base));
+      expect(loadConfig('/tmp/config.json').autonomous?.loopAdvisor).toMatchObject({ mode: 'off', timeoutMs: 45000, triggerAfter: 2, maxCallsPerIssue24h: 2 });
+      for (const invalid of [{ maxCallsPerIssue24h: 3 }, { timeoutMs: 45001 }, { mode: 'approve' }, { triggerAfter: 1 }]) {
+        vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { loopAdvisor: invalid } }));
+        expect(() => loadConfig('/tmp/config.json')).toThrow();
+      }
+    });
     it('wires the explicit strict boundary and never downgrades it from a later utility config load', () => {
       const base = {
         language: 'en',

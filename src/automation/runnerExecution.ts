@@ -192,6 +192,8 @@ export interface ExecutionContext {
   maxReflections?: number;
   /** Fenced durable-run callbacks. Omitted for legacy/off mode. */
   durability?: ExecutionDurabilityHooks;
+  loopAdvisor?: import('./loopRecoveryTypes.js').LoopAdvisorConfig;
+  advisorRole?: import('../core/types.js').RoleConfig;
   /** Current open issue snapshot for same-project duplicate grooming in draft. */
   peerIssues?: TaskItem[];
   /**
@@ -1009,6 +1011,7 @@ export async function executePipeline(
         otherStagesTimeoutMs: otherStageTimeoutsMs(roles, ctx.verify),
       }),
       projectGoal,
+      ctx.loopAdvisor, ctx.advisorRole,
     );
 
     const taskPrefix = buildTaskPrefix(task, actualPath);
@@ -1226,7 +1229,7 @@ export async function executePipeline(
     const pipelineSignal = signal
       ? AbortSignal.any([signal, lifecycleAbort.signal])
       : lifecycleAbort.signal;
-    const result = await pipeline.run(task, actualPath, { signal: pipelineSignal });
+    const result = await pipeline.run(task, actualPath, { signal: pipelineSignal, recovery: ctx.durability?.recovery });
     await settlePipelineEffects();
 
     // A stage ownership fence is part of execution correctness, not telemetry.

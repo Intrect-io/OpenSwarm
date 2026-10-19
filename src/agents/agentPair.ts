@@ -47,6 +47,7 @@ export interface WorkerResult {
   confidence?: ConfidenceLevel; // Legacy quality/reliability of the result
   confidencePercent?: number;   // Agent self-reported 0-100
   haltReason?: string;          // Why the agent halted
+  terminationCause?: 'no_progress';
   blockedOnOperator?: boolean;  // ask_human posted; wait for the Discord answer, do not retry
   executionOutcomeUnknown?: boolean; // sandbox command may have partially mutated; quarantine, do not retry
   operatorQuestionCorrelationIds?: string[]; // exact durable questions that stopped this attempt
@@ -91,6 +92,7 @@ export interface RecommendedAction {
 
 export interface ReviewResult {
   decision: ReviewDecision;
+  terminationCause?: 'no_progress';
   feedback: string;
   /** Display name the agent chose for itself (AGT-4019). */
   codename?: string;

@@ -358,6 +358,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       unknownScopeAdmission: config.autonomous.unknownScopeAdmission,
       infraFailureCircuit: config.autonomous.infraFailureCircuit,
       defaultRoles: config.autonomous.defaultRoles,
+      loopAdvisor: config.autonomous.loopAdvisor,
       projectAgents: config.autonomous.projectAgents,
       // Task decomposition (Planner) configuration. The whole object is passed,
       // not a hand-picked subset: the runner reads maxDepth, maxChildrenPerTask,

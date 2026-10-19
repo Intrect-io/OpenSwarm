@@ -69,6 +69,7 @@ export interface DurableRunCoordinatorConfig {
 export interface ExecutionDurabilityHooks {
   onWorktree(info: WorktreeInfo): Promise<boolean>;
   onStage(stage: string): Promise<boolean>;
+  recovery?: import('./loopRecoveryTypes.js').RecoveryHooks;
   beforePublish(): Promise<boolean>;
   onPublication(prUrl: string, headSha?: string): Promise<boolean>;
 }
@@ -294,6 +295,8 @@ export class DurableRunCoordinator {
   getRun(issueId: string): RunRecord | null {
     return this.ledger?.getRun(issueId) ?? null;
   }
+
+  getRecoveryStatus(issueId: string) { return this.ledger?.recovery.status(issueId); }
 
   listRuns(states?: readonly RunState[]): RunRecord[] {
     return this.ledger?.listRuns(states) ?? [];
@@ -678,6 +681,7 @@ export class DurableRunCoordinator {
     };
 
     const hooks: ExecutionDurabilityHooks = {
+      recovery: this.ledger.recovery?.forClaim(() => claim!),
       onWorktree: async (info) => {
         if (leaseLost) return false;
         const attached = this.ledger!.attachWorktree(claim!, info.worktreePath, info.branchName);
@@ -1159,10 +1163,10 @@ export class DurableRunCoordinator {
    * and this comment is the record of that choice.
    */
   getMetrics(now = Date.now(), inScope?: (projectPath: string) => boolean) {
-    const base = this.ledger?.getMetrics(now) ?? {
+    const base = { ...(this.ledger?.getMetrics(now) ?? {
       byState: {}, effectsByStatus: {}, expiredActiveLeases: 0, oldestPendingEffectAgeMs: 0,
       openCircuits: 0,
-    };
+    }), recovery: this.ledger?.recovery.summary(inScope, now) ?? { tracked: 0, noProgress: 0, advising: 0, adviceCompleted: 0, adviceUnavailable: 0 } };
     if (!this.ledger || !inScope) return { ...base, outOfScope: 0 };
 
     const byState: Record<string, number> = {};

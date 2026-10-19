@@ -1,0 +1,102 @@
+{
+  "live": {
+    "at": "2026-10-19T14:16:22.225Z",
+    "kind": "live-advisor-on-fixture",
+    "requestedModel": "gpt-5.6-terra",
+    "failedStage": "synthetic fixture worker; not a live worker trial",
+    "actualFailedCheck": "node --test --test-reporter=tap add.test.mjs",
+    "failureHash": "70da4442d358c3e24f86d41a2b169b34bc64e2c0f7e4577c341bcf38c1ac4785",
+    "toolPolicy": "all tools denied",
+    "unchanged": true,
+    "wallMs": 5014,
+    "outcome": {
+      "decision": {
+        "diagnosis": "The implementation contradicts the stated requirement: `add` subtracts its second operand, producing -1 for add(2, 3) instead of 5. This is a code-quality failure, not an infrastructure failure.",
+        "condition": "Update the implementation so `add(a, b)` performs addition, then rerun the specified test.",
+        "verification": "Run `node --test add.test.mjs` and confirm the `adds two numbers` subtest passes with no failures.",
+        "action": "revise_strategy",
+        "evidence": [
+          "failure",
+          "source",
+          "requirement",
+          "check"
+        ]
+      },
+      "costInfo": {
+        "costUsd": 0,
+        "inputTokens": 507,
+        "outputTokens": 122,
+        "cacheReadTokens": 0,
+        "cacheCreationTokens": 0,
+        "durationMs": 5003,
+        "servedModels": [
+          "gpt-5.6-terra"
+        ],
+        "model": "gpt-5.6-terra"
+      }
+    }
+  },
+  "paired": [
+    {
+      "fixture": "reviewer",
+      "counts": [
+        {
+          "mode": "baseline",
+          "stage": "reviewer",
+          "workerCalls": 2,
+          "testerCalls": 2,
+          "reviewerCalls": 2,
+          "finalArtifact": "29f09ab55dd9b8d5adb17998c1873c62984453fa",
+          "success": true,
+          "wallMs": 19803,
+          "heapBytes": 90307536
+        },
+        {
+          "mode": "durable",
+          "stage": "reviewer",
+          "workerCalls": 1,
+          "testerCalls": 2,
+          "reviewerCalls": 2,
+          "finalArtifact": "29f09ab55dd9b8d5adb17998c1873c62984453fa",
+          "success": true,
+          "wallMs": 294,
+          "heapBytes": 94552440
+        }
+      ]
+    },
+    {
+      "fixture": "tester",
+      "counts": [
+        {
+          "mode": "baseline",
+          "stage": "tester",
+          "workerCalls": 2,
+          "testerCalls": 2,
+          "reviewerCalls": 1,
+          "finalArtifact": "29f09ab55dd9b8d5adb17998c1873c62984453fa",
+          "success": true,
+          "wallMs": 167,
+          "heapBytes": 97123600
+        },
+        {
+          "mode": "durable",
+          "stage": "tester",
+          "workerCalls": 1,
+          "testerCalls": 2,
+          "reviewerCalls": 1,
+          "finalArtifact": "29f09ab55dd9b8d5adb17998c1873c62984453fa",
+          "success": true,
+          "wallMs": 302,
+          "heapBytes": 100250952
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Two deterministic paired fault fixtures with mocked role results. No inference about live worker quality.",
+    "First-import and cache effects are uncontrolled. Wall time and heap are descriptive, not performance gains.",
+    "Live advisor only: provider-reported model, structured diagnosis and unchanged fixture. No production deployment.",
+    "Subscription cost is unmetered; usage ledger costUsd is null.",
+    "Restart restores only worker artifacts. Required tester and reviewer are rerun in the current environment."
+  ]
+}

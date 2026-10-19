@@ -77,6 +77,7 @@ export function selectDefaultCodexResponseModel(modelIds: string[]): string {
 
 /** The agenticLoop callApi return shape (structurally equals its ChatCompletionResponse). */
 interface ChatLikeResponse {
+  model?: string;
   choices: Array<{
     message: { role: string; content: string | null; tool_calls?: ApiToolCallShape[] };
     finish_reason: string;
@@ -167,6 +168,7 @@ export function createResponsesReducer(): {
   finish: () => ChatLikeResponse;
 } {
   let text = '';
+  let servedModel: string | undefined;
   // Keyed by the streaming item id; the emitted tool-call id is the call_id so it
   // round-trips back as `function_call_output.call_id` on the next turn.
   const calls = new Map<string, { callId: string; name: string; args: string }>();
@@ -174,6 +176,7 @@ export function createResponsesReducer(): {
   const getOnlyCall = () => calls.size === 1 ? calls.values().next().value : undefined;
 
   const handle = (ev: SseEvent): void => {
+    if (ev.response?.model) servedModel = ev.response.model;
     switch (ev.type) {
       case 'response.output_text.delta':
         if (ev.delta) text += ev.delta;
@@ -223,6 +226,7 @@ export function createResponsesReducer(): {
     }));
 
     return {
+      ...(servedModel ? { model: servedModel } : {}),
       choices: [
         {
           message: {

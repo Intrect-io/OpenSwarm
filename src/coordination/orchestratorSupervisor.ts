@@ -85,10 +85,17 @@ export function selectOrchestratorItems(
   events: readonly CoordinationEvent[],
   handledTerminalThroughSeq = 0,
 ): CoordinationEvent[] {
+  const answered = new Set(events.filter((event) => event.kind === 'human-answer' && event.status === 'completed')
+    .map((event) => `${event.repoKey ?? event.repository}:${event.taskId}:${event.correlationId}`));
   const latest = new Map<string, CoordinationEvent>();
   for (const event of events) {
-    const previous = latest.get(event.correlationId);
-    if (!previous || event.seq > previous.seq) latest.set(event.correlationId, event);
+    const humanKey = `${event.repoKey ?? event.repository}:${event.taskId}:${event.correlationId}`;
+    if (event.kind === 'human-question' && answered.has(humanKey)) continue;
+    // 일반 협업 응답의 taskId는 응답자의 작업이다. 같은 correlation의 원래 요청을 닫아야 한다.
+    const human = event.kind === 'human-question' || event.kind === 'human-answer';
+    const key = human ? `human:${humanKey}` : `${event.repoKey ?? event.repository}:${event.correlationId}`;
+    const previous = latest.get(key);
+    if (!previous || event.seq > previous.seq) latest.set(key, event);
   }
   return [...latest.values()].filter((event) => {
     if (isSupervisorAuthoredEvent(event)) return false;

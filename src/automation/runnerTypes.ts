@@ -40,6 +40,7 @@ export interface AutonomousConfig {
   /** Optional hard cap; omitted uses work-conserving weighted project fairness. */
   maxConcurrentPerProject?: number;
   defaultRoles?: DefaultRolesConfig;
+  loopAdvisor?: import('./loopRecoveryTypes.js').LoopAdvisorConfig;
   projectAgents?: ProjectAgentConfig[];
   enableDecomposition?: boolean;
   decompositionThresholdMinutes?: number;

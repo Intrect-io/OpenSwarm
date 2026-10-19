@@ -77,6 +77,7 @@ import {
   removePreservedWorktreeAt,
 } from '../support/worktreeManager.js';
 import { publishStuckWork } from './publishOnPark.js';
+import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
 import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
 import { draftPullRequestCause } from './draftPullRequestCause.js';
 import { missingWorktreeDisposition } from './missingWorktreeDisposition.js';
@@ -1273,6 +1274,7 @@ export class AutonomousRunner {
 
       if (this.durableRuns.isPrimary && durableRun?.state === 'NEEDS_HUMAN') {
         const isOperatorQuestionPark = durableRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON
+          || durableRun.lastErrorCode === RECOVERY_ADVISOR_PARK_REASON
           || (durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false);
         // AGT-4256: a guard/publication park that only named ephemeral paths
         // (.test_venv, pytest-local) is not a human decision. Resume even when
@@ -1295,7 +1297,8 @@ export class AutonomousRunner {
           // A blocker the reviewer confirmed is a claim about the task text; a
           // free slot re-runs the same text into the same confirmed claim
           // (AGT-4535). Explicit dispatch or a tracker Todo lifts it.
-          || durableRun?.lastErrorCode === VERIFIED_WORKER_BLOCKER_PARK_REASON;
+          || durableRun?.lastErrorCode === VERIFIED_WORKER_BLOCKER_PARK_REASON
+          || durableRun?.lastErrorCode === RECOVERY_ADVISOR_PARK_REASON;
         // Nor does a free slot change a verdict that has already come back
         // twice; see idleFillWouldRepeatVerdict.
         if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark
@@ -3573,6 +3576,8 @@ export class AutonomousRunner {
       verify: this.config.verify,
       securityAudit: this.config.securityAudit,
       maxReflections: this.config.maxReflections,
+      loopAdvisor: this.config.loopAdvisor,
+      advisorRole: this.config.defaultRoles?.advisor,
       durability,
       peerIssues: this.lastFetchedTasks,
       getActiveWorkerIssues: (p) => this.durableRuns.activeWorkerIdentifiers(p),
@@ -3663,6 +3668,11 @@ export class AutonomousRunner {
   updateAllowedProjects(paths: string[]): void {
     this.config.allowedProjects = paths;
     this.engine.updateAllowedProjects(paths);
+  }
+
+  getRunStatus(issueId: string) {
+    const run = this.durableRuns.getRun(issueId);
+    return run ? { ...run, recovery: this.durableRuns.getRecoveryStatus(issueId) } : undefined;
   }
 
   getStats() {

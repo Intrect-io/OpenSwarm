@@ -4,10 +4,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CoordinationStore } from './coordinationStore.js';
 import { withFileLock } from '../support/fileLock.js';
+import { resetTraceDbForTests } from './coordinationTrace.js';
 
 let dir = '';
-afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); dir = ''; });
-function store() { dir = mkdtempSync(join(tmpdir(), 'osw-coordination-')); return new CoordinationStore(join(dir, 'events.json')); }
+const originalDb = process.env.OPENSWARM_AUTOMATION_DB;
+afterEach(() => {
+  resetTraceDbForTests(); process.env.OPENSWARM_AUTOMATION_DB = originalDb;
+  if (dir) rmSync(dir, { recursive: true, force: true }); dir = '';
+});
+function store() {
+  dir = mkdtempSync(join(tmpdir(), 'osw-coordination-'));
+  resetTraceDbForTests(); process.env.OPENSWARM_AUTOMATION_DB = join(dir, 'automation.db');
+  return new CoordinationStore(join(dir, 'events.json'));
+}
 function message(over: Record<string, unknown> = {}) {
   return { repository: '/repo', taskId: 't1', actor: 'worker-a', recipient: 'worker-b', kind: 'advice-request' as const, status: 'open' as const, correlationId: 'c1', summary: 'review this approach', ...over };
 }

@@ -42,6 +42,8 @@ export interface TesterOptions {
 
 export interface TesterResult {
   success: boolean;
+  terminationCause?: 'no_progress';
+  executedCommands?: string[];
   testsPassed: number;
   testsFailed: number;
   coverage?: number;
@@ -142,7 +144,11 @@ export async function runTester(options: TesterOptions): Promise<TesterResult> {
       toolDeny: options.toolDeny,
     });
 
-    return parseTesterOutput(raw.stdout);
+    const result = parseTesterOutput(raw.stdout);
+    if (raw.terminationCause) result.terminationCause = raw.terminationCause;
+    if (raw.executedCommands) result.executedCommands = raw.executedCommands;
+    if (raw.costInfo && !result.costInfo) result.costInfo = raw.costInfo;
+    return result;
   } catch (error) {
     // Rate-limit AND infra failures (CLI exit, timeout, auth, spawn) mean the
     // TESTER never ran — they are NOT "tests failed". Propagate so the pipeline

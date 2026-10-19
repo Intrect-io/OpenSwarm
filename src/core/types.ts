@@ -657,6 +657,7 @@ export type AutonomousStartupConfig = {
   shutdownGraceMs?: number;
   /** Default role configuration */
   defaultRoles?: DefaultRolesConfig;
+  loopAdvisor?: import('../automation/loopRecoveryTypes.js').LoopAdvisorConfig;
   /** Per-project agent configuration */
   projectAgents?: ProjectAgentConfig[];
   /** Task decomposition config (Planner Agent) */

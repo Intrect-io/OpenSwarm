@@ -13,6 +13,8 @@ export type CostInfo = {
   cacheCreationTokens: number;
   durationMs: number;
   model?: string;
+  /** Provider-reported identities across the run, absent when any response omitted identity. */
+  servedModels?: string[];
 };
 
 // Extraction
