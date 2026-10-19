@@ -364,14 +364,23 @@ function toParticipant(row: ParticipantRow): ThreadParticipant {
   };
 }
 
+/** Keep historical repository strings intact; registered channel aliases share their lookup scope. */
+function repositoryScope(db: Database.Database, repo: string): string[] {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordination_channel_aliases'").get()) return [repo];
+  const canonical = (db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(repo) as { repo_key: string } | undefined)?.repo_key ?? repo;
+  const aliases = db.prepare('SELECT repository FROM coordination_channel_aliases WHERE repo_key=?').all(canonical) as Array<{ repository: string }>;
+  return [...new Set([repo, canonical, ...aliases.map((a) => a.repository)])];
+}
+
 function getThreadRow(db: Database.Database, repo: string, threadId: string): ThreadRow | undefined {
+  const scope = repositoryScope(db, repo);
   return db.prepare(`
     SELECT t.*,
       (SELECT COUNT(*) FROM coordination_thread_messages m WHERE m.thread_id = t.thread_id) AS message_count,
       (SELECT COUNT(*) FROM coordination_thread_subscriptions s WHERE s.thread_id = t.thread_id) AS participant_count
     FROM coordination_threads t
-    WHERE t.repository = ? AND t.thread_id = ?
-  `).get(repo, threadId) as ThreadRow | undefined;
+    WHERE t.repository IN (${scope.map(() => '?').join(',')}) AND t.thread_id = ?
+  `).get(...scope, threadId) as ThreadRow | undefined;
 }
 
 function requireThreadRow(db: Database.Database, repo: string, threadId: string): ThreadRow {
@@ -462,7 +471,7 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
       FROM coordination_channel_deliveries WHERE id=?`).get(replyToDeliveryId) as {
         repo_key: string; thread_id: string; task_id: string; recipient: string; status: string;
       } | undefined;
-    if (!addressed || addressed.repo_key !== repo || addressed.thread_id !== threadId
+    if (!addressed || !repositoryScope(db, repo).includes(addressed.repo_key) || addressed.thread_id !== threadId
       || addressed.task_id !== taskId || addressed.recipient !== actor || addressed.status !== 'processing') {
       throw new Error('Channel delivery reply scope conflict');
     }
@@ -711,7 +720,7 @@ export function resolveCoordinationThread(input: {
       SET status = 'resolved', version = version + 1, updated_at = ?, resolved_at = ?,
           resolved_by_actor = ?, resolved_by_task_id = ?
       WHERE repository = ? AND thread_id = ? AND version = ? AND status = 'open'
-    `).run(now, now, actor, taskId, repo, threadId, input.expectedVersion);
+    `).run(now, now, actor, taskId, current.repository, threadId, input.expectedVersion);
     if (result.changes === 0) throw new Error('Thread version conflict');
     const thread = toThread(requireThreadRow(db, repo, threadId));
     enqueueThreadNotification(db, thread, 'resolved', `resolve:${threadId}:${thread.version}`, input, input.notification);
@@ -805,8 +814,9 @@ export function listCoordinationThreads(input: {
   const where: string[] = [];
   const params: Array<string | number> = [];
   if (repo) {
-    where.push('t.repository = ?');
-    params.push(repo);
+    const scope = repositoryScope(db, repo);
+    where.push(`t.repository IN (${scope.map(() => '?').join(',')})`);
+    params.push(...scope);
   }
   if (input.status) {
     where.push('t.status = ?');

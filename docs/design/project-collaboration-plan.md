@@ -47,7 +47,7 @@ user has approved the final responsive captures.
 
 Verified 2026-10-19 on this branch; no production deployment was performed.
 
-- Real native provider: codex-responses/gpt-5.6-luna. General coordinator request and exact task/actor inbox receipt both reached responded, with independently read-back original thread message IDs, nonce bodies and the task reply's exact replyToDeliveryId. Final isolated state: /var/folders/x4/5ltqqh6921176w4qz_gr6pr00000gn/T/project-collaboration-live-nwNSi6. This is not production scheduler or deployment proof.
+- Real native provider: codex-responses/gpt-5.6-luna. General coordinator request and exact task/actor inbox receipt both reached responded, with independently read-back original thread message IDs, nonce bodies and the task reply's exact replyToDeliveryId. Final isolated state: /var/folders/x4/5ltqqh6921176w4qz_gr6pr00000gn/T/project-collaboration-live-B8aUPr. This is not production scheduler or deployment proof.
 - Two independent Chromium contexts against production channel routes and existing auth/body-reader gates: read cursor 50 stayed 50 after 10; second context saw 20 unread. Untrusted Origin 403, oversized body 413, lost-response retry returned a single queued delivery, 50/21 cursor pages, ended recipient 409. State/evidence: /tmp/agt4776-http.json.
 - Browser matrix: 16 passed (390/1440px, dark/light, 720 CSS-px reflow, normal/questions/busy/offline/stress). 16 final captures under .impeccable/review-project-collaboration-confirm/. No JavaScript errors or attempted backend writes. 720px is a 200%-equivalent reflow check, not a physical-device browser-zoom claim.
 - Detector: one manual run on final changed UI targets, zero findings. Visual review: one batched pass and one confirmation; screenshots are awaiting user approval.
@@ -111,6 +111,32 @@ records remain preserved; they are not approvals. Lint, typecheck and build pass
 7,534 tests but failed coverage (statements 89.08%, functions 89.98% against 90%).
 Additional behavioral tests now cover task routing, relationship/search paging,
 canonical discussion paging, history positioning, retry, actual SSE transport
-reconnect, shared-read polling, archived channels and partial errors. The final
-focused collaboration suite passes 56 tests. Coverage floors remain unchanged;
+reconnect, shared-read polling, archived channels and partial errors. The feature-head
+focused collaboration suite passed 56 tests. Coverage floors remain unchanged;
 the final full run and exact-head CI decide the release gate.
+
+At 814b916, both OpenSwarm working-tree and fresh PR reviews approved. Standard
+GitHub CI passed all seven jobs (7,548 tests / 12 platform skips, plus the separate
+three-test Windows process-tree job); local coverage passed at statements 90.04%,
+functions 90.94%, branches 81.82%, lines 92.52%. The separate CI model-review
+workflow could not run because its existing OpenRouter credential returned 401
+User not found. No shared credential was changed.
+
+An additional independent migration probe then found that valid older Threads
+stored under filesystem paths were not folded into the canonical channel. The
+new regression failed before the repair. Registered aliases now apply to message
+triggers/backfill, existing projection keys, thread-derived task aggregation and
+Threads lookup/list/reply/resolve. Original repository strings, thread/message
+IDs and projection seq remain intact; split read positions merge monotonically,
+and obsolete duplicate channel metadata is hidden. Opaque keys remain opaque and
+unrelated projects are rejected. The independent reviewer reopened its original
+failed DB and verified repair, canonical HTTP lookup, exact delivery-linked reply
+through the old path, and resolution. Its final verdict was APPROVE. Final-head
+CI and reviews after this repair are linked in the PR comments.
+
+After the legacy repair, the related five-suite check passed 76 tests. The real
+native coordinator/task receipt check passed again. The fresh fixture measurement
+reported query p95 3.36/14.61ms and loopback HTTP p95 4.02/14.68ms at 10/100 and
+100/1,000 (25 observations each); initialization took 73/581ms, process RSS
+281/299 MiB. The earlier busier-host observations above remain part of the record;
+these fixture samples do not establish production latency.

@@ -10,7 +10,7 @@ import { syncChannels, listChannelEntries, markChannelRead, readChannels } from 
 import { channelDatabase } from './channelSchema.js';
 import { claimChannelDelivery, consumeChannelTaskInbox, findChannelDeliveryByKey, finishChannelDelivery, getChannelDelivery, interruptEndedTaskDeliveries,
   pendingCoordinatorMessages, recoverCoordinatorDeliveries, respondToChannelDelivery, retryChannelDelivery, sendChannelMessage } from './channelQueue.js';
-import { createCoordinationThread, getCoordinationThread, postCoordinationThreadMessage } from './coordinationThreads.js';
+import { createCoordinationThread, getCoordinationThread, listCoordinationThreads, postCoordinationThreadMessage, resolveCoordinationThread } from './coordinationThreads.js';
 import { repositoryCell, resetRepositoryCellCacheForTests } from './repositoryCell.js';
 import { buildProjectSnapshot, participantId } from './projectModel.js';
 import { queryProjectSnapshot } from './projectQueries.js';
@@ -44,6 +44,57 @@ afterEach(() => { resetTraceDbForTests(); resetCoordinationStoreForTests();
   process.env.OPENSWARM_AUTOMATION_DB = originalDb; process.env.OPENSWARM_COORDINATION_FILE = originalBoard; vi.restoreAllMocks(); });
 
 describe('durable project channels', () => {
+  it('preserves legacy path-backed discussion IDs while folding history, task lists, replies and resolution into the canonical project', () => {
+    channelDatabase().exec('DROP TRIGGER channel_project_message; DELETE FROM coordination_channels; DELETE FROM coordination_channel_aliases;');
+    const thread = createCoordinationThread({ repository: repo, subject: 'Legacy path discussion', actor: 'legacy', taskId: 'task-a',
+      relatedTaskIds: ['task-b'], body: 'Original source' });
+    const original = getCoordinationThread({ repository: repo, threadId: thread.id }).messages.items[0];
+    resetTraceDbForTests(); syncChannels([repo]);
+    expect(readChannels().filter((c) => c.repoKey === repo)).toHaveLength(0);
+    expect(listChannelEntries(key).items).toContainEqual(expect.objectContaining({ sourceId: original.id, threadId: thread.id }));
+    expect(queryProjectSnapshot([repo]).tasks.filter((t) => t.repoKey === key).map((t) => t.taskId)).toEqual(['task-a', 'task-b']);
+    expect(listCoordinationThreads({ repository: key }).items.map((t) => t.id)).toContain(thread.id);
+    const reply = postCoordinationThreadMessage({ repository: key, threadId: thread.id, actor: 'legacy', taskId: 'task-a', body: 'Canonical scope reply' });
+    expect(listChannelEntries(key).items.some((e) => e.sourceId === reply.id)).toBe(true);
+    const saved = send({ threadId: thread.id, taskId: 'task-a', recipient: 'legacy' }); expect(saved.threadId).toBe(thread.id);
+    consumeChannelTaskInbox(key, 'task-a', 'legacy');
+    postCoordinationThreadMessage({ repository: repo, threadId: thread.id, actor: 'legacy', taskId: 'task-a',
+      body: 'Exact reply through the original path', replyToDeliveryId: saved.id });
+    expect(getChannelDelivery(saved.id).status).toBe('responded');
+    const detail = getCoordinationThread({ repository: key, threadId: thread.id });
+    expect(detail.thread.repository).toBe(repo); expect(detail.messages.items[0].id).toBe(original.id);
+    expect(resolveCoordinationThread({ repository: key, threadId: thread.id, actor: 'legacy', taskId: 'task-a',
+      expectedVersion: detail.thread.version }).status).toBe('resolved');
+    expect(channelDatabase().prepare('SELECT repository FROM coordination_threads WHERE thread_id=?').get(thread.id)).toEqual({ repository: repo });
+  });
+  it('repairs an existing split projection without changing its seq or losing either read position', () => {
+    const legacy = createCoordinationThread({ repository: repo, subject: 'Old projection', actor: 'legacy', taskId: 'legacy-task', body: 'Seen history' });
+    const old = listChannelEntries(key).items[0]; const db = channelDatabase();
+    db.prepare('UPDATE coordination_channel_entries SET repo_key=? WHERE source_id=?').run(repo, old.sourceId);
+    db.prepare('INSERT INTO coordination_channels(repo_key,repository,name,read_seq) VALUES (?,?,?,?)').run(repo, repo, 'Split path channel', old.seq);
+    const unseen = createCoordinationThread({ repository: key, subject: 'New canonical discussion', actor: 'worker', taskId: 'new-task', body: 'Still unread' });
+    resetTraceDbForTests(); syncChannels([repo]);
+    const channel = readChannels().find((c) => c.repoKey === key)!;
+    expect(channel.readSeq).toBe(old.seq); expect(channel.unread).toBe(1);
+    expect(readChannels().some((c) => c.repoKey === repo)).toBe(false);
+    expect(listChannelEntries(key).items.find((e) => e.sourceId === old.sourceId)?.seq).toBe(old.seq);
+    expect(listChannelEntries(key).items.map((e) => e.threadId)).toEqual([unseen.id, legacy.id]);
+    expect(channelDatabase().prepare('SELECT COUNT(*) n FROM coordination_thread_messages').get()).toEqual({ n: 2 });
+  });
+  it('maps a historical sibling path but preserves opaque keys and rejects unrelated project scopes', () => {
+    execFileSync('git', ['init', '-q', repo]); execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=t@e.test', 'commit', '--allow-empty', '-qm', 'base']);
+    const sibling = join(root, 'legacy-sibling'); execFileSync('git', ['-C', repo, 'worktree', 'add', '-qb', 'legacy-sibling', sibling]);
+    resetRepositoryCellCacheForTests(); const canonical = repositoryCell(repo).repoKey;
+    const thread = createCoordinationThread({ repository: sibling, subject: 'Sibling history', actor: 'legacy', taskId: 'same', body: 'One project' });
+    const opaque = 'git:historical-opaque-key'; const other = createCoordinationThread({ repository: opaque, subject: 'Other project', actor: 'legacy', taskId: 'same', body: 'Separate history' });
+    resetTraceDbForTests(); syncChannels([repo]);
+    expect(listChannelEntries(canonical).items.map((e) => e.threadId)).toContain(thread.id);
+    expect(readChannels().some((c) => c.repoKey === opaque && !c.configured)).toBe(true);
+    expect(getCoordinationThread({ repository: canonical, threadId: thread.id }).thread.repository).toBe(sibling);
+    expect(() => getCoordinationThread({ repository: canonical, threadId: other.id })).toThrow('not found');
+    expect(() => postCoordinationThreadMessage({ repository: join(root, 'unknown'), threadId: thread.id, actor: 'legacy', taskId: 'same', body: 'Wrong project' })).toThrow('not found');
+    expect(listCoordinationThreads({ repository: canonical }).items.some((t) => t.id === other.id)).toBe(false);
+  });
   it('preserves consumed board messages and reports the unavailable channel inbox on DB failure', async () => {
     // 실제 DB open 실패를 사용한다. 존재하지 않는 부모는 자동 생성되므로 파일을 부모로 지정한다.
     resetTraceDbForTests(); writeFileSync(join(root, 'blocked'), 'file');

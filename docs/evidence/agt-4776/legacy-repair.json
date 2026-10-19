@@ -1,0 +1,58 @@
+{
+  "verifiedAt": "2026-10-19T10:13:57.220Z",
+  "boundary": "Read-only independent failed-database repair readback. Original path-backed thread rows and IDs remain canonical sources; path omitted.",
+  "threadId": "90f77e30-6e7f-4e98-be19-b3a60ff14674",
+  "status": "resolved",
+  "repoKey": "path:c4692b765723e252f461508d86152fa0",
+  "messages": [
+    {
+      "message_id": "a46a5ece-06f6-411c-9ee7-9b3dff3e0cb3",
+      "seq": 1,
+      "reply_to_delivery_id": null
+    },
+    {
+      "message_id": "1a92d7e5-5b51-41fe-927d-98e6bb02cb17",
+      "seq": 2,
+      "reply_to_delivery_id": null
+    },
+    {
+      "message_id": "8a45da45-003c-4241-952b-8cee9ee82421",
+      "seq": 3,
+      "reply_to_delivery_id": null
+    },
+    {
+      "message_id": "3ddb9dcf-7341-470e-a0bb-e85335b0614f",
+      "seq": 4,
+      "reply_to_delivery_id": "971b1124-305e-4733-b5df-2e5e4e57b61c"
+    }
+  ],
+  "entries": [
+    {
+      "seq": 1,
+      "source_id": "a46a5ece-06f6-411c-9ee7-9b3dff3e0cb3",
+      "repo_key": "path:c4692b765723e252f461508d86152fa0"
+    },
+    {
+      "seq": 2,
+      "source_id": "1a92d7e5-5b51-41fe-927d-98e6bb02cb17",
+      "repo_key": "path:c4692b765723e252f461508d86152fa0"
+    },
+    {
+      "seq": 7,
+      "source_id": "8a45da45-003c-4241-952b-8cee9ee82421",
+      "repo_key": "path:c4692b765723e252f461508d86152fa0"
+    },
+    {
+      "seq": 8,
+      "source_id": "3ddb9dcf-7341-470e-a0bb-e85335b0614f",
+      "repo_key": "path:c4692b765723e252f461508d86152fa0"
+    }
+  ],
+  "deliveries": [
+    {
+      "id": "971b1124-305e-4733-b5df-2e5e4e57b61c",
+      "status": "responded",
+      "thread_id": "90f77e30-6e7f-4e98-be19-b3a60ff14674"
+    }
+  ]
+}

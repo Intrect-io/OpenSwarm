@@ -15,6 +15,7 @@ Captures await the operator's visual approval; automated checks do not grant it.
 - [Detector](detector.json): one manual run, no findings.
 - [HTTP proof](http-proof.json): two browser contexts, monotonic shared reads, lost-response idempotency, Origin/body gates, cursor pages and ended recipients.
 - [Real provider receipts](live-receipts.json): coordinator response and exact task/actor/delivery reply, independently read back from canonical Threads. This is isolated native-provider proof, not production scheduler/deployment proof.
+- [Legacy repair readback](legacy-repair.json): the independent review's original failed database, repaired with original thread/message IDs and projection seq intact; exact delivery reply and resolution verified. Regression tests also assert the original repository string and read position remain intact.
 - [Scale HTTP measurements](scale-http.json): 25 samples at 10/100 and 100/1,000. RSS includes the complete instrumented Node process.
 - [UI performance](ui-performance.json): five contexts at each fixture scale. This is read-only fixture rendering, not a live fleet.
 

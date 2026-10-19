@@ -1,58 +1,58 @@
 {
-  "verifiedAt": "2026-10-19T09:49:27.720Z",
-  "repoKey": "path:1150944fbbcefc909e0c92196c3f8b0c",
+  "verifiedAt": "2026-10-19T10:13:45.401Z",
+  "repoKey": "path:f666c4a1074ab807b70761fe06e33fb9",
   "adapter": "codex-responses",
   "model": "gpt-5.6-luna",
   "general": {
     "delivery": {
-      "id": "0ed2b083-eb4f-47c9-8c67-911da08389e3",
-      "repoKey": "path:1150944fbbcefc909e0c92196c3f8b0c",
-      "threadId": "196e2443-6538-4533-b060-38e10e8783b8",
-      "messageId": "3d3618f0-3ed8-402f-938d-99a12ba6d0c2",
+      "id": "48aaf9d7-6a15-45fe-b15e-f4edf615807d",
+      "repoKey": "path:f666c4a1074ab807b70761fe06e33fb9",
+      "threadId": "c072305e-5348-4e7c-bbea-380f686dd4c6",
+      "messageId": "a2ccfbd2-31c7-4ee5-90df-afa62ab7d49b",
       "status": "responded",
-      "runId": "4733f62e-74ff-4c67-b1dd-c476b272bd30",
-      "createdAt": 1792403355721
+      "runId": "9cd9b703-f14f-4cf2-a7b4-235d155db60d",
+      "createdAt": 1792404814039
     },
     "messages": [
       {
-        "id": "3d3618f0-3ed8-402f-938d-99a12ba6d0c2",
+        "id": "a2ccfbd2-31c7-4ee5-90df-afa62ab7d49b",
         "actor": "operator-dashboard",
         "actorRole": "human",
-        "body": "Isolated receipt check. Do not read files, search the web or contact external services. Respond with exactly PROOF-ce0db50e-16ab-454d-9358-788a7f77ebeb."
+        "body": "Isolated receipt check. Do not read files, search the web or contact external services. Respond with exactly PROOF-63097b7f-ef36-430a-ba0d-c12ad06c7991."
       },
       {
-        "id": "871f9815-dc99-4c52-80d7-3ceba63cff43",
-        "actor": "CairnLead2987",
+        "id": "fb562048-55a8-43b4-b218-db444e6c10df",
+        "actor": "JunctionLead2328",
         "actorRole": "orchestrator",
-        "body": "PROOF-ce0db50e-16ab-454d-9358-788a7f77ebeb"
+        "body": "PROOF-63097b7f-ef36-430a-ba0d-c12ad06c7991"
       }
     ]
   },
   "task": {
     "delivery": {
-      "id": "adf312bb-59db-421e-af71-11edfe190f26",
-      "repoKey": "path:1150944fbbcefc909e0c92196c3f8b0c",
-      "threadId": "c96d9525-4c45-4be3-8008-ba4b39d8b692",
-      "messageId": "f8ac1a67-e579-4cd5-8598-d5b1a9edc7a0",
+      "id": "96ddc7cc-5973-4961-b489-a933589b9e27",
+      "repoKey": "path:f666c4a1074ab807b70761fe06e33fb9",
+      "threadId": "0ff41414-3294-4bff-9dff-a9ba5a8c0ccd",
+      "messageId": "78975d65-3b7d-4bfe-9981-b72c80c2c892",
       "taskId": "isolated-task",
       "recipient": "validation-worker",
       "status": "responded",
-      "runId": "f65baa8e-aaf1-4bcf-bc84-ed843f6e10b7",
-      "createdAt": 1792403357662
+      "runId": "5f58ca4a-47b5-4712-b5f0-6096a767d6ac",
+      "createdAt": 1792404816965
     },
     "messages": [
       {
-        "id": "f8ac1a67-e579-4cd5-8598-d5b1a9edc7a0",
+        "id": "78975d65-3b7d-4bfe-9981-b72c80c2c892",
         "actor": "operator-dashboard",
         "taskId": "operator",
-        "body": "Reply with exactly RECEIPT-3080a6ef-43d9-4d4f-bc7e-81fe3f3cec2b in the existing discussion."
+        "body": "Reply with exactly RECEIPT-cd5fbae9-dddd-4426-b89a-21048cd6beda in the existing discussion."
       },
       {
-        "id": "8c64d99e-b5a5-4ef3-93a6-8ecfe58cc530",
+        "id": "ac0c3091-dd78-4171-a5e3-b0ba4a43577d",
         "actor": "validation-worker",
         "taskId": "isolated-task",
-        "body": "RECEIPT-3080a6ef-43d9-4d4f-bc7e-81fe3f3cec2b",
-        "replyToDeliveryId": "adf312bb-59db-421e-af71-11edfe190f26"
+        "body": "RECEIPT-cd5fbae9-dddd-4426-b89a-21048cd6beda",
+        "replyToDeliveryId": "96ddc7cc-5973-4961-b489-a933589b9e27"
       }
     ]
   },

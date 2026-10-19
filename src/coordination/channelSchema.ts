@@ -63,8 +63,9 @@ export function channelDatabase(): Database.Database {
       BEGIN
         INSERT OR IGNORE INTO coordination_channel_entries
           (repo_key, source_kind, source_id, thread_id, task_id, created_at)
-        SELECT t.repository, 'message', NEW.message_id, NEW.thread_id, NEW.task_id, NEW.created_at
-        FROM coordination_threads t WHERE t.thread_id = NEW.thread_id;
+        SELECT COALESCE(a.repo_key,t.repository), 'message', NEW.message_id, NEW.thread_id, NEW.task_id, NEW.created_at
+        FROM coordination_threads t LEFT JOIN coordination_channel_aliases a ON a.repository=t.repository
+        WHERE t.thread_id = NEW.thread_id;
         UPDATE coordination_channel_deliveries SET status = 'responded', updated_at = NEW.created_at
         WHERE id = NEW.reply_to_delivery_id AND thread_id = NEW.thread_id AND status = 'processing'
           AND recipient = NEW.actor AND task_id = NEW.task_id;
@@ -82,12 +83,17 @@ export function channelDatabase(): Database.Database {
 /** 이관은 원본을 복제하지 않는다. 고유 인덱스로 재접속/중복 publish를 흡수한다. */
 export function backfillChannelEntries(db: Database.Database): void {
   db.exec(`
+    UPDATE coordination_channel_entries SET repo_key=(SELECT a.repo_key FROM coordination_channel_aliases a
+      WHERE a.repository=coordination_channel_entries.repo_key)
+    WHERE EXISTS(SELECT 1 FROM coordination_channel_aliases a
+      WHERE a.repository=coordination_channel_entries.repo_key AND a.repo_key!=coordination_channel_entries.repo_key);
     INSERT OR IGNORE INTO coordination_channel_entries
       (repo_key, source_kind, source_id, thread_id, task_id, created_at)
     SELECT repo_key,source_kind,source_id,thread_id,task_id,created_at FROM (
-      SELECT t.repository repo_key, 'message' source_kind, m.message_id source_id,
+      SELECT COALESCE(a.repo_key,t.repository) repo_key, 'message' source_kind, m.message_id source_id,
         m.thread_id, m.task_id, m.created_at, m.seq original_order
       FROM coordination_thread_messages m JOIN coordination_threads t ON t.thread_id=m.thread_id
+      LEFT JOIN coordination_channel_aliases a ON a.repository=t.repository
       UNION ALL
       SELECT COALESCE(t.repo_key,a.repo_key), 'trace', t.event_id, NULL,
         COALESCE(t.source_task_id,t.task_id), t.timestamp, t.id

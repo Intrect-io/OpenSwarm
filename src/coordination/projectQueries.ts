@@ -54,10 +54,11 @@ export function queryProjectSnapshot(paths: readonly string[], runner?: ProjectR
       }
     }
   } catch { unavailable.push('ledger'); }
-  for (const t of db.prepare(`SELECT DISTINCT t.repository,tt.task_id FROM coordination_threads t
-    JOIN coordination_thread_tasks tt ON tt.thread_id=t.thread_id WHERE tt.task_id!='operator'`).all() as Array<{repository: string; task_id: string}>) {
-    if (!knownTasks.some((k) => k.repoKey === t.repository && k.taskId === t.task_id)) knownTasks.push({
-      repoKey: t.repository, taskId: t.task_id, title: t.task_id, status: 'recorded',
+  for (const t of db.prepare(`SELECT DISTINCT COALESCE(a.repo_key,t.repository) repo_key,tt.task_id FROM coordination_threads t
+    JOIN coordination_thread_tasks tt ON tt.thread_id=t.thread_id
+    LEFT JOIN coordination_channel_aliases a ON a.repository=t.repository WHERE tt.task_id!='operator'`).all() as Array<{repo_key: string; task_id: string}>) {
+    if (!knownTasks.some((k) => k.repoKey === t.repo_key && k.taskId === t.task_id)) knownTasks.push({
+      repoKey: t.repo_key, taskId: t.task_id, title: t.task_id, status: 'recorded',
     });
   }
   return buildProjectSnapshot({ channels, sessions, knownTasks, events, parked, unavailable });

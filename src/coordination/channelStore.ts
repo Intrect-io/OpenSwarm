@@ -1,4 +1,4 @@
-import { basename } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
 import { expandPath } from '../core/config.js';
 import { repositoryCell } from './repositoryCell.js';
 import { backfillChannelEntries, channelDatabase } from './channelSchema.js';
@@ -45,35 +45,39 @@ export function syncChannels(paths: readonly string[]): Channel[] {
     db.transaction(() => {
       const oldKeys = new Set((db.prepare('SELECT repo_key FROM coordination_channels').all() as Array<{ repo_key: string }>).map((r) => r.repo_key));
       const cells = paths.map((path) => repositoryCell(expandPath(path)));
-      if (initial) {
-        const historical = db.prepare(`SELECT DISTINCT repository, repo_key FROM coordination_trace`).all() as Array<{ repository: string; repo_key: string | null }>;
-        for (const row of historical) {
-          const cell = repositoryCell(row.repository);
-          db.prepare(`INSERT OR IGNORE INTO coordination_channel_aliases VALUES (?, ?)`).run(row.repository, row.repo_key ?? cell.repoKey);
-          db.prepare(`INSERT OR IGNORE INTO coordination_channels(repo_key,repository,name) VALUES (?,?,?)`)
-            .run(row.repo_key ?? cell.repoKey, cell.repositoryPath, basename(cell.repositoryPath));
-        }
-        const oldThreads = db.prepare(`SELECT DISTINCT repository FROM coordination_threads`).all() as Array<{ repository: string }>;
-        for (const { repository } of oldThreads) {
-          db.prepare(`INSERT OR IGNORE INTO coordination_channels(repo_key,repository,name) VALUES (?,?,?)`)
-            .run(repository, '', `Archived ${repository.slice(-8)}`);
+      for (const [index, cell] of cells.entries()) {
+        for (const alias of [expandPath(paths[index]), cell.worktreePath, cell.repositoryPath]) {
+          db.prepare('INSERT OR IGNORE INTO coordination_channel_aliases VALUES (?,?)').run(alias, cell.repoKey);
         }
       }
+      if (initial) {
+        const historicalChannel = (repository: string, explicitKey?: string) => {
+          const path = expandPath(repository);
+          const cell = isAbsolute(path) ? repositoryCell(path) : undefined;
+          const known = db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(repository) as { repo_key: string } | undefined;
+          const key = explicitKey ?? known?.repo_key ?? cell?.repoKey ?? repository;
+          for (const alias of [repository, ...(cell ? [path, cell.worktreePath, cell.repositoryPath] : [])]) {
+            db.prepare('INSERT OR IGNORE INTO coordination_channel_aliases VALUES (?,?)').run(alias, key);
+          }
+          db.prepare('INSERT OR IGNORE INTO coordination_channels(repo_key,repository,name) VALUES (?,?,?)')
+            .run(key, cell?.repositoryPath ?? '', cell ? basename(cell.repositoryPath) : `Archived ${key.slice(-8)}`);
+        };
+        const historical = db.prepare(`SELECT DISTINCT repository, repo_key FROM coordination_trace`).all() as Array<{ repository: string; repo_key: string | null }>;
+        for (const row of historical) historicalChannel(row.repository, row.repo_key ?? undefined);
+        const oldThreads = db.prepare(`SELECT DISTINCT repository FROM coordination_threads`).all() as Array<{ repository: string }>;
+        for (const { repository } of oldThreads) historicalChannel(repository);
+      }
       db.prepare('UPDATE coordination_channels SET configured = 0').run();
-      for (const [index, cell] of cells.entries()) {
+      for (const cell of cells) {
         db.prepare(`INSERT INTO coordination_channels(repo_key,repository,name,configured) VALUES (?,?,?,1)
           ON CONFLICT(repo_key) DO UPDATE SET repository=excluded.repository,name=excluded.name,configured=1`)
           .run(cell.repoKey, cell.repositoryPath, basename(cell.repositoryPath));
-        for (const alias of [expandPath(paths[index]), cell.worktreePath, cell.repositoryPath]) {
-          const added = db.prepare(`INSERT OR IGNORE INTO coordination_channel_aliases VALUES (?,?)`).run(alias, cell.repoKey);
-          if (added.changes && !initial) {
-            db.prepare(`INSERT OR IGNORE INTO coordination_channel_entries(repo_key,source_kind,source_id,task_id,created_at)
-              SELECT ?, 'trace', event_id, COALESCE(source_task_id,task_id), timestamp FROM coordination_trace
-              WHERE repository=? AND kind!='thread-update'`).run(cell.repoKey, alias);
-          }
-        }
       }
-      if (initial) backfillChannelEntries(db);
+      backfillChannelEntries(db);
+      // 잘못 분리됐던 경로 채널의 읽음 위치를 병합하되 원본과 projection seq는 유지한다.
+      db.exec(`UPDATE coordination_channels SET read_seq=MAX(read_seq,COALESCE((
+        SELECT MAX(old.read_seq) FROM coordination_channels old JOIN coordination_channel_aliases a
+          ON a.repository=old.repo_key WHERE a.repo_key=coordination_channels.repo_key),0))`);
       // 새로 이관한 채널만 기준점을 만든다. 재시작은 읽음 위치를 바꾸지 않는다.
       const baseline = db.prepare(`UPDATE coordination_channels SET read_seq=COALESCE(
         (SELECT MAX(seq) FROM coordination_channel_entries WHERE repo_key=?),0) WHERE repo_key=?`);
@@ -92,7 +96,9 @@ export function readChannels(): Channel[] {
     (SELECT COUNT(*) FROM coordination_channel_entries e LEFT JOIN coordination_thread_messages m
       ON e.source_kind='message' AND e.source_id=m.message_id
       WHERE e.repo_key=c.repo_key AND e.seq>c.read_seq AND COALESCE(m.actor_role,'')!='human') unread
-    FROM coordination_channels c ORDER BY c.name COLLATE NOCASE, c.repo_key`).all() as Array<{
+    FROM coordination_channels c WHERE NOT EXISTS(SELECT 1 FROM coordination_channel_aliases a
+      WHERE a.repository=c.repo_key AND a.repo_key!=c.repo_key)
+    ORDER BY c.name COLLATE NOCASE, c.repo_key`).all() as Array<{
       repo_key: string; repository: string; name: string; configured: number;
       read_seq: number; latest_seq: number; unread: number;
     }>).map((r) => ({ repoKey: r.repo_key, repository: r.repository, name: r.name,
