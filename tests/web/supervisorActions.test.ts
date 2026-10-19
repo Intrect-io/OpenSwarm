@@ -1,10 +1,23 @@
-// The Supervisor page is a server-rendered string with one inline script, so a
-// source-shape assertion cannot tell whether a failed Stop still reads as sent.
-// Run the real script in jsdom with a scripted fetch and a hand-driven clock.
+// The Supervisor page runs one classic script (web/static/js/supervisor.js),
+// so a source-shape assertion cannot tell whether a failed Stop still reads as
+// sent. Run the real page and script in jsdom with a scripted fetch and a
+// hand-driven clock.
 
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
-import { buildDashboardHtml } from '../../src/support/dashboardHtml.js';
+
+const STATIC = join(__dirname, '..', '..', 'web', 'static');
+const SCRIPT_TAG = '<script src="/static/js/supervisor.js"></script>';
+/** The page with its script inlined: jsdom does not fetch /static/ assets. */
+function pageSource(): string {
+  const html = readFileSync(join(STATIC, 'supervisor.html'), 'utf8');
+  if (!html.includes(SCRIPT_TAG)) throw new Error('supervisor.html no longer loads supervisor.js');
+  const script = readFileSync(join(STATIC, 'js', 'supervisor.js'), 'utf8');
+  return html.replace(SCRIPT_TAG, () => `<script>${script}</script>`);
+}
+const PROVIDERS = ['codex', 'openrouter'];
 
 type Responder = (url: string, init?: RequestInit) => { status: number; body?: unknown } | undefined;
 
@@ -22,14 +35,16 @@ function load(respond: Responder = () => undefined): Page {
   const calls: Page['calls'] = [];
   const timers: Page['timers'] = [];
   const sources: { onmessage: ((m: { data: string }) => void) | null }[] = [];
-  const dom = new JSDOM(buildDashboardHtml(['codex', 'openrouter']), {
+  const dom = new JSDOM(pageSource(), {
     url: 'http://127.0.0.1:3847/',
     runScripts: 'dangerously',
     beforeParse(window) {
       const w = window as unknown as Record<string, unknown>;
       w.fetch = async (url: string, init?: RequestInit) => {
         calls.push({ url, init });
-        const answer = respond(url, init) ?? { status: 200, body: ['/api/chat/history', '/api/logs', '/api/stages'].includes(url) ? [] : {} };
+        const answer = respond(url, init)
+          ?? (url === '/api/providers' ? { status: 200, body: { providers: PROVIDERS } } : undefined)
+          ?? { status: 200, body: ['/api/chat/history', '/api/logs', '/api/stages'].includes(url) ? [] : {} };
         return {
           ok: answer.status >= 200 && answer.status < 300,
           status: answer.status,
@@ -178,5 +193,30 @@ describe('Supervisor fleet-wide switches take two presses', () => {
     expect(select.value).toBe('low');
     expect((page.doc.getElementById('effort-confirm') as HTMLButtonElement).hidden).toBe(true);
     expect(posts(page, '/api/reasoning-effort')).toHaveLength(0);
+  });
+});
+
+// Ported from the server-side source checks that died with dashboardHtml.ts:
+// these now run the behaviour instead of matching the emitted string.
+describe('Supervisor provider toggle and stage rows', () => {
+  it('builds one provider button per registry entry and marks the default (INT-3284)', async () => {
+    const page = load((url) => (url === '/api/stats' ? { status: 200, body: { adapters: { defaultAdapter: 'openrouter' } } } : undefined));
+    await page.settle();
+    const buttons = [...page.doc.querySelectorAll('#provider-toggle .provider-btn')];
+    expect(buttons.map((b) => b.id)).toEqual(['provider-codex', 'provider-openrouter']);
+    expect(buttons.map((b) => b.textContent)).toEqual(['Codex', 'OpenRouter']);
+    expect(buttons.map((b) => b.classList.contains('active'))).toEqual([false, true]);
+  });
+
+  it('escapes a stage status in both the class and the label (AGT-3476)', async () => {
+    const page = load();
+    await page.settle();
+    const status = '"><img src=x onerror="window.__pwned=1">';
+    page.emit({ type: 'pipeline:stage', data: { taskId: 't1', stage: 'worker', status } });
+    await page.settle();
+    page.timers.splice(0).forEach((t) => t.fn());
+    await page.settle();
+    expect(page.doc.querySelector('#stage-list img')).toBeNull();
+    expect(page.doc.getElementById('stage-list')!.textContent).toContain(status);
   });
 });
