@@ -19,7 +19,10 @@ describe('buildDashboardHtml (INT-3284)', () => {
   it('renders a persistent fleet-wide thinking effort control', () => {
     const html = buildDashboardHtml(['openrouter']);
     expect(html).toContain('id="reasoning-effort"');
-    expect(html).toContain('setReasoningEffort(this.value)');
+    // Picking a level stages it; a confirm button beside the select applies it
+    // fleet-wide (behaviour pinned in tests/web/supervisorActions.test.ts).
+    expect(html).toContain('stageReasoningEffort(this.value)');
+    expect(html).toContain('id="effort-confirm"');
     expect(html).toContain('/api/reasoning-effort');
     expect(html).toContain('<option value="high">High</option>');
   });

@@ -43,12 +43,13 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <!--PROVIDER_BUTTONS-->
       </div>
       <label class="control-label" for="reasoning-effort">Thinking</label>
-      <select class="input effort-select" id="reasoning-effort" aria-label="Fleet-wide thinking effort" onchange="setReasoningEffort(this.value)">
+      <select class="input effort-select" id="reasoning-effort" aria-label="Fleet-wide thinking effort" onchange="stageReasoningEffort(this.value)">
         <option value="">Default</option>
         <option value="low">Low</option>
         <option value="medium">Medium</option>
         <option value="high">High</option>
       </select>
+      <button class="btn btn-sm effort-confirm" id="effort-confirm" type="button" hidden onclick="confirmReasoningEffort()"></button>
       <button class="btn btn-danger btn-sm" id="svc-stop-btn" type="button" onclick="svcAction('stop')">⏸ Stop</button>
       <button class="btn btn-secondary btn-sm" id="svc-restart-btn" type="button" onclick="svcAction('restart')">↻ Restart</button>
     </div>
@@ -326,11 +327,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           fetchProcesses();
           addLogLine({ taskId: "system", stage: "exit", line: "Process exited PID=" + ev.data.pid + " code=" + ev.data.exitCode + " duration=" + (ev.data.durationMs / 1000).toFixed(1) + "s" });
           break;
-        case "heartbeat": {
-          const btn = document.getElementById("hb-btn");
-          btn.disabled = false; btn.textContent = "▶ Heartbeat";
+        case "heartbeat":
+          // Fired when a heartbeat starts, scheduled or manual: the start
+          // signal a manual trigger is waiting for.
+          resetHeartbeatButton();
           break;
-        }
         case "pr_processor_start":
         case "pr_processor_end":
         case "pr_processor_pr":
@@ -530,35 +531,114 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       return true;
     }
 
+    // The outcome of an action, said on the button that was pressed. The live
+    // log also records it, but on a phone the log is in another tab, and a
+    // button that just returns to its label reads as success.
+    function flashButton(btn, label, failed, restLabel, reason) {
+      clearTimeout(btn._flashTimer);
+      btn.textContent = label;
+      btn.classList.add("is-flashing");
+      btn.classList.toggle("is-failed", !!failed);
+      if (reason) btn.title = reason;
+      btn._flashTimer = setTimeout(function() {
+        btn.textContent = restLabel;
+        btn.classList.remove("is-flashing", "is-failed");
+        btn.removeAttribute("title");
+      }, 5000);
+    }
+
+    // fetch() resolves on 4xx/5xx, so an awaited call that did not throw is not
+    // an accepted one. Returns the server's reason, or null when it accepted.
+    async function failureOf(res) {
+      if (res.ok) return null;
+      try {
+        const data = await res.json();
+        if (data && data.error) return data.error;
+      } catch {}
+      return "HTTP " + res.status;
+    }
+
     async function svcAction(action) {
       const btnId = action === "stop" ? "svc-stop-btn" : "svc-restart-btn";
       const btn = document.getElementById(btnId);
       if (armButton(btn, action === "stop" ? "Stop the daemon?" : "Restart the daemon?")) return;
+      const restLabel = btn.textContent;
+      const verb = action === "stop" ? "Stop" : "Restart";
       btn.disabled = true;
+      let failure = null;
       try {
-        await fetch("/api/service/" + action, { method: "POST" });
-        addLogLine({ taskId: "system", stage: "service", line: "Service " + action + " requested" });
+        failure = await failureOf(await fetch("/api/service/" + action, { method: "POST" }));
       } catch(e) {
-        addLogLine({ taskId: "system", stage: "error", line: "Service " + action + " failed: " + e.message });
+        failure = e.message;
       }
       btn.disabled = false;
+      if (failure) {
+        addLogLine({ taskId: "system", stage: "error", line: "Service " + action + " failed: " + failure });
+        flashButton(btn, verb + " failed", true, restLabel, failure);
+      } else {
+        addLogLine({ taskId: "system", stage: "service", line: "Service " + action + " requested" });
+        flashButton(btn, verb + " sent", false, restLabel);
+      }
       setTimeout(fetchSvcStatus, 2000);
     }
 
     // ---- Heartbeat trigger ----
+    // POST /api/heartbeat answers 202 before the run starts; the run announces
+    // itself with a "heartbeat" SSE event. Without a deadline on that signal a
+    // run that never started (one already in flight, a dropped stream) left
+    // the button on "Running…" with nothing to say it was stuck.
+    const HEARTBEAT_START_TIMEOUT_MS = 15000;
+    const HEARTBEAT_LABEL = "▶ Heartbeat";
+    let heartbeatStartTimer = null;
+
+    function resetHeartbeatButton() {
+      clearTimeout(heartbeatStartTimer);
+      heartbeatStartTimer = null;
+      const btn = document.getElementById("hb-btn");
+      if (!btn) return;
+      btn.disabled = false;
+      if (!btn.classList.contains("is-flashing")) btn.textContent = HEARTBEAT_LABEL;
+    }
+
     async function triggerHeartbeat() {
       const btn = document.getElementById("hb-btn");
       btn.disabled = true; btn.textContent = "⟳ Running…";
       addLogLine({ taskId: "system", stage: "manual", line: "Heartbeat triggered by user" });
+      let failure = null;
       try {
-        await fetch("/api/heartbeat", { method: "POST" });
+        failure = await failureOf(await fetch("/api/heartbeat", { method: "POST" }));
       } catch(e) {
-        addLogLine({ taskId: "system", stage: "error", line: "Heartbeat failed: " + e.message });
-        btn.disabled = false; btn.textContent = "▶ Heartbeat";
+        failure = e.message;
       }
+      if (failure) {
+        resetHeartbeatButton();
+        addLogLine({ taskId: "system", stage: "error", line: "Heartbeat failed: " + failure });
+        flashButton(btn, "Heartbeat failed", true, HEARTBEAT_LABEL, failure);
+        return;
+      }
+      clearTimeout(heartbeatStartTimer);
+      heartbeatStartTimer = setTimeout(function() {
+        const reason = "The daemon accepted the request but no heartbeat started within "
+          + (HEARTBEAT_START_TIMEOUT_MS / 1000) + "s. One may already be running.";
+        resetHeartbeatButton();
+        addLogLine({ taskId: "system", stage: "error", line: "Heartbeat: no response. " + reason });
+        flashButton(btn, "No response", true, HEARTBEAT_LABEL, reason);
+      }, HEARTBEAT_START_TIMEOUT_MS);
     }
 
-    async function switchProvider(provider) {
+    // Switching the default provider re-routes every agent, so it takes the
+    // same two presses as Stop: the first says what the second will do.
+    function switchProvider(provider) {
+      const btn = document.getElementById("provider-" + provider);
+      if (!btn || btn.classList.contains("active")) return;
+      document.querySelectorAll(".provider-btn.is-armed").forEach(function(other) {
+        if (other !== btn) armButton(other);
+      });
+      if (armButton(btn, "Switch fleet?")) return;
+      applyProvider(provider);
+    }
+
+    async function applyProvider(provider) {
       try {
         const res = await fetch("/api/provider", {
           method: "POST",
@@ -582,8 +662,37 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         const res = await fetch("/api/reasoning-effort");
         if (!res.ok) return;
         const data = await res.json();
-        document.getElementById("reasoning-effort").value = data.effort || "";
+        const select = document.getElementById("reasoning-effort");
+        select.value = data.effort || "";
+        select.dataset.applied = select.value;
       } catch {}
+    }
+
+    // A select cannot be armed like a button, so picking a value stages it and
+    // a confirm button beside it applies it. Left alone, the stage lapses and
+    // the select returns to what the fleet is actually using.
+    let effortStageTimer = null;
+    function stageReasoningEffort(value) {
+      const select = document.getElementById("reasoning-effort");
+      const confirmBtn = document.getElementById("effort-confirm");
+      clearTimeout(effortStageTimer);
+      if (value === (select.dataset.applied || "")) {
+        confirmBtn.hidden = true;
+        return;
+      }
+      const label = select.options[select.selectedIndex].textContent;
+      confirmBtn.textContent = "Set fleet to " + label + "?";
+      confirmBtn.hidden = false;
+      effortStageTimer = setTimeout(function() {
+        confirmBtn.hidden = true;
+        select.value = select.dataset.applied || "";
+      }, 6000);
+    }
+
+    function confirmReasoningEffort() {
+      clearTimeout(effortStageTimer);
+      document.getElementById("effort-confirm").hidden = true;
+      setReasoningEffort(document.getElementById("reasoning-effort").value);
     }
 
     async function setReasoningEffort(value) {
@@ -597,6 +706,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "Failed to update thinking effort");
+        select.dataset.applied = data.effort || "";
         addLogLine({ taskId: "system", stage: "reasoning", line: "Thinking effort set to " + (data.effort || "default") });
       } catch (e) {
         addLogLine({ taskId: "system", stage: "error", line: "Thinking effort update failed: " + e.message });

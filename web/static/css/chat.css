@@ -189,6 +189,13 @@ a.issue-link:hover .issue-title { color: var(--fg-primary); text-decoration: und
   line-height: 1.5;
 }
 .composer-status { min-height: 18px; }
+/* Recipient chip: the pinned agent is chosen, never inferred from the newest speaker. */
+.composer-target { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.composer-target[hidden] { display: none; }
+.composer-target-label { color: var(--fg-muted); font-size: var(--text-sm); }
+.composer-recipient { width: auto; max-width: min(100%, 420px); min-height: 32px; }
+.composer-target-warning { color: var(--warning); font-size: var(--text-sm); }
+.composer-target-warning:empty { display: none; }
 
 body.dropping .room { outline: 2px dashed var(--accent); outline-offset: -6px; }
 

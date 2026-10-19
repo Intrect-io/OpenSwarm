@@ -245,3 +245,51 @@ export function latestAddressable(events) {
   }
   return null;
 }
+
+/**
+ * The identity the composer pins to. An address alone is not unique (agents
+ * name themselves, so two on different tasks can both be "sable"), so the
+ * repository and task are part of who the operator is talking to.
+ */
+export function addressKeyOf(event) {
+  // JSON, not a control-character join: the key round-trips through an
+  // <option value>, where the HTML parser rewrites NUL to U+FFFD.
+  return JSON.stringify([event.actor, event.repository ?? '', event.taskId ?? '']);
+}
+
+/**
+ * Every agent the operator could address, newest speaker first, one entry per
+ * agent and task carrying that agent's newest utterance there. Same speaker
+ * rule as `latestAddressable`, whose answer is always this list's head.
+ */
+export function addressableTargets(events) {
+  const spoken = events.filter(isUtterance).sort((a, b) => b.seq - a.seq);
+  const byKey = new Map();
+  for (const event of spoken) {
+    if (event.actorRole === 'human' || event.actorRole === 'daemon') continue;
+    const key = addressKeyOf(event);
+    if (!byKey.has(key)) byKey.set(key, event);
+  }
+  return [...byKey.values()];
+}
+
+/**
+ * Why a pinned agent has probably stopped listening, or null while it may
+ * still be working. Its own newest word on that task decides: a failure or an
+ * expiry ends the run, and a delivered result is a worker handing its work
+ * back. The composer warns rather than refuses — the daemon may still route
+ * the message, it just should not be sent believing someone is listening.
+ */
+export function targetEndedReason(events, target) {
+  if (!target?.actor) return null;
+  const key = addressKeyOf(target);
+  const own = events
+    .filter((event) => isUtterance(event) && event.actor === target.actor && addressKeyOf(event) === key)
+    .sort((a, b) => b.seq - a.seq);
+  const last = own[0];
+  if (!last) return null;
+  if (last.status === 'failed') return 'failed';
+  if (last.status === 'expired') return 'expired';
+  if (last.kind === 'delegation-result' && last.status === 'completed') return 'delivered';
+  return null;
+}
