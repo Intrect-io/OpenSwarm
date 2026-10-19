@@ -486,6 +486,13 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
       const data = await loadUsage(since, fetchImpl);
       if (seq !== latest) return;   // a newer window is already in flight
       renderSummary(root, data);
+      // With no calls at all, every breakdown would repeat the same empty
+      // line; say it once for the window instead.
+      const nothing = (data.model?.total?.calls ?? 0) === 0;
+      const emptyWindow = root.querySelector('#usage-empty');
+      const breakdown = root.querySelector('#usage-breakdown');
+      if (emptyWindow) emptyWindow.hidden = !nothing;
+      if (breakdown) breakdown.hidden = nothing;
       renderDays(root.querySelector('#days'), data.time);
       // The card is headed by whoever knows which axis was chosen. Left fixed
       // it read "By day" over hourly labels, on first load for

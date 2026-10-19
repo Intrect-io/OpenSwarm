@@ -151,8 +151,6 @@ export function renderStats(doc, stats) {
   // Each count says what it counts on hover: "open exchanges" and "adapter
   // routes" are board terms an operator should not have to look up.
   const cells = [
-    ['waiting on you', stats.agentsAwaitingOperator ?? 0, (stats.agentsAwaitingOperator ?? 0) > 0,
-      'Agents blocked on a question only you can answer'],
     ['active agents', stats.activeAgents, false, 'Agents that posted to the coordination board in the last 30 minutes'],
     ['pending questions', stats.pendingQuestions, stats.pendingQuestions > 0,
       'Questions to you that are not answered or expired yet'],
@@ -178,18 +176,20 @@ export function renderWaitingBanner(doc, stats) {
   const holder = doc.getElementById('waiting');
   if (!holder) return;
   const waiting = stats.agentsAwaitingOperator ?? 0;
-  const open = stats.pendingTotal ?? 0;
   if (waiting > 0) {
+    holder.hidden = false;
     holder.className = 'waiting is-blocking';
     holder.textContent = waiting === 1
       ? '1 agent is waiting on you'
       : `${waiting} agents are waiting on you`;
     return;
   }
+  // Nothing to act on: the shell status line already says so, and the open
+  // exchange count is a stat chip. A third calm sentence was noise (audit
+  // 2026-10-19), so the banner only appears when it has something to say.
   holder.className = 'waiting';
-  holder.textContent = open > 0
-    ? `${open} exchange${open === 1 ? '' : 's'} open · nothing needs you`
-    : 'nothing is waiting on you';
+  holder.textContent = '';
+  holder.hidden = true;
 }
 
 export function renderGraph(doc, model, layout, selected, onSelect, spotlight = null) {
@@ -242,10 +242,10 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
       bandLayer.appendChild(label);
     }
     const count = el(doc, 'text', {
-      x: 12, y: (band.y0 + band.y1) / 2 + 13, class: 'tier-count',
+      x: 12, y: (band.y0 + band.y1) / 2 + 16, class: 'tier-count',
     });
     count.textContent = band.count === 0
-      ? 'none'
+      ? (band.kind === 'lane' ? 'no task running' : 'none')
       : `${band.count} ${band.kind === 'lane' ? 'in task' : 'placed'}`;
     bandLayer.appendChild(count);
   });
@@ -337,10 +337,11 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
         stroke: node.id === selected ? 'var(--fg-primary)' : 'transparent',
         'stroke-width': 2,
       }));
-      const label = el(doc, 'text', { y: radius + 12 });
+      // Baselines spaced for 12px type (step 8 raised it from 10px and 8px).
+      const label = el(doc, 'text', { y: radius + 15 });
       label.textContent = node.name;
       group.appendChild(label);
-      const roleLabel = el(doc, 'text', { y: radius + 22, class: 'role-label' });
+      const roleLabel = el(doc, 'text', { y: radius + 30, class: 'role-label' });
       roleLabel.textContent = node.role;
       group.appendChild(roleLabel);
     });

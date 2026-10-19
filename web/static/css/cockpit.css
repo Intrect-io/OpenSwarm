@@ -94,7 +94,7 @@ body[data-view="sessions"] .view-sessions { display: flex; }
   color: var(--accent);
   border-radius: var(--radius-full);
   padding: 0 var(--space-2);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0;
 }
 
@@ -128,7 +128,7 @@ body[data-view="sessions"] .view-sessions { display: flex; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tree-session .time { font-size: 10px; color: var(--fg-muted); white-space: nowrap; }
+.tree-session .time { font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; }
 
 /* ── Session panel ───────────────────────────────────────────────────── */
 

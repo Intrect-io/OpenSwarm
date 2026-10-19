@@ -36,7 +36,9 @@ body.page-chat {
   max-width: 960px;
   margin: var(--space-3) auto;
   border: 1px solid var(--border);
-  border-left: 3px solid var(--thread-accent);
+  /* The thread's colour is a rule across the top of its head, not a thick
+     left stripe (craft floor: no coloured side border over 1px). */
+  border-top: 2px solid var(--thread-accent);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
   overflow: hidden;
@@ -68,7 +70,7 @@ body.page-chat {
   background: var(--accent-subtle);
   font-weight: 700;
   letter-spacing: 0.08em;
-  font-size: 10px;
+  font-size: var(--text-xs);
   line-height: 18px;
 }
 .thread-system .channel-badge { color: var(--warning); border-color: var(--warning); background: var(--warning-subtle); }

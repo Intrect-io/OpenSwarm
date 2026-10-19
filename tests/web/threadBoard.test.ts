@@ -206,3 +206,27 @@ describe('repository thread board', () => {
     view.stop();
   });
 });
+
+describe('new thread form', () => {
+  it('opens on demand and closes again after the thread is created', async () => {
+    const doc = shell();
+    doc.getElementById('refresh')!.insertAdjacentHTML('afterend', '<button id="new-thread-toggle" aria-expanded="false"></button>');
+    doc.getElementById('new-thread')!.hidden = true;
+    doc.getElementById('new-thread')!.insertAdjacentHTML('beforeend', '<button id="new-thread-cancel" type="button"></button>');
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return response({ thread: { id: 'made' } });
+      if (url.includes('/threads/made')) return response({ thread: { id: 'made', subject: 's', repository: '/repo', version: 1, status: 'open' }, participants: [], messages: { items: [] } });
+      return response({ threads: [], repositories: [{ repository: '/repo' }] });
+    });
+    const view = startThreadBoard(doc, { fetchImpl, pollMs: 0 });
+    const toggle = doc.getElementById('new-thread-toggle')!;
+    const form = doc.getElementById('new-thread') as HTMLFormElement;
+    toggle.click();
+    expect(form.hidden).toBe(false);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    doc.getElementById('new-thread-cancel')!.click();
+    expect(form.hidden).toBe(true);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    view.stop();
+  });
+});
