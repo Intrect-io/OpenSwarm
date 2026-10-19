@@ -378,15 +378,17 @@ describe('the picture stays bounded and legible (AGT-4066)', () => {
     view.stop();
   });
 
-  it('tells the operator nothing needs them when nothing does', async () => {
+  it('stays out of the way when nothing needs the operator', async () => {
     const doc = shell();
     const view = startOrchestrationView(doc, {
       fetchImpl: fetchWith([boardEvent({ id: 'e1', seq: 1, status: 'completed' })]),
       eventSourceImpl: null,
       pollMs: 1e9,
     });
-    await vi.waitFor(() => expect(doc.getElementById('waiting')!.textContent).toBeTruthy());
-    expect(doc.getElementById('waiting')!.textContent).toBe('nothing is waiting on you');
+    // The shell status line already says "Nothing needs you"; a second calm
+    // sentence here was noise, so the banner hides.
+    await vi.waitFor(() => expect(doc.getElementById('waiting')!.hidden).toBe(true));
+    expect(doc.getElementById('waiting')!.textContent).toBe('');
     expect(doc.getElementById('waiting')!.className).not.toContain('is-blocking');
     view.stop();
   });

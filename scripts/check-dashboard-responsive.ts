@@ -88,6 +88,8 @@ try {
         }
         await nav.evaluate((element, left) => { element.scrollLeft = left; }, initialNavScroll);
         if (path === '/threads' && width <= 800) {
+          // The compose form opens on demand; open it to check it still stacks.
+          await page.locator('#new-thread-toggle').click();
           const form = await page.locator('.new-thread').boundingBox();
           const detail = await page.locator('.threads-detail').boundingBox();
           assert(form && detail && detail.y >= form.y + form.height - 1, `${label}: form/detail overlap`);

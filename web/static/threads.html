@@ -28,9 +28,10 @@
           <option value="">All threads</option>
         </select>
         <button id="refresh" type="button" class="btn btn-secondary">Refresh</button>
+        <button id="new-thread-toggle" type="button" class="btn btn-primary" aria-expanded="false" aria-controls="new-thread">New thread</button>
       </div>
       <div id="threads"><div class="empty">Loading all repository threads…</div></div>
-      <form id="new-thread" class="new-thread" aria-labelledby="new-thread-title">
+      <form id="new-thread" class="new-thread" aria-labelledby="new-thread-title" hidden>
         <h2 id="new-thread-title">New thread</h2>
         <label class="field">
           <span>Related task</span>
@@ -54,7 +55,10 @@
             <input class="input" name="relatedFiles" placeholder="Comma-separated" />
           </label>
         </div>
-        <button class="btn btn-primary" type="submit">Open thread</button>
+        <div class="new-thread-actions">
+          <button class="btn btn-primary" type="submit">Open thread</button>
+          <button id="new-thread-cancel" class="btn btn-secondary" type="button">Cancel</button>
+        </div>
       </form>
     </aside>
 

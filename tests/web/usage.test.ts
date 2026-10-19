@@ -461,6 +461,23 @@ describe('loading', () => {
     expect(data.model.rows[0].key).toBe('model-a');
   });
 
+  it('says once that the window is empty instead of six empty panels', async () => {
+    const empty = (by: string) => ({
+      ok: true,
+      json: async () => ({ since: '2026-09-09T00:00:00.000Z', until: '2026-09-10T00:00:00.000Z', by, rows: [], total: row('total', { calls: 0, meteredCalls: 0, costUsd: 0 }) }),
+    });
+    const fetchImpl = vi.fn(async (url: string) => empty(new URL(url, 'http://x').searchParams.get('by')!));
+    await startUsageView({ fetchImpl: fetchImpl as never }).refresh();
+    expect((document.querySelector('#usage-empty') as HTMLElement).hidden).toBe(false);
+    expect((document.querySelector('#usage-breakdown') as HTMLElement).hidden).toBe(true);
+
+    // A window with calls shows the breakdowns again.
+    fetchImpl.mockImplementation(async (url: string) => ok(new URL(url, 'http://x').searchParams.get('by')!) as never);
+    await startUsageView({ fetchImpl: fetchImpl as never }).refresh();
+    expect((document.querySelector('#usage-empty') as HTMLElement).hidden).toBe(true);
+    expect((document.querySelector('#usage-breakdown') as HTMLElement).hidden).toBe(false);
+  });
+
   it('fills the page from a fetched window', async () => {
     const fetchImpl = vi.fn(async (url: string) => ok(new URL(url, 'http://x').searchParams.get('by')!));
     await startUsageView({ fetchImpl: fetchImpl as never }).refresh();

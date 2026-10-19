@@ -36,6 +36,14 @@
       <div class="card stat"><span class="stat-label" title="Share of prompt tokens served from the provider's cache">Cache hit rate</span><strong id="sum-cache" class="stat-value">—</strong><span class="stat-note">cached / prompt</span></div>
     </section>
 
+    <!-- One empty state for the whole window, instead of six panels each
+         repeating "no usage". Shown by usage.mjs when the window has no calls. -->
+    <section id="usage-empty" class="usage-empty-window" hidden>
+      <h2>No usage in this window</h2>
+      <p>Every model call the daemon makes is recorded here with its cost and tokens. Pick a longer window, or start a run and refresh.</p>
+    </section>
+
+    <div id="usage-breakdown" class="usage-breakdown">
     <section class="card panel" aria-labelledby="days-title">
       <h2 id="days-title" class="card-head">By day</h2>
       <div class="card-body"><div id="days" class="bars"></div></div>
@@ -69,6 +77,7 @@
       <p id="task-note" class="muted task-note"></p>
       <div class="card-body table-wrap"><table id="table-task"></table></div>
     </section>
+    </div>
 
   </main>
 

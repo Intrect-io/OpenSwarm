@@ -121,3 +121,10 @@ td.key { color: var(--fg-primary); max-width: 22rem; overflow: hidden; text-over
 .bar-fill-unmetered { min-width: 3px; background: var(--border-strong); }
 
 .task-note { padding: var(--space-2) var(--space-3) 0; font-size: var(--text-xs); }
+
+/* The whole window is empty: one statement, not six empty panels. */
+.usage-empty-window { max-width: 60ch; padding: var(--space-8) 0; }
+.usage-empty-window[hidden], .usage-breakdown[hidden] { display: none; }
+.usage-empty-window h2 { margin: 0 0 var(--space-2); font-size: var(--text-lg); font-weight: 600; color: var(--fg-primary); }
+.usage-empty-window p { margin: 0; color: var(--fg-secondary); }
+.usage-breakdown { display: contents; }

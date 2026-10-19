@@ -284,6 +284,21 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
   statusFilter.addEventListener('change', () => { void loadThreads({ refreshDetail: false }); });
   refresh.addEventListener('click', () => { void loadThreads(); });
 
+  // The compose form used to sit open under the list, pushing every thread up
+  // and reading as the page's main job. It opens on demand now. Shells without
+  // the toggle (older embeds, the bare test shell) keep the form as it is.
+  const composeToggle = doc.getElementById('new-thread-toggle');
+  const composeCancel = doc.getElementById('new-thread-cancel');
+  const setComposing = (open) => {
+    if (!composeToggle) return;
+    newThread.hidden = !open;
+    composeToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) newThread.querySelector('[name="taskId"]')?.focus();
+    else composeToggle.focus();
+  };
+  composeToggle?.addEventListener('click', () => setComposing(newThread.hidden));
+  composeCancel?.addEventListener('click', () => { newThread.reset(); setComposing(false); });
+
   newThread.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!state.repository) return say('Select a repository first.', true);
@@ -301,6 +316,7 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
         }),
       });
       newThread.reset();
+      setComposing(false);
       statusFilter.value = 'open';
       state.selectedId = created.thread.id;
       await loadThreads();
