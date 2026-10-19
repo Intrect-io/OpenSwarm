@@ -7,9 +7,7 @@ body.page-warehouse { min-height: 100vh; }
   display: grid;
   grid-template-columns: minmax(0, 1fr) 320px;
   gap: var(--space-5);
-  max-width: 1440px;
-  margin: 0 auto;
-  padding: var(--space-6) clamp(var(--space-4), 5vw, var(--space-12));
+  padding: var(--space-6) var(--page-gutter);
 }
 
 .browser, .upload {
@@ -103,7 +101,7 @@ td.empty { padding: var(--space-12); text-align: center; white-space: normal; }
 .rules strong { color: var(--fg-primary); }
 
 @media (max-width: 860px) {
-  .warehouse-main { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); padding: var(--space-3); padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
+  .warehouse-main { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); padding: var(--space-4) var(--page-gutter); padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
   .table-wrap { min-height: 240px; }
   th, td { padding: var(--space-2); }
   .file-name, .download, .text-button, .breadcrumbs button { min-height: 44px; }

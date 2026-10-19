@@ -11,17 +11,14 @@
   <link rel="stylesheet" href="/static/css/threads.css" />
 </head>
 <body class="page-threads">
-  <header class="topbar" data-shell>
-    <div class="topbar-actions">
-      <select id="repo" class="select" aria-label="Repository"><option value="">Select repository…</option></select>
-    </div>
-  </header>
+  <header class="topbar" data-shell></header>
 
   <div id="status" class="status-line threads-status" role="status" aria-live="polite">Loading durable threads across all repositories…</div>
 
   <main class="threads-main">
     <aside class="threads-list" aria-label="Threads">
       <div class="toolbar">
+        <select id="repo" class="select" aria-label="Repository"><option value="">All repositories</option></select>
         <select id="thread-status" class="select" aria-label="Thread status">
           <option value="open">Open threads</option>
           <option value="resolved">Resolved threads</option>

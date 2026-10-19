@@ -291,3 +291,14 @@
   --font-ui: var(--font-sans);
   --text-md: var(--text-sm);
 }
+
+/* One page gutter for every page that is not a full-bleed workspace, so the
+   left edge does not drift between Usage, Settings and Warehouse (step 10). */
+:root {
+  --page-gutter: var(--space-6);
+}
+@media (max-width: 600px) {
+  :root {
+    --page-gutter: var(--space-4);
+  }
+}

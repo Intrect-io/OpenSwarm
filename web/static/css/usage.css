@@ -4,7 +4,7 @@
    switch without a second source of truth. */
 
 .usage-main {
-  padding: var(--space-4);
+  padding: var(--space-6) var(--page-gutter);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -120,7 +120,6 @@ td.key { color: var(--fg-primary); max-width: 22rem; overflow: hidden; text-over
 
 @media (max-width: 40rem) {
   .bar-row { grid-template-columns: 4.5rem 1fr auto; }
-  .usage-main { padding: var(--space-2); }
 }
 
 /* A day with calls but no metered cost. Wide enough to see, narrow enough not

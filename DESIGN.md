@@ -3,10 +3,9 @@ name: OpenSwarm Dashboard — Departure Board
 description: Every run is a departure; what needs the operator is posted in timetable yellow.
 ---
 
-<!-- SEED: established with the user before implementation (2026-10-19 direction round,
-     seed:a6b69a4a12b97b10); re-run /impeccable document once the Supervisor is rebuilt to
-     capture the actual tokens and components. Token values live in web/static/css/tokens.css.
-     The replaced Primer-derived system is recorded in docs/design/incumbent-2026-10.md. -->
+<!-- Implementation reference: web/static/css/tokens.css and the shared shell.
+     Updated 2026-10-19 for Step 10. The replaced Primer-derived system is
+     recorded in docs/design/incumbent-2026-10.md. -->
 
 # Design System: OpenSwarm Dashboard (Departure Board)
 
@@ -28,8 +27,8 @@ stay standard web controls.
 - Timetable yellow is reserved for what needs the operator; vermilion means failed or
   cancelled, nothing else.
 - Tabular numerals everywhere; uppercase tracked column heads; rules, not cards.
-- Signature move: the split-flap status change. When a run's status or stage changes, that
-  cell flips once.
+- Live status and stage changes update in place. The proposed split-flap transition is
+  not implemented; it is not an acceptance claim for this build.
 
 ## Colors
 
@@ -61,7 +60,8 @@ On a phone the notice band comes first and board rows stack.
 ## Elevation & Depth
 
 Flat. Depth is the step from shell band to ground to elevated control, plus 1–2 px rules.
-No shadows.
+No section shadows. The folder-picker dialog alone uses a scrim shadow to separate
+a blocking selection task from the page. Keyboard focus uses the shared focus ring.
 
 ## Shapes
 
@@ -78,3 +78,38 @@ Printed edges: 2–3 px corners on controls and tags; full rounding only on stat
 - **Don't** use yellow for decoration, warnings or delays; delays are `--warning` orange.
 - **Don't** box sections in cards or add shadows.
 - **Don't** make the board a costume: no fake split-flap tiles, no LED dot fonts.
+
+## Shared shell and responsive behavior
+
+The shell owns navigation, theme, the status line and an accessible page heading.
+Page-specific controls stay beneath it: Threads keeps repository/status filters in
+its list toolbar; Usage keeps the time window and refresh control in its main area.
+Usage, Settings and Warehouse share `--page-gutter`: 24px, reduced to 16px at
+600px and below. Workspaces retain their pane-specific padding.
+
+At 800px and below, Threads stacks the list, optional compose form and selected
+thread. With no selection (including after a filter removes it), the detail pane
+takes no space. Compose fields keep visible labels; opening and cancelling the
+form update the toggle's expanded state. Narrow-screen inputs use at least 16px
+text and primary navigation and action controls have 44px touch targets.
+
+## Components and browser surfaces
+
+Controls use 2–3px corners, with 6px reserved for larger dialogs. Tags use squared
+2px corners; dots and scrollbar thumbs may be fully rounded. Self-hosted Barlow
+uses 400/500/600 weights; the token scale starts at 12px. Drawn SVG icons share
+currentColor; log and status text retain their meaning without icons or colour.
+Text selection, caret, scrollbars and keyboard focus consume semantic tokens.
+
+## Verification boundary
+
+Colour placement and contrast are checked by the web test suite. The read-only
+responsive script checks eight routes, five widths and both themes against a
+running preview; it blocks backend mutations. Screenshots support direct human
+visual review. Automated checks do not establish visual approval, and a
+`dashboard-only` preview does not prove attached-runner actions.
+
+The detector's Orchestration spacing warning is intentionally retained: 4px
+spacing repeats within metadata/chips and compact control padding, while event
+rows use 8px and detail/transcript sections use 12px. This is local grouping,
+not a single spacing value across page sections.

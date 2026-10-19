@@ -245,6 +245,9 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
     state.repository = path;
     state.selectedId = null;
     state.detail = null;
+    hideConfirm();
+    doc.getElementById('detail').classList.remove('visible');
+    doc.getElementById('empty').hidden = false;
     if (!path) say('Loading durable threads across all repositories…');
     try {
       doc.defaultView?.history?.replaceState({}, '', path ? `/threads?repository=${encodeURIComponent(path)}` : '/threads');

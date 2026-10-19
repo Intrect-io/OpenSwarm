@@ -526,3 +526,9 @@ button:disabled { cursor: default; }
 .mono { font-family: var(--font-mono); }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 [hidden] { display: none !important; }
+
+
+/* A page's own controls (window, repository, refresh): one row under the
+   shell, left-aligned with the page gutter (step 10). */
+.page-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.page-toolbar .select { width: auto; }
