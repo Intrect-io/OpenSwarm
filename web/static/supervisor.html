@@ -11,99 +11,179 @@
   <link rel="stylesheet" href="/static/css/supervisor.css">
 </head>
 <body class="page-supervisor">
-  <header class="topbar" data-shell>
-    <div class="topbar-actions">
-      <span id="sse-status" role="status" aria-live="polite">Connecting</span>
+  <header class="topbar" data-shell></header>
+
+  <main class="board-page">
+    <div class="board-main">
+
+      <!-- What waits on the operator. Same counts as the shell status line:
+           both read /api/shell-status. Hidden when nothing does. -->
+      <section class="notice" id="notice" aria-labelledby="notice-title" hidden>
+        <div class="notice-head">
+          <h2 id="notice-title" class="notice-count">Nothing needs you</h2>
+          <span class="notice-breakdown" id="notice-breakdown"></span>
+          <span class="src notice-src">coordination board · run ledger</span>
+        </div>
+        <div id="notice-rows"></div>
+        <div class="notice-tracker" id="notice-tracker" hidden>
+          <div class="notice-sub">
+            <h3>Stuck or failed in the tracker <span id="stuck-badge">0</span></h3>
+            <span class="src">tracker labels · in progress over 7 days</span>
+            <button class="nb-outline" type="button" id="restart-stuck-btn" onclick="restartStuckIssues()">Move all to Todo</button>
+          </div>
+          <div id="stuck-list"></div>
+        </div>
+      </section>
+
+      <!-- Fleet: counts at a glance, each with where it comes from. -->
+      <section class="fleet" aria-label="Fleet">
+        <div class="k"><small>Running</small><b id="stat-running">0</b></div>
+        <div class="k"><small>Queued</small><b id="stat-queued">0</b></div>
+        <div class="k k-needs"><small>Waiting on you</small><b id="stat-needs">0</b></div>
+        <div class="k k-failed"><small>Failed</small><b id="stat-failed">0</b></div>
+        <span class="split" aria-hidden="true"></span>
+        <div class="k"><small>Done today</small><b id="stat-completed">0</b></div>
+        <div class="k"><small>Cost this session</small><b id="stat-cost">$0.00</b></div>
+        <span class="src fleet-src">scheduler · usage events since this page opened</span>
+      </section>
+
+      <!-- Routine controls left; the daemon service on the right behind a rule. -->
+      <section class="controls" aria-label="Fleet controls">
+        <div class="ctl-group" role="group" aria-label="Routine">
+          <span class="grp">Routine</span>
+          <button class="btn btn-secondary btn-sm" id="hb-btn" type="button" onclick="triggerHeartbeat()">Heartbeat</button>
+          <button class="btn btn-secondary btn-sm" id="pr-proc-btn" type="button" onclick="triggerPRProcessor()">PR review</button>
+          <span class="ctl-pair">
+            <label class="ctl-label" for="provider-select">Provider</label>
+            <select class="input ctl-select" id="provider-select" aria-describedby="fleet-models" onchange="stageProvider(this.value)"></select>
+            <button class="btn btn-sm stage-confirm" id="provider-confirm" type="button" hidden onclick="confirmProvider()"></button>
+          </span>
+          <span class="ctl-pair">
+          <label class="ctl-label" for="reasoning-effort">Thinking</label>
+          <select class="input ctl-select" id="reasoning-effort" onchange="stageReasoningEffort(this.value)">
+            <option value="">Default</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+          <button class="btn btn-sm stage-confirm" id="effort-confirm" type="button" hidden onclick="confirmReasoningEffort()"></button>
+          </span>
+          <span class="src fleet-models" id="fleet-models"></span>
+        </div>
+        <div class="ctl-group ctl-service" role="group" aria-label="Daemon service">
+          <span class="grp">Service</span>
+          <span class="svc-status" id="svc-status">…</span>
+          <button class="btn btn-secondary btn-sm btn-stop" id="svc-stop-btn" type="button" onclick="svcAction('stop')">Stop daemon</button>
+          <button class="btn btn-secondary btn-sm" id="svc-restart-btn" type="button" onclick="svcAction('restart')">Restart daemon</button>
+        </div>
+      </section>
+
+      <!-- The departure board: every run, when it left, where it is now. -->
+      <section class="board" aria-labelledby="board-title">
+        <div class="sec">
+          <h2 id="board-title">Live work</h2>
+          <span class="src" id="board-src">scheduler</span>
+        </div>
+        <div class="board-scroll">
+          <table class="board-table">
+            <thead>
+              <tr>
+                <th scope="col" class="c-time">Started</th>
+                <th scope="col">Run</th>
+                <th scope="col">Title</th>
+                <th scope="col">Repository</th>
+                <th scope="col">Agent · model</th>
+                <th scope="col">Stage</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody id="board-rows"></tbody>
+          </table>
+          <p class="board-empty" id="board-empty">No runs right now. The next heartbeat picks up ready issues.</p>
+        </div>
+      </section>
+
+      <!-- Activity: the live log and the raw stage events behind the board. -->
+      <section class="activity" aria-label="Activity">
+        <div class="activity-tabs" role="tablist" aria-label="Activity view">
+          <button class="activity-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="activity-log" data-view="log">Log <span id="log-count"></span></button>
+          <button class="activity-tab" type="button" role="tab" aria-selected="false" aria-controls="activity-stages" data-view="stages">Stage events <span id="stage-count"></span></button>
+          <span class="src activity-src">event stream</span>
+        </div>
+        <div class="activity-view" id="activity-log" role="tabpanel">
+          <div class="log-tab-bar" id="log-tab-bar" role="tablist" aria-label="Log filter">
+            <button class="log-tab active" type="button" data-task="all" onclick="selectLogTab(null)">All</button>
+          </div>
+          <div class="log-area" id="log-list">
+            <div class="empty">No log output</div>
+          </div>
+        </div>
+        <div class="activity-view" id="activity-stages" role="tabpanel" hidden>
+          <div class="stage-area" id="stage-list">
+            <div class="empty">No stage events</div>
+          </div>
+        </div>
+      </section>
     </div>
-  </header>
 
-  <!-- CONTROL BAR: daemon state, default provider, service actions -->
-  <div class="control-bar">
-    <div class="control-group" role="group" aria-label="Daemon service">
-      <span class="svc-status" id="svc-status">…</span>
-      <span class="control-label">Provider</span>
-      <div class="provider-toggle" id="provider-toggle" role="group" aria-label="Default provider">
-      </div>
-      <label class="control-label" for="reasoning-effort">Thinking</label>
-      <select class="input effort-select" id="reasoning-effort" aria-label="Fleet-wide thinking effort" onchange="stageReasoningEffort(this.value)">
-        <option value="">Default</option>
-        <option value="low">Low</option>
-        <option value="medium">Medium</option>
-        <option value="high">High</option>
-      </select>
-      <button class="btn btn-sm effort-confirm" id="effort-confirm" type="button" hidden onclick="confirmReasoningEffort()"></button>
-      <button class="btn btn-danger btn-sm" id="svc-stop-btn" type="button" onclick="svcAction('stop')">⏸ Stop</button>
-      <button class="btn btn-secondary btn-sm" id="svc-restart-btn" type="button" onclick="svcAction('restart')">↻ Restart</button>
-    </div>
-    <div class="control-spacer"></div>
-    <div class="control-group" role="group" aria-label="Manual triggers">
-      <button class="btn btn-primary btn-sm" id="hb-btn" type="button" onclick="triggerHeartbeat()">▶ Heartbeat</button>
-      <button class="btn btn-secondary btn-sm" id="pr-proc-btn" type="button" onclick="triggerPRProcessor()">↻ PR review</button>
-    </div>
-  </div>
+    <!-- References: what the board draws on, each naming its source. -->
+    <aside class="board-side" aria-label="References">
+      <section class="ref ref-grow">
+        <div class="ref-hdr">
+          <h2>Repositories</h2>
+          <span class="src" id="proj-summary">config</span>
+          <button class="btn btn-ghost btn-sm" type="button" onclick="openRepoPicker()">Add</button>
+        </div>
+        <div class="ref-body" id="project-list"><div class="empty">Loading…</div></div>
+      </section>
 
-  <!-- STATS STRIP -->
-  <div class="stats-bar" aria-label="Daemon statistics">
-    <div class="stat"><span class="stat-label">Running</span><span class="stat-val" id="stat-running">0</span></div>
-    <div class="stat"><span class="stat-label">Queued</span><span class="stat-val amber" id="stat-queued">0</span></div>
-    <div class="stat"><span class="stat-label">Done</span><span class="stat-val" id="stat-completed">0</span></div>
-    <div class="stat"><span class="stat-label">Pace</span><span class="stat-val" id="stat-pace">-</span></div>
-    <div class="stat"><span class="stat-label">SSE</span><span class="stat-val cyan" id="stat-sse">-</span></div>
-    <div class="stat"><span class="stat-label">CLI</span><span class="stat-val cyan" id="stat-adapter">-</span></div>
-    <div class="stat"><span class="stat-label">Pair</span><span class="stat-val cyan" id="stat-pair-adapters">-</span></div>
-    <div class="stat"><span class="stat-label">Uptime</span><span class="stat-val" id="stat-uptime">-</span></div>
-    <div class="stat"><span class="stat-label">Cost</span><span class="stat-val cyan" id="stat-cost">$0.00</span></div>
-  </div>
+      <section class="ref ref-grow">
+        <div class="ref-hdr">
+          <h2>Agent chat</h2>
+          <span class="src" id="chat-status">supervisor agent</span>
+        </div>
+        <div class="chat-col">
+          <div class="chat-messages" id="chat-messages" aria-live="polite" aria-label="Conversation with the supervisor agent"></div>
+          <div class="chat-input-area">
+            <input class="input chat-input" id="chat-input" type="text" placeholder="Message OpenSwarm…" aria-label="Message OpenSwarm"
+              autocomplete="off" onkeydown="if(event.key==='Enter'&&!event.isComposing&&event.keyCode!==229)sendChat()">
+            <button class="btn btn-primary btn-sm chat-send" id="chat-send" type="button" onclick="sendChat()">Send</button>
+          </div>
+        </div>
+      </section>
 
-  <!-- TAB BAR (narrow screens only) -->
-  <div class="tab-bar" role="tablist" aria-label="Sections">
-    <button class="tab active" type="button" data-tab="0">Repos</button>
-    <button class="tab" type="button" data-tab="1">Pipeline</button>
-    <button class="tab" type="button" data-tab="2">Chat</button>
-  </div>
+      <section class="ref">
+        <div class="ref-hdr">
+          <h2>PR processor</h2>
+          <span class="src" id="pr-proc-badge">config</span>
+        </div>
+        <div class="ref-body is-dense" id="pr-proc-body">Loading…</div>
+      </section>
 
-  <!-- MAIN GRID -->
-  <div class="main-grid">
+      <section class="ref" id="monitor-panel">
+        <div class="ref-hdr">
+          <h2>Monitors &amp; processes</h2>
+          <span class="src" id="monitor-count">process table</span>
+        </div>
+        <div class="ref-body is-dense" id="monitor-list"><div class="empty">No monitors or processes</div></div>
+      </section>
 
-    <!-- LEFT: REPOSITORIES -->
-    <div class="col">
-      <div class="panel">
-        <div class="panel-hdr">
-          <span class="panel-hdr-title">Repositories</span>
-          <span class="panel-hdr-badge" id="proj-summary"></span>
-          <button class="btn btn-ghost btn-sm" type="button" onclick="openRepoPicker()">+ Add</button>
+      <section class="ref" id="coordination-panel">
+        <div class="ref-hdr">
+          <h2>Agent coordination</h2>
+          <span class="src" id="coordination-count">coordination board</span>
         </div>
-        <div class="panel-body" id="project-list">
-          <div class="empty">Loading…</div>
-        </div>
-      </div>
-      <div class="panel" id="monitor-panel">
-        <div class="panel-hdr">
-          <span class="panel-hdr-title">Monitors &amp; processes</span>
-          <span class="panel-hdr-badge" id="monitor-count"></span>
-        </div>
-        <div class="panel-body" id="monitor-list">
-          <div class="empty">No monitors or processes</div>
-        </div>
-      </div>
-      <div class="panel" id="coordination-panel">
-        <div class="panel-hdr">
-          <span class="panel-hdr-title">Agent coordination</span>
-          <span class="panel-hdr-badge" id="coordination-count"></span>
-        </div>
-        <div class="panel-body" id="coordination-summary">
-          <div class="empty">No coordination events</div>
-        </div>
-        <a href="/orchestration" class="panel-foot-link">Open orchestration graph →</a>
-      </div>
-    </div>
+        <div class="ref-body is-dense" id="coordination-summary"><div class="empty">No coordination events</div></div>
+        <a href="/orchestration" class="ref-foot">Open the orchestration graph</a>
+      </section>
+    </aside>
 
     <!-- REPO PICKER DIALOG -->
     <div id="repo-picker" class="overlay" role="dialog" aria-modal="true" aria-labelledby="repo-picker-title">
       <div class="dialog">
         <div class="dialog-head">
           <h2 id="repo-picker-title">Add repository</h2>
-          <button type="button" class="btn btn-ghost btn-icon" aria-label="Close" onclick="closeRepoPicker()">✕</button>
+          <button type="button" class="btn btn-ghost btn-icon" aria-label="Close" onclick="closeRepoPicker()"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
         </div>
         <div class="dialog-toolbar">
           <input id="repo-search" class="input" type="text" placeholder="Filter repositories…" aria-label="Filter repositories"
@@ -114,8 +194,8 @@
           <div class="dialog-section-title">Scan paths</div>
           <div id="scan-paths-list"></div>
           <div class="dialog-actions">
-            <button class="btn btn-secondary btn-sm grow" type="button" onclick="openFolderBrowser()">📁 Browse for folder…</button>
-            <button class="btn btn-secondary btn-sm btn-icon" type="button" onclick="toggleManualPathInput()" title="Type a path manually" aria-label="Type a path manually">⌨</button>
+            <button class="btn btn-secondary btn-sm grow" type="button" onclick="openFolderBrowser()">Browse for a folder…</button>
+            <button class="btn btn-secondary btn-sm" type="button" onclick="toggleManualPathInput()">Type a path</button>
           </div>
           <div id="manual-path-row" class="dialog-actions">
             <input id="scan-path-input" class="input grow" type="text" placeholder="/absolute/path/to/scan" aria-label="Path to scan"
@@ -131,10 +211,10 @@
       <div class="dialog">
         <div class="dialog-head">
           <h2 id="folder-browser-title">Choose folder to scan</h2>
-          <button type="button" class="btn btn-ghost btn-icon" aria-label="Close" onclick="closeFolderBrowser()">✕</button>
+          <button type="button" class="btn btn-ghost btn-icon" aria-label="Close" onclick="closeFolderBrowser()"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
         </div>
         <div class="dialog-toolbar">
-          <button class="btn btn-secondary btn-sm" id="fb-up" type="button" onclick="folderBrowserUp()" title="Parent directory">↑ Up</button>
+          <button class="btn btn-secondary btn-sm" id="fb-up" type="button" onclick="folderBrowserUp()" >Parent folder</button>
           <input id="fb-path" class="input mono" type="text" readonly aria-label="Current folder">
         </div>
         <div id="fb-list" class="dialog-body"></div>
@@ -145,71 +225,7 @@
       </div>
     </div>
 
-    <!-- MIDDLE: PIPELINE + LOG -->
-    <div class="col">
-      <div class="panel panel-pipeline">
-        <div class="panel-hdr">
-          <span class="panel-hdr-title">Pipeline</span>
-          <span class="panel-hdr-badge" id="stage-count"></span>
-        </div>
-        <div class="panel-body" id="stage-list">
-          <div class="empty">No pipeline events</div>
-        </div>
-      </div>
-      <div class="panel">
-        <div class="panel-hdr">
-          <span class="panel-hdr-title">Live log</span>
-          <span class="panel-hdr-badge" id="log-count"></span>
-        </div>
-        <div class="log-tab-bar" id="log-tab-bar" role="tablist" aria-label="Log filter">
-          <button class="log-tab active" type="button" data-task="all" onclick="selectLogTab(null)">All</button>
-        </div>
-        <div class="panel-body log-area" id="log-list">
-          <div class="empty">No log output</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- RIGHT: PR PROCESSOR, STUCK, CHAT -->
-    <div class="col">
-      <div class="panel panel-auto">
-        <div class="panel-hdr">
-          <span class="panel-hdr-title">PR processor</span>
-          <span class="panel-hdr-badge" id="pr-proc-badge"></span>
-        </div>
-        <div class="panel-body is-dense">
-          <div id="pr-proc-body" class="muted">Loading…</div>
-        </div>
-      </div>
-
-      <div class="panel panel-stuck">
-        <div class="panel-hdr">
-          <span class="panel-hdr-title">Stuck / failed</span>
-          <span class="panel-hdr-badge" id="stuck-badge">0</span>
-          <button class="btn btn-ghost btn-sm" type="button" onclick="restartStuckIssues()" id="restart-stuck-btn">↻ Restart all</button>
-        </div>
-        <div class="panel-body is-dense">
-          <div id="stuck-list" class="muted">Loading…</div>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-hdr">
-          <span class="panel-hdr-title">Agent chat</span>
-          <span class="panel-hdr-badge" id="chat-status"></span>
-        </div>
-        <div class="chat-col">
-          <div class="chat-messages" id="chat-messages" aria-live="polite" aria-label="Conversation with the supervisor agent"></div>
-          <div class="chat-input-area">
-            <input class="input chat-input" id="chat-input" type="text" placeholder="Message OpenSwarm…" aria-label="Message OpenSwarm"
-              autocomplete="off" onkeydown="if(event.key==='Enter'&&!event.isComposing&&event.keyCode!==229)sendChat()">
-            <button class="btn btn-primary btn-sm chat-send" id="chat-send" type="button" onclick="sendChat()">Send</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-  </div>
+  </main>
   <script src="/static/js/supervisor.js"></script>
   <script type="module">
     import { mountShell } from '/static/js/shell.mjs';

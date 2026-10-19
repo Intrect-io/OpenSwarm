@@ -89,7 +89,7 @@ describe('Supervisor service actions report the daemon\'s answer', () => {
     expect(btn.getAttribute('title')).toBe('systemctl: not found');
     expect(page.doc.body.textContent).toContain('Service stop failed: systemctl: not found');
     page.fire(5000);
-    expect(btn.textContent).toBe('⏸ Stop');
+    expect(btn.textContent).toBe('Stop daemon');
   });
 
   it('says the request was sent when the daemon accepts', async () => {
@@ -119,7 +119,7 @@ describe('Supervisor heartbeat button cannot hang', () => {
     await page.settle();
     await call(page, 'triggerHeartbeat');
     const btn = page.doc.getElementById('hb-btn') as HTMLButtonElement;
-    expect(btn.textContent).toBe('⟳ Running…');
+    expect(btn.textContent).toBe('Starting…');
     expect(btn.disabled).toBe(true);
     page.fire(15000);
     expect(btn.textContent).toBe('No response');
@@ -132,35 +132,39 @@ describe('Supervisor heartbeat button cannot hang', () => {
     await call(page, 'triggerHeartbeat');
     page.emit({ type: 'heartbeat' });
     const btn = page.doc.getElementById('hb-btn') as HTMLButtonElement;
-    expect(btn.textContent).toBe('▶ Heartbeat');
+    expect(btn.textContent).toBe('Heartbeat');
     expect(btn.disabled).toBe(false);
     page.fire(15000);
-    expect(btn.textContent).toBe('▶ Heartbeat');
+    expect(btn.textContent).toBe('Heartbeat');
   });
 });
 
 describe('Supervisor fleet-wide switches take two presses', () => {
-  it('arms a provider on the first press and switches on the second', async () => {
-    const page = load();
+  it('stages a provider and switches the fleet only on confirm', async () => {
+    const page = load((url) => (url === '/api/stats' ? { status: 200, body: { adapters: { defaultAdapter: 'codex' } } } : undefined));
     await page.settle();
-    const btn = page.doc.getElementById('provider-openrouter')!;
-    call(page, 'switchProvider', 'openrouter');
-    expect(btn.textContent).toBe('Switch fleet?');
+    const select = page.doc.getElementById('provider-select') as HTMLSelectElement;
+    const confirm = page.doc.getElementById('provider-confirm') as HTMLButtonElement;
+    select.value = 'openrouter';
+    call(page, 'stageProvider', 'openrouter');
+    expect(confirm.hidden).toBe(false);
+    expect(confirm.textContent).toBe('Switch fleet to openrouter?');
     expect(posts(page, '/api/provider')).toHaveLength(0);
-    call(page, 'switchProvider', 'openrouter');
+    call(page, 'confirmProvider');
     await page.settle();
     expect(posts(page, '/api/provider')).toHaveLength(1);
     expect(JSON.parse(posts(page, '/api/provider')[0]!.init!.body as string)).toEqual({ provider: 'openrouter' });
-    expect(btn.textContent).toBe('OpenRouter');
   });
 
-  it('keeps only one provider armed at a time', async () => {
-    const page = load();
+  it('lets an unconfirmed provider lapse back to the one the fleet uses', async () => {
+    const page = load((url) => (url === '/api/stats' ? { status: 200, body: { adapters: { defaultAdapter: 'codex' } } } : undefined));
     await page.settle();
-    call(page, 'switchProvider', 'openrouter');
-    call(page, 'switchProvider', 'codex');
-    expect(page.doc.getElementById('provider-openrouter')!.textContent).toBe('OpenRouter');
-    expect(page.doc.getElementById('provider-codex')!.textContent).toBe('Switch fleet?');
+    const select = page.doc.getElementById('provider-select') as HTMLSelectElement;
+    select.value = 'openrouter';
+    call(page, 'stageProvider', 'openrouter');
+    page.fire(6000);
+    expect(select.value).toBe('codex');
+    expect((page.doc.getElementById('provider-confirm') as HTMLButtonElement).hidden).toBe(true);
     expect(posts(page, '/api/provider')).toHaveLength(0);
   });
 
@@ -198,14 +202,13 @@ describe('Supervisor fleet-wide switches take two presses', () => {
 
 // Ported from the server-side source checks that died with dashboardHtml.ts:
 // these now run the behaviour instead of matching the emitted string.
-describe('Supervisor provider toggle and stage rows', () => {
-  it('builds one provider button per registry entry and marks the default (INT-3284)', async () => {
+describe('Supervisor provider select and stage rows', () => {
+  it('lists every registry provider in the select and selects the default (INT-3284)', async () => {
     const page = load((url) => (url === '/api/stats' ? { status: 200, body: { adapters: { defaultAdapter: 'openrouter' } } } : undefined));
     await page.settle();
-    const buttons = [...page.doc.querySelectorAll('#provider-toggle .provider-btn')];
-    expect(buttons.map((b) => b.id)).toEqual(['provider-codex', 'provider-openrouter']);
-    expect(buttons.map((b) => b.textContent)).toEqual(['Codex', 'OpenRouter']);
-    expect(buttons.map((b) => b.classList.contains('active'))).toEqual([false, true]);
+    const select = page.doc.getElementById('provider-select') as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(['codex', 'openrouter']);
+    expect(select.value).toBe('openrouter');
   });
 
   it('escapes a stage status in both the class and the label (AGT-3476)', async () => {
@@ -218,5 +221,84 @@ describe('Supervisor provider toggle and stage rows', () => {
     await page.settle();
     expect(page.doc.querySelector('#stage-list img')).toBeNull();
     expect(page.doc.getElementById('stage-list')!.textContent).toContain(status);
+  });
+});
+
+describe('Supervisor departure board', () => {
+  const running = {
+    running: [{ task: { id: 'u1', issueIdentifier: 'AX-1777', title: 'Import statements' }, projectPath: '/r/cgf-portal', startedAt: Date.now() - 4 * 60_000, stage: 'worker' }],
+    queued: [{ task: { id: 'u2', issueIdentifier: 'AX-1801', title: 'Batch guard' }, projectPath: '/r/kyte', queuedAt: Date.now() - 60_000 }],
+  };
+
+  it('lists running and queued runs from the scheduler', async () => {
+    const page = load((url) => (url === '/api/tasks' ? { status: 200, body: running } : undefined));
+    await page.settle();
+    const rows = [...page.doc.querySelectorAll('#board-rows tr')];
+    expect(rows.map((r) => r.querySelector('.c-run')!.textContent)).toEqual(['AX-1777', 'AX-1801']);
+    expect(rows[0]!.querySelector('.c-repo')!.textContent).toBe('cgf-portal');
+    expect(rows[0]!.querySelector('.c-status')!.textContent).toBe('Running · 4m');
+    expect(rows[0]!.querySelector('.stg.now')!.textContent).toBe('worker');
+    expect(rows[1]!.querySelector('.c-status')!.textContent).toBe('Queued · 1m');
+    expect((page.doc.getElementById('board-empty') as HTMLElement).hidden).toBe(true);
+  });
+
+  it('marks a run that ended in failure and counts it', async () => {
+    const page = load();
+    await page.settle();
+    page.emit({ type: 'task:started', data: { taskId: 'u9', title: 'Flaky', issueIdentifier: 'AX-9' } });
+    page.emit({ type: 'task:completed', data: { taskId: 'u9', success: false, duration: 1000 } });
+    const row = page.doc.querySelector('#board-rows tr.is-failed')!;
+    expect(row.querySelector('.c-status')!.textContent).toBe('Failed');
+    expect(page.doc.getElementById('stat-failed')!.textContent).toBe('1');
+  });
+
+  it('says so instead of an empty table when nothing runs', async () => {
+    const page = load();
+    await page.settle();
+    expect((page.doc.getElementById('board-empty') as HTMLElement).hidden).toBe(false);
+  });
+});
+
+describe('Supervisor notice band', () => {
+  it('stays hidden when nothing waits on the operator', async () => {
+    const page = load((url) => (url === '/api/shell-status' ? { status: 200, body: { needsYou: { questions: 0, parked: 0, total: 0 } } } : undefined));
+    await page.settle();
+    expect((page.doc.getElementById('notice') as HTMLElement).hidden).toBe(true);
+  });
+
+  it('uses the shell status counts and lists the open question', async () => {
+    const page = load((url) => {
+      if (url === '/api/shell-status') return { status: 200, body: { needsYou: { questions: 1, parked: 2, total: 3 } } };
+      if (url === '/api/coordination') return { status: 200, body: { events: [{ id: 'e1', seq: 1, correlationId: 'c1', kind: 'human-question', status: 'open', actor: 'sable', actorRole: 'worker', taskLabel: 'AX-1812', repository: '/r/cgf-portal', summary: 'uv is missing?', timestamp: Date.now() }] } };
+      return undefined;
+    });
+    await page.settle();
+    expect((page.doc.getElementById('notice') as HTMLElement).hidden).toBe(false);
+    expect(page.doc.getElementById('notice-title')!.textContent).toBe('3 need you');
+    expect(page.doc.getElementById('notice-breakdown')!.textContent).toBe('1 question · 2 parked runs');
+    expect(page.doc.getElementById('stat-needs')!.textContent).toBe('3');
+    expect(page.doc.getElementById('notice-rows')!.textContent).toContain('sable (worker): uv is missing?');
+    expect(page.doc.querySelector('#notice-rows a.nb')!.getAttribute('href')).toBe('/chat');
+  });
+
+  it('does not read a tracker error as nothing stuck', async () => {
+    const page = load((url) => (url === '/api/stuck-issues' ? { status: 500, body: { error: 'Linear unreachable' } } : undefined));
+    await page.settle();
+    page.fire(3000);
+    await page.settle();
+    expect((page.doc.getElementById('notice') as HTMLElement).hidden).toBe(false);
+    expect(page.doc.getElementById('stuck-list')!.textContent).toContain('did not answer');
+  });
+
+  it('links a tracker issue only when its URL is http(s)', async () => {
+    const page = load((url) => (url === '/api/stuck-issues' ? { status: 200, body: { stuckIssues: [], failedIssues: [
+      { id: 'a', identifier: 'AX-1', title: 'ok', url: 'https://linear.app/x/AX-1', reason: 'failed' },
+      { id: 'b', identifier: 'AX-2', title: 'bad', url: 'javascript:alert(1)', reason: 'failed' },
+    ] } } : undefined));
+    await page.settle();
+    page.fire(3000);
+    await page.settle();
+    const links = [...page.doc.querySelectorAll('#stuck-list a')].map((a) => a.getAttribute('href'));
+    expect(links).toEqual(['https://linear.app/x/AX-1']);
   });
 });
