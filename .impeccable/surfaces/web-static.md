@@ -70,3 +70,47 @@ migration + hierarchy → 7 copy pass (terms, IDs behind copy, English, time for
 tooltips) → 8 remaining layouts (Threads compose button, Orchestration legend/idle lanes,
 12 px floor, Usage empty state, Issues consolidation) → 9 first-run and Warehouse setup
 guidance → 10 polish.
+
+## Direction contract
+
+THESIS: Every run is a departure. The Supervisor is a station board. Active runs are set in
+timetable columns: started, run, title, destination repo, platform worktree, agent·model,
+stage, status. Anything that needs the operator is posted above the board as a yellow
+platform-change notice. It refuses the category default: equal-weight bordered cards in
+borrowed GitHub dark.
+
+OWN-WORLD: Dark is the station board: navy ground (#0b1f4b), a deeper navy shell bar,
+white ink, blue-grey secondary. Light is the printed timetable: white ground, navy ink. Two
+colours are reserved:
+- Timetable yellow (#ffd400) appears only on what needs the operator: the notice band and
+  the needs-you count. On white it is a fill, never text.
+- Vermilion means cancelled or failed, and nothing else.
+
+Type is Barlow, self-hosted at 400/500/600, with tabular numerals everywhere. Column heads
+are uppercase and tracked. Heads sit on a 2px rule and rows are split by hairlines. Corners
+are 3px. There are no cards and no shadows.
+
+STORY: The operator reads the yellow band first, because anything yellow needs them. Then
+the board: what is running and what is late. Then they act from the controls row. A healthy
+swarm shows no yellow band and one calm status line.
+
+FIRST VIEWPORT:
+- Shell bar: brand, nav with an underlined active item, theme switch.
+- Status line: four facts, each with its source, and the yellow needs-you link at the right.
+- Full-width yellow notice band: the count as its headline, then up to three rows (tag,
+  run, repo, message, when, actions).
+- A strip of fleet figures.
+- The departure board table, with the time column large and right-aligned.
+- A three-column live-log strip.
+- Controls: routine on the left; Service (Stop/Restart) on the right, after a divider.
+
+The count is a sentence inside the notice band, not a hero metric: no supporting-stat
+cluster sits around it. At 390 px the band comes first, and board rows stack as time +
+run / title / status.
+
+FORM: Departure Board (SBB and Korail timetables), position 1 on the ordered list. The
+signature move is the split-flap status change: when a run's status or stage changes, that
+cell flips once (a short vertical clip transition, instant under reduced motion).
+seed:a6b69a4a12b97b10
+
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance

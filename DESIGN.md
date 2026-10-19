@@ -1,207 +1,80 @@
 ---
-name: OpenSwarm Dashboard (incumbent, 2026-10)
-description: Record of the shipped GitHub-Primer-derived system; the anti-reference for the 2026-10 redesign.
-colors:
-  canvas-dark: "#0d1117"
-  surface-dark: "#161b22"
-  elevated-dark: "#1c2128"
-  code-ground-dark: "#0b0f14"
-  ink-dark: "#e6edf3"
-  ink-secondary-dark: "#b1bac4"
-  ink-muted-dark: "#8b949e"
-  hairline-dark: "#30363d"
-  hairline-strong-dark: "#484f58"
-  primer-blue: "#58a6ff"
-  primer-blue-hover: "#79c0ff"
-  primer-red: "#f85149"
-  primer-amber: "#d29922"
-  primer-green: "#3fb950"
-  primer-violet: "#d2a8ff"
-  canvas-light: "#ffffff"
-  surface-light: "#f6f8fa"
-  ink-light: "#1f2328"
-  ink-muted-light: "#656d76"
-  hairline-light: "#d0d7de"
-  primer-blue-light: "#0969da"
-  primer-red-light: "#cf222e"
-  primer-amber-light: "#9a6700"
-  primer-green-light: "#1a7f37"
-typography:
-  title:
-    fontFamily: "Inter Variable, Inter, -apple-system, Segoe UI, Apple SD Gothic Neo, sans-serif"
-    fontSize: "20px"
-    fontWeight: 600
-    lineHeight: 1.3
-  panel-title:
-    fontFamily: "Inter Variable, Inter, sans-serif"
-    fontSize: "15px"
-    fontWeight: 600
-    lineHeight: 1.3
-  body:
-    fontFamily: "Inter Variable, Inter, sans-serif"
-    fontSize: "15px"
-    fontWeight: 400
-    lineHeight: 1.6
-  label:
-    fontFamily: "Inter Variable, Inter, sans-serif"
-    fontSize: "12px"
-    fontWeight: 400
-    lineHeight: 1.3
-  mono:
-    fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace"
-    fontSize: "12px"
-rounded:
-  sm: "6px"
-  md: "10px"
-  lg: "16px"
-  full: "9999px"
-spacing:
-  "1": "4px"
-  "2": "8px"
-  "3": "12px"
-  "4": "16px"
-  "6": "24px"
-  "8": "32px"
-components:
-  button-primary:
-    backgroundColor: "{colors.primer-blue}"
-    textColor: "{colors.canvas-dark}"
-    rounded: "{rounded.md}"
-    height: "32px"
-  button-secondary:
-    backgroundColor: "transparent"
-    textColor: "{colors.ink-dark}"
-    rounded: "{rounded.md}"
-    height: "32px"
-  button-danger:
-    backgroundColor: "transparent"
-    textColor: "{colors.primer-red}"
-    rounded: "{rounded.md}"
-  panel:
-    backgroundColor: "{colors.surface-dark}"
-    rounded: "{rounded.md}"
-  nav-link-active:
-    backgroundColor: "rgba(88, 166, 255, 0.12)"
-    textColor: "{colors.primer-blue}"
-    rounded: "{rounded.md}"
+name: OpenSwarm Dashboard — Departure Board
+description: Every run is a departure; what needs the operator is posted in timetable yellow.
 ---
 
-<!-- INCUMBENT RECORD: written 2026-10-19 by `/impeccable document` (scan mode) from
-     web/static/css/tokens.css + shell.css before the redesign. Descriptive language is
-     inferred, not interviewed: this system is the anti-reference for the redesign and is
-     replaced in the next step, not extended. Keep it as evidence of what is being left. -->
+<!-- SEED: established with the user before implementation (2026-10-19 direction round,
+     seed:a6b69a4a12b97b10); re-run /impeccable document once the Supervisor is rebuilt to
+     capture the actual tokens and components. Token values live in web/static/css/tokens.css.
+     The replaced Primer-derived system is recorded in docs/design/incumbent-2026-10.md. -->
 
-# Design System: OpenSwarm Dashboard (incumbent)
+# Design System: OpenSwarm Dashboard (Departure Board)
 
 ## Overview
 
-**Creative North Star: "The Borrowed Console"**
+**Creative North Star: "The Departure Board"**
 
-The shipped dashboard is a faithful GitHub Primer skin: Primer's dark and light canvases,
-its blue accent, its red/amber/green status trio, Inter, and 10 px rounded bordered panels.
-It is calm, legible and well-engineered, with semantic tokens, light as a true value swap,
-and a build test that forbids colour literals outside `tokens.css`. But nothing in it is
-about running a swarm of agents. An unrelated developer tool could ship the same chrome.
+The swarm reads like a station. Active runs are departures set in timetable columns:
+started, run, title, destination repository, platform worktree, agent and model, stage,
+status. Anything that needs the operator is posted above the board as a yellow
+platform-change notice. A healthy swarm shows no yellow at all.
 
-The product-specific moments come from content, not from the system: swimlanes named
-Operator / Control plane / Coordination / Tasks, one hue per agent role shared by chat,
-graph and legend, and worker → reviewer → tester stage ticks on work cards.
+The world lends type, palette, density and one signature move. Navigation and controls
+stay standard web controls.
 
 **Key Characteristics:**
-- Primer palette, dark-first, light as a value swap.
-- Uniform 10 px-radius bordered panels at equal weight; no page heading.
-- Pill-shaped tab links in a top bar that each page copies by hand.
-- Status as small tinted pills; `--role-human` shares `--danger`'s red.
-- Dense 12 px floor with 10–11 px exceptions on chips, timestamps and badges.
+- Dark is the station board: navy ground, white ink. Light is the printed timetable: white
+  ground, navy ink, under the same navy shell band.
+- Timetable yellow is reserved for what needs the operator; vermilion means failed or
+  cancelled, nothing else.
+- Tabular numerals everywhere; uppercase tracked column heads; rules, not cards.
+- Signature move: the split-flap status change. When a run's status or stage changes, that
+  cell flips once.
 
 ## Colors
 
-GitHub's own Primer values, used semantically.
-
-### Primary
-- **Primer Blue** (#58a6ff dark / #0969da light): accent, links, active nav, primary
-  buttons, the worker role and chart series 1. One hue doing five jobs.
-
-### Neutral
-- **Canvas** (#0d1117 / #ffffff), **Surface** (#161b22 / #f6f8fa), **Elevated** (#1c2128):
-  page, panels, cards.
-- **Ink** (#e6edf3 / #1f2328), **Secondary ink** (#b1bac4), **Muted ink** (#8b949e /
-  #656d76): text tiers.
-- **Hairline** (#30363d / #d0d7de): every panel and control border.
-
-### Status and roles
-- **Primer Red** (#f85149 / #cf222e): danger, failed status, **and the human/operator role**.
-- **Primer Amber** (#d29922 / #9a6700): warning, pending, orchestrator role.
-- **Primer Green** (#3fb950 / #1a7f37): success, reviewer role.
-- **Primer Violet** (#d2a8ff / #8250df): review-agent role, route edges.
+Two grounds, one ink, two reserved signals.
 
 ### Named Rules
+**The Yellow Means You Rule.** Timetable yellow (`--needs`) appears only on things waiting
+for the operator. On a white ground it is a fill, never text.
+
+**The Vermilion Means Stopped Rule.** `--danger` marks failed, cancelled and destructive
+actions only. The operator's role colour is the yellow family, never the failure red.
+
 **The Literal Lives Once Rule.** Every colour literal lives in `tokens.css`; `tokens.test.ts`
-fails the build otherwise. (Keep this rule through the redesign.)
+and `tokenContrast.test.ts` gate placement and WCAG 2.2 AA contrast in both themes.
 
 ## Typography
 
-**Body Font:** Inter Variable (with system and Korean fallbacks)
-**Mono Font:** ui-monospace stack
+**UI Font:** Barlow (self-hosted, SIL OFL) at 400/500/600, system and Korean fallbacks.
+**Mono Font:** system monospace, for code, logs and run identifiers only.
 
-**Character:** neutral product sans with a mono for identifiers. No display face, no
-distinct page title on any page.
-
-### Hierarchy
-- **Title** (600, 20 px, 1.3): defined but unused by any page header.
-- **Panel title** (600, 15 px, 1.3): every panel header, so every panel looks equally important.
-- **Body** (400, 15 px, 1.6).
-- **Label** (400, 12 px): metadata, chips, control labels; 10–11 px in `.task-chip`,
-  `.tree-session .time`, `.thread-card .badge`, Supervisor coordination summary.
-- **Lane label** (mono, letter-spaced, ~9–10 px uppercase): orchestration tiers.
+**Character:** a signage grotesk set like a timetable: large right-aligned times, quiet
+column heads, nothing below 12 px.
 
 ## Layout
 
-4 pt spacing scale (4–48 px). A 48 px sticky top bar (89 px when the nav wraps below
-1100 px). Pages are fixed-viewport grids of equal panels (Supervisor: three columns of
-seven panels under a 17-control bar and a 9-metric strip). Below 900 px or on coarse
-pointers, controls grow to 44 px; below 480 px the page-title label hides. The mobile nav
-scrolls horizontally with no overflow cue.
+Full-width rows on a 4 pt rhythm. Sections are separated by rules and space, never boxed.
+On a phone the notice band comes first and board rows stack.
 
 ## Elevation & Depth
 
-Flat. Depth comes from three tonal steps (canvas → surface → elevated) and 1 px hairlines.
-The only blur is the top bar's translucent backdrop. No shadow vocabulary.
+Flat. Depth is the step from shell band to ground to elevated control, plus 1–2 px rules.
+No shadows.
 
 ## Shapes
 
-Gently rounded, uniform: 6 px (inline code, small), 10 px (buttons, inputs, panels,
-nav pills), 16 px (large), full (chips, status pills). Every container has a 1 px border.
-
-## Components
-
-### Buttons
-- **Shape:** 10 px radius, 32 px tall (28 px small; 44 px on touch).
-- **Primary:** Primer Blue fill, dark ink. **Secondary:** transparent with hairline.
-  **Danger:** red outline; armed state fills red (two-press confirm).
-- **Focus:** 2 px canvas gap + 2 px accent ring.
-
-### Navigation
-- Brand (🐝 + "OpenSwarm"), a page-title label duplicating the active tab, then pill links;
-  active link is accent text on accent-subtle (4.3:1 in light theme, below AA).
-- Hand-copied into each of seven HTML files; three different orders in production.
-
-### Panels
-- Surface background, hairline border, 10 px radius, 36 px header with 15 px bold title.
-
-### Status pills
-- Tinted fill + coloured text + dot ("LIVE", "Unknown", "connected"); success/danger
-  subtle pairs measure 4.1–4.4:1 in light theme.
+Printed edges: 2–3 px corners on controls and tags; full rounding only on status dots.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** keep semantic token names and the single-file literal rule.
-- **Do** keep one colour per agent role, always with a text label.
-- **Do** keep in-place two-press confirmation for fleet-wide and destructive actions.
+- **Do** post everything that needs the operator in the yellow notice band, with its action.
+- **Do** keep times, counts and money in tabular numerals.
+- **Do** name the source of every status, count and colour.
 
 ### Don't:
-- **Don't** carry the Primer palette forward; it is someone else's identity.
-- **Don't** give every panel the same weight and title size.
-- **Don't** let the operator role share the danger red.
-- **Don't** go below 12 px for anything a person needs to read.
+- **Don't** use yellow for decoration, warnings or delays; delays are `--warning` orange.
+- **Don't** box sections in cards or add shadows.
+- **Don't** make the board a costume: no fake split-flap tiles, no LED dot fonts.
