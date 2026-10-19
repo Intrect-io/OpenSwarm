@@ -212,7 +212,7 @@ button:disabled { cursor: default; }
   text-decoration: none;
 }
 .nav-more-menu a:hover { color: var(--fg-primary); background: var(--bg-hover); }
-.nav-more-menu a[aria-current="page"] { color: var(--fg-primary); box-shadow: inset 3px 0 0 var(--fg-primary); }
+.nav-more-menu a[aria-current="page"] { color: var(--fg-primary); background: var(--bg-active); }
 .topbar-spacer { flex: 1; }
 .topbar-actions { display: flex; align-items: center; gap: var(--space-2); }
 
@@ -408,7 +408,8 @@ button:disabled { cursor: default; }
   padding: 0 var(--space-2);
   min-height: 20px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-full);
+  /* Tags are squared like the board's route plates, never pills. */
+  border-radius: var(--radius-sm);
   color: var(--fg-muted);
   font-size: var(--text-xs);
   line-height: 1;
@@ -421,11 +422,10 @@ button:disabled { cursor: default; }
 
 /* ── Cards & panels ──────────────────────────────────────────────────── */
 
-/* Border, never shadow: shadows vanish on a dark ground (§4.1). */
+/* Rules, not cards (DESIGN.md): a section is set off by a 1px rule above it
+   and space, never boxed on a raised surface. */
 .card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 0;

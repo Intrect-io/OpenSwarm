@@ -6,9 +6,10 @@
 // reload recovers in-flight work; console history comes from the SSE replay
 // buffer alone (see main.mjs — seeding it twice duplicated every line).
 
+import { ICONS } from './icons.mjs';
 import { PendingLogBuffer } from './pendingLogBuffer.mjs';
 
-const STATUS_GLYPH = { start: '▸', complete: '✓', fail: '✗' };
+const STATUS_ICON = { start: 'play', complete: 'check', fail: 'cross' };
 
 // Ring buffer per card. The agent stream is chatty (one line per tool call and
 // per reasoning chunk); an unbounded console would grow without limit across a
@@ -60,7 +61,7 @@ export class WorkCards {
       card.stages.set(data.stage, line);
     }
     line.dataset.status = data.status;
-    line.querySelector('.glyph').textContent = STATUS_GLYPH[data.status] ?? '·';
+    line.querySelector('.glyph').innerHTML = ICONS[STATUS_ICON[data.status] ?? 'dot'];
     const details = [];
     if (data.status === 'complete' && data.summary) details.push(data.summary);
     if (data.durationMs) details.push(`${Math.round(data.durationMs / 1000)}s`);

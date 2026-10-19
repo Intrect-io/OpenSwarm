@@ -253,7 +253,7 @@ async function fetchPRProcessorStatus() {
     html += '<div><span style="color: var(--fg-muted);">Next run:</span> <span style="color: var(--text);">' + formatTime(data.nextRun) + '</span></div>';
 
     if (data.conflictResolverEnabled) {
-      html += '<div style="color: var(--accent); font-size:12px; margin-top: 4px;">✓ Conflict Resolver: ON</div>';
+      html += '<div style="color: var(--accent); font-size:var(--text-xs); margin-top: 4px;">Conflict resolver on</div>';
     }
 
     html += '</div>';
@@ -704,8 +704,8 @@ function renderProjects() {
           "<div class=\"proj-name\">" + escapeHtml(p.name) + "</div>" +
           "<div class=\"proj-path\">" + escapeHtml(p.path) + "</div>" +
           (p.git ? "<div class=\"git-info\">" +
-            "\u2387 <span class=\"git-branch-name\">" + escapeHtml(p.git.branch) + "</span>" +
-            (p.git.hasChanges ? " <span class=\"git-dirty\">\u25CF " + p.git.uncommittedFiles + "</span>" : "") +
+            "<span class=\"git-branch-name\">" + escapeHtml(p.git.branch) + "</span>" +
+            (p.git.hasChanges ? " <span class=\"git-dirty\">" + p.git.uncommittedFiles + " changed</span>" : "") +
             ((p.git.ahead || p.git.behind) ? " <span class=\"git-sync\">" +
               (p.git.ahead ? "\u2191" + p.git.ahead : "") +
               (p.git.behind ? " \u2193" + p.git.behind : "") +
@@ -942,7 +942,7 @@ function renderStages() {
       inlineSummary = escapeHtml(r.summary);
       if (r.filesChangedCount > 0) inlineSummary += " · " + r.filesChangedCount + " files";
     } else if (r.passed != null || r.failed != null) {
-      inlineSummary = "✓ " + (r.passed || 0) + "  ✗ " + (r.failed || 0);
+      inlineSummary = (r.passed || 0) + " passed · " + (r.failed || 0) + " failed";
     } else if (r.error) {
       inlineSummary = "<span style=\"color:var(--danger)\">" + escapeHtml(r.error.slice(0, 120)) + "</span>";
     }
@@ -1010,22 +1010,36 @@ function addLogLine(data) {
   renderLog();
 }
 
+// Log marks are drawn, not typed: a unicode glyph renders in the OS fallback
+// font at its own weight (step 10). Same strokes as icons.mjs, which this
+// classic script cannot import.
+var LOG_ICON = {
+  play: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M4 2.5v7L9 6z" fill="currentColor"/></svg>',
+  check: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.2 5 8.6l4.5-5"/></svg>',
+  cross: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3 3 9"/></svg>',
+  block: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="6" cy="6" r="4"/><path d="M3.2 8.8l5.6-5.6"/></svg>',
+  bar: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><rect x="2" y="2" width="8" height="8" fill="currentColor"/></svg>',
+  dot: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="1.5" fill="currentColor"/></svg>',
+};
+// The daemon prefixes some lines with its own glyph; the drawn mark replaces it.
+var LOG_PREFIX = /^[■▸▶✓✗⟳⛔—]\s*/;
+
 function classifyLog(line) {
   if (!line) return { cls: "log-spacer", icon: "" };
   if (line === "───") return { cls: "log-separator", icon: "" };
-  if (/^■ /.test(line)) return { cls: "log-heading2", icon: "■" };
+  if (/^■ /.test(line)) return { cls: "log-heading2", icon: LOG_ICON.bar };
   if (/^[┌└│]/.test(line)) return { cls: "log-code", icon: "" };
-  if (/^▸ /.test(line)) return { cls: "log-tool", icon: "▸" };
-  if (/^▶|Heartbeat started|Stage started|Iteration [0-9]/.test(line)) return { cls: "log-heading", icon: "▶" };
-  if (/^✓|success=true|approved|completed|Done|Created sub-issue/.test(line)) return { cls: "log-success", icon: "✓" };
-  if (/^✗|success=false|failed|error|Error|rejected|exceeded/.test(line)) return { cls: "log-fail", icon: "✗" };
-  if (/^⟳|Fetching|Decomposing|Running|Scheduling|Spawning/.test(line)) return { cls: "", icon: "⟳" };
-  if (/^⛔|Blocked|Time window|blocked/.test(line)) return { cls: "log-warn", icon: "⛔" };
-  if (/^—|No task|already completed|no log/.test(line)) return { cls: "log-system", icon: "—" };
+  if (/^▸ /.test(line)) return { cls: "log-tool", icon: LOG_ICON.play };
+  if (/^▶|Heartbeat started|Stage started|Iteration [0-9]/.test(line)) return { cls: "log-heading", icon: LOG_ICON.play };
+  if (/^✓|success=true|approved|completed|Done|Created sub-issue/.test(line)) return { cls: "log-success", icon: LOG_ICON.check };
+  if (/^✗|success=false|failed|error|Error|rejected|exceeded/.test(line)) return { cls: "log-fail", icon: LOG_ICON.cross };
+  if (/^⟳|Fetching|Decomposing|Running|Scheduling|Spawning/.test(line)) return { cls: "", icon: LOG_ICON.dot };
+  if (/^⛔|Blocked|Time window|blocked/.test(line)) return { cls: "log-warn", icon: LOG_ICON.block };
+  if (/^—|No task|already completed|no log/.test(line)) return { cls: "log-system", icon: LOG_ICON.dot };
   // Marks stay typographic (the board's craft floor bans emoji icons); the
   // remaining categories differ by colour class alone.
   if (/Direct path|Project|path found/.test(line)) return { cls: "log-system", icon: "·" };
-  return { cls: "", icon: "·" };
+  return { cls: "", icon: LOG_ICON.dot };
 }
 
 function formatLogText(raw) {
@@ -1093,10 +1107,8 @@ function renderLog() {
     if (cls === "log-separator") return "<div class=\"log-line log-separator\"><span class=\"ltext\">───────────────────</span></div>";
     const time = fmtLogTime(l._ts);
     const stage = l.stage && l.stage !== "heartbeat" ? l.stage : "";
-    // heading2: strip ■ prefix (icon handles it)
-    const displayLine = cls === "log-heading2" ? (l.line || "").replace(/^■ /, "") : l.line;
-    // tool: strip ▸ prefix
-    const displayLine2 = cls === "log-tool" ? (displayLine || "").replace(/^▸ /, "") : displayLine;
+    // The drawn icon stands in for the daemon's own leading glyph.
+    const displayLine2 = cls === "log-code" ? l.line : (l.line || "").replace(LOG_PREFIX, "");
     return (
       "<div class=\"log-line " + cls + "\">" +
       "<span class=\"ltime\">" + time + "</span>" +

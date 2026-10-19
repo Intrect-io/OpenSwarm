@@ -6,7 +6,6 @@
 //
 // DOM-free formatting so it is unit-testable; the caller owns the element.
 
-const BAR_SEGMENTS = 4;
 
 /** "3h" / "45m" / "30s" until an epoch-SECONDS reset, or '' when unknown/past. */
 export function formatResetIn(resetsAtSeconds, nowMs) {
@@ -16,13 +15,6 @@ export function formatResetIn(resetsAtSeconds, nowMs) {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   return `${Math.round(seconds / 3600)}h`;
-}
-
-/** Filled/empty block bar, e.g. 58% → "▓▓░░". */
-export function formatBar(usedPercent) {
-  const clamped = Math.max(0, Math.min(100, usedPercent));
-  const filled = Math.round((clamped / 100) * BAR_SEGMENTS);
-  return '▓'.repeat(filled) + '░'.repeat(BAR_SEGMENTS - filled);
 }
 
 /**
@@ -35,7 +27,9 @@ export function formatObservation(observation, nowMs = Date.now()) {
   }
   const resetIn = formatResetIn(observation.resetsAt, nowMs);
   const percent = `${Math.round(observation.usedPercent)}%`;
-  return `${observation.provider} ${formatBar(observation.usedPercent)} ${percent}${resetIn ? ` · ${resetIn}` : ''}`;
+  // The percentage alone: the old ▓░ block bar drew in the OS fallback font
+  // and said nothing the number did not (step 10).
+  return `${observation.provider} ${percent}${resetIn ? ` · ${resetIn}` : ''}`;
 }
 
 export function formatQuota(snapshot, nowMs = Date.now()) {
@@ -43,7 +37,7 @@ export function formatQuota(snapshot, nowMs = Date.now()) {
     .map((observation) => formatObservation(observation, nowMs))
     .filter(Boolean);
   const held = typeof snapshot?.schedulerHoldUntil === 'number' && snapshot.schedulerHoldUntil > nowMs;
-  if (held) parts.push('⏸ paused');
+  if (held) parts.push('paused');
   return parts.join(' · ');
 }
 
