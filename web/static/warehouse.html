@@ -11,67 +11,50 @@
   <link rel="stylesheet" href="/static/css/warehouse.css" />
 </head>
 <body class="page-warehouse">
-  <header class="topbar">
-    <a class="brand" href="/app">🐝 OpenSwarm</a>
-    <span class="page-title">Warehouse</span>
-    <nav class="topbar-nav" aria-label="Pages">
-      <a href="/app">Cockpit</a>
-      <a href="/chat">Chat</a>
-      <a href="/orchestration">Orchestration</a>
-      <a href="/threads">Threads</a>
-      <a href="/warehouse" aria-current="page">Warehouse</a>
-      <a href="/usage">Usage</a>
-      <a href="/">Supervisor</a>
-    </nav>
-    <div class="topbar-spacer"></div>
-    <div class="topbar-actions">
-      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="테마 전환" aria-pressed="false">
-        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
-      </button>
-    </div>
+  <header class="topbar" data-shell>
   </header>
 
   <main class="warehouse-main">
+    <!-- First run: shown by warehouse.mjs when the folder does not exist. -->
+    <section id="setup" class="setup" aria-labelledby="setup-title" hidden>
+      <h2 id="setup-title">Set up the warehouse</h2>
+      <p>The warehouse is a folder you share with agents: they read it, you upload to it here. This daemon looks for it at <code id="setup-folder">/warehouse</code>, which does not exist yet.</p>
+      <ol>
+        <li>Create that folder, or choose another one with <code>OPENSWARM_WAREHOUSE_ROOT</code> in the daemon's environment.</li>
+        <li>To let this page upload while agents keep read-only access, set <code>OPENSWARM_WAREHOUSE_WRITE_ROOT</code> to the same folder seen from the daemon's side (in Docker, the writable mount).</li>
+        <li>Restart the daemon, then refresh this page.</li>
+      </ol>
+    </section>
+
     <section class="browser" aria-label="Warehouse files">
       <div class="toolbar">
-        <button id="up" type="button" class="btn btn-secondary btn-sm">← 상위</button>
+        <button id="up" type="button" class="btn btn-secondary btn-sm">Parent folder</button>
         <nav id="breadcrumbs" class="breadcrumbs" aria-label="Current path"></nav>
-        <button id="refresh" type="button" class="btn btn-secondary btn-sm">새로고침</button>
+        <button id="refresh" type="button" class="btn btn-secondary btn-sm">Refresh</button>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>이름</th><th>종류</th><th>크기</th><th>수정 시각</th><th><span class="sr-only">동작</span></th></tr></thead>
-          <tbody id="entries"><tr><td colspan="5" class="empty">불러오는 중…</td></tr></tbody>
+          <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th><th><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody id="entries"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
         </table>
       </div>
     </section>
 
     <aside class="upload" aria-label="Upload">
-      <section class="access" aria-labelledby="access-title">
-        <h2 id="access-title">원격 접근</h2>
-        <p>로컬이 아닌 브라우저에서는 배포 시 설정한 웹 토큰이 필요합니다.</p>
-        <label for="web-token">OpenSwarm 웹 토큰</label>
-        <div class="token-row">
-          <input id="web-token" class="input" type="password" autocomplete="off" spellcheck="false" />
-          <button id="save-token" type="button" class="btn btn-secondary">적용</button>
-        </div>
-        <button id="clear-token" class="text-button" type="button">이 탭의 토큰 지우기</button>
-      </section>
-
-      <h2>파일 올리기</h2>
-      <p>현재 폴더: <code id="upload-directory">/</code></p>
+      <h2>Upload a file</h2>
+      <p>Into folder <code id="upload-directory">/</code></p>
       <label class="dropzone" for="file">
-        <span id="file-label">파일을 선택하세요</span>
+        <span id="file-label">Choose a file</span>
         <input id="file" type="file" />
       </label>
-      <label class="overwrite"><input id="overwrite" type="checkbox" /> 같은 이름이면 덮어쓰기</label>
-      <button id="upload" class="btn btn-primary" type="button" disabled>업로드</button>
+      <label class="overwrite"><input id="overwrite" type="checkbox" /> Overwrite a file with the same name</label>
+      <button id="upload" class="btn btn-primary" type="button" disabled>Upload</button>
       <p id="status" class="status-line status" role="status" aria-live="polite"></p>
       <div class="rules">
-        <strong>안전 경계</strong>
-        <span>에이전트 경로 <code>/warehouse</code>는 읽기 전용입니다.</span>
-        <span>삭제 기능은 제공하지 않습니다.</span>
-        <span>기존 파일은 체크박스를 켜고 한 번 더 확인해야 덮어씁니다.</span>
+        <strong>Safety limits</strong>
+        <span>Agents see <code>/warehouse</code> read-only.</span>
+        <span>Nothing here can delete a file.</span>
+        <span>Replacing an existing file needs the checkbox and a second press.</span>
       </div>
     </aside>
   </main>

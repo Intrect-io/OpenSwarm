@@ -168,6 +168,9 @@ export function planBands(nodes, { maxLanes = 12, laneOrder = null } = {}) {
  * row saying "nothing is coordinating right now" is information. Crowded bands
  * wrap into sub-rows instead of squeezing below `minSpacing`.
  */
+/** Height of an empty band, in units of one populated row. */
+const EMPTY_BAND_WEIGHT = 0.45;
+
 export function layoutTiers(nodes, {
   width = 900,
   height = 600,
@@ -182,14 +185,18 @@ export function layoutTiers(nodes, {
   const usable = Math.max(width - labelGutter - margin, minSpacing);
   const perRow = Math.max(1, Math.floor(usable / minSpacing));
   const subRows = planned.map((band) => Math.max(1, Math.ceil(band.members.length / perRow)));
-  const totalUnits = subRows.reduce((sum, rows) => sum + rows, 0);
+  // An empty band still states its tier, but it needs only a label's height:
+  // at equal weight an idle swarm drew four tall, mostly blank stripes and
+  // squeezed the one band with a node in it (redesign step 8).
+  const weights = planned.map((band, index) => (band.members.length === 0 ? EMPTY_BAND_WEIGHT : subRows[index]));
+  const totalUnits = weights.reduce((sum, units) => sum + units, 0);
   const unitHeight = (height - margin * 2) / totalUnits;
 
   const positions = new Map();
   const bands = [];
   let y = margin;
   planned.forEach((band, index) => {
-    const bandHeight = unitHeight * subRows[index];
+    const bandHeight = unitHeight * weights[index];
     bands.push({
       id: band.id,
       label: band.label,

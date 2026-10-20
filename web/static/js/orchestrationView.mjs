@@ -12,6 +12,7 @@ import {
   nodeIdForEvent, RAIL_ROLES, taskLanesOf,
 } from './orchestrationModel.mjs';
 import { layoutTiers } from './tierLayout.mjs';
+import { formatClock } from './format.mjs';
 import {
   buildThreads, chatLineOf, isUtterance, metadataPairs, openQuestionFor, taskLabelOf, threadFor,
 } from './conversationModel.mjs';
@@ -137,18 +138,29 @@ export function nodeRadius(node) {
   return Math.min(26, 10 + Math.sqrt(node.eventCount) * 2.5);
 }
 
+/** What each rail holds, said on hover over its label. */
+const TIER_MEANING = {
+  operator: 'You, when you answer or message an agent',
+  control: 'The daemon: it schedules runs and owns their lifecycle',
+  coordination: 'Agents that route work between other agents (orchestrator, review agent)',
+  execution: 'Agents doing the work on a task (worker, reviewer)',
+};
+
 export function renderStats(doc, stats) {
   const holder = doc.getElementById('stats');
+  // Each count says what it counts on hover: "open exchanges" and "adapter
+  // routes" are board terms an operator should not have to look up.
   const cells = [
-    ['waiting on you', stats.agentsAwaitingOperator ?? 0, (stats.agentsAwaitingOperator ?? 0) > 0],
-    ['active agents', stats.activeAgents, false],
-    ['pending questions', stats.pendingQuestions, stats.pendingQuestions > 0],
-    ['open exchanges', stats.pendingTotal, false],
-    ['adapter routes', stats.routes, false],
-    ['events', stats.totalEvents, false],
+    ['active agents', stats.activeAgents, false, 'Agents that posted to the coordination board in the last 30 minutes'],
+    ['pending questions', stats.pendingQuestions, stats.pendingQuestions > 0,
+      'Questions to you that are not answered or expired yet'],
+    ['open exchanges', stats.pendingTotal, false,
+      'Requests between agents (advice, delegation, questions) still waiting for a reply'],
+    ['adapter routes', stats.routes, false, 'Times an agent call was routed to a different provider adapter'],
+    ['events', stats.totalEvents, false, 'Coordination board events loaded on this page'],
   ];
   holder.innerHTML = cells
-    .map(([label, value, warn]) => `<span class="stat${warn ? ' warn' : ''}"><b>${value}</b>${label}</span>`)
+    .map(([label, value, warn, meaning]) => `<span class="stat${warn ? ' warn' : ''}" title="${meaning}"><b>${value}</b>${label}</span>`)
     .join('');
 }
 
@@ -164,18 +176,20 @@ export function renderWaitingBanner(doc, stats) {
   const holder = doc.getElementById('waiting');
   if (!holder) return;
   const waiting = stats.agentsAwaitingOperator ?? 0;
-  const open = stats.pendingTotal ?? 0;
   if (waiting > 0) {
+    holder.hidden = false;
     holder.className = 'waiting is-blocking';
     holder.textContent = waiting === 1
       ? '1 agent is waiting on you'
       : `${waiting} agents are waiting on you`;
     return;
   }
+  // Nothing to act on: the shell status line already says so, and the open
+  // exchange count is a stat chip. A third calm sentence was noise (audit
+  // 2026-10-19), so the banner only appears when it has something to say.
   holder.className = 'waiting';
-  holder.textContent = open > 0
-    ? `${open} exchange${open === 1 ? '' : 's'} open · nothing needs you`
-    : 'nothing is waiting on you';
+  holder.textContent = '';
+  holder.hidden = true;
 }
 
 export function renderGraph(doc, model, layout, selected, onSelect, spotlight = null) {
@@ -215,12 +229,23 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
       'data-tier-label': band.id,
     });
     label.textContent = band.label;
-    bandLayer.appendChild(label);
+    // The hover text sits on a wrapping group so the label's own text stays
+    // exactly the tier name.
+    const meaning = TIER_MEANING[band.id];
+    if (meaning) {
+      const group = el(doc, 'g', {});
+      const title = el(doc, 'title', {});
+      title.textContent = meaning;
+      group.append(title, label);
+      bandLayer.appendChild(group);
+    } else {
+      bandLayer.appendChild(label);
+    }
     const count = el(doc, 'text', {
-      x: 12, y: (band.y0 + band.y1) / 2 + 13, class: 'tier-count',
+      x: 12, y: (band.y0 + band.y1) / 2 + 16, class: 'tier-count',
     });
     count.textContent = band.count === 0
-      ? 'none'
+      ? (band.kind === 'lane' ? 'no task running' : 'none')
       : `${band.count} ${band.kind === 'lane' ? 'in task' : 'placed'}`;
     bandLayer.appendChild(count);
   });
@@ -312,10 +337,11 @@ export function renderGraph(doc, model, layout, selected, onSelect, spotlight = 
         stroke: node.id === selected ? 'var(--fg-primary)' : 'transparent',
         'stroke-width': 2,
       }));
-      const label = el(doc, 'text', { y: radius + 12 });
+      // Baselines spaced for 12px type (step 8 raised it from 10px and 8px).
+      const label = el(doc, 'text', { y: radius + 15 });
       label.textContent = node.name;
       group.appendChild(label);
-      const roleLabel = el(doc, 'text', { y: radius + 22, class: 'role-label' });
+      const roleLabel = el(doc, 'text', { y: radius + 30, class: 'role-label' });
       roleLabel.textContent = node.role;
       group.appendChild(roleLabel);
     });
@@ -408,7 +434,7 @@ export function renderDetail(doc, model, events, selected) {
     <div class="name">${escapeHtml(node.name)}</div>
     <div class="meta">${escapeHtml(node.role)} · ${node.eventCount} event(s) · ${node.active ? 'active' : 'idle'}</div>
     <div class="meta">pending: ${pending.length ? escapeHtml(pending.map((event) => event.kind).join(', ')) : 'none'}</div>
-    <div class="meta">last seen ${new Date(node.lastSeen).toLocaleTimeString()}</div>`;
+    <div class="meta">last seen ${formatClock(node.lastSeen, { seconds: true })}</div>`;
 }
 
 function statusColor(status) {
@@ -417,7 +443,7 @@ function statusColor(status) {
 }
 
 function clockOf(timestamp) {
-  return new Date(timestamp).toLocaleTimeString();
+  return formatClock(timestamp, { seconds: true });
 }
 
 /** Metadata chips: long opaque tokens truncate visually, tooltip keeps them whole. */

@@ -75,3 +75,35 @@ export function truncate(text, maxChars) {
   if (!Number.isFinite(maxChars) || maxChars <= 0 || text.length <= maxChars) return text;
   return `${text.slice(0, maxChars - 1)}…`;
 }
+
+// ── Clock and calendar times ───────────────────────────────────────────
+// One format for every page. Pages used to call toLocaleTimeString() with the
+// browser's locale, so an English UI read "[오후 7:07:42]" on a Korean machine
+// next to "7:07 PM" on the Supervisor, and Usage hard-coded ko-KR. The UI is
+// English (PRODUCT.md), so the times are too; the zone stays the reader's.
+
+function validDate(value) {
+  const at = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+/** "7:07 PM", or "7:07:42 PM" with `seconds`. */
+export function formatClock(value, { seconds = false, timeZone } = {}) {
+  const at = validDate(value);
+  if (!at) return '';
+  return at.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), timeZone });
+}
+
+/** "Oct 19, 7:07 PM". */
+export function formatDateTime(value, { timeZone } = {}) {
+  const at = validDate(value);
+  if (!at) return '';
+  return at.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone });
+}
+
+/** "Oct 10, 11 PM": an hour bucket, which has no minutes to show. */
+export function formatHour(value, { timeZone } = {}) {
+  const at = validDate(value);
+  if (!at) return '';
+  return at.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', timeZone });
+}

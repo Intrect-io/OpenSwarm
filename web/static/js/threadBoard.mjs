@@ -1,6 +1,9 @@
 // Durable repository thread board. Dynamic content is written with textContent,
 // never HTML, because every message originated with an agent or operator.
 
+import { formatDateTime } from './format.mjs';
+import { idChip, repoName, shortId } from './idChip.mjs';
+
 function splitCsv(value) {
   return String(value ?? '').split(',').map((item) => item.trim()).filter(Boolean);
 }
@@ -31,7 +34,7 @@ function text(doc, tag, value, className) {
 
 function time(value) {
   if (!Number.isFinite(value)) return '';
-  return new Date(value).toLocaleString();
+  return formatDateTime(value);
 }
 
 function appendCode(doc, holder, source) {
@@ -94,13 +97,15 @@ export function renderThreadList(doc, holder, threads, selectedId, onSelect) {
     subject.appendChild(text(doc, 'span', thread.status, `badge ${thread.status}`));
     if ((thread.unreadCount ?? 0) > 0) subject.appendChild(text(doc, 'span', `${thread.unreadCount} unread`, 'badge open'));
     card.appendChild(subject);
-    const tasks = (thread.relatedTaskIds ?? []).join(', ') || 'no related task';
-    card.appendChild(text(
+    const tasks = (thread.relatedTaskIds ?? []).map(shortId).join(', ') || 'no related task';
+    const meta = text(
       doc,
       'div',
-      `${thread.repository} · ${tasks} · ${thread.messageCount} messages · ${thread.participantCount} participants · ${time(thread.updatedAt)}`,
+      `${repoName(thread.repository)} · ${tasks} · ${thread.messageCount} messages · ${thread.participantCount} participants · ${time(thread.updatedAt)}`,
       'meta',
-    ));
+    );
+    meta.title = thread.repository ?? '';
+    card.appendChild(meta);
     card.addEventListener('click', () => onSelect(thread.id));
     holder.appendChild(card);
   }
@@ -110,14 +115,21 @@ export function renderThreadDetail(doc, detail) {
   doc.getElementById('empty').hidden = true;
   doc.getElementById('detail').classList.add('visible');
   doc.getElementById('detail-subject').textContent = detail.thread.subject;
-  doc.getElementById('detail-meta').textContent = [
-    detail.thread.repository,
+  const detailMeta = doc.getElementById('detail-meta');
+  detailMeta.textContent = [
+    repoName(detail.thread.repository),
     `v${detail.thread.version}`,
     detail.thread.status,
-    `tasks ${(detail.thread.relatedTaskIds ?? []).join(', ')}`,
     `files ${(detail.thread.relatedFiles ?? []).join(', ') || 'none'}`,
     `participants ${(detail.participants ?? []).map((participant) => participant.actorName ?? participant.actor).join(', ')}`,
   ].join(' · ');
+  detailMeta.title = detail.thread.repository ?? '';
+  // Tasks last, as chips: each id short, the full value behind Copy.
+  const taskIds = detail.thread.relatedTaskIds ?? [];
+  if (taskIds.length) {
+    detailMeta.append(' · tasks ');
+    for (const id of taskIds) detailMeta.append(idChip(doc, id), ' ');
+  }
   const messages = doc.getElementById('messages');
   messages.replaceChildren();
   if ((detail.messages?.items ?? []).length === 0) {
@@ -128,7 +140,7 @@ export function renderThreadDetail(doc, detail) {
     block.appendChild(text(
       doc,
       'div',
-      `${message.actorName ?? message.actor} · ${message.actorRole ?? 'agent'} · ${message.taskLabel ?? message.taskId} · ${time(message.createdAt)}`,
+      `${message.actorName ?? message.actor} · ${message.actorRole ?? 'agent'} · ${message.taskLabel ?? shortId(message.taskId)} · ${time(message.createdAt)}`,
       'message-head',
     ));
     const body = text(doc, 'div', '', 'message-body');
@@ -272,6 +284,21 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
   statusFilter.addEventListener('change', () => { void loadThreads({ refreshDetail: false }); });
   refresh.addEventListener('click', () => { void loadThreads(); });
 
+  // The compose form used to sit open under the list, pushing every thread up
+  // and reading as the page's main job. It opens on demand now. Shells without
+  // the toggle (older embeds, the bare test shell) keep the form as it is.
+  const composeToggle = doc.getElementById('new-thread-toggle');
+  const composeCancel = doc.getElementById('new-thread-cancel');
+  const setComposing = (open) => {
+    if (!composeToggle) return;
+    newThread.hidden = !open;
+    composeToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) newThread.querySelector('[name="taskId"]')?.focus();
+    else composeToggle.focus();
+  };
+  composeToggle?.addEventListener('click', () => setComposing(newThread.hidden));
+  composeCancel?.addEventListener('click', () => { newThread.reset(); setComposing(false); });
+
   newThread.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (!state.repository) return say('Select a repository first.', true);
@@ -289,6 +316,7 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
         }),
       });
       newThread.reset();
+      setComposing(false);
       statusFilter.value = 'open';
       state.selectedId = created.thread.id;
       await loadThreads();

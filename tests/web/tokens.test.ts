@@ -108,8 +108,12 @@ describe('design tokens (AGT-4201)', () => {
     expect(src, 'tokens.css must declare an @font-face src').not.toBeNull();
     const asset = join(ROOT, src![1].replace(/^\/static\//, ''));
     expect(existsSync(asset), `${src![1]} is not vendored under web/static`).toBe(true);
-    expect(existsSync(join(ROOT, 'fonts', 'LICENSE.inter'))).toBe(true);
-    expect(tokens).toMatch(/--font-sans:\s*'Inter Variable'/);
+    expect(existsSync(join(ROOT, 'fonts', 'LICENSE.barlow'))).toBe(true);
+    expect(tokens).toMatch(/--font-sans:\s*'Barlow'/);
+    // Every weight the Departure Board world sets is vendored, not just the first.
+    for (const m of tokens.matchAll(/src:\s*url\('([^']+)'\)/g)) {
+      expect(existsSync(join(ROOT, m[1].replace(/^\/static\//, ''))), m[1]).toBe(true);
+    }
   });
 });
 
@@ -142,7 +146,6 @@ describe('page shells (AGT-4201)', () => {
     // page script, or the first requests go out unauthenticated.
     const repoRoot = join(__dirname, '..', '..');
     const serverRendered = [
-      join(repoRoot, 'src', 'support', 'dashboardHtml.ts'),
       join(repoRoot, 'src', 'issues', 'issueBoardHtml.ts'),
     ];
     const pages = [...html, ...serverRendered];
@@ -162,14 +165,24 @@ describe('page shells (AGT-4201)', () => {
     }
   });
 
-  it('share one navigation naming every page', () => {
-    const routes = ['/app', '/chat', '/orchestration', '/threads', '/warehouse', '/usage'];
+  it('share one navigation, mounted from shell.mjs on every page', () => {
+    // Each page used to hand-copy its header; by the 2026-10-19 review they had
+    // drifted into three nav orders. A page now carries only a data-shell
+    // header and mounts the shared one, either inline or from its page module.
     for (const file of html) {
       const source = readFileSync(file, 'utf8');
       const name = relative(ROOT, file);
-      expect(source, name).toMatch(/class="topbar-nav"/);
-      for (const route of routes) expect(source, `${name} is missing a nav link to ${route}`).toContain(`href="${route}"`);
-      expect(source, `${name} has no theme toggle`).toContain('class="btn btn-ghost btn-icon theme-toggle"');
+      expect(source, name).toMatch(/<header class="topbar" data-shell>/);
+      expect(source, `${name} hand-copies a nav`).not.toMatch(/class="topbar-nav"/);
+      const modules = [...source.matchAll(/<script type="module" src="\/static\/js\/([\w.-]+\.mjs)"/g)]
+        .map((m) => readFileSync(join(ROOT, 'js', m[1]), 'utf8'));
+      const mounts = [source, ...modules].some((text) => /mountShell\(document\)/.test(text)
+        || /mountShell\(doc\b/.test(text));
+      expect(mounts, `${name} never mounts the shell`).toBe(true);
+    }
+    const shell = readFileSync(join(ROOT, 'js', 'shell.mjs'), 'utf8');
+    for (const route of ['/', '/app', '/chat', '/orchestration', '/threads', '/usage', '/warehouse', '/settings']) {
+      expect(shell, `shell.mjs has no nav entry for ${route}`).toContain(`href: '${route}'`);
     }
   });
 
@@ -183,14 +196,14 @@ describe('page shells (AGT-4201)', () => {
   });
 });
 
-// The two server-rendered pages (`/` supervisor, `/issues` board) keep their
-// inline stylesheets — their scripts are asserted by name elsewhere — but
-// they draw every colour from the shared tokens and follow the same theme.
+// The server-rendered `/issues` board keeps its inline stylesheet, and the
+// Supervisor's classic script still writes markup as strings; both draw every
+// colour from the shared tokens and follow the same theme.
 describe('server-rendered legacy pages (AGT-4201)', () => {
   const pages = [
-    join(__dirname, '..', '..', 'src', 'support', 'dashboardHtml.ts'),
     join(__dirname, '..', '..', 'src', 'issues', 'issueBoardHtml.ts'),
   ];
+  const markupSources = [...pages, join(ROOT, 'js', 'supervisor.js')];
 
   it('link tokens.css, boot the theme first, and offer a toggle', () => {
     for (const file of pages) {
@@ -200,14 +213,17 @@ describe('server-rendered legacy pages (AGT-4201)', () => {
       expect(source, name).toContain('/static/js/themeBoot.js');
       expect(source.indexOf('themeBoot.js'), `${name}: themeBoot.js must load before tokens.css`)
         .toBeLessThan(source.indexOf('tokens.css'));
-      expect(source, name).toContain('id="theme-toggle"');
-      expect(source, name).toContain("import { installThemeToggle } from '/static/js/theme.mjs'");
+      // The Supervisor mounts the shared shell (which carries the toggle);
+      // the issue board keeps its own until it is folded into the cockpit.
+      const shared = source.includes("import { mountShell } from '/static/js/shell.mjs'") && source.includes('data-shell');
+      const own = source.includes('id="theme-toggle"') && source.includes("import { installThemeToggle } from '/static/js/theme.mjs'");
+      expect(shared || own, `${name} offers no theme toggle`).toBe(true);
     }
   });
 
   it('carry no colour literal in their <style> or markup', () => {
     const hex = /(?:['"`]|:\s*)(#[0-9a-fA-F]{3,8})\b/g;
-    for (const file of pages) {
+    for (const file of markupSources) {
       const source = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
       const offenders = [...source.matchAll(hex)].map((m) => `${relative(join(__dirname, '..', '..'), file)}: ${m[1]}`);
       expect(offenders).toEqual([]);
@@ -221,7 +237,7 @@ describe('server-rendered legacy pages (AGT-4201)', () => {
     // indirections; what the page references must be declared somewhere.
     const declaredInCss = new Set(css.flatMap((file) =>
       [...readFileSync(file, 'utf8').matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1])));
-    for (const file of pages) {
+    for (const file of markupSources) {
       const source = readFileSync(file, 'utf8');
       const local = new Set([...source.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
       const missing = referencedTokens(source)

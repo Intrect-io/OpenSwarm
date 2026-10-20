@@ -1,0 +1,26 @@
+/* Settings (dashboard redesign, step 5). Consumes tokens.css + shell.css. */
+
+.settings-main {
+  max-width: var(--content-max);
+  padding: var(--space-8) var(--space-6) var(--space-12);
+}
+.settings-main h1 { font-size: var(--text-xl); margin-bottom: var(--space-6); }
+.settings-section { padding-top: var(--space-4); border-top: 2px solid var(--border-strong); }
+.settings-section h2 {
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+  margin-bottom: var(--space-2);
+}
+.settings-help { color: var(--fg-secondary); max-width: 65ch; margin-bottom: var(--space-4); }
+.settings-form label { display: block; color: var(--fg-muted); font-size: var(--text-xs); margin-bottom: var(--space-1); }
+.token-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.token-row .input { flex: 1 1 260px; border-color: var(--border-strong); }
+.settings-state { min-height: 24px; margin-top: var(--space-3); color: var(--fg-secondary); }
+.settings-state[data-tone="ok"] { color: var(--success); }
+.settings-state[data-tone="warn"] { color: var(--warning); }
+.settings-state[data-tone="bad"] { color: var(--danger); }
+
+@media (max-width: 600px) {
+  .settings-main { padding: var(--space-6) var(--space-4) var(--space-10); }
+}

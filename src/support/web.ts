@@ -7,16 +7,17 @@ import { readFileSync, existsSync, watchFile, unwatchFile, type Stats } from 'no
 import { readdir, stat } from 'node:fs/promises';
 import { join, resolve as resolvePath, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { handleUsageRoute } from './usageRoute.js';
 import { atomicWriteFileSync } from './atomicFile.js';
 import { safeConsole as console } from './safeLog.js';
 import { execFile } from 'node:child_process';
+import { handleServiceControl, safeErrorMessage } from './webServiceControl.js';
 import { getChatHistory } from '../discord/index.js';
 import { addSSEClient, getActiveSSECount, broadcastEvent, getLogBuffer, getStageBuffer, getChatBuffer } from '../core/eventHub.js';
 import { formatCost } from './costTracker.js';
 import { getRateLimiterMetrics } from './rateLimiter.js';
 import { scanLocalProjects, invalidateProjectCache } from './projectMapper.js';
 import type { AutonomousRunner } from '../automation/autonomousRunner.js';
-import { buildDashboardHtml } from './dashboardHtml.js';
 import { getGraph, toProjectSlug, getProjectHealth, scanAndCache, listGraphs } from '../knowledge/index.js';
 import { getProjectGitInfo, startGitStatusPoller, stopGitStatusPoller } from './gitStatus.js';
 import { getActiveMonitors, registerMonitor, unregisterMonitor } from '../automation/longRunningMonitor.js';
@@ -73,19 +74,6 @@ let gitStatusPoller: NodeJS.Timeout | null = null;
 
 
 
-// `systemctl` talking to a wedged user service manager can hang past any
-// caller's patience; bound it so a stuck call surfaces as a controlled error
-// instead of leaving the HTTP request open indefinitely.
-const SYSTEMCTL_TIMEOUT_MS = 10_000;
-
-// Never leak raw Error objects (which include stack traces in many runtimes)
-// or arbitrary thrown values to HTTP responses.
-function safeErrorMessage(err: unknown): string {
-  if (err instanceof Error && typeof err.message === 'string' && err.message) {
-    return err.message;
-  }
-  return 'Internal error';
-}
 
 
 
@@ -313,7 +301,6 @@ export function setWebRunner(runner: AutonomousRunner | undefined): void {
   startReposWatcher();
 }
 
-// Read POST body helper
 // Start web server
 export async function startWebServer(port: number = 3847): Promise<void> {
   if (server) {
@@ -363,12 +350,10 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(ISSUE_BOARD_HTML);
 
-      // ---- Dashboard ----
-      } else if (url === '/' || url === '/index.html') {
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        // Build buttons from the live registry so the toggle never drifts from
-        // isKnownAdapter validation (INT-1901 / INT-3284).
-        res.end(buildDashboardHtml(listAdapterNames()));
+      // ---- Provider registry: the Supervisor builds its toggle from this so
+      // it never drifts from isKnownAdapter validation (INT-1901 / INT-3284) ----
+      } else if (url === '/api/providers' && req.method === 'GET') {
+        writeJson(res, 200, { providers: listAdapterNames() });
 
       // ---- Desktop-app routes (/app, /static/*, /api/work*) → webAppRoutes.ts (INT-3388) ----
       } else if (await tryHandleAppRoutes(req, res, url, requestUrl, runnerRef, readBody)) {
@@ -387,15 +372,19 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
       // ---- Usage ledger (AGT-4178) ----
       } else if (url === '/api/usage' && req.method === 'GET') {
-        const { queryUsage } = await import('./usageLedger.js');
-        const result = queryUsage({
-          since: requestUrl.searchParams.get('since') ?? '24h',
-          by: requestUrl.searchParams.get('by') ?? 'model',
-        });
-        if (!result.ok) { writeJson(res, 400, { error: result.error }); return; }
-        writeJson(res, 200, { since: new Date(result.since).toISOString(), until: new Date(result.until).toISOString(), ...result.aggregate });
+        await handleUsageRoute(requestUrl.searchParams, res);
 
       // ---- Stats ----
+      } else if (url === '/api/shell-status' && req.method === 'GET') {
+        const { buildShellStatus } = await import('./webShellStatus.js');
+        const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
+        const { isLinearInitialized } = await import('../linear/linear.js');
+        writeJson(res, 200, await buildShellStatus({
+          runner: runnerRef,
+          pendingEvents: () => getCoordinationStore().snapshot().pending,
+          linearConfigured: isLinearInitialized,
+        }));
+
       } else if (url === '/api/stats') {
         const stats = runnerRef?.getStats();
         const state = runnerRef?.getState();
@@ -698,10 +687,18 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
       // ---- Heartbeat (manual trigger) ----
       } else if (url === '/api/heartbeat' && req.method === 'POST') {
+        // `openswarm dash` serves this page with no runner attached. Answering
+        // 202 there left the button on "Running…" forever, waiting for a start
+        // signal nothing could send.
+        if (!runnerRef) {
+          res.writeHead(503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'No daemon runner is attached to this dashboard' }));
+          return;
+        }
         res.writeHead(202, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         // Non-blocking heartbeat
-        runnerRef?.heartbeat().catch((e: Error) => console.error('[Web] Heartbeat error:', e));
+        runnerRef.heartbeat().catch((e: Error) => console.error('[Web] Heartbeat error:', e));
 
       // ---- Provider toggle ----
       } else if (url === '/api/provider' && req.method === 'POST') {
@@ -941,50 +938,9 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, response, provider: result.provider, model: result.model }));
 
-      // ---- Service control: status ----
-      } else if (url === '/api/service/status' && req.method === 'GET') {
-        try {
-          const result = await new Promise<string>((resolve) => {
-            execFile('systemctl', ['--user', 'is-active', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err, stdout) => {
-              resolve(err ? 'unknown' : stdout.trim());
-            });
-          });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: result }));
-        } catch {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'unknown' }));
-        }
-
-      // ---- Service control: stop ----
-      } else if (url === '/api/service/stop' && req.method === 'POST') {
-        try {
-          await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'stop', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err) => {
-              if (err) reject(err); else resolve();
-            });
-          });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        } catch (e) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: safeErrorMessage(e) }));
-        }
-
-      // ---- Service control: restart ----
-      } else if (url === '/api/service/restart' && req.method === 'POST') {
-        try {
-          await new Promise<void>((resolve, reject) => {
-            execFile('systemctl', ['--user', 'restart', 'openswarm'], { timeout: SYSTEMCTL_TIMEOUT_MS }, (err) => {
-              if (err) reject(err); else resolve();
-            });
-          });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        } catch (e) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: safeErrorMessage(e) }));
-        }
+      // ---- Service control: status / stop / restart ----
+      } else if (url.startsWith('/api/service/') && await handleServiceControl(url, req.method, res)) {
+        // handled
 
       // ---- Knowledge Graph: project health ----
       } else if (url.startsWith('/api/knowledge/') && req.method === 'GET') {

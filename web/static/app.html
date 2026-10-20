@@ -12,25 +12,8 @@
   <link rel="stylesheet" href="/static/css/app.css" />
 </head>
 <body class="page-cockpit" data-view="issues">
-  <header class="topbar">
-    <button id="sidebar-toggle" class="btn btn-ghost btn-icon sidebar-toggle" type="button" aria-label="Toggle sidebar" aria-expanded="false" aria-controls="sidebar">☰</button>
-    <a class="brand" href="/app">🐝 OpenSwarm</a>
-    <span class="page-title">Cockpit</span>
-    <nav class="topbar-nav" aria-label="Pages">
-      <a href="/app" aria-current="page">Cockpit</a>
-      <a href="/chat">Chat</a>
-      <a href="/orchestration">Orchestration</a>
-      <a href="/threads">Threads</a>
-      <a href="/warehouse">Warehouse</a>
-      <a href="/usage">Usage</a>
-      <a href="/">Supervisor</a>
-    </nav>
-    <div class="topbar-spacer"></div>
-    <div class="topbar-actions">
-      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
-        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
-      </button>
-    </div>
+  <header class="topbar" data-shell>
+    <button data-shell-leading id="sidebar-toggle" class="btn btn-ghost btn-icon sidebar-toggle" type="button" aria-label="Toggle sidebar" aria-expanded="false" aria-controls="sidebar"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
   </header>
 
   <aside id="sidebar" class="sidebar" aria-label="Views and sessions">
@@ -85,7 +68,7 @@
   <footer class="statusbar">
     <div id="quota-gauge" class="quota-gauge" title="provider rate limit — observed from usage headers" hidden></div>
     <div class="spacer"></div>
-    <div id="daemon-status" class="daemon-status" title="daemon">
+    <div id="daemon-status" class="daemon-status" title="Dashboard server. The daemon state is in the status line above.">
       <span class="dot" data-state="unknown"></span>
       <span class="label">connecting…</span>
     </div>

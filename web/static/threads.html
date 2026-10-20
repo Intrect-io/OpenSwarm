@@ -11,24 +11,9 @@
   <link rel="stylesheet" href="/static/css/threads.css" />
 </head>
 <body class="page-threads">
-  <header class="topbar">
-    <a class="brand" href="/app">🐝 OpenSwarm</a>
-    <span class="page-title">Repository threads</span>
-    <nav class="topbar-nav" aria-label="Pages">
-      <a href="/app">Cockpit</a>
-      <a href="/chat">Chat</a>
-      <a href="/orchestration">Orchestration</a>
-      <a href="/threads" aria-current="page">Threads</a>
-      <a href="/warehouse">Warehouse</a>
-      <a href="/usage">Usage</a>
-      <a href="/">Supervisor</a>
-    </nav>
-    <div class="topbar-spacer"></div>
+  <header class="topbar" data-shell>
     <div class="topbar-actions">
       <select id="repo" class="select" aria-label="Repository"><option value="">Select repository…</option></select>
-      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
-        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
-      </button>
     </div>
   </header>
 
@@ -43,9 +28,10 @@
           <option value="">All threads</option>
         </select>
         <button id="refresh" type="button" class="btn btn-secondary">Refresh</button>
+        <button id="new-thread-toggle" type="button" class="btn btn-primary" aria-expanded="false" aria-controls="new-thread">New thread</button>
       </div>
       <div id="threads"><div class="empty">Loading all repository threads…</div></div>
-      <form id="new-thread" class="new-thread" aria-labelledby="new-thread-title">
+      <form id="new-thread" class="new-thread" aria-labelledby="new-thread-title" hidden>
         <h2 id="new-thread-title">New thread</h2>
         <label class="field">
           <span>Related task</span>
@@ -69,7 +55,10 @@
             <input class="input" name="relatedFiles" placeholder="Comma-separated" />
           </label>
         </div>
-        <button class="btn btn-primary" type="submit">Open thread</button>
+        <div class="new-thread-actions">
+          <button class="btn btn-primary" type="submit">Open thread</button>
+          <button id="new-thread-cancel" class="btn btn-secondary" type="button">Cancel</button>
+        </div>
       </form>
     </aside>
 
@@ -103,8 +92,8 @@
 
   <script type="module">
     import { startThreadBoard } from '/static/js/threadBoard.mjs';
-    import { installThemeToggle } from '/static/js/theme.mjs';
-    installThemeToggle(document, document.getElementById('theme-toggle'));
+    import { mountShell } from '/static/js/shell.mjs';
+    mountShell(document);
     startThreadBoard(document);
   </script>
 </body>

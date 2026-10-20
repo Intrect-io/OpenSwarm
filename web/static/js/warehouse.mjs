@@ -1,4 +1,5 @@
-import { installThemeToggle } from './theme.mjs';
+import { mountShell } from './shell.mjs';
+import { formatDateTime } from './format.mjs';
 
 const entriesBody = document.querySelector('#entries');
 const breadcrumbs = document.querySelector('#breadcrumbs');
@@ -10,9 +11,6 @@ const overwriteInput = document.querySelector('#overwrite');
 const uploadButton = document.querySelector('#upload');
 const uploadDirectory = document.querySelector('#upload-directory');
 const status = document.querySelector('#status');
-const webTokenInput = document.querySelector('#web-token');
-const saveTokenButton = document.querySelector('#save-token');
-const clearTokenButton = document.querySelector('#clear-token');
 
 const TOKEN_KEY = 'openswarm.webToken';
 
@@ -46,7 +44,9 @@ async function api(url, options) {
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
     try { message = (await response.json()).error || message; } catch { /* non-JSON */ }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   return response;
 }
@@ -64,7 +64,7 @@ let armedOverwrite = null;
 function disarmOverwrite() {
   armedOverwrite = null;
   uploadButton.classList.remove('is-armed');
-  uploadButton.textContent = '업로드';
+  uploadButton.textContent = 'Upload';
 }
 
 function renderBreadcrumbs() {
@@ -92,7 +92,7 @@ function downloadButton(path, name) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'download';
-  button.textContent = '내려받기';
+  button.textContent = 'Download';
   button.addEventListener('click', async () => {
     button.disabled = true;
     try {
@@ -116,7 +116,7 @@ function renderEntries(entries) {
   entriesBody.replaceChildren();
   if (!entries.length) {
     const row = document.createElement('tr');
-    row.innerHTML = '<td colspan="5" class="empty">빈 폴더입니다.</td>';
+    row.innerHTML = '<td colspan="5" class="empty">This folder is empty.</td>';
     entriesBody.append(row);
     return;
   }
@@ -133,7 +133,7 @@ function renderEntries(entries) {
     const sizeCell = document.createElement('td');
     sizeCell.textContent = entry.type === 'directory' ? '—' : formatBytes(entry.size);
     const modifiedCell = document.createElement('td');
-    modifiedCell.textContent = new Date(entry.mtime).toLocaleString('ko-KR');
+    modifiedCell.textContent = formatDateTime(entry.mtime);
     const actionCell = document.createElement('td');
     if (entry.type !== 'directory') actionCell.append(downloadButton(joinPath(currentPath, entry.name), entry.name));
     row.append(nameCell, typeCell, sizeCell, modifiedCell, actionCell);
@@ -150,14 +150,32 @@ async function loadTree(path) {
     renderBreadcrumbs();
     renderEntries(payload.entries);
   } catch (error) {
+    if (error.status === 503 && /not provisioned/.test(error.message) && showSetup(error.message)) return;
     entriesBody.innerHTML = `<tr><td colspan="5" class="empty error"></td></tr>`;
     entriesBody.querySelector('td').textContent = error.message;
   }
 }
 
+/**
+ * First run: the folder does not exist yet. A red "Warehouse is not
+ * provisioned" told the operator something was wrong but not what to do, and
+ * left an upload form that could only fail.
+ */
+function showSetup(message) {
+  const folder = message.match(/: (.+) does not exist$/)?.[1] ?? '/warehouse';
+  const setup = document.querySelector('#setup');
+  // A page from before the setup panel existed (a stale cache) keeps the
+  // plain error instead of throwing.
+  if (!setup) return false;
+  setup.querySelector('#setup-folder').textContent = folder;
+  setup.hidden = false;
+  for (const panel of document.querySelectorAll('.browser, .upload')) panel.hidden = true;
+  return true;
+}
+
 fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0];
-  fileLabel.textContent = file ? `${file.name} · ${formatBytes(file.size)}` : '파일을 선택하세요';
+  fileLabel.textContent = file ? `${file.name} · ${formatBytes(file.size)}` : 'Choose a file';
   uploadButton.disabled = !file;
   disarmOverwrite();
 });
@@ -173,14 +191,14 @@ uploadButton.addEventListener('click', async () => {
   if (overwriteInput.checked && armedOverwrite !== target) {
     armedOverwrite = target;
     uploadButton.classList.add('is-armed');
-    uploadButton.textContent = '덮어쓰기 확인';
-    setStatus(`/${target} 을(를) 새 파일로 바꿉니다. 한 번 더 누르면 실행합니다.`, 'warning');
+    uploadButton.textContent = 'Confirm overwrite';
+    setStatus(`This replaces /${target} with the new file. Press again to go ahead.`, 'warning');
     return;
   }
   disarmOverwrite();
   uploadButton.disabled = true;
   uploadButton.setAttribute('aria-busy', 'true');
-  setStatus('업로드 중…', 'pending');
+  setStatus('Uploading…', 'pending');
   try {
     const overwrite = overwriteInput.checked ? '&overwrite=true' : '';
     await api(`/api/warehouse/file?path=${encodeURIComponent(target)}${overwrite}`, {
@@ -188,9 +206,9 @@ uploadButton.addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/octet-stream' },
       body: file,
     });
-    setStatus(`${file.name} 업로드 완료`, 'success');
+    setStatus(`Uploaded ${file.name}`, 'success');
     fileInput.value = '';
-    fileLabel.textContent = '파일을 선택하세요';
+    fileLabel.textContent = 'Choose a file';
     overwriteInput.checked = false;
     await loadTree(currentPath);
   } catch (error) {
@@ -201,23 +219,7 @@ uploadButton.addEventListener('click', async () => {
   }
 });
 
-saveTokenButton.addEventListener('click', () => {
-  const token = webTokenInput.value.trim();
-  if (token) sessionStorage.setItem(TOKEN_KEY, token);
-  else sessionStorage.removeItem(TOKEN_KEY);
-  webTokenInput.value = '';
-  setStatus(token ? '이 탭에 웹 토큰을 적용했습니다.' : '웹 토큰을 지웠습니다.', 'success');
-  loadTree(currentPath);
-});
-
-clearTokenButton.addEventListener('click', () => {
-  sessionStorage.removeItem(TOKEN_KEY);
-  webTokenInput.value = '';
-  setStatus('이 탭의 웹 토큰을 지웠습니다.');
-  loadTree(currentPath);
-});
-
 upButton.addEventListener('click', () => loadTree(parts(currentPath).slice(0, -1).join('/')));
 refreshButton.addEventListener('click', () => loadTree(currentPath));
-installThemeToggle(document, document.querySelector('#theme-toggle'));
+mountShell(document);
 loadTree('');

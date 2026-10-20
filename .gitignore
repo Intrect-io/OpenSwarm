@@ -128,3 +128,8 @@ tmp-run-*.mjs
 tmp-run-*.js
 .test-runner-tmp.*
 .cursor-review-*
+
+# Impeccable working artifacts (decision mocks, review captures)
+.impeccable/mocks/
+.impeccable/review*/
+.impeccable/critique/

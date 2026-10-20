@@ -182,6 +182,19 @@ describe('SessionStore', () => {
 });
 
 describe('SessionStore — path and terminal semantics (INT-3402 review)', () => {
+  it('groups a seeded session by repository too, not by its worktree UUID', () => {
+    // The live stage path folded worktrees back to their repo; the snapshot
+    // did not, so every finished run in the cockpit sidebar sat under its own
+    // issue-UUID heading (audit 2026-10-19).
+    const store = new SessionStore();
+    store.seed({
+      sessions: [{ taskId: 'r1', status: 'running', title: 'Running', projectPath: '/repo/worktree/bb4c009a-0e78-4547-a31c-045fe14e7e47' }],
+      recent: [{ taskId: 'd1', status: 'failed', title: 'Done', projectPath: '/repo/worktree/d8dbb7a0-dd88-48f6-a391-53292e71d538' }],
+    });
+    expect(store.byProject('/repo').map((s: { taskId: string }) => s.taskId).sort()).toEqual(['d1', 'r1']);
+    expect(store.get('d1')).toMatchObject({ projectPath: '/repo', worktreePath: '/repo/worktree/d8dbb7a0-dd88-48f6-a391-53292e71d538' });
+  });
+
   it('groups by REPOSITORY, not by the per-task worktree the stage reports', () => {
     const store = new SessionStore();
     // Stage events report the ACTIVE directory, which in worktree mode is the

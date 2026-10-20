@@ -8,8 +8,9 @@
 // (`/api/coordination/history`), live updates from the same SSE channel the
 // orchestration view uses, with the board snapshot as a polling backstop.
 
-import { buildChatThreads, latestAddressable, openQuestionFor } from './conversationModel.mjs';
+import { addressKeyOf, addressableTargets, buildChatThreads, chatLineOf, openQuestionFor, targetEndedReason } from './conversationModel.mjs';
 import { ROLE_COLORS } from './orchestrationView.mjs';
+import { formatClock } from './format.mjs';
 import { autogrow, bindDraft, bindEnterToSubmit, setSendEnabled, setSendingState } from './composer.mjs';
 import { createScrollFollow } from './scrollFollow.mjs';
 
@@ -27,7 +28,7 @@ function escapeHtml(text) {
 }
 
 function clockOf(timestamp) {
-  return new Date(timestamp).toLocaleTimeString();
+  return formatClock(timestamp, { seconds: true });
 }
 
 function mentionMarkup(name, role = '') {
@@ -207,7 +208,7 @@ export function renderThread(thread, mentionTargets = [], taskReferences = new M
     .join('');
   return `<section class="chat-thread thread-${system ? 'system' : 'chat'}" data-correlation="${escapeHtml(thread.correlationId)}">
     <div class="thread-head">
-      <span class="channel-badge">${channel}</span>
+      <span class="channel-badge" title="${system ? 'Posted by the daemon about a run, not written by an agent' : 'Messages between agents, or between you and an agent'}">${channel}</span>
       ${issue}<span class="thread-kind">${escapeHtml(kind)}</span>
     </div>
     <div class="thread-lines">${lines}</div>
@@ -241,6 +242,10 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   });
   let sending = false;
   let addressable = false;
+  // Who the composer is talking to. Pinned once, then changed only by the
+  // operator: it used to follow whoever spoke last, so a message drafted for
+  // one agent could leave addressed to another that spoke mid-sentence.
+  let pinnedKey = null;
   // Files the operator has staged but not yet sent. Held until the message goes
   // out so a refused send does not silently discard them (AGT-4026's rule,
   // applied to attachments).
@@ -331,6 +336,96 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     return lines;
   };
 
+  /**
+   * The pinned agent's newest utterance. The first agent to become addressable
+   * is pinned as the default; after that only the operator moves the pin. If
+   * the pinned agent leaves the retained window it cannot be addressed at all,
+   * and the newest speaker takes its place.
+   */
+  const currentTarget = (events) => {
+    const targets = addressableTargets(events);
+    const pinned = pinnedKey ? targets.find((target) => addressKeyOf(target) === pinnedKey) : null;
+    if (pinned) return pinned;
+    pinnedKey = targets[0] ? addressKeyOf(targets[0]) : null;
+    return targets[0] ?? null;
+  };
+
+  const describeTarget = (target) => {
+    const line = chatLineOf(target);
+    return [line.speakerName, line.speakerRole, line.taskLabel].filter(Boolean).join(' · ');
+  };
+
+  // The recipient chip: a picker over every addressable agent plus a warning
+  // when the pinned one has stopped. Created on demand like the status line,
+  // so the shell markup does not have to know about it.
+  let targetOptionsKey = '';
+  const renderTargetControl = (events, target) => {
+    if (!form) return;
+    let control = doc.getElementById('composer-target');
+    if (!control) {
+      control = doc.createElement('div');
+      control.id = 'composer-target';
+      control.className = 'composer-target';
+      control.innerHTML = '<label class="composer-target-label" for="composer-recipient">To</label>'
+        + '<select id="composer-recipient" class="input composer-recipient" aria-label="Message recipient"></select>'
+        + '<span id="composer-target-warning" class="composer-target-warning" role="status" aria-live="polite"></span>';
+      form.insertAdjacentElement('afterbegin', control);
+      control.querySelector('select').addEventListener('change', (changeEvent) => {
+        pinnedKey = changeEvent.target.value || null;
+        updateComposer([...byId.values()]);
+      });
+    }
+    const select = control.querySelector('select');
+    const warning = control.querySelector('.composer-target-warning');
+    control.hidden = !target;
+    const targets = addressableTargets(events);
+    const optionsKey = targets.map((entry) => `${addressKeyOf(entry)}=${describeTarget(entry)}`).join('\n');
+    // Rebuild only when the set changes: replacing the options under an open
+    // picker would close it on every arriving event.
+    if (optionsKey !== targetOptionsKey) {
+      targetOptionsKey = optionsKey;
+      select.innerHTML = targets
+        .map((entry) => `<option value="${escapeHtml(addressKeyOf(entry))}">${escapeHtml(describeTarget(entry))}</option>`)
+        .join('');
+    }
+    if (target) select.value = addressKeyOf(target);
+    select.disabled = sending;
+    const ended = target ? targetEndedReason(events, target) : null;
+    const name = target ? (target.actorName || target.actor) : '';
+    warning.textContent = ended === 'failed'
+      ? `${name} failed on this task and may not read this.`
+      : ended === 'expired'
+        ? `${name}'s exchange expired; it may not read this.`
+        : ended === 'delivered'
+          ? `${name} already delivered its result; it may have stopped listening.`
+          : '';
+    control.classList.toggle('is-ended', !!ended);
+  };
+
+  /** Recipient chip, placeholder and enablement — everything that follows the pin. */
+  const updateComposer = (events) => {
+    const target = currentTarget(events);
+    addressable = !!target;
+    const question = target
+      ? openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId })
+      : null;
+    renderTargetControl(events, target);
+    if (input) {
+      // A send takes seconds under load (AGT-4027) and agent events keep
+      // arriving, so a redraw lands mid-flight — it must not re-enable the box
+      // the send just locked.
+      input.disabled = !target || sending;
+      // Say which of the two things the next message will do: unpark an agent
+      // that is waiting, or just speak into the room.
+      input.placeholder = !target
+        ? 'No agent to address yet'
+        : question
+          ? `Answer ${target.actorName || target.actor}: ${(question.summary || '').slice(0, 60)}…`
+          : `Message ${target.actorName || target.actor}…`;
+    }
+    syncSendState();
+  };
+
   // One line under the composer carrying the send's outcome. Created on demand
   // so the shell markup does not have to know about it.
   const setComposerStatus = (message, { pending = false } = {}) => {
@@ -345,8 +440,8 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     sending = pending;
     line.textContent = pending ? 'Sending…' : message;
     line.classList.toggle('is-error', !pending && !!message);
-    addressable = !!latestAddressable([...byId.values()]);
-    if (input) input.disabled = pending || !addressable;
+    // Re-derive the box, the picker and the placeholder: a send locks all three.
+    updateComposer([...byId.values()]);
     setSendingState(button, pending);
     syncSendState();
   };
@@ -376,25 +471,7 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
       : emptyState();
     // The composer can only address an agent that exists; without one the
     // POST would be unroutable (the API requires repository/taskId/recipient).
-    const target = latestAddressable(events);
-    addressable = !!target;
-    const question = target
-      ? openQuestionFor(events, target.actor, { repository: target.repository, taskId: target.taskId })
-      : null;
-    if (input) {
-      // A send takes seconds under load (AGT-4027) and agent events keep
-      // arriving, so a redraw lands mid-flight — it must not re-enable the box
-      // the send just locked.
-      input.disabled = !target || sending;
-      // Say which of the two things the next message will do: unpark an agent
-      // that is waiting, or just speak into the room.
-      input.placeholder = !target
-        ? 'No agent to address yet'
-        : question
-          ? `Answer ${target.actorName || target.actor}: ${(question.summary || '').slice(0, 60)}…`
-          : `Message ${target.actorName || target.actor}…`;
-    }
-    syncSendState();
+    updateComposer(events);
     // One announcement per batch of arrivals, not one per line (§8.5).
     if (lines.length > renderedLines) follow.announce(lines.length - renderedLines);
     renderedLines = lines.length;
@@ -419,8 +496,7 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
     return false;
   };
 
-  // Interjections join the newest exchange: the message is addressed to the
-  // last agent that spoke, exactly like replying in a busy room. Same POST
+  // Interjections go to the pinned agent, on its newest exchange for that task. Same POST
   // contract (and same bare-fetch auth posture) as the orchestration composer.
   // Returns the failure reason, or null when the message was accepted. The
   // caller keeps the operator's text until it hears null: a refusal that
@@ -429,7 +505,7 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
   // "already answered" both arrive that way (AGT-4026).
   const send = async (text) => {
     const events = [...byId.values()];
-    const target = latestAddressable(events);
+    const target = currentTarget(events);
     if (!target) return 'No agent is addressable yet.';
     // Answering beats chatting: if this agent is parked on a question, the
     // message has to ride that exchange or the daemon files it as a note and

@@ -18,6 +18,7 @@ export class IssueBoard {
   #renderSequence = 0;
   #armed = false;
   #armTimer = null;
+  #tracker = '';
 
   constructor({ listEl, countEl, summaryEl, deployBtn, fetchIssues, dispatch, onDeployed }) {
     this.#listEl = listEl;
@@ -31,6 +32,17 @@ export class IssueBoard {
     this.#deployBtn.addEventListener('click', () => this.#deploy());
   }
 
+  /**
+   * Which tracker the daemon works from ('linear' | 'local'), read from
+   * /api/shell-status. A local-tracker daemon has nothing for Cockpit to
+   * deploy, so say so before the operator picks a repository and waits for
+   * an error (redesign step 9).
+   */
+  setTracker(tracker) {
+    this.#tracker = tracker ?? '';
+    if (this.#tracker === 'local' && !this.#projectPath) this.#renderLocalTracker();
+  }
+
   async loadFor(projectPath) {
     this.#projectPath = projectPath;
     this.#selected.clear();
@@ -41,6 +53,10 @@ export class IssueBoard {
       payload = await this.#fetchIssues(projectPath);
     } catch (err) {
       if (seq !== this.#renderSequence) return;
+      if (err?.status === 503 && /Linear is not configured/.test(err?.message ?? '')) {
+        this.#renderLocalTracker();
+        return;
+      }
       this.#renderMessage(err?.message ?? 'Failed to load issues');
       return;
     }
@@ -106,6 +122,41 @@ export class IssueBoard {
     div.className = 'empty';
     div.textContent = text;
     this.#listEl.replaceChildren(div);
+  }
+
+  // Cockpit lists and deploys Linear issues only. Without Linear the daemon
+  // takes work from its local tracker by itself, and those issues live on the
+  // /issues board, so point there instead of showing the bare 503.
+  #renderLocalTracker() {
+    const div = document.createElement('div');
+    div.className = 'empty tracker-help';
+
+    const head = document.createElement('strong');
+    head.textContent = 'This daemon works from the local tracker';
+
+    const why = document.createElement('p');
+    why.textContent = 'Cockpit deploys Linear issues. Without Linear, the daemon picks up '
+      + 'issues from its local tracker on its own — there is nothing to deploy from here.';
+
+    const link = document.createElement('a');
+    link.className = 'btn';
+    link.href = '/issues';
+    link.textContent = 'Open the local issue board';
+
+    const how = document.createElement('p');
+    how.className = 'hint';
+    how.append('To deploy Linear issues here, set ');
+    for (const [i, name] of ['LINEAR_API_KEY', 'LINEAR_TEAM_ID'].entries()) {
+      if (i) how.append(' and ');
+      const code = document.createElement('code');
+      code.textContent = name;
+      how.append(code);
+    }
+    how.append(' for the daemon and restart it.');
+
+    div.append(head, why, link, how);
+    this.#listEl.replaceChildren(div);
+    this.#countEl.textContent = '';
   }
 
   #syncFooter() {

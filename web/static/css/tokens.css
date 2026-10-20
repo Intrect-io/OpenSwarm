@@ -1,5 +1,11 @@
 /* OpenSwarm design tokens — the single source every page consumes (AGT-4201).
 
+   World: the Departure Board (2026-10 redesign; contract in
+   .impeccable/surfaces/web-static.md). Dark is the station board: navy ground,
+   white ink. Light is the printed timetable: white ground, navy ink under a
+   navy shell band. Timetable yellow (`--needs`) is reserved for what needs
+   the operator; vermilion (`--danger`) only for failed / cancelled.
+
    Semantic names only (§8.1 of the chat-ui guidelines): a rule says what a
    colour is FOR (`--fg-muted`), never what it looks like (`--gray-400`).
    Dark is the default; light is a value swap under `[data-theme="light"]`,
@@ -7,17 +13,44 @@
    literal on the web surface lives in this file — tokens.test.ts fails the
    build if one appears anywhere else under web/static.
 
+   Contrast (WCAG 2.2 AA, measured 2026-10-19): every --fg-* and status/role
+   hue clears 4.5:1 on --bg-app, --bg-surface and --bg-elevated in its theme;
+   --border-strong clears 3:1 for control outlines. --border is a decorative
+   hairline and is not used to outline a control. --needs is a fill on white,
+   never text.
+
    Legacy aliases at the bottom keep the names the earlier cockpit CSS used
    (`--bg`, `--surface`, `--text`, …) resolving to the same tokens, so a rule
    that has not been migrated still renders on-system instead of falling back
    to the browser default. */
 
+/* Barlow (SIL OFL 1.1, fonts/LICENSE.barlow): a low-contrast grotesk drawn
+   from public road and transit signage, set with tabular numerals. Latin
+   subset; Korean text falls through to the system stack in --font-sans. */
 @font-face {
-  font-family: 'Inter Variable';
+  font-family: 'Barlow';
   font-style: normal;
-  font-weight: 100 900;
+  font-weight: 400;
   font-display: swap;
-  src: url('/static/fonts/inter-latin-wght-normal.woff2') format('woff2-variations');
+  src: url('/static/fonts/barlow-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/static/fonts/barlow-latin-500-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/static/fonts/barlow-latin-600-normal.woff2') format('woff2');
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
     U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
@@ -25,43 +58,54 @@
 :root {
   color-scheme: dark;
 
-  /* ── Surfaces ─────────────────────────────────────────────────────── */
-  --bg-app: #0d1117;          /* outermost page ground */
-  --bg-surface: #161b22;      /* sidebar, panels, top bar */
-  --bg-elevated: #1c2128;     /* cards, popovers, hovered rows */
-  --bg-user-bubble: #1a2536;  /* the operator's own lines */
-  --bg-code: #0b0f14;         /* code blocks, terminal panes */
-  --bg-hover: rgba(255, 255, 255, 0.05);
-  --bg-active: rgba(255, 255, 255, 0.09);
-  --bg-scrim: rgba(1, 4, 9, 0.7);
+  /* ── Surfaces: the station board ──────────────────────────────────── */
+  --bg-app: #0b1f4b;          /* the board's navy ground */
+  --bg-surface: #071637;      /* sidebars, panels, deeper navy */
+  --bg-elevated: #10275a;     /* popovers, selects, hovered rows */
+  --bg-user-bubble: #13306b;  /* the operator's own lines */
+  --bg-code: #061230;         /* code blocks, terminal panes */
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --bg-scrim: rgba(3, 10, 28, 0.72);
+
+  /* ── Shell band (brand, nav, status line) ─────────────────────────── */
+  --shell-bg: #071637;
+  --shell-fg: #ffffff;
+  --shell-muted: #8fa3c7;     /* ≈7:1 on --shell-bg */
+  --shell-rule: rgba(255, 255, 255, 0.14);
 
   /* ── Foreground ───────────────────────────────────────────────────── */
-  --fg-primary: #e6edf3;      /* body text, ≈14:1 on --bg-app */
-  --fg-secondary: #b1bac4;    /* supporting text, ≈8:1 */
-  --fg-muted: #8b949e;        /* labels, placeholders, ≈5.7:1 */
-  --fg-on-accent: #0d1117;    /* text on a filled accent button */
+  --fg-primary: #ffffff;      /* ≈16:1 on --bg-app */
+  --fg-secondary: #c5d1e8;    /* ≈10:1 */
+  --fg-muted: #8fa3c7;        /* labels, placeholders, ≈6.3:1 */
+  --fg-on-accent: #0b1f4b;    /* navy on a white primary button */
 
   /* ── Accent & status ──────────────────────────────────────────────── */
-  --accent: #58a6ff;
-  --accent-hover: #79c0ff;
-  --accent-subtle: rgba(88, 166, 255, 0.12);
-  --danger: #f85149;
-  --danger-subtle: rgba(248, 81, 73, 0.14);
-  --warning: #d29922;
-  --warning-subtle: rgba(210, 153, 34, 0.14);
-  --success: #3fb950;
-  --success-subtle: rgba(63, 185, 80, 0.14);
-  --info: #79c0ff;
+  --accent: #ffffff;          /* the board's white: primary actions, active nav, links */
+  --accent-hover: #dfe7f5;
+  --accent-subtle: rgba(255, 255, 255, 0.12);
+  --danger: #ff6a52;          /* vermilion lifted for navy: failed, cancelled, destructive */
+  --danger-subtle: rgba(255, 106, 82, 0.16);
+  --warning: #ff9f43;         /* delayed, degraded — never the operator's yellow */
+  --warning-subtle: rgba(255, 159, 67, 0.16);
+  --success: #4cd18a;
+  --success-subtle: rgba(76, 209, 138, 0.16);
+  --info: #9cc1ff;
+
+  /* ── Needs the operator: timetable yellow, reserved ───────────────── */
+  --needs: #ffd400;
+  --needs-ink: #0b1f4b;       /* text on a --needs fill, ≈11:1 */
+  --needs-subtle: rgba(255, 212, 0, 0.16);
 
   /* ── Border & focus ───────────────────────────────────────────────── */
-  --border: #30363d;
-  --border-strong: #484f58;
+  --border: #2a4277;          /* hairline rules between rows */
+  --border-strong: #647cb0;   /* control outlines, head rules; ≈3.9:1 */
   --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
 
-  /* ── Radius ───────────────────────────────────────────────────────── */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 16px;
+  /* ── Radius: printed edges, barely softened ───────────────────────── */
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 6px;
   --radius-full: 9999px;
 
   /* ── Spacing (4pt grid) ───────────────────────────────────────────── */
@@ -76,21 +120,23 @@
   --space-12: 48px;
 
   /* ── Typography ───────────────────────────────────────────────────── */
-  --font-sans: 'Inter Variable', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+  --font-sans: 'Barlow', -apple-system, BlinkMacSystemFont, 'Segoe UI',
     'Apple SD Gothic Neo', Pretendard, 'Noto Sans KR', 'Malgun Gothic', sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   --text-xs: 12px;
   --text-sm: 14px;
   --text-base: 15px;
-  --text-lg: 17px;
-  --text-xl: 20px;
-  --leading-body: 1.6;
-  --leading-tight: 1.3;
+  --text-lg: 19px;            /* board times, row headlines */
+  --text-xl: 26px;            /* figures, page headings */
+  --leading-body: 1.5;
+  --leading-tight: 1.25;
+  --tracking-caps: 0.07em;    /* uppercase column heads and labels */
 
   /* ── Motion ───────────────────────────────────────────────────────── */
   --dur-fast: 120ms;
   --dur-base: 180ms;
   --dur-slow: 300ms;
+  --dur-flap: 240ms;          /* the split-flap status change */
   --ease-out: cubic-bezier(0.2, 0, 0, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
 
@@ -101,37 +147,39 @@
   --z-toast: 400;
 
   /* ── Code highlight ───────────────────────────────────────────────── */
-  --code-keyword: #ff7b72;
-  --code-string: #a5d6ff;
-  --code-comment: #8b949e;
-  --code-number: #79c0ff;
-  --code-function: #d2a8ff;
-  --code-property: #7ee787;
-  --code-punctuation: #c9d1d9;
+  --code-keyword: #ff8f7a;
+  --code-string: #a8d4ff;
+  --code-comment: #8fa3c7;
+  --code-number: #9cc1ff;
+  --code-function: #d4b3ff;
+  --code-property: #7fe0a6;
+  --code-punctuation: #d9e2f2;
 
   /* ── Charts ───────────────────────────────────────────────────────── */
-  --chart-1: #58a6ff;
-  --chart-2: #3fb950;
-  --chart-3: #d29922;
-  --chart-4: #d2a8ff;
-  --chart-5: #ff7b72;
-  --chart-6: #79c0ff;
+  --chart-1: #7fb2ff;
+  --chart-2: #4cd18a;
+  --chart-3: #ff9f43;
+  --chart-4: #c79bff;
+  --chart-5: #ff6a52;
+  --chart-6: #9cc1ff;
 
   /* ── Speakers — one hue per agent role, shared by the chat room, the
         orchestration graph, and the legend so an agent reads the same colour
-        on every page. Never the sole indicator: always paired with a label. */
-  --role-worker: #58a6ff;
-  --role-reviewer: #3fb950;
-  --role-orchestrator: #d29922;
-  --role-review-agent: #d2a8ff;
-  --role-daemon: #8b949e;
-  --role-human: #f85149;
-  --role-agent: #8b93a5;
+        on every page. Never the sole indicator: always paired with a label.
+        The operator is timetable yellow — what the swarm waits on — and no
+        longer shares the failure red. */
+  --role-worker: #7fb2ff;
+  --role-reviewer: #4cd18a;
+  --role-orchestrator: #c79bff;
+  --role-review-agent: #ff9fd2;
+  --role-daemon: #8fa3c7;
+  --role-human: #ffd400;
+  --role-agent: #8fa3c7;
 
   /* ── Interaction kinds — graph edge colours by family. */
   --kind-request: var(--warning);
   --kind-response: var(--success);
-  --kind-human-question: var(--danger);
+  --kind-human-question: var(--role-human);
   --kind-human-answer: var(--accent);
   --kind-route: var(--role-review-agent);
   --kind-plumbing: var(--fg-muted);
@@ -142,72 +190,82 @@
   --status-done: var(--success);
 
   /* ── Metric hues (cost / speed / risk read apart from status) ─────── */
-  --metric-orange: #ffa657;
-  --metric-risk: #ff7b72;
+  --metric-orange: #ff9f43;
+  --metric-risk: #ff6a52;
 
   /* ── Layout ───────────────────────────────────────────────────────── */
   --sidebar-w: 272px;
   --content-max: 800px;   /* readable measure for prose columns (§1.1) */
-  --topbar-h: 48px;
+  --topbar-h: 87px;       /* 52px shell row + 34px status line + 1px rule */
 }
 
-/* Light: a value swap, never a reversal of the dark palette (§8.1). */
+/* Light: the printed timetable. A value swap, never a reversal (§8.1). */
 [data-theme="light"] {
   color-scheme: light;
 
   --bg-app: #ffffff;
-  --bg-surface: #f6f8fa;
+  --bg-surface: #f1f4fa;
   --bg-elevated: #ffffff;
-  --bg-user-bubble: #ddf0ff;
-  --bg-code: #f6f8fa;
-  --bg-hover: rgba(0, 0, 0, 0.04);
-  --bg-active: rgba(0, 0, 0, 0.08);
-  --bg-scrim: rgba(27, 31, 36, 0.5);
+  --bg-user-bubble: #e8eefb;
+  --bg-code: #f1f4fa;
+  --bg-hover: rgba(11, 31, 75, 0.05);
+  --bg-active: rgba(11, 31, 75, 0.09);
+  --bg-scrim: rgba(11, 31, 75, 0.45);
 
-  --fg-primary: #1f2328;
-  --fg-secondary: #424a53;
-  --fg-muted: #656d76;
+  /* The navy band stays navy: a timetable's printed header. */
+  --shell-bg: #0b1f4b;
+  --shell-fg: #ffffff;
+  --shell-muted: #b9c6e0;
+  --shell-rule: rgba(255, 255, 255, 0.18);
+
+  --fg-primary: #0b1f4b;
+  --fg-secondary: #34466e;
+  --fg-muted: #5a6b8c;
   --fg-on-accent: #ffffff;
 
-  --accent: #0969da;
-  --accent-hover: #0550ae;
-  --accent-subtle: rgba(9, 105, 218, 0.1);
-  --danger: #cf222e;
-  --danger-subtle: rgba(207, 34, 46, 0.1);
-  --warning: #9a6700;
-  --warning-subtle: rgba(154, 103, 0, 0.12);
-  --success: #1a7f37;
-  --success-subtle: rgba(26, 127, 55, 0.12);
-  --info: #0969da;
+  --accent: #0b1f4b;
+  --accent-hover: #1d3a7a;
+  --accent-subtle: rgba(11, 31, 75, 0.08);
+  --danger: #c4321a;
+  --danger-subtle: rgba(196, 50, 26, 0.1);
+  --warning: #a85400;
+  --warning-subtle: rgba(168, 84, 0, 0.1);
+  --success: #17773a;
+  --success-subtle: rgba(23, 119, 58, 0.1);
+  --info: #1d4fbf;
 
-  --border: #d0d7de;
-  --border-strong: #8c959f;
+  --needs: #ffd400;
+  --needs-ink: #0b1f4b;
+  --needs-subtle: rgba(255, 212, 0, 0.28);
 
-  --code-keyword: #cf222e;
-  --code-string: #0a3069;
-  --code-comment: #6e7781;
-  --code-number: #0550ae;
-  --code-function: #8250df;
-  --code-property: #116329;
-  --code-punctuation: #24292f;
+  --border: #c9d2e3;
+  --border-strong: #8592ad;
 
-  --chart-1: #0969da;
-  --chart-2: #1a7f37;
-  --chart-3: #9a6700;
-  --chart-4: #8250df;
-  --chart-5: #cf222e;
-  --chart-6: #0550ae;
+  --code-keyword: #b4231a;
+  --code-string: #0b3a8f;
+  --code-comment: #5a6b8c;
+  --code-number: #1d4fbf;
+  --code-function: #6a32b0;
+  --code-property: #17773a;
+  --code-punctuation: #1b2a4a;
 
-  --role-worker: #0969da;
-  --role-reviewer: #1a7f37;
-  --role-orchestrator: #9a6700;
-  --role-review-agent: #8250df;
-  --role-daemon: #656d76;
-  --role-human: #cf222e;
-  --role-agent: #57606a;
+  --chart-1: #1d4fbf;
+  --chart-2: #17773a;
+  --chart-3: #a85400;
+  --chart-4: #7a3fc4;
+  --chart-5: #c4321a;
+  --chart-6: #0b1f4b;
 
-  --metric-orange: #bc4c00;
-  --metric-risk: #cf222e;
+  --role-worker: #1d4fbf;
+  --role-reviewer: #17773a;
+  --role-orchestrator: #7a3fc4;
+  --role-review-agent: #b0337f;
+  --role-daemon: #5a6b8c;
+  --role-human: #806500;     /* yellow cannot be text on white; ochre carries the role */
+  --role-agent: #5a6b8c;
+
+  --metric-orange: #a85400;
+  --metric-risk: #c4321a;
 }
 
 /* ── Legacy aliases ────────────────────────────────────────────────────

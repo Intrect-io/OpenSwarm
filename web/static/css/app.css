@@ -72,6 +72,13 @@
   cursor: pointer;
   user-select: none;
 }
+/* Local-tracker explanation (redesign step 9): reads as a short note, not a
+   centred placeholder, so the measure stays narrow and the hint quieter. */
+.tracker-help { max-width: 46ch; margin: var(--space-6) auto 0; gap: var(--space-3); }
+.tracker-help strong { color: var(--fg-primary); font-size: var(--text-base); }
+.tracker-help p { margin: 0; line-height: 1.5; }
+.tracker-help .hint { font-size: var(--text-xs); }
+.tracker-help code { font-size: inherit; }
 .issue-row:hover { background: var(--bg-hover); }
 .issue-row.selected { background: var(--accent-subtle); }
 .issue-row input[type="checkbox"] { accent-color: var(--accent); }

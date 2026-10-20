@@ -51,11 +51,13 @@ body.page-threads {
 .thread-card.selected { background: var(--accent-subtle); box-shadow: inset 3px 0 var(--accent); }
 .thread-card:focus-visible { box-shadow: inset 3px 0 var(--accent), var(--focus-ring); }
 .subject { display: flex; gap: var(--space-2); align-items: center; font-weight: 600; }
-.thread-card .badge { font-size: 10px; }
+.thread-card .badge { font-size: var(--text-xs); }
 .badge.open { color: var(--success); border-color: var(--success); background: var(--success-subtle); }
 .badge.resolved { color: var(--fg-muted); }
 .thread-card .meta, .detail-head .meta { margin-top: var(--space-1); color: var(--fg-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
 
+.new-thread[hidden] { display: none; }
+.new-thread-actions { display: flex; gap: var(--space-2); }
 .new-thread { display: grid; gap: var(--space-2); padding: var(--space-3); border-top: 1px solid var(--border); }
 .new-thread h2 { margin: 0; font-size: var(--text-xs); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-muted); }
 .new-thread .textarea { min-height: 62px; resize: vertical; }

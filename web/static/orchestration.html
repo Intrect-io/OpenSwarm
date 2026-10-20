@@ -11,24 +11,7 @@
   <link rel="stylesheet" href="/static/css/orchestration.css" />
 </head>
 <body class="page-orchestration">
-  <header class="topbar">
-    <a class="brand" href="/app">🐝 OpenSwarm</a>
-    <span class="page-title">Orchestration</span>
-    <nav class="topbar-nav" aria-label="Pages">
-      <a href="/app">Cockpit</a>
-      <a href="/chat">Chat</a>
-      <a href="/orchestration" aria-current="page">Orchestration</a>
-      <a href="/threads">Threads</a>
-      <a href="/warehouse">Warehouse</a>
-      <a href="/usage">Usage</a>
-      <a href="/">Supervisor</a>
-    </nav>
-    <div class="topbar-spacer"></div>
-    <div class="topbar-actions">
-      <button type="button" id="theme-toggle" class="btn btn-ghost btn-icon theme-toggle" aria-label="Switch theme" aria-pressed="false">
-        <span class="when-dark" aria-hidden="true">☾</span><span class="when-light" aria-hidden="true">☀</span>
-      </button>
-    </div>
+  <header class="topbar" data-shell>
   </header>
 
   <div id="waiting" class="waiting" role="status" aria-live="polite"></div>
@@ -57,8 +40,8 @@
 
   <main class="orch-main">
     <div id="graph-wrap">
-      <svg id="graph" role="img" aria-label="Agent interaction graph"></svg>
       <div id="legend" aria-label="Legend"></div>
+      <svg id="graph" role="img" aria-label="Agent interaction graph"></svg>
     </div>
     <aside class="orch-aside" aria-label="Selection details">
       <h2>Agent detail</h2>
@@ -72,8 +55,8 @@
 
   <script type="module">
     import { startOrchestrationView } from '/static/js/orchestrationView.mjs';
-    import { installThemeToggle } from '/static/js/theme.mjs';
-    installThemeToggle(document, document.getElementById('theme-toggle'));
+    import { mountShell } from '/static/js/shell.mjs';
+    mountShell(document);
     startOrchestrationView(document);
   </script>
 </body>
