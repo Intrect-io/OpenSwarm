@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 
 import {
   EXEC_HOLD_TTL_MS, clearExecHold, isExecHeld, listHeldIssueIds, markExecHold, resetExecHoldForTests,
@@ -138,5 +139,35 @@ describe('exec hold store', () => {
       process.off('unhandledRejection', onRejection);
       warn.mockRestore();
     }
+  });
+
+  it('keeps the asymmetry when the store opens but its table is gone', () => {
+    markExecHold('i1', 'external:cli');
+    // Another process (or a damaged file) removes the table behind the cached
+    // handle: every statement now fails rather than the open.
+    const other = new Database(process.env.OPENSWARM_AUTOMATION_DB!);
+    other.exec('DROP TABLE automation_exec_runs');
+    other.close();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(() => markExecHold('i1', 'external:cli')).toThrow(/Could not record the exec hold for i1/);
+      expect(isExecHeld('i1')).toBe(false);
+      expect(listHeldIssueIds().size).toBe(0);
+      expect(() => clearExecHold('i1')).not.toThrow();
+      expect(warn.mock.calls.map(([tag]) => tag)).toEqual([
+        '[ExecHold] Read failed:', '[ExecHold] List failed:', '[ExecHold] Clear failed:',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('drops the old handle when the database path moves under it', () => {
+    markExecHold('i1', 'external:cli');
+    process.env.OPENSWARM_AUTOMATION_DB = join(dir, 'moved.db');
+
+    expect(isExecHeld('i1')).toBe(false);
+    markExecHold('i2', 'external:cli');
+    expect([...listHeldIssueIds()]).toEqual(['i2']);
   });
 });

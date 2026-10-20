@@ -40,6 +40,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 
+// The default transport (probe -> /api/work -> detached child) is the effectful
+// edge every other test injects around. Only `spawn` and the `dist/cli.js`
+// existence check are replaced, so those tests still run the real code path
+// without starting a worker or depending on whether this checkout was built.
+const spawnMock = vi.hoisted(() => vi.fn());
+const distEntry = vi.hoisted(() => ({ exists: true }));
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
+  spawn: spawnMock,
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    existsSync: (path: Parameters<typeof actual.existsSync>[0]) =>
+      String(path).endsWith(join('dist', 'cli.js')) ? distEntry.exists : actual.existsSync(path),
+  };
+});
+
 import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import type { RepoMetadata } from '../support/repoMetadata.js';
 import { RunLedger, RUN_STATES } from '../automation/runLedger.js';
@@ -724,6 +743,87 @@ describe('runExecDeployCommand', () => {
     expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(0);
     expect(getIssue).toHaveBeenCalledWith('INT-1');
     expect(JSON.parse(deps.outs.join('\n')).runId).toBe(UUID_MAIN);
+  });
+});
+
+describe('runExecDeployCommand — default daemon transport', () => {
+  /** Deploy deps with no injected probe, post or spawn: the module's own defaults run. */
+  const defaultTransportDeps = () => deployDeps({
+    markHold: vi.fn(), daemonHealthy: undefined, postWork: undefined,
+  });
+  type FetchArgs = [string, RequestInit | undefined];
+  const fetchMock = vi.fn<(...args: FetchArgs) => Promise<Response>>();
+  const urls = () => fetchMock.mock.calls.map(([url]) => new URL(url).pathname);
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    spawnMock.mockReset();
+    distEntry.exists = true;
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('probes /api/stats, then posts the issue to /api/work', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response('{}', { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ queued: 1, items: [] }), { status: 202 }));
+    const deps = defaultTransportDeps();
+
+    expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(0);
+    expect(urls()).toEqual(['/api/stats', '/api/work']);
+    const [, init] = fetchMock.mock.calls[1];
+    expect(init?.method).toBe('POST');
+    expect(JSON.parse(String(init?.body))).toEqual({ issueIds: ['INT-1'], projectPath: repoPath });
+    expect(JSON.parse(deps.outs.join('\n'))).toMatchObject({ transport: 'daemon', deployed: true });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('reads a non-2xx health probe as a refusal and never posts or spawns', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('forbidden', { status: 403 }));
+    const deps = defaultTransportDeps();
+
+    expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(2);
+    expect(urls()).toEqual(['/api/stats']);
+    expect(JSON.parse(deps.outs.join('\n')).error).toMatch(/\/api\/stats HTTP 403/);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps a dispatch error whose body is not JSON as a failure (exit 1)', async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response('{}', { status: 200 }))
+      .mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }));
+    const deps = defaultTransportDeps();
+
+    expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(1);
+    expect(JSON.parse(deps.outs.join('\n')).error).toMatch(/HTTP 502/);
+  });
+
+  it('spawns a detached `work` child from dist/cli.js when the daemon cannot be reached', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+    const unref = vi.fn();
+    spawnMock.mockReturnValue({ unref });
+    const deps = defaultTransportDeps();
+
+    expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(0);
+    expect(spawnMock).toHaveBeenCalledWith(
+      process.execPath,
+      [expect.stringMatching(/dist[\\/]cli\.js$/), 'work', 'INT-1', '--yes', '--path', repoPath],
+      { detached: true, stdio: 'ignore' },
+    );
+    expect(unref).toHaveBeenCalled();
+    expect(JSON.parse(deps.outs.join('\n'))).toMatchObject({ transport: 'child', deployed: true });
+  });
+
+  it('fails the child fallback with a build hint when dist/cli.js is missing', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+    distEntry.exists = false;
+    const deps = defaultTransportDeps();
+
+    expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(1);
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(JSON.parse(deps.outs.join('\n')).error).toMatch(/npm run build/);
   });
 });
 
