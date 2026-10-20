@@ -407,7 +407,9 @@ describe('runAgenticLoop local-data discovery (AGT-4128, AGT-4661)', () => {
 
   it('does not send a native-host worker to a warehouse that is not there', async () => {
     process.env[ENV] = join(tmpdir(), 'warehouse-that-does-not-exist');
-    const prompt = await firstPrompt(process.cwd());
+    const nativeRoot = mkdtempSync(join(tmpdir(), 'native-host-'));
+    dirs.push(nativeRoot);
+    const prompt = await firstPrompt(nativeRoot);
     expect(prompt).not.toContain('INDEX.md');
     expect(prompt).not.toContain('/warehouse');
     // The task prompt still follows the working-directory note on its own line.

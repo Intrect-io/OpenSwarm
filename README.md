@@ -254,6 +254,8 @@ from sysctls, quotes bwrap's own error, and prints the matching fix.
 
 For crash recovery, fenced execution leases, outbox semantics, rollout modes, and
 repository admission policy, see [Durable autonomous loop](docs/DURABLE_AUTONOMY.md).
+For artifact-bound stage recovery and the opt-in `off`/`shadow`/`active` Recovery
+Advisor, see [Recovery Advisor](docs/durable-recovery-advisor.md).
 
 ### `openswarm exec` options
 

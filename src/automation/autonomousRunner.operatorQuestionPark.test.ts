@@ -164,9 +164,14 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     internal.durableRuns.close();
   });
 
-  it('never turns a quarantined sandbox outcome into RETRY_AT or heartbeat backoff', async () => {
+  it.each(['worker', 'tester', 'reviewer'] as const)('keeps a quarantined %s outcome parked through idle fill until explicit dispatch', async (stage) => {
     const internal = await makeRunner();
     const quarantined = pipelineResult([], true);
+    if (stage !== 'worker') {
+      quarantined.workerResult = { success: true, summary: 'Changed behavior', filesChanged: ['value.ts'], commands: [], output: '' };
+      if (stage === 'tester') quarantined.testerResult = { success: false, testsPassed: 0, testsFailed: 0, output: '', executionOutcomeUnknown: true };
+      else quarantined.reviewResult = { decision: 'revise', feedback: 'Unknown execution', executionOutcomeUnknown: true };
+    }
     await internal.durableRuns.execute(TASK, REPO, async () => quarantined);
     expect(internal.durableRuns.getRun('AGT-1')).toMatchObject({
       state: 'NEEDS_HUMAN',
@@ -180,8 +185,14 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     });
 
     expect(internal.failedTaskRetryTimes.has('AGT-1')).toBe(false);
-    // AGT-4257: idle_fill resumes even a sandbox-quarantine park so slots work.
-    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]);
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    const premature = vi.fn(async () => quarantined);
+    await internal.durableRuns.execute(TASK, REPO, premature);
+    expect(premature).not.toHaveBeenCalled();
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+    expect((internal as unknown as { readmitForExplicitDispatch(task: TaskItem): boolean })
+      .readmitForExplicitDispatch({ ...TASK, explicitDispatch: true })).toBe(true);
     expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('READY');
     internal.durableRuns.close();
   });
@@ -478,10 +489,12 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
 
   // AGT-4306: the same-fingerprint infra circuit parks a run so an operator
   // changes something first. A free slot is not that change.
-  it('does not idle-fill a run the infra circuit parked; an explicit dispatch still lifts it', async () => {
+  it.each(['infra', 'advisor'] as const)('does not idle-fill a run the %s parked; an explicit dispatch still lifts it', async (kind) => {
     const internal = await makeRunner();
     const { RunLedger } = await import('./runLedger.js');
     const { INFRA_CIRCUIT_PARK_REASON } = await import('./infraFailureCircuit.js');
+    const { RECOVERY_ADVISOR_PARK_REASON } = await import('./loopRecoveryTypes.js');
+    const code = kind === 'infra' ? INFRA_CIRCUIT_PARK_REASON : RECOVERY_ADVISOR_PARK_REASON;
     // Seeded the way durableRunCoordinator parks it: a claimed run transitioned
     // to NEEDS_HUMAN with the circuit's own error code.
     const ledger = new RunLedger(dbPath);
@@ -489,10 +502,10 @@ describe('stop re-dispatching a repeatedly-unanswered ask_human (AGT-4042)', () 
     expect(claim).not.toBeNull();
     expect(ledger.transition(claim!, 'EXECUTING')).toBe(true);
     expect(ledger.transition(claim!, 'NEEDS_HUMAN', {
-      errorCode: INFRA_CIRCUIT_PARK_REASON, errorMessage: 'Identical infrastructure failure on 6 consecutive attempts: codeql missing',
+      errorCode: code, errorMessage: 'Identical infrastructure failure on 6 consecutive attempts: codeql missing',
     })).toBe(true);
     ledger.close();
-    expect(internal.durableRuns.getRun('AGT-1')).toMatchObject({ state: 'NEEDS_HUMAN', lastErrorCode: INFRA_CIRCUIT_PARK_REASON });
+    expect(internal.durableRuns.getRun('AGT-1')).toMatchObject({ state: 'NEEDS_HUMAN', lastErrorCode: code });
 
     // Free slots, Todo card: every other NEEDS_HUMAN park would be lifted here.
     expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);

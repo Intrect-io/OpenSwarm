@@ -1,4 +1,8 @@
+import { reconcileExpiredRowsInDb } from './runLedgerExpired.js';
 import Database from 'better-sqlite3';
+import { RunRecoveryStore } from './runRecoveryStore.js';
+import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
+import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -90,6 +94,7 @@ export { defaultAutomationDbPath } from './automationDbPath.js';
  */
 export class RunLedger {
   private readonly db: Database.Database;
+  readonly recovery: RunRecoveryStore;
   private closed = false;
 
   constructor(dbPath = defaultAutomationDbPath(), options: RunLedgerOptions = {}) {
@@ -107,6 +112,7 @@ export class RunLedger {
       this.db.pragma('foreign_keys = ON');
       this.db.pragma('synchronous = FULL');
       migrateAutomationSchema(this.db);
+      this.recovery = new RunRecoveryStore(this.db);
     } catch (error) {
       this.db.close();
       throw error;
@@ -371,6 +377,9 @@ export class RunLedger {
     const resume = this.db.transaction((): RunState | null => {
       const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?').get(issueId) as RunRow | undefined;
       if (!row || row.state !== 'NEEDS_HUMAN') return null;
+      if (row.last_error_code === RECOVERY_ADVISOR_PARK_REASON && trigger === 'idle_fill') return null;
+      if (row.last_error_code === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON
+          && trigger !== 'explicit_dispatch' && trigger !== 'sandbox_quarantine_dispatch') return null;
       // An ask_human park carries its own exact-correlation resume contract.
       // Linear state changes and generic operator recovery must not bypass it.
       // idle_fill is the exception: empty slots + in-scope work beat the wait
@@ -399,6 +408,7 @@ export class RunLedger {
         WHERE issue_id = ? AND state = 'NEEDS_HUMAN' AND state_version = ?
       `).run(to, now, issueId, row.state_version);
       if (updated.changes !== 1) return null;
+      if (row.last_error_code === RECOVERY_ADVISOR_PARK_REASON) this.recovery.operatorResumed(issueId);
       this.insertEvent(issueId, row.attempt_no, 'operator_resumed', 'NEEDS_HUMAN', to, {
         deadEffectsReset: deadEffects,
         trigger,
@@ -1380,42 +1390,11 @@ export class RunLedger {
     this.db.close();
   }
 
-  /** Caller must already hold a SQLite writer transaction. */
   private reconcileExpiredRows(rows: readonly RunRow[], now: number): string[] {
-    const reconciledIssueIds: string[] = [];
-    for (const row of rows) {
+    return reconcileExpiredRowsInDb(this.db, rows, now, (row) => {
       assertRunState(row.state);
-      const updated = this.db.prepare(`
-        UPDATE automation_runs
-        SET state = 'NEEDS_RECONCILE', state_version = state_version + 1,
-            lease_expires_at = NULL,
-            last_error_code = 'lease_expired',
-            last_error_message = 'Execution lease expired before a terminal transition',
-            updated_at = ?
-        WHERE issue_id = ? AND state_version = ? AND lease_epoch = ?
-          AND state IN (${placeholders(ACTIVE_LEASE_STATES)})
-          AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
-      `).run(
-        now,
-        row.issue_id,
-        row.state_version,
-        row.lease_epoch,
-        ...ACTIVE_LEASE_STATES,
-        now,
-      );
-      if (updated.changes !== 1) continue;
-      reconciledIssueIds.push(row.issue_id);
-      this.db.prepare(`
-        UPDATE automation_attempts
-        SET status = 'orphaned', finished_at = ?, error_code = 'lease_expired',
-            error_message = 'Execution lease expired before a terminal transition'
-        WHERE issue_id = ? AND attempt_no = ? AND lease_epoch = ? AND status = 'running'
-      `).run(now, row.issue_id, row.attempt_no, row.lease_epoch);
-      this.insertEvent(row.issue_id, row.attempt_no, 'lease_expired', row.state, 'NEEDS_RECONCILE', {
-        leaseEpoch: row.lease_epoch,
-      }, now);
-    }
-    return reconciledIssueIds;
+      this.insertEvent(row.issue_id, row.attempt_no, 'lease_expired', row.state, 'NEEDS_RECONCILE', { leaseEpoch: row.lease_epoch }, now);
+    });
   }
 
   private unfencedTransition(

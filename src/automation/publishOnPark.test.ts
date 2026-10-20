@@ -288,6 +288,8 @@ describe('parked-work draft publication', () => {
     // A published run and a quarantined sandbox outcome still never publish.
     expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator', prUrl: 'https://x/1' })).toBe(false);
     expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator', workerResult: { executionOutcomeUnknown: true } })).toBe(false);
+    expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator', testerResult: { executionOutcomeUnknown: true } })).toBe(false);
+    expect(shouldPublishParkedWork(true, { finalStatus: 'waiting_on_operator', reviewResult: { executionOutcomeUnknown: true } })).toBe(false);
   });
 });
 
@@ -437,6 +439,8 @@ describe('unfinished-run publication (AGT-4664)', () => {
 
     it('does not publish a sandbox outcome it cannot trust or a run that already has a PR', () => {
       expect(shouldPublishUnfinishedWork(true, { finalStatus: 'failed', workerResult: { executionOutcomeUnknown: true } })).toBe(false);
+      expect(shouldPublishUnfinishedWork(true, { finalStatus: 'failed', testerResult: { executionOutcomeUnknown: true } })).toBe(false);
+      expect(shouldPublishUnfinishedWork(true, { finalStatus: 'failed', reviewResult: { executionOutcomeUnknown: true } })).toBe(false);
       expect(shouldPublishUnfinishedWork(true, { finalStatus: 'failed', prUrl: 'https://x/1' })).toBe(false);
     });
 

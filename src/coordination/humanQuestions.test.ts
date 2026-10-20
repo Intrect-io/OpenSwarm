@@ -33,6 +33,35 @@ async function modules() {
 }
 
 describe('human questions', () => {
+  it('does not resurrect an answered question when notification completes late', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    let release!: () => void;
+    const notification = new Promise<void>((resolve) => { release = resolve; });
+    const notify = vi.fn(async () => { await notification; return true; });
+    const pending = h.postHumanQuestion({ repository: '/repo', taskId: 'late-notify', actor: 'worker', question: 'Which API?', notify });
+    await vi.waitFor(() => expect(notify).toHaveBeenCalled());
+    const question = store.openQuestions('/repo', 'late-notify')[0];
+    expect((await h.answerHumanQuestion(question.correlationId, 'Use v2', 'discord:operator')).accepted).toBe(true);
+    release();
+    expect(await pending).toMatchObject({ answer: 'Use v2' });
+    expect(store.openQuestions('/repo', 'late-notify')).toEqual([]);
+    expect(store.exchange(question.correlationId).at(-1)?.kind).toBe('human-answer');
+  });
+
+  it('fences a late page marker inside the store lock after an answer', async () => {
+    const h = await modules();
+    const store = (await import('./coordinationStore.js')).getCoordinationStore();
+    const posted = await h.postHumanQuestion({ repository: '/repo', taskId: 'late-publish', actor: 'worker', question: 'Which API?', notify: async () => false });
+    expect((await h.answerHumanQuestion(posted.correlationId, 'Use v2', 'discord:operator')).accepted).toBe(true);
+    const result = await store.publish({ repository: '/repo', taskId: 'late-publish', actor: 'worker', kind: 'human-question', status: 'running', correlationId: posted.correlationId, summary: 'Operator paged' });
+    expect(result.kind).toBe('human-answer');
+    expect(store.openQuestions('/repo', 'late-publish')).toEqual([]);
+    const other = await store.publish({ repository: '/other', taskId: 'late-publish', actor: 'worker', kind: 'human-question', status: 'waiting', correlationId: posted.correlationId, summary: 'Different project' });
+    expect(other.kind).toBe('human-question');
+    const otherTask = await store.publish({ repository: '/repo', taskId: 'another-task', actor: 'worker', kind: 'human-question', status: 'waiting', correlationId: posted.correlationId, summary: 'Different task' });
+    expect(otherTask.kind).toBe('human-question');
+  });
   it('records the blocker but never invokes an injected operator sender in strict mode', async () => {
     const h = await modules();
     const notify = vi.fn(async () => true);

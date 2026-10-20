@@ -1,3 +1,6 @@
+import { LoopRecovery, RecoveryParkError } from './loopRecovery.js';
+import { RECOVERY_ADVISOR_PARK_REASON } from '../automation/loopRecoveryTypes.js';
+import { runFullIterationLoop } from './pairIterationLoop.js';
 // ============================================
 // OpenSwarm - Pair Pipeline
 // Worker → Reviewer → Tester → Documenter pipeline
@@ -7,8 +10,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { taskAttributionKey, taskEventKey, type TaskItem } from '../orchestration/decisionEngine.js';
 import { rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 import { scratchNotesSection, workerScratchpadRunId } from './workerScratchpad.js';
-import { discardStagedMemoriesFrom } from './stagedMemory.js';
-import { captureBeforeIteration, createSnapshotState, rollbackStagnantIteration } from './iterationSnapshot.js';
+import { createSnapshotState } from './iterationSnapshot.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import type { TesterResult } from './tester.js';
@@ -16,30 +18,24 @@ import type { DocumenterResult } from './documenter.js';
 import type { AuditorResult } from './auditor.js';
 import type { SkillDocumenterResult } from './skillDocumenter.js';
 import { summarizeStageResult } from './stageSummary.js';
-import { composePipelineResult } from './pairPipelineResult.js';
+import { composePipelineResult, pipelineCosts } from './pairPipelineResult.js';
 import type { PipelineStage, PipelineGuardsConfig, JobProfile } from '../core/types.js';
 import { type CostInfo, formatCost } from '../support/costTracker.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import { t } from '../locale/index.js';
-import { CONFIDENCE_THRESHOLDS } from './agentPair.js';
 import * as agentPair from './agentPair.js';
-import { runGuards } from './pipelineGuards.js';
-import { adjudicateContractEvidenceStagnation } from './guardArbiter.js';
 import {
   type ReflectionSource,
   createReflectionState,
-  recordReflection,
   shouldStopReflecting,
   buildReflectionFeedback,
-  similarReviewFeedback,
   DEFAULT_MAX_REFLECTIONS,
 } from './reflection.js';
-import { buildRepeatEscalation, resolveWorkerStageOverrides } from './workerEscalation.js';
 import { hasRepoSnapshot, scanAndCache } from '../knowledge/index.js';
 import * as workerAgent from './worker.js';
 import type { WorkerOptions } from './worker.js';
 import { buildTaskPrefix } from './pipelineTaskPrefix.js';
-import { emitWorkerFanoutGateDecision, evaluateWorkerFanoutGate, runWorkerWithOptionalFanout } from './workerFanoutGate.js';
+import { runWorkerWithOptionalFanout } from './workerFanoutGate.js';
 import type {
   PipelineConfig,
   PipelineContext,
@@ -62,19 +58,12 @@ import { resolveAdapterDefaultModel } from './stageModelResolver.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
 import type { ModelRole } from '../adapters/modelCompat.js';
 import { captureVerifyInputFingerprint, loadTrustedVerifyPlan, runTesterWithVerification } from './deterministicTester.js';
-import { captureSecurityAuditBaseline, collectIntroducedSecurityFindings, formatSecurityFinding, SecurityAuditInfrastructureError } from './securityAuditGate.js';
+import { captureSecurityAuditBaseline, SecurityAuditInfrastructureError } from './securityAuditGate.js';
 import { collectWorkerContext } from './workerContext.js';
-import { testerReflectionErrors, testerRevisionFeedback } from './testerFailureFeedback.js';
-import { formatGuardWarningLine, guardWarningsForResult } from './guardWarningRecord.js';
+import { guardWarningsForResult } from './guardWarningRecord.js';
 import { repoNameFromPath, worktreeNameFromPath } from './repoPathNames.js';
 import { assignedAgentName, coordinationContextFor, publishStageFailureToBoard, publishStageOutcomeToBoard, publishStageToBoard, stageCorrelationId } from './pipelineCoordination.js';
 import { isClassifiedStageError, rethrowClassified, extractClassifiedStageResult, PipelineCancelledError } from './stageErrorClassification.js';
-import {
-  isTesterCodeFile,
-  isValidationRelevantFile,
-  missingWorkerValidationIssues,
-  testerWouldRunForWorkerResult,
-} from './workerValidationEvidence.js';
 export { PipelineCancelledError };
 export type {
   PipelineConfig,
@@ -87,32 +76,11 @@ export type {
 export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
-import { canStartAnotherIteration } from '../orchestration/taskBudget.js';
 import { buildReviewerStageOptions } from './reviewerStageOptions.js';
-import { reviewWorkerBlocker } from './workerBlockerReview.js';
 
 
-/**
- * Resolve the coordination identity for one stage of a task.
- *
- * Keyed on the task rather than the session so a call sign survives a retry:
- * an operator's answer, or another agent's advice, is addressed to the name
- * that asked, and a fresh session ID on the next attempt would strand it in an
- * inbox nobody reads. Role is part of the key so the worker and the reviewer on
- * one task never answer to the same name.
- */
-/**
- * A test verdict describes the diff it ran against. Left in place, a run that
- * ends before the tester — on a guard, a worker failure — is recorded with the
- * previous iteration's test output as its reason (AX-1585, AGT-4468). A function
- * rather than an inline assignment so the loop's later reads are not narrowed
- * to `undefined`.
- */
 type RunControl = { signal?: AbortSignal; stuck: StuckDetector };
 
-function dropStaleTestVerdict(context: { testerResult?: TesterResult }): void {
-  context.testerResult = undefined;
-}
 
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
@@ -159,7 +127,7 @@ export class PairPipeline extends EventEmitter {
    * 1 iteration = full pass through Worker → Reviewer → Tester
    * On failure at any stage, returns to Worker (up to maxIterations)
    */
-  async run(task: TaskItem, projectPath: string, opts?: { signal?: AbortSignal }): Promise<PipelineResult> {
+  async run(task: TaskItem, projectPath: string, opts?: import('./pairPipelineTypes.js').PipelineRunOptions): Promise<PipelineResult> {
     // A fresh detector per run: two run() calls on one instance must not share
     // the per-run identity that runControl exists to keep separate.
     const stuckDetector = createStuckDetector({ sameErrorRepeat: 3, revisionLoop: 4 });
@@ -209,6 +177,7 @@ export class PairPipeline extends EventEmitter {
         context.trustedVerifyCommands = plan.commands; context.trustedVerifyPackageJsonByDirectory = plan.packageJsonByDirectory;
         context.trustedVerifyInputFingerprint = await captureVerifyInputFingerprint(projectPath);
       } catch (error) { context.trustedVerifyError = error; }
+      context.recovery = await LoopRecovery.create(context, opts?.recovery, startTime);
       if (this.config.securityAudit?.enabled) {
         context.securityBaseline = await captureSecurityAuditBaseline(projectPath, this.config.securityAudit);
         safeConsole.log(`[${context.taskPrefix}] CodeQL baseline: ${context.securityBaseline.status}, ${context.securityBaseline.findings.length} finding(s)`);
@@ -257,6 +226,7 @@ export class PairPipeline extends EventEmitter {
       // Cancellation (project disable / manual stop) is not a failure — surface it
       // as 'cancelled' so the scheduler doesn't count it failed or trigger a retry.
       const cancelled = error instanceof PipelineCancelledError || !!PairPipeline.runControl.getStore()?.signal?.aborted;
+      const recoveryPark = !cancelled && error instanceof RecoveryParkError;
       // A 429/usage-limit propagates up here from any stage (worker/reviewer/…).
       // Surface it as its own finalStatus so the runner pauses until quota resets
       // instead of counting a failure and spamming Linear comments. (INT-1906)
@@ -267,6 +237,7 @@ export class PairPipeline extends EventEmitter {
       const infra = !cancelled && !rateLimited && (error instanceof SecurityAuditInfrastructureError || isInfraError(error));
       const classifiedStage = extractClassifiedStageResult(error); // INT-2424
       if (classifiedStage) stages.push(classifiedStage);
+      if (!infra && !rateLimited && context.recovery && opts?.recovery?.isCurrent()) context.recovery.settle(false);
       if (cancelled) {
         safeConsole.log(`[${context.taskPrefix}] Pipeline cancelled`);
       } else if (rateLimited) {
@@ -281,13 +252,16 @@ export class PairPipeline extends EventEmitter {
         success: false,
         sessionId: session.id,
         stages,
-        finalStatus: cancelled ? 'cancelled' : rateLimited ? 'rate_limited' : infra ? 'infra_error' : 'failed',
+        finalStatus: cancelled ? 'cancelled' : recoveryPark ? 'waiting_on_operator' : rateLimited ? 'rate_limited' : infra ? 'infra_error' : 'failed',
+        recovery: context.recovery?.status(),
+        operatorPark: recoveryPark ? { code: RECOVERY_ADVISOR_PARK_REASON, reason: error.message } : undefined,
         failureDetail: `${classifiedStage?.stage ?? 'pipeline'}: ${error instanceof Error ? error.message : String(error)}`,
         failureSignal: isTimeoutError(error) ? 'timeout' : undefined,
         rateLimitResetsAt: rateLimited && (error as RateLimitError).resetsAt
           ? (error as RateLimitError).resetsAt! * 1000
           : undefined,
         totalDuration: Date.now() - startTime,
+        totalCost: pipelineCosts(context, stages),
         iterations: context.currentIteration,
         // A crashed run still knows what the guards objected to (AGT-4439).
         guardWarnings: guardWarningsForResult(context.guardsResult?.results),
@@ -323,7 +297,7 @@ export class PairPipeline extends EventEmitter {
     }
   }
 
-  private async runTester(context: PipelineContext): Promise<TesterResult> {
+  private async runTester(context: PipelineContext, overrides?: { model?: string; modelRole?: ModelRole }): Promise<TesterResult> {
     if (!context.workerResult) throw new Error('Worker result required for tester');
     if (context.trustedVerifyError) throw context.trustedVerifyError;
     const testerResult = await runTesterWithVerification({
@@ -345,7 +319,7 @@ export class PairPipeline extends EventEmitter {
         taskTitle: context.task.title, taskDescription: context.task.description || '',
         workerResult: context.workerResult!, projectPath: context.projectPath,
         timeoutMs: stageTimeoutMs('tester', this.config.roles?.tester?.timeoutMs),
-        model: compatibleStageModel(this.config, 'tester', this.config.roles?.tester?.model),
+        model: compatibleStageModel(this.config, 'tester', overrides?.model ?? this.config.roles?.tester?.model, overrides?.modelRole ?? 'tester'),
         // Coding stages run without a turn ceiling unless configured (AGT-4388).
         maxTurns: this.config.roles?.tester?.maxTurns ?? UNBOUNDED_TURNS,
         adapterName: this.config.roles?.tester?.adapter,
@@ -360,8 +334,36 @@ export class PairPipeline extends EventEmitter {
     return testerResult;
   }
 
+  /** 복구 판정은 실제 단계 바깥에서 기록해 lease 실패를 단계 성공으로 바꾸지 않는다. */
+  private async runStage(stage: PipelineStage, context: PipelineContext,
+    overrides?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high'; modelRole?: ModelRole }): Promise<StageResult> {
+    const recovery = context.recovery;
+    if (recovery?.parkReason) throw new RecoveryParkError(recovery.parkReason);
+    const cached = await recovery?.restore(stage);
+    if (cached) {
+      this.emit('stage:start', { stage, context, model: 'checkpoint', reused: true });
+      this.emit('stage:complete', { stage, result: cached, context, reused: true });
+      return cached;
+    }
+    recovery?.start(stage);
+    const model = recovery?.model(stage) ?? overrides?.model ?? modelForTask(this.config, stage, context.task)
+      ?? (recovery ? await resolveAdapterDefaultModel(this.config.roles?.[stage]?.adapter, this.defaultModelCache) : undefined);
+    const effective = recovery?.model(stage) ? { ...overrides, model, modelRole: 'escalate' as const } : overrides;
+    let result: StageResult;
+    try { result = await this.executeStage(stage, context, effective); }
+    catch (error) {
+      const failed = extractClassifiedStageResult(error);
+      if (failed) await recovery?.complete(failed, model, error);
+      if (recovery?.parkReason) throw new RecoveryParkError(recovery.parkReason);
+      throw error;
+    }
+    await recovery?.complete(result, model);
+    if (recovery?.parkReason) throw new RecoveryParkError(recovery.parkReason);
+    return result;
+  }
+
   /** Run a single stage. */
-  private async runStage(
+  private async executeStage(
     stage: PipelineStage,
     context: PipelineContext,
     overrides?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high'; modelRole?: ModelRole }
@@ -462,7 +464,7 @@ export class PairPipeline extends EventEmitter {
             : undefined;
           const scratchNotesPart = await scratchNotesSection(context.task);
           const combinedFeedback =
-            [scratchNotesPart, priorSessionPart, reflectionPart, reviewPart, scopeFencePart]
+            [scratchNotesPart, priorSessionPart, reflectionPart, reviewPart, scopeFencePart, context.recovery?.feedback]
               .filter(Boolean).join('\n\n') || undefined;
 
           const workerOptions: WorkerOptions = {
@@ -607,7 +609,7 @@ export class PairPipeline extends EventEmitter {
           break;
 
         case 'tester':
-          result = await this.runTester(context);
+          result = await this.runTester(context, overrides);
           context.testerResult = result as TesterResult;
 
           // Verbose: emit tester details
@@ -768,6 +770,8 @@ export class PairPipeline extends EventEmitter {
     stage: PipelineStage,
     result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult
   ): boolean {
+    const boundary = result as { executionOutcomeUnknown?: boolean; blockedOnOperator?: boolean };
+    if (boundary.executionOutcomeUnknown || boundary.blockedOnOperator) return false;
     switch (stage) {
       case 'worker':
         return (result as WorkerResult).success;
@@ -834,589 +838,13 @@ export class PairPipeline extends EventEmitter {
    * On failure (revise) at any stage, restart from Worker in next iteration
    * reject = immediate termination
    */
-  private async runFullIterationLoop(
-    context: PipelineContext,
-    stages: StageResult[]
-  ): Promise<{ success: boolean }> {
-    const maxIterations = this.config.maxIterations ?? 3;
-    const loopStartedAt = Date.now();
-    const hasWorker = this.hasStage('worker');
-    const hasReviewer = this.hasStage('reviewer');
-    const hasTester = this.hasStage('tester');
-
-    // No point without a worker
-    if (!hasWorker) {
-      safeConsole.log(`[${context.taskPrefix}] No worker stage configured`);
-      return { success: false };
-    }
-
-    // The watchdog used to fire mid-iteration and the run ended "cancelled, PR
-    // not created" with finished work stranded on a branch (AGT-4430). Stop on
-    // our own terms instead: an iteration is only started when the longest one
-    // observed so far still fits in what is left of the same budget.
-    const taskBudgetMs = this.config.taskBudgetMs ?? 0;
-    const workerTimeoutMs = stageTimeoutMs('worker', this.config.roles?.worker?.timeoutMs);
-    let longestIterationMs = 0;
-
-    while (context.currentIteration < maxIterations) {
-      this.throwIfAborted(); // bail before starting another iteration
-      const budget = canStartAnotherIteration({
-        elapsedMs: Date.now() - loopStartedAt,
-        budgetMs: taskBudgetMs,
-        iterationsUsed: context.currentIteration,
-        maxIterations,
-        longestIterationMs,
-        workerTimeoutMs,
-      });
-      if (!budget.start && budget.reason) {
-        context.budgetParkReason = budget.reason;
-        safeConsole.warn(`[${context.taskPrefix}] Stopping before iteration ${context.currentIteration + 1}: ${budget.reason}`);
-        agentPair.updateSessionStatus(context.session.id, 'failed');
-        return { success: false };
-      }
-      const iterationStartedAt = Date.now();
-      context.currentIteration++;
-      dropStaleTestVerdict(context);
-      await captureBeforeIteration(context);
-
-      // Stuck detection check (before iteration starts)
-      const stuckCheck = this.getStuck().check();
-      if (stuckCheck.isStuck) {
-        context.stuckReason = stuckCheck.reason;
-        safeConsole.error(`[${context.taskPrefix}] STUCK DETECTED: ${stuckCheck.reason}`);
-        safeConsole.error(`[${context.taskPrefix}] Suggestion: ${stuckCheck.suggestion}`);
-        this.emit('stuck', {
-          reason: stuckCheck.reason,
-          suggestion: stuckCheck.suggestion,
-          context,
-        });
-        agentPair.updateSessionStatus(context.session.id, 'failed');
-        return { success: false };
-      }
-
-      this.emit('iteration:start', {
-        iteration: context.currentIteration,
-        maxIterations,
-        context,
-      });
-      broadcastEvent({ type: 'pipeline:iteration', data: { taskId: taskEventKey(context.task), iteration: context.currentIteration } });
-
-      safeConsole.log(`[${context.taskPrefix}] Iteration ${context.currentIteration}/${maxIterations}`);
-
-      // ========== WORKER (with escalation) ==========
-      // Iteration-count escalation + one-shot signal escalation (INT-2475) —
-      // policy lives in workerEscalation.ts; the signal takes precedence.
-      const workerOverrides = resolveWorkerStageOverrides({
-        workerCfg: this.config.roles?.worker,
-        iteration: context.currentIteration,
-        baseModel: modelForTask(this.config, 'worker', context.task),
-        // The role's declared effort is part of the floor, not just the profile's:
-        // the retry rung takes a MAX, so omitting it lowered a role asking for
-        // `high` down to `medium` on the first retry.
-        baseEffort: effortForTask(this.config, context.task) ?? this.config.roles?.worker?.effort,
-        signalEscalation: context.workerEscalation,
-        taskId: taskEventKey(context.task),
-        taskPrefix: context.taskPrefix,
-      });
-
-      const fanoutDecision = evaluateWorkerFanoutGate({
-        task: context.task,
-        draftAnalysis: this.config.draftAnalysis,
-        iteration: context.currentIteration,
-        feedbackSource: context.feedbackSource,
-        effort: effortForTask(this.config, context.task) ?? this.config.roles?.worker?.effort,
-        config: this.config.roles?.worker?.fanout,
-      });
-      context.workerFanoutDecision = fanoutDecision;
-      emitWorkerFanoutGateDecision({
-        context,
-        decision: fanoutDecision,
-        verbose: this.config.verbose,
-        emit: (event, payload) => this.emit(event, payload),
-      });
-
-      agentPair.updateSessionStatus(context.session.id, 'working');
-      const workerResult = await this.runStage('worker', context, workerOverrides);
-      stages.push(workerResult);
-
-      // Record Worker result in stuck detector
-      this.getStuck().addEntry({
-        stage: 'worker',
-        success: workerResult.success,
-        output: (workerResult.result as WorkerResult).summary,
-        error: (workerResult.result as WorkerResult).error,
-        timestamp: Date.now(),
-      });
-
-      if (!workerResult.success) {
-        const failedWorker = workerResult.result as WorkerResult;
-        // Blocked-on-operator is terminal for this run, not a retryable
-        // failure: every further iteration re-runs the same worker into the
-        // same unanswered question, burning the iteration budget to end up
-        // where we already are. The question stays open on the board; the task
-        // resumes when the Discord answer lands.
-        if (failedWorker.blockedOnOperator || failedWorker.executionOutcomeUnknown) {
-          safeConsole.log(failedWorker.executionOutcomeUnknown ? `[${context.taskPrefix}] Worker sandbox outcome is unknown — quarantining without retry` : `[${context.taskPrefix}] Worker is waiting on an operator decision — stopping without retry`);
-          // First-class status: buildResult derives finalStatus from the
-          // session, and anything else here surfaces as a plain 'failed' the
-          // scheduler failure-counts and backoff-retries into the same
-          // unanswered question.
-          context.workerResult = failedWorker;
-          agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
-          this.emit('halt', {
-            confidence: failedWorker.confidencePercent ?? 0,
-            haltReason: failedWorker.haltReason ?? 'Blocked on an operator decision',
-            sessionId: context.session.id,
-            iteration: context.currentIteration,
-            context,
-          });
-          return { success: false };
-        }
-        const detail = failedWorker.error
-          ?? failedWorker.haltReason
-          ?? failedWorker.noChangesReason
-          ?? failedWorker.summary;
-        // A second identical scope rejection is structural, not a worker-quality
-        // failure.  Retrying would only consume the next iteration with the same
-        // fence (and otherwise triggers fresh-context / reasoning escalation).
-        // Park it explicitly so the operator sees the incompatible demand and
-        // scope rather than receiving a PR that silently dropped the request.
-        if (detail?.startsWith('worker-scope:') && context.repeatedScopeRejection === detail) {
-          const reason = `Repeated write-scope rejection; stopped instead of retrying: ${detail}`;
-          safeConsole.log(`[${context.taskPrefix}] ${reason}`);
-          context.workerResult = { ...failedWorker, haltReason: reason };
-          agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
-          this.emit('halt', { confidence: failedWorker.confidencePercent ?? 0, haltReason: reason, sessionId: context.session.id, iteration: context.currentIteration, context });
-          return { success: false };
-        }
-        if (detail?.startsWith('worker-scope:')) context.repeatedScopeRejection = detail;
-        // A no-edit stop with a stated reason is a claim about the task: put it
-        // to the reviewer once instead of retrying blind (AGT-4535).
-        const blocker = await reviewWorkerBlocker(this.config, context, failedWorker, PairPipeline.runControl.getStore()?.signal);
-        if (blocker?.confirmed) {
-          agentPair.updateSessionStatus(context.session.id, 'waiting_on_operator');
-          this.emit('halt', { confidence: failedWorker.confidencePercent ?? 0, haltReason: blocker.reason, sessionId: context.session.id, iteration: context.currentIteration, context });
-          return { success: false };
-        }
-        if (blocker) {
-          agentPair.trackFailure(context.session.id);
-          this.emit('iteration:fail', { iteration: context.currentIteration, stage: 'worker', context });
-          agentPair.updateSessionStatus(context.session.id, 'revising');
-          continue;
-        }
-        safeConsole.log(`[${context.taskPrefix}] Worker failed, retrying...${detail ? ` (${detail.slice(0, 500)})` : ''}`);
-        agentPair.trackFailure(context.session.id);
-        this.emit('iteration:fail', {
-          iteration: context.currentIteration,
-          stage: 'worker',
-          context,
-        });
-        continue; // Next iteration
-      }
-
-      // ========== PIPELINE GUARDS (post-worker, pre-reviewer) ==========
-      if (this.config.guards && context.workerResult) {
-        safeConsole.log(`[${context.taskPrefix}] Running pipeline guards...`);
-        const guardsResult = await runGuards(
-          context.workerResult,
-          context.projectPath,
-          this.config.guards,
-        );
-        context.guardsResult = guardsResult;
-
-        if (!guardsResult.allPassed) {
-          // Blocking guard failed → bad edit. Skip the (expensive) reviewer and
-          // drive a bounded self-repair retry with the exact errors preserved.
-          const blocking = guardsResult.results.filter(r => !r.passed && r.blocking);
-          const blockingIssues = blocking.flatMap(r => r.issues);
-          safeConsole.log(`[${context.taskPrefix}] Blocking guard failed: ${blockingIssues.join('; ')}`);
-
-          // qualityGate is the lint/type bad-edit check; bsDetector is code-smell.
-          const source: ReflectionSource = blocking.some(r => r.guard === 'qualityGate') ? 'lint' : 'bs';
-          const { progressed } = recordReflection(context.reflection, {
-            iteration: context.currentIteration,
-            source,
-            errors: blockingIssues,
-          });
-
-          // Confirmed stagnation (identical block twice) on contractEvidence
-          // ALONE — not mixed with another guard — gets one arbiter
-          // adjudication before the mechanical retry/abort below (AGT-4462):
-          // the guard's own evidence check cannot accept a literal this same
-          // diff newly defines, so retrying never helps that specific case.
-          const arbiterOutcome = !progressed && blocking.length === 1 && blocking[0].guard === 'contractEvidence'
-            ? await adjudicateContractEvidenceStagnation({
-                issues: blockingIssues,
-                projectPath: context.projectPath,
-                adapter: this.config.roles?.reviewer?.adapter,
-                model: this.config.roles?.reviewer?.model,
-              })
-            : undefined;
-          if (arbiterOutcome) safeConsole.log(`[${context.taskPrefix}] ${arbiterOutcome.summary}`);
-
-          if (!arbiterOutcome?.overridden) {
-            context.reviewResult = {
-              decision: 'revise',
-              feedback: `Pipeline guard failed: ${blockingIssues.join('; ')}`
-                + (arbiterOutcome ? `\n\n${arbiterOutcome.summary}` : ''),
-              issues: blockingIssues,
-              suggestions: ['Fix the issues flagged by quality guards'],
-            };
-            context.feedbackSource = 'objective';
-            agentPair.trackFailure(context.session.id);
-            this.emit('iteration:fail', {
-              iteration: context.currentIteration,
-              stage: 'worker',
-              context,
-            });
-            agentPair.updateSessionStatus(context.session.id, 'revising');
-
-            // Stagnation built on an edit that was not working: restore instead
-            // of abandoning the run on top of it (AGT-4460).
-            const rolledBack = await rollbackStagnantIteration(context, progressed);
-            if (rolledBack) await discardStagedMemoriesFrom(taskAttributionKey(context.task), rolledBack.iteration);
-            if (!rolledBack && this.shouldAbortSelfRepair(context, progressed, source)) {
-              return { success: false };
-            }
-            longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
-            continue;
-          }
-          this.emit('log', { line: '🔓 Guard arbiter override: contractEvidence literal(s) confirmed self-defining by this diff — proceeding.' });
-          longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
-          // No `continue` here: fall through past this guard block and treat
-          // the iteration as if guards had passed.
-        }
-
-        // Carries the issues, not just the guard's name: stdout is the last
-        // reader left. Why, in guardWarningRecord.ts (AGT-4439).
-        const warningLine = formatGuardWarningLine(guardsResult.results);
-        if (warningLine) {
-          safeConsole.log(`[${context.taskPrefix}] ${warningLine}`);
-          this.emit('log', { line: `⚠️ ${warningLine}` });
-        }
-      }
-
-      // CodeQL is a post-edit gate, not a tester-stage feature. It is opt-in
-      // (securityAudit.enabled, default OFF) because it is too slow to gate PRs
-      // (AGT-4160). When disabled we do not even invoke the gate, so the default
-      // autonomous path never runs CodeQL.
-      const introducedSecurityFindings = this.config.securityAudit?.enabled
-        ? await collectIntroducedSecurityFindings(context)
-        : [];
-      if (introducedSecurityFindings.length > 0) {
-        const failures = introducedSecurityFindings.map(formatSecurityFinding);
-        safeConsole.log(
-          `[${context.taskPrefix}] New CodeQL findings (${failures.length}): ${
-            failures.slice(0, 3).join('; ')
-          }${failures.length > 3 ? ` (+${failures.length - 3} more)` : ''}`,
-        );
-        const { progressed } = recordReflection(context.reflection, {
-          iteration: context.currentIteration,
-          source: 'test',
-          errors: failures,
-        });
-        context.reviewResult = {
-          decision: 'revise',
-          feedback: `New deterministic CodeQL findings:\n${failures.join('\n')}`,
-          issues: failures,
-          suggestions: ['Resolve every new CodeQL finding without suppressing its rule or weakening the audit.'],
-        };
-        context.feedbackSource = 'objective';
-        agentPair.trackFailure(context.session.id);
-        this.emit('iteration:fail', {
-          iteration: context.currentIteration,
-          stage: 'tester',
-          context,
-        });
-        agentPair.updateSessionStatus(context.session.id, 'revising');
-
-        if (this.shouldAbortSelfRepair(context, progressed, 'test')) {
-          return { success: false };
-        }
-        continue;
-      }
-
-      // A code-changing worker that reports no commands is usually a low-accuracy
-      // partial implementation: the reviewer then spends a full pass rediscovering
-      // that nothing was built, tested, or smoke-checked. When there is no tester
-      // stage to provide objective evidence, bounce it back immediately with a
-      // ground-truth validation reflection.
-      if (hasReviewer && context.workerResult && !testerWouldRunForWorkerResult(
-        context.workerResult,
-        hasTester,
-        this.config.skipTesterIfNoCodeChange ?? true, this.config.verify?.enabled === true,
-      )) {
-        const validationIssues = missingWorkerValidationIssues(context.workerResult);
-        if (validationIssues.length > 0) {
-          // Missing validation evidence is a nudge, not a verdict, and it must
-          // cost AT MOST ONE iteration. A per-iteration bounce consumed the whole
-          // budget when the worker kept editing DIFFERENT files without running a
-          // check (each bounce "progresses", so the stagnation-defer never trips)
-          // → widespread Max-iteration STUCKs. Nudge once, then DEFER to the
-          // reviewer (the real quality gate) for the rest of the session. (INT-2485)
-          if (!context.validationNudged) {
-            context.validationNudged = true;
-            recordReflection(context.reflection, {
-              iteration: context.currentIteration,
-              source: 'validation',
-              errors: validationIssues,
-            });
-            safeConsole.log(`[${context.taskPrefix}] Missing worker validation evidence: ${validationIssues.join('; ')}`);
-            context.reviewResult = {
-              decision: 'revise',
-              feedback: `Worker validation evidence missing: ${validationIssues.join('; ')}`,
-              issues: validationIssues,
-              suggestions: ['Run a relevant validation command before asking for review'],
-            };
-            context.feedbackSource = 'objective';
-            agentPair.trackFailure(context.session.id);
-            this.emit('iteration:fail', {
-              iteration: context.currentIteration,
-              stage: 'worker',
-              context,
-            });
-            agentPair.updateSessionStatus(context.session.id, 'revising');
-            continue;
-          }
-          safeConsole.log(`[${context.taskPrefix}] Validation evidence still missing — deferring to reviewer (already nudged once)`);
-          this.emit('log', { line: '⚠️ Validation evidence missing; deferring to reviewer' });
-        }
-      }
-
-      // ========== HALT CHECK (confidence too low) ==========
-      if (context.workerResult) {
-        const confidence = agentPair.calculateConfidence(context.workerResult);
-        // A degenerate no-op HALTs INDEPENDENTLY of self-reported confidence — a
-        // worker can claim 90% while changing nothing, so it must not slip past. (INT-2521)
-        const degenerate = agentPair.isDegenerateWorkerResult(context.workerResult);
-        if (degenerate || confidence < CONFIDENCE_THRESHOLDS.HALT) {
-          const haltReason = degenerate ? 'Worker produced no changes'
-            : (context.workerResult.haltReason || `Low confidence: ${confidence}%`);
-          safeConsole.warn(`[${context.taskPrefix}] HALT triggered: confidence=${confidence}%, degenerate=${degenerate}, reason=${haltReason}`);
-          this.emit('halt', { confidence, haltReason, sessionId: context.session.id, iteration: context.currentIteration, context });
-          // Degenerate no-op → escalate the next attempt (stronger effort/model) vs the same empty run to STUCK. (INT-2521)
-          if (degenerate && !context.workerEscalation) {
-            context.workerEscalation = buildRepeatEscalation({
-              workerCfg: this.config.roles?.worker,
-              currentIteration: context.currentIteration,
-              currentModel: modelForTask(this.config, 'worker', context.task),
-              currentEffort: effortForTask(this.config, context.task) ?? this.config.roles?.worker?.effort,
-            });
-          }
-          context.reviewResult = {
-            decision: 'revise',
-            feedback: degenerate
-              ? 'Your previous attempt produced ZERO file changes and ran no commands — you did not implement anything. Read the relevant files and make concrete edits now.'
-              : `[HALT] Confidence too low (${confidence}%). ${haltReason}`,
-            issues: [degenerate ? 'Worker produced no changes' : haltReason],
-            suggestions: ['Review task requirements', 'Provide additional context', 'Break into sub-tasks'],
-          };
-          context.feedbackSource = 'review';
-          agentPair.trackFailure(context.session.id);
-          this.emit('iteration:fail', { iteration: context.currentIteration, stage: 'worker', context });
-          agentPair.updateSessionStatus(context.session.id, 'revising');
-          continue;
-        }
-      }
-
-      // ========== TESTER (before reviewer — INT-1703) ==========
-      // Run the tester first so the reviewer judges code + test outcomes
-      // together, and so a failing test drives INT-1679 self-repair WITHOUT
-      // spending a reviewer pass. Runs exactly once per iteration.
-      if (hasTester) {
-        // Skip tester if no code files changed (configurable, default true)
-        const skipIfNoCode = this.config.skipTesterIfNoCodeChange ?? true;
-        const changedFiles = context.workerResult?.filesChanged || [];
-        const hasCodeChange = changedFiles.some(file => (this.config.verify?.enabled || this.config.securityAudit?.enabled)
-          ? isValidationRelevantFile(file)
-          : isTesterCodeFile(file));
-        if (skipIfNoCode && !hasCodeChange) {
-          safeConsole.log(`[${context.taskPrefix}] Skipping tester: no code files changed (${changedFiles.length} files: ${changedFiles.join(', ') || 'none'})`);
-        } else {
-        const testerResult = await this.runStage('tester', context);
-        stages.push(testerResult);
-
-        const hasNewSecurityFindings = (context.newSecurityFindings?.length ?? 0) > 0;
-        // Only a configured reviewer can judge a deterministic verdict; without
-        // one the deferral had no recipient and the run ended instead of
-        // self-repairing. See `testerFailureFeedback.ts` (AGT-4438).
-        const reviewerShouldJudgeFailure = hasReviewer
-          && context.testerResult?.deterministic === true
-          && !hasNewSecurityFindings;
-        if (!testerResult.success && !this.config.continueOnTestFail && !reviewerShouldJudgeFailure) {
-          // Test failure is objective ground truth → record into the reflection
-          // trail and drive a bounded self-repair retry (INT-1679).
-          safeConsole.log(`[${context.taskPrefix}] Tester failed, retrying...`);
-          agentPair.trackFailure(context.session.id);
-
-          const { progressed } = recordReflection(context.reflection, {
-            iteration: context.currentIteration,
-            source: 'test',
-            errors: testerReflectionErrors(context.testerResult),
-          });
-
-          if (context.testerResult) {
-            context.reviewResult = testerRevisionFeedback(context.testerResult);
-          }
-          context.feedbackSource = 'objective';
-
-          this.emit('iteration:fail', {
-            iteration: context.currentIteration,
-            stage: 'tester',
-            context,
-          });
-          agentPair.updateSessionStatus(context.session.id, 'revising');
-
-          if (this.shouldAbortSelfRepair(context, progressed, 'test')) {
-            return { success: false };
-          }
-          continue;
-        }
-        } // end else (has code change)
-      }
-
-      // ========== REVIEWER ==========
-      if (hasReviewer) {
-        agentPair.updateSessionStatus(context.session.id, 'reviewing');
-
-        // Reviewer escalation: 로컬 모델이 N회 이상 REVISE → 상위 모델로 spot check
-        const reviewerCfg = this.config.roles?.reviewer;
-        const reviewerEscalateModel = reviewerCfg?.escalateModel;
-        const reviewerEscalateThreshold = reviewerCfg?.escalateAfterIteration ?? 3;
-        const shouldEscalateReviewer = context.currentIteration >= reviewerEscalateThreshold && !!reviewerEscalateModel;
-
-        // `modelRole: 'escalate'` so the escalation resolves as an escalation.
-        // Without it the override runs through the reviewer's own role, and on
-        // an adapter that routes per role — cursor — it produced the reviewer's
-        // model verbatim while the line below announced a spot check on a
-        // different one. (AGT-4273)
-        const reviewerOverrides = shouldEscalateReviewer
-          ? { model: reviewerEscalateModel, modelRole: 'escalate' as const }
-          : undefined;
-
-        if (shouldEscalateReviewer && reviewerEscalateModel) {
-          safeConsole.log(`[${context.taskPrefix}] Reviewer escalation → ${reviewerEscalateModel} (iteration ${context.currentIteration})`);
-          this.emit('log', {
-            line: `🔍 Reviewer spot check: escalating to ${reviewerEscalateModel}`,
-          });
-        }
-
-        const reviewerResult = await this.runStage('reviewer', context, reviewerOverrides);
-        stages.push(reviewerResult);
-
-        const decision = (reviewerResult.result as ReviewResult).decision;
-
-        // Record Reviewer result in stuck detector
-        this.getStuck().addEntry({
-          stage: 'reviewer',
-          success: reviewerResult.success,
-          decision: decision,
-          output: (reviewerResult.result as ReviewResult).feedback,
-          timestamp: Date.now(),
-        });
-
-        if (decision === 'reject') {
-          // reject = terminate immediately (keep the real feedback for the retry)
-          context.lastReviseFeedback = (reviewerResult.result as ReviewResult).feedback ?? context.lastReviseFeedback;
-          safeConsole.log(`[${context.taskPrefix}] Reviewer rejected`);
-          agentPair.updateSessionStatus(context.session.id, 'rejected');
-          return { success: false };
-        }
-
-        if (decision === 'revise') {
-          const reviseFeedback = (reviewerResult.result as ReviewResult).feedback ?? '';
-
-          // The reflection stagnation detector only counts OBJECTIVE sources, so
-          // a reviewer that keeps saying the same thing never trips it — failing
-          // sessions used to burn every remaining iteration on feedback the
-          // worker demonstrably isn't absorbing (measured: 146 max-iteration
-          // exhaustions vs 21 objective aborts). Two consecutive near-identical
-          // revise feedbacks → first ESCALATE the worker once (higher model
-          // and/or effort — the current tier has proven it can't absorb this
-          // feedback, INT-2475); if it repeats even after escalation, end the
-          // session — the runner persists the feedback and the NEXT attempt
-          // starts with it injected (INT-2474).
-          if (
-            context.lastReviseFeedback
-            && similarReviewFeedback(context.lastReviseFeedback, reviseFeedback)
-          ) {
-            const escalation = !context.workerEscalation
-              ? buildRepeatEscalation({
-                  workerCfg: this.config.roles?.worker,
-                  currentIteration: context.currentIteration,
-                  currentModel: modelForTask(this.config, 'worker', context.task),
-                  currentEffort: effortForTask(this.config, context.task) ?? this.config.roles?.worker?.effort,
-                })
-              : undefined;
-            if (escalation) {
-              context.workerEscalation = escalation;
-              const target = [
-                escalation.model ? `model→${escalation.model}` : '',
-                escalation.reasoningEffort ? `effort→${escalation.reasoningEffort}` : '',
-              ].filter(Boolean).join(', ');
-              safeConsole.log(`[${context.taskPrefix}] Reviewer repeated the same feedback — escalating worker (${target})`);
-              this.emit('log', { line: `⬆️ Worker escalation on repeated review feedback (${target})` });
-              broadcastEvent({ type: 'pipeline:escalation', data: {
-                taskId: taskEventKey(context.task),
-                iteration: context.currentIteration,
-                reason: 'repeated-review-feedback',
-                toModel: escalation.model,
-                toEffort: escalation.reasoningEffort,
-              } });
-            } else {
-              const reason = context.workerEscalation
-                ? 'reviewer repeated the same revise feedback even after worker escalation'
-                : 'reviewer repeated the same revise feedback — no escalation tier available';
-              safeConsole.log(`[${context.taskPrefix}] Aborting session early: ${reason}`);
-              this.emit('log', { line: `🛑 ${reason}` });
-              this.emit('iteration:fail', {
-                iteration: context.currentIteration,
-                stage: 'reviewer',
-                context,
-              });
-              agentPair.updateSessionStatus(context.session.id, 'failed');
-              return { success: false };
-            }
-          }
-          context.lastReviseFeedback = reviseFeedback;
-
-          // revise = next iteration. Reviewer feedback is subjective → it travels
-          // through the reviewer channel and is kept for the next worker iteration.
-          safeConsole.log(`[${context.taskPrefix}] Reviewer requested revision`);
-          context.feedbackSource = 'review';
-          agentPair.trackFailure(context.session.id);
-          this.emit('iteration:fail', {
-            iteration: context.currentIteration,
-            stage: 'reviewer',
-            context,
-          });
-          agentPair.updateSessionStatus(context.session.id, 'revising');
-          continue;
-        }
-
-        agentPair.resetFailureStreak(context.session.id); // Reset on approval
-      }
-
-      if (context.testerResult?.deterministic === true
-        && context.testerResult.success === false
-        && (this.config.verify?.blockOnNewFailures === true || (context.newSecurityFindings?.length ?? 0) > 0)) {
-        safeConsole.log(`[${context.taskPrefix}] Deterministic verification has a blocking new failure`);
-        this.emit('iteration:fail', { iteration: context.currentIteration, stage: 'tester', context });
-        agentPair.updateSessionStatus(context.session.id, 'failed');
-        return { success: false };
-      }
-      longestIterationMs = Math.max(longestIterationMs, Date.now() - iterationStartedAt);
-      safeConsole.log(`[${context.taskPrefix}] Iteration ${context.currentIteration} completed successfully`);
-      this.emit('iteration:complete', {
-        iteration: context.currentIteration,
-        context,
-      });
-      return { success: true };
-    }
-
-    safeConsole.log(`[${context.taskPrefix}] Max iterations (${maxIterations}) exceeded`);
-    agentPair.updateSessionStatus(context.session.id, 'failed');
-    return { success: false };
+  private async runFullIterationLoop(context: PipelineContext, stages: StageResult[]): Promise<{ success: boolean }> {
+    return runFullIterationLoop({
+      config: this.config, throwIfAborted: () => this.throwIfAborted(), getStuck: () => this.getStuck(),
+      hasStage: (stage) => this.hasStage(stage), runStage: (stage, ctx, overrides) => this.runStage(stage, ctx, overrides),
+      shouldAbortSelfRepair: (ctx, progressed, source) => this.shouldAbortSelfRepair(ctx, progressed, source),
+      emit: (event, payload) => this.emit(event, payload),
+    }, context, stages);
   }
 
   /**
@@ -1427,6 +855,7 @@ export class PairPipeline extends EventEmitter {
     stages: StageResult[],
     startTime: number
   ): PipelineResult {
+    context.recovery?.settle(context.session.status === 'approved');
     const result = composePipelineResult(context, stages, startTime);
     this.emit(result.success ? 'pipeline:complete' : 'pipeline:fail', result);
     return result;
@@ -1480,6 +909,7 @@ export function createPipelineFromConfig(
   workerSandbox?: PipelineConfig['workerSandbox'],
   taskBudgetMs?: number,
   projectGoal?: string,
+  loopAdvisor?: PipelineConfig['loopAdvisor'], advisorRole?: PipelineConfig['advisorRole'],
 ): PairPipeline {
   const stages: PipelineStage[] = [];
 
@@ -1519,7 +949,7 @@ export function createPipelineFromConfig(
     roleMcpTools,
     adapterRouting,
     workerSandbox,
-    projectGoal,
+    projectGoal, loopAdvisor, advisorRole,
   });
 }
 

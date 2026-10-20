@@ -7,6 +7,7 @@ import {
   infraFailureFingerprint,
 } from './infraFailureCircuit.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
+import { pipelineExecutionBoundary } from '../agents/stageExecutionBoundary.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
@@ -69,6 +70,7 @@ export interface DurableRunCoordinatorConfig {
 export interface ExecutionDurabilityHooks {
   onWorktree(info: WorktreeInfo): Promise<boolean>;
   onStage(stage: string): Promise<boolean>;
+  recovery?: import('./loopRecoveryTypes.js').RecoveryHooks;
   beforePublish(): Promise<boolean>;
   onPublication(prUrl: string, headSha?: string): Promise<boolean>;
 }
@@ -294,6 +296,8 @@ export class DurableRunCoordinator {
   getRun(issueId: string): RunRecord | null {
     return this.ledger?.getRun(issueId) ?? null;
   }
+
+  getRecoveryStatus(issueId: string) { return this.ledger?.recovery.status(issueId); }
 
   listRuns(states?: readonly RunState[]): RunRecord[] {
     return this.ledger?.listRuns(states) ?? [];
@@ -678,6 +682,7 @@ export class DurableRunCoordinator {
     };
 
     const hooks: ExecutionDurabilityHooks = {
+      recovery: this.ledger.recovery?.forClaim(() => claim!),
       onWorktree: async (info) => {
         if (leaseLost) return false;
         const attached = this.ledger!.attachWorktree(claim!, info.worktreePath, info.branchName);
@@ -873,7 +878,8 @@ export class DurableRunCoordinator {
     }
 
     if (result.finalStatus === 'waiting_on_operator') {
-      if (result.workerResult?.executionOutcomeUnknown) {
+      const boundary = pipelineExecutionBoundary(result);
+      if (boundary?.executionOutcomeUnknown) {
         const reason = 'Sandbox command outcome unknown; inspect the preserved worktree and explicitly redispatch to resume';
         return this.ledger.transition(claim, 'NEEDS_HUMAN', {
           errorCode: SANDBOX_OUTCOME_UNKNOWN_PARK_REASON,
@@ -883,7 +889,7 @@ export class DurableRunCoordinator {
         }, now) ? result : fencedResult(result);
       }
       const correlationIds = normalizeOperatorQuestionCorrelations(
-        result.workerResult?.operatorQuestionCorrelationIds ?? [],
+        boundary?.operatorQuestionCorrelationIds ?? [],
       );
       if (correlationIds.length > 0) {
         const reason = `Waiting for operator answer (${correlationIds.join(', ')})`;
@@ -1159,10 +1165,10 @@ export class DurableRunCoordinator {
    * and this comment is the record of that choice.
    */
   getMetrics(now = Date.now(), inScope?: (projectPath: string) => boolean) {
-    const base = this.ledger?.getMetrics(now) ?? {
+    const base = { ...(this.ledger?.getMetrics(now) ?? {
       byState: {}, effectsByStatus: {}, expiredActiveLeases: 0, oldestPendingEffectAgeMs: 0,
       openCircuits: 0,
-    };
+    }), recovery: this.ledger?.recovery.summary(inScope, now) ?? { tracked: 0, noProgress: 0, advising: 0, adviceCompleted: 0, adviceUnavailable: 0 } };
     if (!this.ledger || !inScope) return { ...base, outOfScope: 0 };
 
     const byState: Record<string, number> = {};

@@ -410,6 +410,13 @@ const AutonomousConfigSchema = z.object({
   shutdownGraceMs: z.number().int().min(0).max(5 * 60_000).default(30_000),
   /** Default role configuration */
   defaultRoles: DefaultRolesConfigSchema,
+  loopAdvisor: z.object({
+    mode: z.enum(['off', 'shadow', 'active']).default('off'),
+    adapter: AdapterNameSchema.optional(), model: z.string().min(1).optional(),
+    timeoutMs: z.number().int().min(1).max(45_000).default(45_000),
+    triggerAfter: z.number().int().min(2).max(10).default(2),
+    maxCallsPerIssue24h: z.number().int().min(1).max(2).default(2),
+  }).prefault({}),
   /** Per-project agent configuration */
   projectAgents: z.array(ProjectAgentConfigSchema).optional(),
   /** Task decomposition configuration (Planner Agent) */
@@ -836,6 +843,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       automationLeaseMs: raw.autonomous.automationLeaseMs,
       shutdownGraceMs: raw.autonomous.shutdownGraceMs,
       defaultRoles: raw.autonomous.defaultRoles,
+      loopAdvisor: raw.autonomous.loopAdvisor,
       projectAgents: raw.autonomous.projectAgents?.map(pa => ({
         ...pa,
         projectPath: expandPath(pa.projectPath),

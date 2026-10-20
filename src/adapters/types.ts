@@ -52,6 +52,7 @@ export interface CliRunResult {
    * task and wait rather than retry — a retry re-runs the same worker straight
    * back into the same unanswered question.
    */
+  terminationCause?: 'no_progress';
   blockedOnOperator?: boolean;
   /** Side-effecting companion RPC lost its result; never retry automatically. */
   executionOutcomeUnknown?: boolean;

@@ -12,6 +12,7 @@ import { broadcastEvent } from '../core/eventHub.js';
 import { safeConsole } from '../support/safeLog.js';
 import { guardWarningsForResult } from './guardWarningRecord.js';
 import { ITERATION_BUDGET_PARK_REASON } from '../orchestration/taskBudget.js';
+import { pipelineExecutionBoundary } from './stageExecutionBoundary.js';
 import {
   VERIFIED_WORKER_BLOCKER_PARK_REASON,
   WORKER_NO_CHANGES_PARK_REASON,
@@ -19,6 +20,21 @@ import {
   type PipelineResult,
   type StageResult,
 } from './pairPipelineTypes.js';
+
+export function pipelineCosts(context: PipelineContext, stages: StageResult[]): CostInfo | undefined {
+  const costs: CostInfo[] = [...(context.recovery?.costs ?? [])];
+  const seen = new Set<object>();
+  for (const stage of stages) {
+    const cost = (stage.result as { costInfo?: CostInfo }).costInfo;
+    seen.add(stage.result);
+    if (!stage.reused && cost) costs.push(cost);
+  }
+  for (const result of [context.workerResult, context.reviewResult, context.blockerReview, context.testerResult,
+    context.documenterResult, context.auditorResult, context.skillDocumenterResult]) {
+    if (result?.costInfo && !seen.has(result)) { costs.push(result.costInfo); seen.add(result); }
+  }
+  return costs.length ? aggregateCosts(costs) : undefined;
+}
 
 export function composePipelineResult(
   context: PipelineContext,
@@ -36,24 +52,16 @@ export function composePipelineResult(
   // the durable ledger tells an operator why another iteration never began.
   const stopReason = context.budgetParkReason
     ?? context.stuckReason
-    ?? (finalStatus === 'waiting_on_operator' ? context.workerResult?.haltReason : undefined);
+    ?? (finalStatus === 'waiting_on_operator' ? pipelineExecutionBoundary(context)?.reason : undefined);
   // Aggregate costs from all stages
-  const stageCosts: (CostInfo | undefined)[] = [];
-  if (context.workerResult?.costInfo) stageCosts.push(context.workerResult.costInfo);
-  if (context.reviewResult?.costInfo) stageCosts.push(context.reviewResult.costInfo);
-  // A confirmed blocker review is not the run's reviewResult; count it anyway.
-  if (context.blockerReview?.costInfo && context.blockerReview !== context.reviewResult) stageCosts.push(context.blockerReview.costInfo);
-  if (context.testerResult?.costInfo) stageCosts.push(context.testerResult.costInfo);
-  if (context.documenterResult?.costInfo) stageCosts.push(context.documenterResult.costInfo);
-  if (context.auditorResult?.costInfo) stageCosts.push(context.auditorResult.costInfo);
-  if (context.skillDocumenterResult?.costInfo) stageCosts.push(context.skillDocumenterResult.costInfo);
-  const totalCost = stageCosts.length > 0 ? aggregateCosts(stageCosts) : undefined;
+  const totalCost = pipelineCosts(context, stages);
   if (totalCost) {
     safeConsole.log(`[${context.taskPrefix}] Total cost: ${formatCost(totalCost)}`);
     broadcastEvent({ type: 'task:cost', data: { taskId: taskEventKey(context.task), cost: totalCost } });
   }
   const result: PipelineResult = {
     success,
+    recovery: context.recovery?.status(),
     sessionId: context.session.id,
     stages,
     finalStatus,

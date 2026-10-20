@@ -437,6 +437,7 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
 
     // Parse result via adapter
     const parsedResult = adapter.parseWorkerOutput(raw);
+    parsedResult.terminationCause = raw.terminationCause;
 
     // A blocking ask_human is neither success nor failure: the operator owns
     // the next step. Mark it before the git-diff heuristics below — a run that

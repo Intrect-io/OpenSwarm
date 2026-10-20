@@ -74,6 +74,12 @@ function result(over: Record<string, unknown> = {}) {
   };
 }
 
+it('keeps historical late notification markers answered', () => {
+  const answer = event({ seq: 2, kind: 'human-answer', status: 'completed' });
+  const late = event({ seq: 3, kind: 'human-question', status: 'running' });
+  expect(selectOrchestratorItems([answer, late])).toEqual([]);
+});
+
 const capsule = {
   text: 'rules', digest: 'digest', sources: [], errors: [], repositoryRoot: '/repo',
 };
@@ -128,6 +134,13 @@ describe('OrchestratorSupervisor', () => {
     });
 
     expect(selectOrchestratorItems([request, response])).toEqual([response]);
+  });
+
+  it('closes an advice exchange when the responder belongs to another task', () => {
+    const request = event({ taskId: 'task-a', targetTaskId: 'task-b', seq: 2, correlationId: 'cross-task' });
+    const response = event({ taskId: 'task-b', targetTaskId: 'task-a', seq: 3, correlationId: 'cross-task', kind: 'advice-response', status: 'completed' });
+    expect(selectOrchestratorItems([request, response])).toEqual([response]);
+    expect(selectOrchestratorItems([request, response], 3)).toEqual([]);
   });
 
   it('excludes only this supervisor\'s events and advances one-shot terminal items by sequence', () => {

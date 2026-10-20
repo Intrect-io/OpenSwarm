@@ -54,6 +54,7 @@ import {
 import type { DefaultRolesConfig } from '../core/types.js';
 import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
+import { pipelineExecutionBoundary } from '../agents/stageExecutionBoundary.js';
 import * as execution from './runnerExecution.js';
 import { draftFingerprint, pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
 import { pruneSessionLogs } from '../support/sessionLog.js';
@@ -77,6 +78,7 @@ import {
   removePreservedWorktreeAt,
 } from '../support/worktreeManager.js';
 import { publishStuckWork } from './publishOnPark.js';
+import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
 import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
 import { draftPullRequestCause } from './draftPullRequestCause.js';
 import { missingWorktreeDisposition } from './missingWorktreeDisposition.js';
@@ -814,7 +816,8 @@ export class AutonomousRunner {
       task: TaskItem; result: PipelineResult;
     }) => {
       const taskCtx = this.formatTaskContext(task);
-      const question = result.workerResult?.haltReason ?? 'Blocked on an operator decision';
+      const boundary = pipelineExecutionBoundary(result);
+      const question = boundary?.reason ?? result.workerResult?.haltReason ?? 'Blocked on an operator decision';
       console.log(`[Scheduler] Task waiting on operator: ${taskCtx} ${task.title} — ${question}`);
       this.recordPipelineHistory(task, result);
       broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: false, duration: result.totalDuration } });
@@ -829,7 +832,7 @@ export class AutonomousRunner {
       // operator's answer cannot shorten it.
       const parkedId = task.issueId || task.id;
       if (parkedId) {
-        const outcomeUnknown = result.workerResult?.executionOutcomeUnknown === true;
+        const outcomeUnknown = boundary?.executionOutcomeUnknown === true;
         // Without an authoritative ledger there is no error code to carry the
         // park, so record the stand-in signal the heartbeat reads instead.
         if (!this.durableRuns.isPrimary) {
@@ -838,7 +841,7 @@ export class AutonomousRunner {
         }
 
         const correlationIds = normalizeOperatorQuestionCorrelations(
-          result.workerResult?.operatorQuestionCorrelationIds ?? [],
+          boundary?.operatorQuestionCorrelationIds ?? [],
         );
         // The primary coordinator normally persisted NEEDS_HUMAN atomically
         // before this event. The RETRY_AT conversion remains as a recovery path
@@ -1273,6 +1276,8 @@ export class AutonomousRunner {
 
       if (this.durableRuns.isPrimary && durableRun?.state === 'NEEDS_HUMAN') {
         const isOperatorQuestionPark = durableRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON
+          || durableRun.lastErrorCode === RECOVERY_ADVISOR_PARK_REASON
+          || durableRun.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON
           || (durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false);
         // AGT-4256: a guard/publication park that only named ephemeral paths
         // (.test_venv, pytest-local) is not a human decision. Resume even when
@@ -1295,7 +1300,9 @@ export class AutonomousRunner {
           // A blocker the reviewer confirmed is a claim about the task text; a
           // free slot re-runs the same text into the same confirmed claim
           // (AGT-4535). Explicit dispatch or a tracker Todo lifts it.
-          || durableRun?.lastErrorCode === VERIFIED_WORKER_BLOCKER_PARK_REASON;
+          || durableRun?.lastErrorCode === VERIFIED_WORKER_BLOCKER_PARK_REASON
+          || durableRun?.lastErrorCode === RECOVERY_ADVISOR_PARK_REASON
+          || durableRun?.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON;
         // Nor does a free slot change a verdict that has already come back
         // twice; see idleFillWouldRepeatVerdict.
         if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark
@@ -2044,6 +2051,9 @@ export class AutonomousRunner {
     return {
       worker: { ...base.worker, ...projectConfig.roles.worker },
       reviewer: { ...base.reviewer, ...projectConfig.roles.reviewer },
+      advisor: projectConfig.roles.advisor
+        ? { ...base.advisor, ...projectConfig.roles.advisor }
+        : base.advisor,
       tester: projectConfig.roles.tester
         ? { ...base.tester, ...projectConfig.roles.tester }
         : base.tester,
@@ -3401,7 +3411,7 @@ export class AutonomousRunner {
         console.log(`[Scheduler] Explicit dispatch of ${label} refused: ${decision.reason}`);
         return false;
       case 'resume-needs-human': {
-        const resumed = this.durableRuns.resumeNeedsHuman(id);
+        const resumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'explicit_dispatch');
         if (resumed) console.log(`[Scheduler] Explicit dispatch resumed ${label} from NEEDS_HUMAN (${resumed})`);
         // A dead external effect resumes through SYNC_PENDING; the heartbeat
         // drains it, not the scheduler, so make sure one is coming.
@@ -3573,6 +3583,8 @@ export class AutonomousRunner {
       verify: this.config.verify,
       securityAudit: this.config.securityAudit,
       maxReflections: this.config.maxReflections,
+      loopAdvisor: this.config.loopAdvisor,
+      advisorRole: this.config.defaultRoles?.advisor,
       durability,
       peerIssues: this.lastFetchedTasks,
       getActiveWorkerIssues: (p) => this.durableRuns.activeWorkerIdentifiers(p),
@@ -3663,6 +3675,11 @@ export class AutonomousRunner {
   updateAllowedProjects(paths: string[]): void {
     this.config.allowedProjects = paths;
     this.engine.updateAllowedProjects(paths);
+  }
+
+  getRunStatus(issueId: string) {
+    const run = this.durableRuns.getRun(issueId);
+    return run ? { ...run, recovery: this.durableRuns.getRecoveryStatus(issueId) } : undefined;
   }
 
   getStats() {

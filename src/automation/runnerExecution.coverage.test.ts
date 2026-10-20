@@ -1035,17 +1035,21 @@ describe('runnerExecution.ts coverage extension', () => {
       expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Worker start audit comment failed'), expect.any(Error));
     });
 
-    it('includes tester and documenter in the Stages field when those roles are enabled', async () => {
+    it.each([false, true])('forwards the effective advisor and lists enabled stages; project override=%s', async (projectOverride) => {
+      const globalAdvisor = { enabled: false, model: 'global-advisor' };
+      const projectAdvisor = { enabled: false, model: 'project-advisor', adapter: 'codex-responses' as const };
       const getRolesForProject = vi.fn(() => ({
         worker: { enabled: true, timeoutMs: 0 },
         reviewer: { enabled: true, timeoutMs: 0 },
         tester: { enabled: true, timeoutMs: 0 },
         documenter: { enabled: true, timeoutMs: 0 },
+        advisor: projectOverride ? projectAdvisor : undefined,
       }));
       createPipelineFromConfig.mockReturnValue(makeFakePipeline(pipelineResult()));
       const reportToDiscord = vi.fn(async () => {});
 
-      await executePipeline(makeCtx({ getRolesForProject, reportToDiscord }), task(), '/repo');
+      await executePipeline(makeCtx({ getRolesForProject, reportToDiscord, advisorRole: globalAdvisor }), task(), '/repo');
+      expect(createPipelineFromConfig.mock.calls.at(-1)?.at(-1)).toEqual(projectOverride ? projectAdvisor : globalAdvisor);
 
       const startEmbed = reportToDiscord.mock.calls
         .map((c) => c[0])

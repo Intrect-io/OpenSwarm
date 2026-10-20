@@ -12,6 +12,8 @@ import type { WorkerFanoutGateDecision } from './workerFanoutGate.js';
 import type { VerifyCommand } from '../verify/manifest.js';
 import type { ToolDefinition } from '../adapters/tools.js';
 import type { AdapterRoutePolicy } from '../coordination/routingPolicy.js';
+import type { LoopRecovery } from './loopRecovery.js';
+import type { LoopAdvisorConfig, RecoveryHooks, RecoveryStatus } from '../automation/loopRecoveryTypes.js';
 import type { InstructionCapsule } from './instructionCapsule.js';
 
 export interface PipelineRunMetadata {
@@ -29,6 +31,8 @@ export interface PipelineRunMetadata {
 
 export interface PipelineConfig {
   stages: PipelineStage[];
+  loopAdvisor?: LoopAdvisorConfig;
+  advisorRole?: RoleConfig;
   continueOnTestFail?: boolean;
   skipDocumenterIfNoChange?: boolean;
   maxIterations?: number;
@@ -78,7 +82,10 @@ export interface PipelineConfig {
   };
 }
 
+export interface PipelineRunOptions { signal?: AbortSignal; recovery?: RecoveryHooks }
+
 export interface StageResult {
+  reused?: boolean;
   stage: PipelineStage;
   success: boolean;
   result: WorkerResult | ReviewResult | TesterResult | DocumenterResult | AuditorResult | SkillDocumenterResult | { success: false; error: string };
@@ -89,6 +96,7 @@ export interface StageResult {
 
 export interface PipelineResult {
   success: boolean;
+  recovery?: RecoveryStatus;
   sessionId: string;
   stages: StageResult[];
   /**
@@ -166,6 +174,7 @@ export const VERIFIED_WORKER_BLOCKER_PARK_REASON = 'verified_worker_blocker';
 
 export interface PipelineContext {
   task: TaskItem;
+  recovery?: LoopRecovery;
   projectPath: string;
   session: PairSession;
   config: PipelineConfig;

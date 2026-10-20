@@ -88,6 +88,14 @@ autonomous:
   automationLedgerMode: primary  # off | shadow | primary (durable fail-closed execution truth)
   automationLeaseMs: 600000      # Renewed every ~3m; stale callbacks are fenced
   shutdownGraceMs: 30000         # Wait for real executor exit before service teardown
+  # Recovery consultation only for durable runs. No production opt-in by default.
+  # The existing defaultRoles.advisor adapter/model are inherited when omitted.
+  # A native adapter with a model distinct from the failed stage is required.
+  loopAdvisor:
+    mode: off                   # off | shadow (record only) | active (bounded policy)
+    timeoutMs: 45000             # Also bounded by the remaining task budget
+    triggerAfter: 2              # Same artifact, checks and failure repeated
+    maxCallsPerIssue24h: 2       # Includes failed consultations and premise verification
 
   # Durable agent board + human/operator coordination. Use one project-scoped
   # issue whose comments form the append-only Linear board.

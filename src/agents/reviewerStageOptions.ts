@@ -103,6 +103,7 @@ export async function buildReviewerStageOptions(input: {
     reasoningEffort: effortForTask(config, context.task) ?? config.roles?.reviewer?.effort,
     completionCriteria: config.draftAnalysis?.completionCriteria,
     verificationEvidence: context.testerResult?.verificationEvidence,
+    priorReviewContext: context.recovery?.feedback || undefined,
     // Surface non-blocking guard warnings (dead-module, reformat/scope) so the
     // reviewer verifies them instead of them dying in a log. (INT-2388)
     guardWarnings: context.guardsResult?.results

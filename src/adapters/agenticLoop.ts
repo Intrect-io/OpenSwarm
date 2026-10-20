@@ -1,3 +1,5 @@
+import { summarizeToolArgs } from './toolArgsSummary.js';
+import { createHash } from 'node:crypto';
 // ============================================
 // OpenSwarm - Agentic Tool Loop
 // Created: 2026-04-11
@@ -285,6 +287,8 @@ export interface AgenticLoopResult {
   /** Calls that carried a metered price; 0 means the provider is unmetered. */
   meteredCalls: number;
   /** A blocking ask_human ended the run; the operator now owns the next step. */
+  terminationCause?: 'no_progress';
+  servedModels?: string[];
   blockedOnOperator?: boolean;
   /** Exact correlation IDs returned by the blocking ask_human tool call. */
   operatorQuestionCorrelationIds?: string[];
@@ -530,8 +534,11 @@ async function runAgenticLoopInner(
   // 진전 정체 감지: 이번 턴의 도구 호출이 모두 이전과 동일(name+args)하면 새 정보·변경
   // 없는 반복이다. N턴 연속이면 루프로 보고 조기 종료한다 — 고정 turn 한도(작업 제한)가
   // 아니라 진전 기반 중단. maxTurns는 비상 천장으로만 남는다.
-  const seenToolCalls = new Set<string>();
+  const servedModels = new Set<string>();
+  let modelIdentityMissing = false;
   let blockedOnOperator = false;
+  let terminationCause: 'no_progress' | undefined;
+  const seenToolResults = new Set<string>();
   let executionOutcomeUnknown = false;
   const operatorQuestionCorrelationIds: string[] = [];
   let noProgressTurns = 0;
@@ -572,6 +579,7 @@ async function runAgenticLoopInner(
   // throw, or the process being killed — would otherwise erase the spend of
   // every call that already completed. (AGT-4178)
   const accountUsage = (usage: ChatUsage | undefined, callStartedAt: number, servedModel?: string): void => {
+    if (servedModel) servedModels.add(servedModel); else modelIdentityMissing = true;
     if (!usage) return;
     const metered = typeof usage.cost === 'number';
     recordUsage({
@@ -948,16 +956,22 @@ async function runAgenticLoopInner(
     // Progress-based stop: if every tool call this turn repeats a prior one
     // (same name+args → no new info or change), count it as a stalled turn.
     // N consecutive stalled turns → wrap up via the final-answer turn.
-    if (allToolCallsSeen(toolCalls, seenToolCalls)) {
+    const observed = toolCalls.map((call, index) => toolCallKey(call) + ':' + createHash('sha256')
+      .update(JSON.stringify([results[index]?.content, results[index]?.is_error])).digest('hex'));
+    // Preserve the inbox exemption for the whole turn: a repeated file read
+    // must not hide newly received peer evidence in the same batch.
+    const checkedInbox = toolCalls.some((call, index) => EXTERNALLY_CHANGING_TOOLS.has(call.function.name) && results[index] && !results[index].is_error);
+    if (!checkedInbox && observed.length > 0 && observed.every((key) => seenToolResults.has(key))) {
       noProgressTurns++;
       if (noProgressTurns >= NO_PROGRESS_LIMIT) {
+        terminationCause = 'no_progress';
         onLog?.(`⚠ No new progress for ${NO_PROGRESS_LIMIT} turns (repeated tool calls) — wrapping up`);
         break;
       }
     } else {
       noProgressTurns = 0;
     }
-    for (const tc of toolCalls) seenToolCalls.add(toolCallKey(tc));
+    for (const key of observed) seenToolResults.add(key);
 
     // 도구 결과를 메시지에 추가 (길이 초과 시 자동 truncate)
     for (const result of results) {
@@ -1149,6 +1163,8 @@ async function runAgenticLoopInner(
     meteredCalls,
     durationMs: Date.now() - startTime,
     executedCommands,
+    terminationCause,
+    servedModels: !modelIdentityMissing && servedModels.size ? [...servedModels] : undefined,
     blockedOnOperator,
     executionOutcomeUnknown,
     operatorQuestionCorrelationIds: operatorQuestionCorrelationIds.length > 0
@@ -1213,6 +1229,7 @@ export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
     stderr: '',
     durationMs: result.durationMs,
     executedCommands: result.executedCommands,
+    terminationCause: result.terminationCause,
     blockedOnOperator: result.blockedOnOperator,
     executionOutcomeUnknown: result.executionOutcomeUnknown,
     operatorQuestionCorrelationIds: result.operatorQuestionCorrelationIds,
@@ -1223,6 +1240,7 @@ export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
       cacheReadTokens: result.cachedTokens,
       cacheCreationTokens: 0,
       durationMs: result.durationMs,
+      servedModels: result.servedModels,
     },
   };
 }
@@ -1467,30 +1485,4 @@ export function compactPriorTurns(messages: ChatMessage[], keepRecent = 8): void
     role: 'assistant',
     content: summaryText,
   });
-}
-
-// ============ 헬퍼 ============
-
-function summarizeToolArgs(name: string, args: Record<string, unknown>): string {
-  switch (name) {
-    case 'read_file': {
-      // Include offset/limit so a chunked walk of a large file (advancing offsets
-      // = legitimate investigation) is distinguishable from an identical re-read
-      // (a real loop). Without this the log hides the signal needed to tell them
-      // apart, and the turn-count nudge/maxTurns may cut a still-progressing read.
-      const off = args.offset != null ? ` @${args.offset}` : '';
-      const lim = args.limit != null ? `+${args.limit}` : '';
-      return `${String(args.path ?? '')}${off}${lim}`;
-    }
-    case 'write_file':
-      return String(args.path ?? '');
-    case 'edit_file':
-      return String(args.path ?? '');
-    case 'search_files':
-      return `"${args.pattern}" in ${args.path}`;
-    case 'bash':
-      return String(args.command ?? '').slice(0, 80);
-    default:
-      return '';
-  }
 }

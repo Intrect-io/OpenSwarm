@@ -270,6 +270,15 @@ export class CoordinationStore {
     // it through the priority lane. Deduplication still runs inside the same
     // locked mutate, so a replayed answer cannot double-publish.
     const event = await this.mutate((state) => {
+      if (normalized.kind === 'human-question' && ['open', 'waiting', 'running'].includes(normalized.status)) {
+        // notify 완료 뒤 board lock을 기다리는 동안 답변이 도착한 경우도 같은 잠금 안에서 막는다.
+        const answered = [...this.exchange(normalized.correlationId!), ...state.events].find((candidate) =>
+          candidate.correlationId === normalized.correlationId && candidate.kind === 'human-answer'
+          && candidate.status === 'completed'
+          && candidate.taskId === normalized.taskId
+          && repositoryKey(candidate.repoKey, candidate.repository) === normalized.repoKey);
+        if (answered) { isNew = false; return answered; }
+      }
       const existing = state.events.find((candidate) => candidate.fingerprint === digest
         || (legacyDigest !== undefined
           && candidate.repoKey === undefined
