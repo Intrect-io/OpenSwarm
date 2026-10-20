@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **The test suite no longer writes into the operator's live `~/.openswarm/task-state.json`.** `vitest.setup.ts` redirected a dozen home-dir state paths per worker but missed `OPENSWARM_TASK_STATE_FILE`, so suites that built a real task-state store fell back to the default path and appended fixture rows (`issue-uuid`/"Serial task", `INT-1`) to the live file. It is now redirected per worker like the rest.
+
 ## 0.24.4 — 2026-09-29
 
 ### Added
