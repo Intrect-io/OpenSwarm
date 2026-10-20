@@ -22,6 +22,7 @@ import {
   recoverCoordinatorDeliveries, respondToChannelDelivery,
   processingCoordinatorProjects,
 } from './channelQueue.js';
+import { listHeldIssueIds } from '../automation/execHold.js';
 
 export type OrchestratorTrigger = 'cron' | 'coordination-event' | 'manual';
 
@@ -89,6 +90,7 @@ export function isActionableOrchestratorEvent(event: CoordinationEvent): boolean
 export function selectOrchestratorItems(
   events: readonly CoordinationEvent[],
   handledTerminalThroughSeq = 0,
+  heldIssueIds?: ReadonlySet<string>,
 ): CoordinationEvent[] {
   const answered = new Set(events.filter((event) => event.kind === 'human-answer' && event.status === 'completed')
     .map((event) => `${event.repoKey ?? event.repository}:${event.taskId}:${event.correlationId}`));
@@ -102,8 +104,22 @@ export function selectOrchestratorItems(
     const previous = latest.get(key);
     if (!previous || event.seq > previous.seq) latest.set(key, event);
   }
+  // Resolved on first use rather than as a default argument: a sweep that has
+  // no candidate event, or none carrying a task id, should not open the
+  // automation database at all.
+  let held: ReadonlySet<string> | undefined = heldIssueIds;
+  const isHeld = (taskId: string): boolean => {
+    held ??= listHeldIssueIds();
+    return held.has(taskId);
+  };
   return [...latest.values()].filter((event) => {
     if (isSupervisorAuthoredEvent(event)) return false;
+    // A run held by an external orchestrator (`openswarm exec --issue`) is not
+    // this supervisor's to unblock: the elevation belongs to the agent that
+    // deployed it and is waiting on `exec await`. Answering here would resume
+    // the run behind that agent's back — the same silent re-run the scheduler's
+    // idle_fill gate exists to stop, reached through the supervisor instead.
+    if (event.taskId && isHeld(event.taskId)) return false;
     if (['open', 'waiting', 'running'].includes(event.status)) return true;
     return isOneShotFollowUp(event) && event.seq > handledTerminalThroughSeq;
   });
