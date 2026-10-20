@@ -101,7 +101,7 @@ export function renderThreadList(doc, holder, threads, selectedId, onSelect) {
     const meta = text(
       doc,
       'div',
-      `${repoName(thread.repository)} · ${tasks} · ${thread.messageCount} messages · ${thread.participantCount} participants · ${time(thread.updatedAt)}`,
+      `${repoName(thread.repository)} · ${tasks} · ${count(thread.messageCount, 'message')} · ${count(thread.participantCount, 'participant')} · ${time(thread.updatedAt)}`,
       'meta',
     );
     meta.title = thread.repository ?? '';
@@ -245,6 +245,9 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
     state.repository = path;
     state.selectedId = null;
     state.detail = null;
+    hideConfirm();
+    doc.getElementById('detail').classList.remove('visible');
+    doc.getElementById('empty').hidden = false;
     if (!path) say('Loading durable threads across all repositories…');
     try {
       doc.defaultView?.history?.replaceState({}, '', path ? `/threads?repository=${encodeURIComponent(path)}` : '/threads');
@@ -395,4 +398,9 @@ export function startThreadBoard(doc, { fetchImpl = globalThis.fetch, pollMs = 5
       if (timer) clearInterval(timer);
     },
   };
+}
+
+function count(n, noun) {
+  const value = Number(n) || 0;
+  return `${value} ${noun}${value === 1 ? '' : 's'}`;
 }

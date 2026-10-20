@@ -4,7 +4,7 @@
    switch without a second source of truth. */
 
 .usage-main {
-  padding: var(--space-4);
+  padding: var(--space-6) var(--page-gutter);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
@@ -19,15 +19,22 @@
   gap: var(--space-3);
 }
 
-.stat { padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-1); }
-.stat-label { font-size: var(--text-xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.08em; }
-.stat-value { font-family: var(--font-mono); font-size: var(--text-xl); color: var(--fg-primary); }
+.stat { padding: var(--space-3) 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.stat-label { font-size: var(--text-xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: var(--tracking-caps); }
+/* Board numerals: Barlow tabular, not mono — mono is for code and ids. */
+.stat-value { font-size: var(--text-xl); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--fg-primary); }
 .stat-note  { font-size: var(--text-xs); color: var(--fg-muted); min-height: 1em; }
 
 /* --- panels --- */
 
 .panel .card-head {
-  font-size: var(--text-sm);
+  padding-left: 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+  color: var(--fg-muted);
+  border-bottom: 0;
   font-weight: 600;
   color: var(--fg-secondary);
   padding: var(--space-2) var(--space-3);
@@ -113,7 +120,6 @@ td.key { color: var(--fg-primary); max-width: 22rem; overflow: hidden; text-over
 
 @media (max-width: 40rem) {
   .bar-row { grid-template-columns: 4.5rem 1fr auto; }
-  .usage-main { padding: var(--space-2); }
 }
 
 /* A day with calls but no metered cost. Wide enough to see, narrow enough not

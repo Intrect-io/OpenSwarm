@@ -488,7 +488,7 @@ tr.is-failed .c-title { text-decoration: line-through; text-decoration-color: va
 .log-line.log-system { opacity: 0.7; }
 .log-line.log-heading { margin-top: var(--space-2); padding-top: var(--space-2); border-top: 1px solid var(--border); border-radius: 0; }
 .ltime { flex-shrink: 0; min-width: 60px; color: var(--fg-muted); opacity: 0.8; font-variant-numeric: tabular-nums; }
-.licon { flex-shrink: 0; min-width: 14px; text-align: center; }
+.licon { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-width: 14px; }
 .ltag { flex-shrink: 0; min-width: 56px; color: var(--fg-muted); font-weight: 500; }
 .lstage { flex-shrink: 0; min-width: 64px; color: var(--info); text-transform: uppercase; letter-spacing: 0.03em; }
 .ltext { flex: 1; min-width: 0; color: var(--fg-secondary); white-space: pre-wrap; word-break: break-word; }
@@ -574,7 +574,8 @@ tr.is-failed .c-title { text-decoration: line-through; text-decoration-color: va
 .scan-path-row { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) 0; font-size: var(--text-xs); }
 .scan-path-row .path { flex: 1; color: var(--fg-secondary); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .scan-path-badge { flex-shrink: 0; padding: 0 var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: var(--text-xs); color: var(--fg-muted); }
-.scan-path-remove { flex-shrink: 0; padding: 0 var(--space-1); border: 0; background: transparent; color: var(--danger); font-size: var(--text-sm); cursor: pointer; }
+.scan-path-remove { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; padding: 0; border: 0; background: transparent; color: var(--fg-muted); cursor: pointer; }
+.scan-path-remove:hover { color: var(--fg-primary); }
 
 /* ── Narrow screens: one column at a time ────────────────────────────── */
 
@@ -626,3 +627,21 @@ tr.is-failed .c-title { text-decoration: line-through; text-decoration-color: va
   .dialog { max-height: 90vh; }
   .repo-item { min-height: 44px; }
 }
+
+/* Unpin sits beside the toggle; quiet until hovered. */
+.unpin { color: var(--fg-muted); }
+.unpin:hover { color: var(--fg-primary); }
+
+/* Touch: tabs and the reference link reach the 44px tap floor (step 10). */
+@media (pointer: coarse) {
+  .activity-tab, .log-tab, .ref-foot { min-height: 44px; }
+  .ref-foot { display: flex; align-items: center; }
+  .unpin, .scan-path-remove { min-width: 44px; min-height: 44px; }
+}
+
+/* Coordination summary under the agent chat. */
+.coord-summary { padding: var(--space-2) var(--space-1); font-size: var(--text-xs); }
+.coord-placed { color: var(--fg-primary); }
+.coord-placed b { font-size: var(--text-base); font-variant-numeric: tabular-nums; }
+.coord-pending { margin-top: var(--space-1); color: var(--fg-muted); }
+.needs-tag { padding: 1px var(--space-1); background: var(--needs); color: var(--needs-ink); font-weight: 600; }

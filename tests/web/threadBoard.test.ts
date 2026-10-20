@@ -85,6 +85,12 @@ describe('repository thread board', () => {
     (doc.querySelector('[data-thread-id="thread-all"]') as HTMLButtonElement).click();
     await vi.waitFor(() => expect(doc.getElementById('detail-subject')?.textContent).toBe('Shared decision'));
     expect(fetchImpl).toHaveBeenCalledWith(expect.stringContaining('repository=git%3A0123456789abcdef0123456789abcdef'), expect.any(Object));
+    const repo = doc.getElementById('repo') as HTMLSelectElement;
+    repo.add(new Option('Other repository', '/other'));
+    repo.value = '/other';
+    repo.dispatchEvent(new Event('change'));
+    expect(doc.getElementById('empty')!.hidden).toBe(false);
+    expect(doc.getElementById('detail')!.classList.contains('visible')).toBe(false);
     view.stop();
   });
 

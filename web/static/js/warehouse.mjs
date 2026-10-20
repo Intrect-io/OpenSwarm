@@ -125,7 +125,9 @@ function renderEntries(entries) {
     const nameCell = document.createElement('td');
     const name = document.createElement(entry.type === 'directory' ? 'button' : 'span');
     name.className = 'file-name';
-    name.textContent = `${entry.type === 'directory' ? '📁' : entry.type === 'symlink' ? '🔗' : '📄'} ${entry.name}`;
+    // The Type column already says what an entry is; a directory reads as a
+    // link because it is the one you can open.
+    name.textContent = entry.type === 'directory' ? `${entry.name}/` : entry.name;
     if (entry.type === 'directory') name.addEventListener('click', () => loadTree(joinPath(currentPath, entry.name)));
     nameCell.append(name);
     const typeCell = document.createElement('td');

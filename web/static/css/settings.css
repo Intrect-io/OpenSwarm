@@ -2,7 +2,7 @@
 
 .settings-main {
   max-width: var(--content-max);
-  padding: var(--space-8) var(--space-6) var(--space-12);
+  padding: var(--space-6) var(--page-gutter) var(--space-12);
 }
 .settings-main h1 { font-size: var(--text-xl); margin-bottom: var(--space-6); }
 .settings-section { padding-top: var(--space-4); border-top: 2px solid var(--border-strong); }
@@ -22,5 +22,5 @@
 .settings-state[data-tone="bad"] { color: var(--danger); }
 
 @media (max-width: 600px) {
-  .settings-main { padding: var(--space-6) var(--space-4) var(--space-10); }
+  .settings-main { padding-bottom: var(--space-10); }
 }

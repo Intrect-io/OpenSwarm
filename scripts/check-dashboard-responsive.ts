@@ -19,7 +19,9 @@ const paths = ['/', '/app', '/chat', '/orchestration', '/threads', '/warehouse',
 const documentPages = new Set(['/warehouse', '/usage', '/settings']);
 const results: object[] = [];
 await mkdir(outputDir, { recursive: true });
-const browser = await chromium.launch({ channel: 'chrome', headless: true });
+const browser = await chromium.launch({
+  channel: process.env.DASHBOARD_BROWSER === 'chromium' ? undefined : 'chrome', headless: true,
+});
 try {
   for (const width of [320, 390, 768, 1024, 1440]) {
     for (const theme of ['light', 'dark'] as const) {
@@ -87,12 +89,45 @@ try {
           assert(hit, `${label}: navigation link obscured`);
         }
         await nav.evaluate((element, left) => { element.scrollLeft = left; }, initialNavScroll);
+        await page.locator('.nav-more summary').click();
+        for (const link of await page.locator('.nav-more-menu a').all()) {
+          assert(await link.isVisible(), label + ': More link hidden');
+          assert(await link.evaluate(el => {
+            const r = el.getBoundingClientRect();
+            return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+          }), label + ': More link obscured');
+        }
+        await page.keyboard.press('Escape');
+        assert(!await page.locator('.nav-more').evaluate(el => (el as HTMLDetailsElement).open), label + ': More does not close on Escape');
         if (path === '/threads' && width <= 800) {
-          // The compose form opens on demand; open it to check it still stacks.
+          const detailPane = page.locator('.threads-detail');
+          await page.waitForFunction(() => document.querySelector('#threads .thread-card') || document.querySelector('#threads .empty'));
+          assert(!await detailPane.isVisible(), label + ': unselected detail takes mobile space');
+          const firstThread = page.locator('.thread-card').first();
+          assert(await firstThread.count(), label + ': needs an open thread to verify selection');
+          await firstThread.click();
+          await page.locator('#detail.visible').waitFor();
+          assert(await detailPane.isVisible(), label + ': selected detail hidden');
           await page.locator('#new-thread-toggle').click();
-          const form = await page.locator('.new-thread').boundingBox();
-          const detail = await page.locator('.threads-detail').boundingBox();
-          assert(form && detail && detail.y >= form.y + form.height - 1, `${label}: form/detail overlap`);
+          const form = page.locator('.new-thread');
+          assert.equal(await page.locator('#new-thread-toggle').getAttribute('aria-expanded'), 'true');
+          for (const field of await form.locator('input, textarea').all()) {
+            assert(await field.evaluate(el => (el as HTMLInputElement).labels!.length > 0), label + ': compose field lacks label');
+          }
+          await form.locator('[name="subject"]').focus();
+          const formBox = await form.boundingBox();
+          const detailBox = await detailPane.boundingBox();
+          assert(formBox && detailBox && detailBox.y >= formBox.y + formBox.height - 1, label + ': form/detail overlap');
+          const filtered = page.waitForResponse(r => r.url().includes('/api/coordination/threads?') && r.url().includes('status=resolved'));
+          await page.locator('#thread-status').selectOption('resolved');
+          await filtered;
+          await page.waitForFunction(() => !document.querySelector('#detail.visible'));
+          assert(!await detailPane.isVisible(), label + ': filtered-out detail takes mobile space');
+          await page.locator('#new-thread-cancel').click();
+          const restored = page.waitForResponse(r => r.url().includes('/api/coordination/threads?') && r.url().includes('status=open'));
+          await page.locator('#thread-status').selectOption('open');
+          await restored;
+          await page.waitForFunction(() => !document.querySelector('#threads .badge.resolved'));
         }
         if (path === '/orchestration' && width <= 900) {
           await page.locator('#thread').scrollIntoViewIfNeeded();

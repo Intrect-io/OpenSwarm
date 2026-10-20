@@ -35,12 +35,9 @@ body.page-chat {
   --thread-accent: var(--accent);
   max-width: 960px;
   margin: var(--space-3) auto;
-  border: 1px solid var(--border);
-  /* The thread's colour is a rule across the top of its head, not a thick
-     left stripe (craft floor: no coloured side border over 1px). */
+  /* A thread is a run of lines under its own coloured rule — no box, no
+     stripe (rules, not cards). */
   border-top: 2px solid var(--thread-accent);
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
   overflow: hidden;
 }
 .chat-thread.thread-system {
@@ -162,7 +159,8 @@ a.issue-link:hover .issue-title { color: var(--fg-primary); text-decoration: und
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
-.mention-human { color: var(--danger); background: var(--danger-subtle); }
+/* The operator is the yellow family (Yellow Means You); red is for failure. */
+.mention-human { color: var(--needs-ink); background: var(--needs); }
 
 /* The operator's own lines: a tinted ground, the room's user bubble (§2.2). */
 .line.from-operator { background: var(--bg-user-bubble); }

@@ -11,7 +11,6 @@ body.page-threads {
   font-size: var(--text-sm);
 }
 
-.topbar #repo { width: 240px; max-width: 40vw; }
 
 .threads-status {
   min-height: 28px;
@@ -48,9 +47,9 @@ body.page-threads {
   cursor: pointer;
 }
 .thread-card:hover { background: var(--bg-hover); }
-.thread-card.selected { background: var(--accent-subtle); box-shadow: inset 3px 0 var(--accent); }
-.thread-card:focus-visible { box-shadow: inset 3px 0 var(--accent), var(--focus-ring); }
-.subject { display: flex; gap: var(--space-2); align-items: center; font-weight: 600; }
+.thread-card.selected { background: var(--bg-active); }
+.subject { display: flex; gap: var(--space-2); align-items: baseline; font-weight: 600; }
+.subject .badge { margin-left: auto; flex-shrink: 0; }
 .thread-card .badge { font-size: var(--text-xs); }
 .badge.open { color: var(--success); border-color: var(--success); background: var(--success-subtle); }
 .badge.resolved { color: var(--fg-muted); }
@@ -97,14 +96,10 @@ body.page-threads {
   .threads-list { overflow: visible; border-right: 0; border-bottom: 1px solid var(--border); }
   #threads { flex: none; max-height: 40dvh; }
   .threads-detail { min-height: 240px; }
+  /* List first on a phone: the detail pane only takes space once a thread
+     is open, instead of half a screen of "Select a thread" (step 10). */
+  .threads-detail:has(> #empty:not([hidden])) { display: none; }
   #messages { flex: none; max-height: 60dvh; }
   .reply-form { padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
   .two { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 1100px) {
-  .page-threads .topbar .page-title { display: none; }
-  .page-threads .topbar-actions { flex: 1; min-width: 0; }
-  .page-threads .topbar-spacer { display: none; }
-  .topbar #repo { flex: 1; width: 0; max-width: none; }
 }

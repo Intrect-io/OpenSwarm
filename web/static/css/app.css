@@ -38,9 +38,8 @@
 .daemon-status .dot[data-state="down"] { background: var(--danger); }
 
 .panel {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  /* Rules, not cards: a panel is a column under a rule, not a raised box. */
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -136,10 +135,8 @@
 }
 
 .work-card {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: var(--space-3);
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-3) 0;
 }
 .work-card .head {
   display: flex;
@@ -167,7 +164,7 @@
   font-family: var(--font-mono);
   color: var(--fg-muted);
 }
-.work-card .stage-line .glyph { width: 14px; text-align: center; }
+.work-card .stage-line .glyph { display: inline-flex; justify-content: center; width: 14px; }
 .work-card .stage-line[data-status="complete"] .glyph { color: var(--success); }
 .work-card .stage-line[data-status="fail"] .glyph { color: var(--danger); }
 .work-card .stage-line[data-status="start"] .glyph { color: var(--accent); }
@@ -195,6 +192,7 @@
 
 @media (max-width: 900px), (pointer: coarse) {
   .console-toggle, .issue-row { min-height: 44px; }
+  .issue-row input[type="checkbox"] { width: 20px; height: 20px; }
   .repo-picker select { min-height: 44px; font-size: 16px; }
 }
 

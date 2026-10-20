@@ -212,7 +212,7 @@ button:disabled { cursor: default; }
   text-decoration: none;
 }
 .nav-more-menu a:hover { color: var(--fg-primary); background: var(--bg-hover); }
-.nav-more-menu a[aria-current="page"] { color: var(--fg-primary); box-shadow: inset 3px 0 0 var(--fg-primary); }
+.nav-more-menu a[aria-current="page"] { color: var(--fg-primary); background: var(--bg-active); }
 .topbar-spacer { flex: 1; }
 .topbar-actions { display: flex; align-items: center; gap: var(--space-2); }
 
@@ -270,6 +270,8 @@ button:disabled { cursor: default; }
   :root { --topbar-h: 123px; }
   .topbar { column-gap: var(--space-2); padding: 0 var(--space-3); }
   .topbar > :not(.shell-status) { min-height: 44px; }
+  .topbar-nav a, .nav-more > summary { min-height: 44px; }
+  .nav-more-menu a { display: flex; align-items: center; min-height: 44px; }
   .topbar-nav-group { order: 2; flex: 0 0 calc(100% + 2 * var(--space-3)); margin: 0 calc(-1 * var(--space-3)); padding: 0 var(--space-1); border-top: 1px solid var(--shell-rule); }
   .topbar-nav { flex: 1; }
   .shell-status { order: 3; flex-basis: calc(100% + 2 * var(--space-3)); margin: 0 calc(-1 * var(--space-3)); padding: 0 var(--space-3); gap: var(--space-4); }
@@ -406,7 +408,8 @@ button:disabled { cursor: default; }
   padding: 0 var(--space-2);
   min-height: 20px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-full);
+  /* Tags are squared like the board's route plates, never pills. */
+  border-radius: var(--radius-sm);
   color: var(--fg-muted);
   font-size: var(--text-xs);
   line-height: 1;
@@ -419,11 +422,10 @@ button:disabled { cursor: default; }
 
 /* ── Cards & panels ──────────────────────────────────────────────────── */
 
-/* Border, never shadow: shadows vanish on a dark ground (§4.1). */
+/* Rules, not cards (DESIGN.md): a section is set off by a 1px rule above it
+   and space, never boxed on a raised surface. */
 .card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -524,3 +526,9 @@ button:disabled { cursor: default; }
 .mono { font-family: var(--font-mono); }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 [hidden] { display: none !important; }
+
+
+/* A page's own controls (window, repository, refresh): one row under the
+   shell, left-aligned with the page gutter (step 10). */
+.page-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.page-toolbar .select { width: auto; }

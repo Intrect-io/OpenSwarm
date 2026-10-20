@@ -11,8 +11,12 @@
   <link rel="stylesheet" href="/static/css/usage.css" />
 </head>
 <body class="page-usage">
-  <header class="topbar" data-shell>
-    <div class="topbar-actions">
+  <header class="topbar" data-shell></header>
+
+  <main class="usage-main">
+    <!-- Page controls live under the shell, not in it: the shared top bar
+         carries only navigation (one shell, step 10). -->
+    <div class="page-toolbar">
       <label class="sr-only" for="window">Time window</label>
       <select id="window" class="select">
         <option value="1h">Last hour</option>
@@ -24,9 +28,6 @@
       </select>
       <button type="button" id="refresh" class="btn btn-secondary btn-sm">Refresh</button>
     </div>
-  </header>
-
-  <main class="usage-main">
     <p id="status" class="status-line status" role="status" aria-live="polite">Loading…</p>
 
     <section class="summary" aria-label="Summary">

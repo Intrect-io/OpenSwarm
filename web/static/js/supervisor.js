@@ -170,11 +170,25 @@ async function fetchSvcStatus() {
     const status = data.status || "unknown";
     el.textContent = status;
     el.className = "svc-status " + (status === "active" ? "active" : "inactive");
+    syncServiceButtons(status);
   } catch {
     const el = document.getElementById("svc-status");
     el.textContent = "unknown";
     el.className = "svc-status inactive";
+    syncServiceButtons("unknown");
   }
+}
+
+// A nonzero systemctl is-active exit also covers inactive/failed services.
+// Unknown status must not block the recovery action.
+function syncServiceButtons(status) {
+  const unknown = status === "unknown";
+  ["svc-stop-btn", "svc-restart-btn"].forEach(function(id) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    if (unknown) btn.title = "Service status unavailable; you can still attempt recovery";
+    else btn.removeAttribute("title");
+  });
 }
 
 // ---- Stuck/Failed Issues ----
@@ -253,7 +267,7 @@ async function fetchPRProcessorStatus() {
     html += '<div><span style="color: var(--fg-muted);">Next run:</span> <span style="color: var(--text);">' + formatTime(data.nextRun) + '</span></div>';
 
     if (data.conflictResolverEnabled) {
-      html += '<div style="color: var(--accent); font-size:12px; margin-top: 4px;">✓ Conflict Resolver: ON</div>';
+      html += '<div style="color: var(--accent); font-size:var(--text-xs); margin-top: 4px;">Conflict resolver on</div>';
     }
 
     html += '</div>';
@@ -704,8 +718,8 @@ function renderProjects() {
           "<div class=\"proj-name\">" + escapeHtml(p.name) + "</div>" +
           "<div class=\"proj-path\">" + escapeHtml(p.path) + "</div>" +
           (p.git ? "<div class=\"git-info\">" +
-            "\u2387 <span class=\"git-branch-name\">" + escapeHtml(p.git.branch) + "</span>" +
-            (p.git.hasChanges ? " <span class=\"git-dirty\">\u25CF " + p.git.uncommittedFiles + "</span>" : "") +
+            "<span class=\"git-branch-name\">" + escapeHtml(p.git.branch) + "</span>" +
+            (p.git.hasChanges ? " <span class=\"git-dirty\">" + p.git.uncommittedFiles + " changed</span>" : "") +
             ((p.git.ahead || p.git.behind) ? " <span class=\"git-sync\">" +
               (p.git.ahead ? "\u2191" + p.git.ahead : "") +
               (p.git.behind ? " \u2193" + p.git.behind : "") +
@@ -718,7 +732,7 @@ function renderProjects() {
           (p.pending.length ? "<span class=\"cnt cnt-pnd\">" + p.pending.length + "p</span>" : "") +
         "</div>" +
         "<div class=\"proj-toggle\" onclick=\"event.stopPropagation()\" style=\"display:flex;align-items:center;gap:4px\">" +
-          "<button class=\"btn\" style=\"font-size:11px;padding:1px 4px;opacity:.5\" data-path=\"" + escapeAttr(p.path) + "\" onclick=\"handleUnpin(this)\">✕</button>" +
+          "<button class=\"btn btn-ghost btn-icon unpin\" aria-label=\"Unpin project\" title=\"Unpin project\" data-path=\"" + escapeAttr(p.path) + "\" onclick=\"handleUnpin(this)\"><svg viewBox=\"0 0 16 16\" width=\"12\" height=\"12\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"><path d=\"M4 4l8 8M12 4l-8 8\"/></svg></button>" +
           "<label class=\"toggle\">" +
             "<input type=\"checkbox\" " + checked + " data-path=\"" + escapeAttr(p.path) + "\" onchange=\"handleToggleProject(this)\">" +
             "<span class=\"slider\"></span>" +
@@ -942,7 +956,7 @@ function renderStages() {
       inlineSummary = escapeHtml(r.summary);
       if (r.filesChangedCount > 0) inlineSummary += " · " + r.filesChangedCount + " files";
     } else if (r.passed != null || r.failed != null) {
-      inlineSummary = "✓ " + (r.passed || 0) + "  ✗ " + (r.failed || 0);
+      inlineSummary = (r.passed || 0) + " passed · " + (r.failed || 0) + " failed";
     } else if (r.error) {
       inlineSummary = "<span style=\"color:var(--danger)\">" + escapeHtml(r.error.slice(0, 120)) + "</span>";
     }
@@ -1010,24 +1024,36 @@ function addLogLine(data) {
   renderLog();
 }
 
+// Log marks are drawn, not typed: a unicode glyph renders in the OS fallback
+// font at its own weight (step 10). Same strokes as icons.mjs, which this
+// classic script cannot import.
+var LOG_ICON = {
+  play: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M4 2.5v7L9 6z" fill="currentColor"/></svg>',
+  check: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.2 5 8.6l4.5-5"/></svg>',
+  cross: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3 3 9"/></svg>',
+  block: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="6" cy="6" r="4"/><path d="M3.2 8.8l5.6-5.6"/></svg>',
+  bar: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><rect x="2" y="2" width="8" height="8" fill="currentColor"/></svg>',
+  dot: '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="1.5" fill="currentColor"/></svg>',
+};
+// The daemon prefixes some lines with its own glyph; the drawn mark replaces it.
+var LOG_PREFIX = /^[■▸▶✓✗⟳⛔—]\s*/;
+
 function classifyLog(line) {
   if (!line) return { cls: "log-spacer", icon: "" };
   if (line === "───") return { cls: "log-separator", icon: "" };
-  if (/^■ /.test(line)) return { cls: "log-heading2", icon: "■" };
+  if (/^■ /.test(line)) return { cls: "log-heading2", icon: LOG_ICON.bar };
   if (/^[┌└│]/.test(line)) return { cls: "log-code", icon: "" };
-  if (/^▸ /.test(line)) return { cls: "log-tool", icon: "▸" };
-  if (/^▶|Heartbeat started|Stage started|Iteration [0-9]/.test(line)) return { cls: "log-heading", icon: "▶" };
-  if (/^✓|success=true|approved|completed|Done|Created sub-issue/.test(line)) return { cls: "log-success", icon: "✓" };
-  if (/^✗|success=false|failed|error|Error|rejected|exceeded/.test(line)) return { cls: "log-fail", icon: "✗" };
-  if (/^⟳|Fetching|Decomposing|Running|Scheduling|Spawning/.test(line)) return { cls: "", icon: "⟳" };
-  if (/^⛔|Blocked|Time window|blocked/.test(line)) return { cls: "log-warn", icon: "⛔" };
-  if (/^—|No task|already completed|no log/.test(line)) return { cls: "log-system", icon: "—" };
-  if (/Cost:|\$[\.0-9]/.test(line)) return { cls: "", icon: "💲" };
-  if (/Git detected|files changed|filesChanged/.test(line)) return { cls: "", icon: "📁" };
-  if (/Selected [0-9]+ tasks/.test(line)) return { cls: "", icon: "🎯" };
-  if (/Enqueued|executePipeline/.test(line)) return { cls: "", icon: "📋" };
-  if (/Direct path|Project|path found/.test(line)) return { cls: "log-system", icon: "📂" };
-  return { cls: "", icon: "·" };
+  if (/^▸ /.test(line)) return { cls: "log-tool", icon: LOG_ICON.play };
+  if (/^▶|Heartbeat started|Stage started|Iteration [0-9]/.test(line)) return { cls: "log-heading", icon: LOG_ICON.play };
+  if (/^✓|success=true|approved|completed|Done|Created sub-issue/.test(line)) return { cls: "log-success", icon: LOG_ICON.check };
+  if (/^✗|success=false|failed|error|Error|rejected|exceeded/.test(line)) return { cls: "log-fail", icon: LOG_ICON.cross };
+  if (/^⟳|Fetching|Decomposing|Running|Scheduling|Spawning/.test(line)) return { cls: "", icon: LOG_ICON.dot };
+  if (/^⛔|Blocked|Time window|blocked/.test(line)) return { cls: "log-warn", icon: LOG_ICON.block };
+  if (/^—|No task|already completed|no log/.test(line)) return { cls: "log-system", icon: LOG_ICON.dot };
+  // Marks stay typographic (the board's craft floor bans emoji icons); the
+  // remaining categories differ by colour class alone.
+  if (/Direct path|Project|path found/.test(line)) return { cls: "log-system", icon: "·" };
+  return { cls: "", icon: LOG_ICON.dot };
 }
 
 function formatLogText(raw) {
@@ -1095,10 +1121,8 @@ function renderLog() {
     if (cls === "log-separator") return "<div class=\"log-line log-separator\"><span class=\"ltext\">───────────────────</span></div>";
     const time = fmtLogTime(l._ts);
     const stage = l.stage && l.stage !== "heartbeat" ? l.stage : "";
-    // heading2: strip ■ prefix (icon handles it)
-    const displayLine = cls === "log-heading2" ? (l.line || "").replace(/^■ /, "") : l.line;
-    // tool: strip ▸ prefix
-    const displayLine2 = cls === "log-tool" ? (displayLine || "").replace(/^▸ /, "") : displayLine;
+    // The drawn icon stands in for the daemon's own leading glyph.
+    const displayLine2 = cls === "log-code" ? l.line : (l.line || "").replace(LOG_PREFIX, "");
     return (
       "<div class=\"log-line " + cls + "\">" +
       "<span class=\"ltime\">" + time + "</span>" +
@@ -1304,7 +1328,7 @@ function renderScanPaths(data) {
     rows.push(
       "<div class=\"scan-path-row\">" +
         "<span class=\"path\">" + escapeHtml(p) + "</span>" +
-        "<button class=\"scan-path-remove\" title=\"remove\" onclick=\"removeScanPath(" + escapeJsArgAttr(p) + ")\">✕</button>" +
+        "<button class=\"scan-path-remove\" aria-label=\"Remove scan path\" title=\"Remove scan path\" onclick=\"removeScanPath(" + escapeJsArgAttr(p) + ")\"><svg viewBox=\"0 0 16 16\" width=\"12\" height=\"12\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"><path d=\"M4 4l8 8M12 4l-8 8\"/></svg></button>" +
       "</div>"
     );
   }
@@ -1312,7 +1336,7 @@ function renderScanPaths(data) {
     rows.push(
       "<div class=\"scan-path-row\">" +
         "<span class=\"path\">" + escapeHtml(p) + "</span>" +
-        "<button class=\"scan-path-remove\" onclick=\"removeScanPath(" + escapeJsArgAttr(p) + ")\">✕</button>" +
+        "<button class=\"scan-path-remove\" aria-label=\"Remove scan path\" title=\"Remove scan path\" onclick=\"removeScanPath(" + escapeJsArgAttr(p) + ")\"><svg viewBox=\"0 0 16 16\" width=\"12\" height=\"12\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"><path d=\"M4 4l8 8M12 4l-8 8\"/></svg></button>" +
       "</div>"
     );
   }
@@ -1398,8 +1422,7 @@ async function loadFolderBrowser(path) {
       return "<div class=\"fb-row\" data-name=\"" + escapeAttr(e.name) + "\" onclick=\"folderBrowserEnter(this.getAttribute('data-name'))\"" +
         " style=\"padding:7px 18px;cursor:pointer;font-size:13px;color:var(--fg-primary);display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);transition:background .12s\"" +
         " onmouseover=\"this.style.background='var(--bg-elevated)'\" onmouseout=\"this.style.background=''\">" +
-        "<span style=\"color:var(--accent)\">📁</span>" +
-        "<span>" + escapeHtml(e.name) + "</span>" +
+        "<span>" + escapeHtml(e.name) + "/</span>" +
         "</div>";
     }).join("");
   } catch (e) {
@@ -1575,10 +1598,18 @@ function renderCoordination() {
   Object.values(agents).forEach(function(role) { roles[role] = (roles[role] || 0) + 1; });
   var roleLine = Object.keys(roles).sort().map(function(role) { return roles[role] + " " + escapeHtml(role); }).join(" · ");
   el.innerHTML =
-    '<div style="padding:8px 6px;font-size:11px">' +
-    '<div style="color:var(--fg-primary)"><b style="font-size:15px">' + Object.keys(agents).length + '</b> agents placed <span style="color:var(--fg-muted)">(' + roleLine + ')</span></div>' +
-    '<div style="margin-top:4px;color:' + (questions > 0 ? 'var(--warning)' : 'var(--fg-muted)') + '">' + questions + ' question(s) waiting on you · ' + pending.length + ' open exchange(s)</div>' +
+    '<div class="coord-summary">' +
+    '<div class="coord-placed"><b>' + Object.keys(agents).length + '</b> agents placed <span class="muted">(' + roleLine + ')</span></div>' +
+    // Questions are the one thing here that waits on the operator: a yellow
+    // fill, never yellow text (Yellow Means You).
+    '<div class="coord-pending">' +
+      (questions > 0 ? '<span class="needs-tag">' + plural(questions, 'question') + ' waiting on you</span>' : '0 questions waiting on you') +
+      ' · ' + plural(pending.length, 'open exchange') + '</div>' +
     '</div>';
+}
+
+function plural(count, noun) {
+  return count + ' ' + noun + (count === 1 ? '' : 's');
 }
 
 async function fetchCoordination() {
@@ -1845,7 +1876,31 @@ async function fetchShellStatus() {
     if (!res.ok) return;
     shellStatus = await res.json();
     renderNotice();
+    syncDaemonControls();
   } catch {}
+}
+
+// A dashboard with no daemon runner attached can serve pages but cannot run a
+// heartbeat or review PRs: those controls would only answer with an error.
+// Provider and thinking settings persist without a runner and remain usable.
+const DAEMON_CONTROL_IDS = ["hb-btn", "pr-proc-btn"];
+const NO_DAEMON_NOTE = "No daemon runner is attached to this dashboard";
+
+function syncDaemonControls() {
+  const detached = shellStatus && shellStatus.daemon && shellStatus.daemon.state === "dashboard-only";
+  DAEMON_CONTROL_IDS.forEach(function(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (detached) {
+      el.disabled = true;
+      el.title = NO_DAEMON_NOTE;
+      el.dataset.detached = "true";
+    } else if (el.dataset.detached) {
+      el.disabled = false;
+      el.removeAttribute("title");
+      delete el.dataset.detached;
+    }
+  });
 }
 
 function openQuestions() {

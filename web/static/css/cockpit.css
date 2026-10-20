@@ -114,8 +114,9 @@ body[data-view="sessions"] .view-sessions { display: flex; }
   text-align: left;
 }
 .tree-session:hover { background: var(--bg-hover); }
+@media (pointer: coarse) { .tree-session, .nav-item { min-height: 44px; } }
 .tree-session.selected { background: var(--accent-subtle); }
-.tree-session .glyph { width: 12px; text-align: center; color: var(--fg-muted); }
+.tree-session .glyph { display: inline-flex; flex-shrink: 0; width: 12px; color: var(--fg-muted); }
 .tree-session[data-phase="running"] .glyph { color: var(--accent); }
 .tree-session[data-phase="completed"] .glyph { color: var(--success); }
 .tree-session[data-phase="failed"] .glyph { color: var(--danger); }

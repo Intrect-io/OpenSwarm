@@ -280,7 +280,7 @@ export function startChatView(doc, { fetchImpl, eventSourceImpl, pollMs = 30_000
       const drop = doc.createElement('button');
       drop.type = 'button';
       drop.className = 'chip-remove';
-      drop.textContent = '×';
+      drop.innerHTML = '<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3 3 9"/></svg>';
       drop.setAttribute('aria-label', `Remove ${file.name}`);
       drop.title = `Remove ${file.name}`;
       drop.addEventListener('click', () => {

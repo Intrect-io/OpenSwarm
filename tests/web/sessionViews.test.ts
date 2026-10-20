@@ -14,6 +14,8 @@ import { TranscriptModel } from '../../web/static/js/transcriptModel.mjs';
 import { TranscriptView } from '../../web/static/js/transcriptView.mjs';
 // @ts-expect-error — browser ESM assets without type declarations
 import { SessionTree } from '../../web/static/js/sessionTree.mjs';
+// @ts-expect-error — browser ESM asset without type declarations
+import { WorkCards } from '../../web/static/js/workCards.mjs';
 // @ts-expect-error — browser ESM assets without type declarations
 import { SessionPanel } from '../../web/static/js/sessionPanel.mjs';
 // @ts-expect-error — browser ESM assets without type declarations
@@ -30,6 +32,18 @@ beforeEach(() => {
 });
 
 describe('SessionTree', () => {
+  it.each(['queued', 'running', 'completed', 'failed', 'cancelled', 'decomposed'])('exposes the %s phase in the session button name', (phase) => {
+    const el = document.createElement('div');
+    const store = new SessionStore();
+    new SessionTree(el, { store, onSelect: () => {} });
+    const entry = { taskId: 'a', status: phase, title: 'Alpha', issueIdentifier: 'INT-1', projectPath: '/repo' };
+    store.seed(['queued', 'running'].includes(phase) ? { sessions: [entry], recent: [] } : { sessions: [], recent: [entry] });
+    const row = el.querySelector('button.tree-session')!;
+    expect(row.getAttribute('aria-label')).toContain('INT-1');
+    expect(row.getAttribute('aria-label')).toContain(phase);
+    expect(row.querySelector('.glyph')?.getAttribute('aria-hidden')).toBe('true');
+  });
+
   it('groups sessions under their repository with a running count', () => {
     const el = document.createElement('div');
     const store = new SessionStore();
@@ -362,5 +376,19 @@ describe('Nav', () => {
     nav.addEventListener('change', () => emitted++);
     nav.show('sessions', 'x');
     expect(emitted).toBe(1);
+  });
+});
+
+
+describe('WorkCards status accessibility', () => {
+  it('keeps stage status readable when decorative icons change', () => {
+    const el = document.createElement('div');
+    const cards = new WorkCards(el);
+    for (const status of ['start', 'complete', 'fail']) {
+      cards.onStage({ taskId: 'a', stage: 'worker', status });
+      const row = el.querySelector('.stage-line')!;
+      expect(row.querySelector('.stage-status')?.textContent).toBe(status + ': ');
+      expect(row.textContent).toContain(status + ': worker');
+    }
   });
 });

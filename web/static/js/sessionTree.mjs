@@ -4,14 +4,15 @@
 // knows — no placeholder rows for work the daemon never reported.
 
 import { formatRelativeTime, truncate } from './format.mjs';
+import { ICONS } from './icons.mjs';
 
-const PHASE_GLYPH = {
-  queued: '·',
-  running: '▸',
-  completed: '✓',
-  failed: '✗',
-  cancelled: '⊘',
-  decomposed: '⑂',
+const PHASE_ICON = {
+  queued: 'dot',
+  running: 'play',
+  completed: 'check',
+  failed: 'cross',
+  cancelled: 'cancel',
+  decomposed: 'fork',
 };
 
 export class SessionTree {
@@ -83,7 +84,8 @@ export class SessionTree {
 
     const glyph = document.createElement('span');
     glyph.className = 'glyph';
-    glyph.textContent = PHASE_GLYPH[session.phase] ?? '·';
+    glyph.innerHTML = ICONS[PHASE_ICON[session.phase] ?? 'dot'];
+    glyph.setAttribute('aria-hidden', 'true');
 
     const label = document.createElement('span');
     label.className = 'label';
@@ -94,6 +96,7 @@ export class SessionTree {
     time.textContent = formatRelativeTime(session.completedAt ?? session.startedAt ?? session.updatedAt, nowMs);
 
     row.append(glyph, label, time);
+    row.setAttribute('aria-label', `${label.textContent}, ${session.phase}, ${time.textContent}`);
     row.title = `${session.issueIdentifier ? `${session.issueIdentifier} — ` : ''}${session.title ?? ''}`;
     row.addEventListener('click', () => this.#onSelect(session.taskId));
     return row;

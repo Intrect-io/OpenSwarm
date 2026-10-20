@@ -45,13 +45,13 @@ body.page-orchestration {
   display: inline-flex;
   align-items: baseline;
   gap: var(--space-1);
-  padding: 2px var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
+  padding: 2px 0;
   font-size: var(--text-xs);
   color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
 }
+.stat + .stat { padding-left: var(--space-3); border-left: 1px solid var(--border); }
 .stat b { color: var(--fg-primary); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .stat.warn b { color: var(--warning); }
 
@@ -137,9 +137,9 @@ body.page-orchestration {
 /* Long opaque values (digests, ids) must never widen the panel: the feed
    scrolls vertically only, and its rows are free to break anywhere. */
 #feed { flex: 1 1 40%; min-height: 120px; overflow-y: auto; overflow-x: hidden; padding: 0 var(--space-2) var(--space-3); }
-.ev { padding: var(--space-2); border-bottom: 1px solid var(--border); border-left: 2px solid transparent; cursor: pointer; }
+.ev { padding: var(--space-2); border-bottom: 1px solid var(--border); cursor: pointer; }
 .ev:hover { background: var(--bg-hover); }
-.ev.focused { border-left-color: var(--accent); background: var(--bg-active); }
+.ev.focused { background: var(--bg-active); }
 .ev-head { display: flex; gap: var(--space-2); align-items: center; font-size: var(--text-xs); }
 .ev .status { font-weight: 700; }
 .task-chip { color: var(--accent); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0 4px; font-family: var(--font-mono); font-size: var(--text-xs); }
@@ -168,8 +168,8 @@ body.page-orchestration {
 .thread-head .participants { margin-left: auto; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .await-chip { color: var(--fg-on-accent); background: var(--warning); border-radius: var(--radius-sm); padding: 0 4px; font-weight: 700; }
 .transcript { flex: 1; overflow-y: auto; overflow-x: hidden; padding: var(--space-2) var(--space-3); scroll-behavior: auto; }
-.msg { margin: var(--space-2) 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-elevated); }
-.msg.from-operator { border-color: var(--role-human); background: var(--bg-user-bubble); }
+.msg { margin: 0; padding: var(--space-2) 0; border-bottom: 1px solid var(--border); }
+.msg.from-operator { padding-inline: var(--space-2); background: var(--bg-user-bubble); }
 .msg-head { display: flex; gap: var(--space-2); align-items: baseline; font-size: var(--text-xs); }
 .msg .who { font-weight: 700; }
 .msg .to { color: var(--fg-muted); }
@@ -200,4 +200,10 @@ body.page-orchestration {
   #thread { flex: none; min-height: 180px; padding-bottom: env(safe-area-inset-bottom); }
   .transcript { flex: none; max-height: 50dvh; }
   .composer .textarea { min-height: 44px; font-size: 16px; }
+}
+
+/* Touch: the idle filter's whole label is the target, checkbox sized up. */
+@media (pointer: coarse) {
+  label[for="filter-idle"] { display: inline-flex; align-items: center; gap: var(--space-2); min-height: 44px; }
+  #filter-idle { width: 20px; height: 20px; }
 }
