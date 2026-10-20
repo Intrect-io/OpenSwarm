@@ -74,3 +74,11 @@ process.env.OPENSWARM_SNAPSHOT_DIR = join(tmpdir(), 'openswarm-test-snapshots', 
 // tree. Tests that exercise snapshots delete this in their own beforeEach and
 // point projectPath at a temporary worktree.
 process.env.OPENSWARM_SNAPSHOT = '0';
+
+// The shared runner task-state store. Same hazard as the stores above, but this
+// one was missed: `src/taskState/store.ts` defaults to
+// ~/.openswarm/task-state.json, so every suite that builds a real task-state
+// store rewrote the operator's live file — its root `updatedAt` advanced on
+// every test run, and fixtures ("issue-uuid"/"Serial task", "1"/INT-1) were
+// appended to 4000+ real rows. Redirected per worker like the rest.
+process.env.OPENSWARM_TASK_STATE_FILE = join(tmpdir(), 'openswarm-test-task-state', workerScope, 'task-state.json');
