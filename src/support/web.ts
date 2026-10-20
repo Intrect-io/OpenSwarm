@@ -176,6 +176,11 @@ function pathDenylistVariants(p: string): string[] {
   return [...variants];
 }
 
+function configuredChannelPaths(): string[] {
+  return [...new Set([...(runnerRef?.getAllowedProjects() ?? loadConfig().autonomous?.allowedProjects ?? []), ...pinnedProjects])]
+    .filter((path) => !pathDenylistVariants(path).some((variant) => removedConfigPaths.has(variant)));
+}
+
 /** One destination policy for GitHub discovery and cloning. */
 function getWorkspaceRoot(): string {
   const configured = process.env.OPENSWARM_WORKSPACE_ROOT?.trim();
@@ -356,7 +361,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         writeJson(res, 200, { providers: listAdapterNames() });
 
       // ---- Desktop-app routes (/app, /static/*, /api/work*) → webAppRoutes.ts (INT-3388) ----
-      } else if (await tryHandleAppRoutes(req, res, url, requestUrl, runnerRef, readBody)) {
+      } else if (await tryHandleAppRoutes(req, res, url, requestUrl, runnerRef, readBody, configuredChannelPaths)) {
         // handled
 
       // ---- SSE stream ----
@@ -379,10 +384,15 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         const { buildShellStatus } = await import('./webShellStatus.js');
         const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
         const { isLinearInitialized } = await import('../linear/linear.js');
+        const { queryProjectSnapshot } = await import('../coordination/projectQueries.js');
         writeJson(res, 200, await buildShellStatus({
           runner: runnerRef,
           pendingEvents: () => getCoordinationStore().snapshot().pending,
           linearConfigured: isLinearInitialized,
+          projectNeeds: () => {
+            const snapshot = queryProjectSnapshot(configuredChannelPaths(), runnerRef);
+            return { ...snapshot.totals, unavailable: snapshot.unavailable };
+          },
         }));
 
       } else if (url === '/api/stats') {

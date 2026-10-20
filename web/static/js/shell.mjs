@@ -101,7 +101,9 @@ export function describeStatus(outcome) {
     provider: provider
       ? { value: provider.model ? `${provider.adapter} · ${provider.model}` : provider.adapter, source: 'config' }
       : null,
-    needs: needsYou.total > 0
+    needs: outcome.status.unavailable?.some((s) => ['questions', 'ledger'].includes(s))
+      ? { text: 'Needs you unavailable · retrying', href: '/chat', tone: 'warn' }
+      : needsYou.total > 0
       ? {
         text: `${needsYou.total} need${needsYou.total === 1 ? 's' : ''} you · ${parts.join(' · ')}`,
         // A question is answered in Chat; a parked run is resolved on the Supervisor.

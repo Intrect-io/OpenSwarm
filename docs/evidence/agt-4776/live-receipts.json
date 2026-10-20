@@ -1,0 +1,60 @@
+{
+  "verifiedAt": "2026-10-19T12:34:18.605Z",
+  "repoKey": "path:c78bc652622ab242b435e7c1d5526f6b",
+  "adapter": "codex-responses",
+  "model": "gpt-5.6-luna",
+  "general": {
+    "delivery": {
+      "id": "f5eb2622-cc46-49f2-a3dd-2b67223cb149",
+      "repoKey": "path:c78bc652622ab242b435e7c1d5526f6b",
+      "threadId": "6b6d2638-385a-497c-82ce-630788b1e6a6",
+      "messageId": "f192a1f0-7655-4804-8796-55bab49e8890",
+      "status": "responded",
+      "runId": "ab2cf896-0c72-4501-b806-c83e6770b34f",
+      "createdAt": 1792413251104
+    },
+    "messages": [
+      {
+        "id": "f192a1f0-7655-4804-8796-55bab49e8890",
+        "actor": "operator-dashboard",
+        "actorRole": "human",
+        "body": "Isolated receipt check. Do not read files, search the web or contact external services. Respond with exactly PROOF-8d6cfd87-0c87-4c1a-848c-5b64a32e0bbe."
+      },
+      {
+        "id": "dc7f807b-70a7-48d9-ac19-7265dfe14ef1",
+        "actor": "meridiansignal87",
+        "actorRole": "orchestrator",
+        "body": "PROOF-8d6cfd87-0c87-4c1a-848c-5b64a32e0bbe"
+      }
+    ]
+  },
+  "task": {
+    "delivery": {
+      "id": "cf5c0b8c-bb3f-408e-8d47-41db41e662f6",
+      "repoKey": "path:c78bc652622ab242b435e7c1d5526f6b",
+      "threadId": "02329106-d2c8-44b4-b290-3fdaec8ecd10",
+      "messageId": "d8e81d1d-ae31-454b-8b1b-7f1d9e1f776e",
+      "taskId": "isolated-task",
+      "recipient": "validation-worker",
+      "status": "responded",
+      "runId": "cc73ad83-298b-4585-9e2b-c0dfed921e21",
+      "createdAt": 1792413253167
+    },
+    "messages": [
+      {
+        "id": "d8e81d1d-ae31-454b-8b1b-7f1d9e1f776e",
+        "actor": "operator-dashboard",
+        "taskId": "operator",
+        "body": "Reply with exactly RECEIPT-b065ba74-c600-4402-b394-1aa7a1d0cdd1 in the existing discussion."
+      },
+      {
+        "id": "4b13e1e7-c27c-409d-befc-1e26698439e9",
+        "actor": "validation-worker",
+        "taskId": "isolated-task",
+        "body": "RECEIPT-b065ba74-c600-4402-b394-1aa7a1d0cdd1",
+        "replyToDeliveryId": "cf5c0b8c-bb3f-408e-8d47-41db41e662f6"
+      }
+    ]
+  },
+  "boundary": "Real native provider and coordination tools with an isolated store. Direct durable send; not production scheduler/HTTP deployment proof."
+}

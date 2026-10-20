@@ -35,6 +35,8 @@ export interface SwarmStats {
 
 export type HubEvent =
   | { type: 'pipeline:recovery'; data: import('../automation/loopRecoveryTypes.js').RecoveryStatus & { taskId: string; stage?: string; reused?: boolean } }
+  | { type: 'coordination:channel'; data: { repoKey: string } }
+  | { type: 'coordination:channel-status'; data: { repoKey: string } }
   | { type: 'stats'; data: SwarmStats }
   | { type: 'task:queued'; data: { taskId: string; title: string; projectPath: string; issueIdentifier?: string } }
   | { type: 'task:started'; data: { taskId: string; title: string; issueIdentifier?: string } }

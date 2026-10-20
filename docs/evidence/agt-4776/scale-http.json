@@ -1,0 +1,35 @@
+{
+  "fixtureOnly": true,
+  "results": [
+    {
+      "projects": 10,
+      "agents": 100,
+      "loops": 25,
+      "initMs": 75.14979200000005,
+      "queryP50Ms": 1.4644160000000284,
+      "queryP95Ms": 3.2513340000000426,
+      "queryMaxMs": 12.32833299999993,
+      "httpP50Ms": 3.664416000000074,
+      "httpP95Ms": 7.212000000000103,
+      "httpMaxMs": 16.288374999999974,
+      "heapDeltaBytes": -10574792,
+      "rssBytes": 316817408,
+      "aggregateScope": "complete durable records; two synthetic sessions per project"
+    },
+    {
+      "projects": 100,
+      "agents": 1000,
+      "loops": 25,
+      "initMs": 566.7909999999999,
+      "queryP50Ms": 12.37495899999999,
+      "queryP95Ms": 16.862375000000156,
+      "queryMaxMs": 19.600791000000072,
+      "httpP50Ms": 13.874667000000045,
+      "httpP95Ms": 14.928667000000132,
+      "httpMaxMs": 16.525917000000163,
+      "heapDeltaBytes": -8800688,
+      "rssBytes": 338477056,
+      "aggregateScope": "complete durable records; two synthetic sessions per project"
+    }
+  ]
+}

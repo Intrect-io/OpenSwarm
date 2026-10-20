@@ -17,6 +17,11 @@ import { repositoryCell, type RepositoryCell } from './repositoryCell.js';
 import { buildOrchestratorObjective, runOrchestrator, type OrchestratorRunOptions, type OrchestratorRunResult } from './orchestratorAgent.js';
 import type { ResolvedOrchestratorConfig } from './orchestratorConfig.js';
 import type { OrchestratorTrackerBridge } from './orchestratorTrackerTools.js';
+import {
+  channelMessageBody, claimChannelDelivery, finishChannelDelivery, pendingCoordinatorMessages,
+  recoverCoordinatorDeliveries, respondToChannelDelivery,
+  processingCoordinatorProjects,
+} from './channelQueue.js';
 
 export type OrchestratorTrigger = 'cron' | 'coordination-event' | 'manual';
 
@@ -196,6 +201,7 @@ export class OrchestratorSupervisor {
   private readonly lastActionable = new Map<string, string>();
   private cron: Cron | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private channelPoll: ReturnType<typeof setInterval> | null = null;
   private activeSweep: Promise<void> | null = null;
   private activeAbort: AbortController | null = null;
   private started = false;
@@ -240,10 +246,48 @@ export class OrchestratorSupervisor {
     }
     this.started = true;
     this.stopping = false;
+    getEventHub().on('coordination:channel', this.onChannelMessage);
+    // 별도 dashboard 프로세스가 같은 DB에 접수해도 인메모리 알림에 의존하지 않는다.
+    this.channelPoll = setInterval(this.onChannelMessage, 15_000);
+    this.channelPoll.unref();
     // Reconcile events committed before this process subscribed. Event-only
     // mode otherwise loses any request published immediately before a crash.
     void this.requestSweep('coordination-event').catch((error) =>
       console.error('[Orchestrator] startup reconciliation failed:', error));
+  }
+
+  private readonly onChannelMessage = (): void => {
+    void this.requestSweep('coordination-event').catch((error) =>
+      console.error('[Orchestrator] channel sweep failed:', error));
+  };
+
+  private async drainChannelQueue(cell: RepositoryCell, signal: AbortSignal): Promise<void> {
+    await withFileLock(repositoryLockPath(cell.repoKey), async () => {
+      recoverCoordinatorDeliveries(cell.repoKey);
+      for (const item of pendingCoordinatorMessages(cell.repoKey)) {
+        if (signal.aborted) break;
+        if (!this.options.getRepositories().some((path) => repositoryCell(path).repoKey === cell.repoKey)) break;
+        const runId = claimChannelDelivery(item.id);
+        if (!runId) continue;
+        try {
+          const result = await this.run({ repository: cell.repositoryPath, taskId: ORCHESTRATOR_SUPERVISOR_TASK_ID,
+            objective: `The operator posted to this project channel. Respond to this request within the project's existing policies and budget.\nThread: ${item.threadId}\n\n${channelMessageBody(item)}`,
+            policy: this.options.policy, adapterName: this.options.config.adapter, model: this.options.config.model,
+            reasoningEffort: this.options.config.reasoningEffort, timeoutMs: this.options.config.timeoutMs,
+            maxTurns: this.options.config.maxTurns, instructionCapsule: this.buildCapsule(cell.repositoryPath),
+            tracker: this.options.tracker, trigger: 'project-channel', signal });
+          if (result.skippedReason) {
+            finishChannelDelivery(item.id, runId, 'queued', `Coordinator unavailable: ${result.skippedReason}`);
+            break;
+          }
+          respondToChannelDelivery(item.id, runId, result.callSign, result.output);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          finishChannelDelivery(item.id, runId, signal.aborted ? 'interrupted' : 'failed',
+            message.replace(/(?:bearer\s+\S+|(?:sk|ghp|xox[baprs])_?[-A-Za-z0-9_]{8,})/gi, '[redacted]').slice(0, 500));
+        }
+      }
+    }, { timeoutMs: this.lockTimeoutMs });
   }
 
   private readonly onCoordinationEvent = (value: unknown): void => {
@@ -301,6 +345,17 @@ export class OrchestratorSupervisor {
       failed: 0,
     };
     const cells = new Map<string, RepositoryCell>();
+    try {
+      // 비활성화/제거된 프로젝트도 실행 결과가 불명확하면 중단 상태로 복구한다.
+      for (const repoKey of processingCoordinatorProjects()) {
+        if (signal.aborted) break;
+        try {
+          await withFileLock(repositoryLockPath(repoKey), async () => recoverCoordinatorDeliveries(repoKey), { timeoutMs: this.lockTimeoutMs });
+        } catch (error) {
+          if (!(error instanceof Error && error.message.includes('Timed out waiting for file lock'))) throw error;
+        }
+      }
+    } catch (error) { console.warn('[Orchestrator] Channel recovery unavailable:', error instanceof Error ? error.message : String(error)); }
     for (const configuredPath of this.options.getRepositories()) {
       const cell = repositoryCell(configuredPath);
       if (!cells.has(cell.repoKey)) cells.set(cell.repoKey, cell);
@@ -309,6 +364,13 @@ export class OrchestratorSupervisor {
       if (signal.aborted) break;
       stats.considered++;
       const { repoKey, repositoryPath: repository } = cell;
+      try {
+        await this.drainChannelQueue(cell, signal);
+      } catch (error) {
+        // 채널 저장소 장애가 기존 보드 기반 감독까지 중단시키지 않게 한다.
+        console.error('[Orchestrator] channel queue unavailable:', error);
+      }
+      if (signal.aborted) break;
       const pending = this.pendingFor(repository, repoKey).events;
       const objective = buildOrchestratorObjective(pending);
       if (!objective) {
@@ -417,9 +479,12 @@ export class OrchestratorSupervisor {
     this.stopping = true;
     this.cron?.stop();
     this.cron = null;
+    if (this.channelPoll) clearInterval(this.channelPoll);
+    this.channelPoll = null;
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = null;
     getEventHub().off('coordination:published', this.onCoordinationEvent);
+    getEventHub().off('coordination:channel', this.onChannelMessage);
     this.pendingTriggers.clear();
     this.activeAbort?.abort(new Error('OpenSwarm supervisor is stopping'));
     await this.activeSweep?.catch(() => {});

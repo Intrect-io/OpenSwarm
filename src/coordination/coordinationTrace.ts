@@ -163,6 +163,14 @@ export function recordTraceEvent(event: CoordinationEvent): void {
   const handle = getTraceDb();
   if (!handle) return;
   try {
+    recordTraceEventRequired(handle, event);
+  } catch (error) {
+    console.warn('[CoordinationTrace] Failed to record event:', error);
+  }
+}
+
+/** 영속 명령의 동일 트랜잭션 안에서 답변 증거를 쓸 때는 실패를 전파한다. */
+export function recordTraceEventRequired(handle: Database.Database, event: CoordinationEvent): void {
     handle.prepare(`
       INSERT OR IGNORE INTO coordination_trace(
         event_id, board_seq, timestamp, repository, repo_key, task_id, task_label,
@@ -181,9 +189,6 @@ export function recordTraceEvent(event: CoordinationEvent): void {
       event.detail ?? null, event.metadata ? JSON.stringify(event.metadata) : null,
       event.fingerprint,
     );
-  } catch (error) {
-    console.warn('[CoordinationTrace] Failed to record event:', error);
-  }
 }
 
 interface TraceRow {
@@ -249,7 +254,7 @@ export function scanCoordinationTrace(input: {
   };
 }
 
-function toEvent(row: TraceRow): CoordinationEvent {
+export function toEvent(row: TraceRow): CoordinationEvent {
   let metadata: CoordinationEvent['metadata'];
   if (row.metadata_json) {
     try {

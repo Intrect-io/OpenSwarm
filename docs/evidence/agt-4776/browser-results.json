@@ -1,0 +1,166 @@
+[
+  {
+    "path": "/orchestration",
+    "width": 390,
+    "theme": "dark",
+    "initialMs": 880.0841659999996,
+    "selectMs": 846.170666,
+    "jsHeapBytes": 2768722,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": null
+  },
+  {
+    "path": "/chat",
+    "width": 390,
+    "theme": "dark",
+    "initialMs": 114.18491699999959,
+    "selectMs": 159.7318749999995,
+    "jsHeapBytes": 2687788,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": null
+  },
+  {
+    "path": "/orchestration",
+    "width": 390,
+    "theme": "light",
+    "initialMs": 128.2671250000003,
+    "selectMs": 151.1984999999995,
+    "jsHeapBytes": 2786428,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": null
+  },
+  {
+    "path": "/chat",
+    "width": 390,
+    "theme": "light",
+    "initialMs": 92.41212500000074,
+    "selectMs": 201.984292000001,
+    "jsHeapBytes": 2685358,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": null
+  },
+  {
+    "path": "/orchestration",
+    "width": 1440,
+    "theme": "dark",
+    "initialMs": 95.00591700000041,
+    "selectMs": 680.7934580000001,
+    "jsHeapBytes": 2603886,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": null
+  },
+  {
+    "path": "/chat",
+    "width": 1440,
+    "theme": "dark",
+    "initialMs": 106.18737500000134,
+    "selectMs": 121.22241700000086,
+    "jsHeapBytes": 2493032,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": null
+  },
+  {
+    "path": "/orchestration",
+    "width": 1440,
+    "theme": "light",
+    "initialMs": 115.92879099999845,
+    "selectMs": 271.70975,
+    "jsHeapBytes": 2794860,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": null
+  },
+  {
+    "path": "/chat",
+    "width": 1440,
+    "theme": "light",
+    "initialMs": 97.87283399999978,
+    "selectMs": 608.0794999999998,
+    "jsHeapBytes": 2512774,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": null
+  },
+  {
+    "path": "/orchestration",
+    "width": 720,
+    "theme": "dark",
+    "initialMs": 99.56720900000073,
+    "selectMs": 70.32408399999986,
+    "jsHeapBytes": 2671213,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": "200% equivalent at 1440px: 720 CSS-pixel reflow"
+  },
+  {
+    "path": "/chat",
+    "width": 720,
+    "theme": "dark",
+    "initialMs": 100.98174999999901,
+    "selectMs": 64.90499999999884,
+    "jsHeapBytes": 2625947,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": "200% equivalent at 1440px: 720 CSS-pixel reflow"
+  },
+  {
+    "path": "/orchestration",
+    "width": 720,
+    "theme": "light",
+    "initialMs": 99.15420799999993,
+    "selectMs": 82.97795799999949,
+    "jsHeapBytes": 2693267,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": "200% equivalent at 1440px: 720 CSS-pixel reflow"
+  },
+  {
+    "path": "/chat",
+    "width": 720,
+    "theme": "light",
+    "initialMs": 88.85762499999691,
+    "selectMs": 672.4879999999976,
+    "jsHeapBytes": 2583177,
+    "errors": [],
+    "writes": [],
+    "reflow": true,
+    "zoomBoundary": "200% equivalent at 1440px: 720 CSS-pixel reflow"
+  },
+  {
+    "scenario": "questions",
+    "errors": [],
+    "boundary": "Read-only demo fixture"
+  },
+  {
+    "scenario": "busy",
+    "errors": [],
+    "boundary": "Read-only demo fixture"
+  },
+  {
+    "scenario": "offline",
+    "errors": [],
+    "boundary": "Read-only demo fixture"
+  },
+  {
+    "scenario": "stress",
+    "errors": [],
+    "boundary": "Read-only demo fixture"
+  }
+]

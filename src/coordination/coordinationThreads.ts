@@ -10,6 +10,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { getTraceDb } from './coordinationTrace.js';
+import { syncChannelState } from './channelStore.js';
 import {
   enqueueCoordinationThreadMutation,
   migrateCoordinationThreadOutbox,
@@ -60,6 +61,7 @@ export interface CoordinationThreadMessage {
   taskLabel?: string;
   body: string;
   createdAt: number;
+  replyToDeliveryId?: string;
 }
 
 export interface CreateThreadInput {
@@ -91,6 +93,7 @@ export interface PostThreadMessageInput {
   idempotencyKey?: string;
   notification?: ThreadNotificationContext;
   now?: number;
+  replyToDeliveryId?: string;
 }
 
 export interface ThreadNotificationContext {
@@ -156,6 +159,7 @@ interface MessageRow {
   body: string;
   created_at: number;
   fingerprint: string;
+  reply_to_delivery_id: string | null;
 }
 
 interface ParticipantRow {
@@ -171,11 +175,13 @@ interface ParticipantRow {
 function database(): Database.Database {
   const handle = getTraceDb();
   if (!handle) throw new Error('Coordination thread store is unavailable');
-  migrate(handle);
+  migrateCoordinationThreads(handle);
+  // 단독 Threads 사용도 과거 경로를 찾는다. 전달의 외부 원자 트랜잭션은 이미 준비된 상태를 쓴다.
+  if (!handle.inTransaction) syncChannelState();
   return handle;
 }
 
-function migrate(db: Database.Database): void {
+export function migrateCoordinationThreads(db: Database.Database): void {
   db.pragma('foreign_keys = ON');
   db.exec(`
     CREATE TABLE IF NOT EXISTS coordination_threads (
@@ -223,7 +229,8 @@ function migrate(db: Database.Database): void {
       body TEXT NOT NULL,
       idempotency_key TEXT,
       fingerprint TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      reply_to_delivery_id TEXT
     );
     CREATE UNIQUE INDEX IF NOT EXISTS coordination_thread_message_key
       ON coordination_thread_messages(thread_id, idempotency_key)
@@ -245,6 +252,10 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS coordination_thread_subscriptions_actor
       ON coordination_thread_subscriptions(actor, task_id, thread_id);
   `);
+  const messageColumns = db.pragma('table_info(coordination_thread_messages)') as Array<{ name: string }>;
+  if (!messageColumns.some((c) => c.name === 'reply_to_delivery_id')) {
+    db.exec('ALTER TABLE coordination_thread_messages ADD COLUMN reply_to_delivery_id TEXT');
+  }
   migrateCoordinationThreadOutbox(db);
 }
 
@@ -340,6 +351,7 @@ function toMessage(row: MessageRow): CoordinationThreadMessage {
     taskLabel: row.task_label ?? undefined,
     body: row.body,
     createdAt: row.created_at,
+    ...(row.reply_to_delivery_id ? { replyToDeliveryId: row.reply_to_delivery_id } : {}),
   };
 }
 
@@ -355,14 +367,23 @@ function toParticipant(row: ParticipantRow): ThreadParticipant {
   };
 }
 
+/** Keep historical repository strings intact; registered channel aliases share their lookup scope. */
+function repositoryScope(db: Database.Database, repo: string): string[] {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordination_channel_aliases'").get()) return [repo];
+  const canonical = (db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(repo) as { repo_key: string } | undefined)?.repo_key ?? repo;
+  const aliases = db.prepare('SELECT repository FROM coordination_channel_aliases WHERE repo_key=?').all(canonical) as Array<{ repository: string }>;
+  return [...new Set([repo, canonical, ...aliases.map((a) => a.repository)])];
+}
+
 function getThreadRow(db: Database.Database, repo: string, threadId: string): ThreadRow | undefined {
+  const scope = repositoryScope(db, repo);
   return db.prepare(`
     SELECT t.*,
       (SELECT COUNT(*) FROM coordination_thread_messages m WHERE m.thread_id = t.thread_id) AS message_count,
       (SELECT COUNT(*) FROM coordination_thread_subscriptions s WHERE s.thread_id = t.thread_id) AS participant_count
     FROM coordination_threads t
-    WHERE t.repository = ? AND t.thread_id = ?
-  `).get(repo, threadId) as ThreadRow | undefined;
+    WHERE t.repository IN (${scope.map(() => '?').join(',')}) AND t.thread_id = ?
+  `).get(...scope, threadId) as ThreadRow | undefined;
 }
 
 function requireThreadRow(db: Database.Database, repo: string, threadId: string): ThreadRow {
@@ -437,7 +458,8 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
   const taskLabel = optionalText(input.taskLabel, 'taskLabel', 240);
   const body = boundedText(input.body, 'body', MAX_BODY);
   const key = idempotencyKey(input.idempotencyKey);
-  const fingerprint = digest({ threadId, actor, taskId, body });
+  const replyToDeliveryId = input.replyToDeliveryId ? identity(input.replyToDeliveryId, 'replyToDeliveryId') : undefined;
+  const fingerprint = digest({ threadId, actor, taskId, body, ...(replyToDeliveryId ? { replyToDeliveryId } : {}) });
   if (key) {
     const existing = db.prepare(`
       SELECT * FROM coordination_thread_messages WHERE thread_id = ? AND idempotency_key = ?
@@ -445,6 +467,16 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
     if (existing) {
       if (existing.fingerprint !== fingerprint) throw new Error('Thread message idempotency key collision');
       return toMessage(existing);
+    }
+  }
+  if (replyToDeliveryId) {
+    const addressed = db.prepare(`SELECT repo_key,thread_id,task_id,recipient,status
+      FROM coordination_channel_deliveries WHERE id=?`).get(replyToDeliveryId) as {
+        repo_key: string; thread_id: string; task_id: string; recipient: string; status: string;
+      } | undefined;
+    if (!addressed || !repositoryScope(db, repo).includes(addressed.repo_key) || addressed.thread_id !== threadId
+      || addressed.task_id !== taskId || addressed.recipient !== actor || addressed.status !== 'processing') {
+      throw new Error('Channel delivery reply scope conflict');
     }
   }
   const count = (db.prepare(`
@@ -459,8 +491,8 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
   const result = db.prepare(`
     INSERT INTO coordination_thread_messages(
       message_id, thread_id, actor, actor_name, actor_role, task_id, task_label,
-      body, idempotency_key, fingerprint, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      body, idempotency_key, fingerprint, created_at, reply_to_delivery_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     messageId,
     threadId,
@@ -473,6 +505,7 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
     key ?? null,
     fingerprint,
     now,
+    replyToDeliveryId ?? null,
   );
   db.prepare(`
     UPDATE coordination_threads SET version = version + 1, updated_at = ? WHERE thread_id = ?
@@ -494,6 +527,7 @@ function insertMessage(db: Database.Database, input: PostThreadMessageInput): Co
     body,
     created_at: now,
     fingerprint,
+    reply_to_delivery_id: replyToDeliveryId ?? null,
   });
 }
 
@@ -689,7 +723,7 @@ export function resolveCoordinationThread(input: {
       SET status = 'resolved', version = version + 1, updated_at = ?, resolved_at = ?,
           resolved_by_actor = ?, resolved_by_task_id = ?
       WHERE repository = ? AND thread_id = ? AND version = ? AND status = 'open'
-    `).run(now, now, actor, taskId, repo, threadId, input.expectedVersion);
+    `).run(now, now, actor, taskId, current.repository, threadId, input.expectedVersion);
     if (result.changes === 0) throw new Error('Thread version conflict');
     const thread = toThread(requireThreadRow(db, repo, threadId));
     enqueueThreadNotification(db, thread, 'resolved', `resolve:${threadId}:${thread.version}`, input, input.notification);
@@ -783,8 +817,9 @@ export function listCoordinationThreads(input: {
   const where: string[] = [];
   const params: Array<string | number> = [];
   if (repo) {
-    where.push('t.repository = ?');
-    params.push(repo);
+    const scope = repositoryScope(db, repo);
+    where.push(`t.repository IN (${scope.map(() => '?').join(',')})`);
+    params.push(...scope);
   }
   if (input.status) {
     where.push('t.status = ?');

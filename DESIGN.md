@@ -113,3 +113,24 @@ The detector's Orchestration spacing warning is intentionally retained: 4px
 spacing repeats within metadata/chips and compact control padding, while event
 rows use 8px and detail/transcript sections use 12px. This is local grouping,
 not a single spacing value across page sections.
+
+## Project collaboration
+
+Orchestration starts with the Project / Running tasks / Recent participants ·
+30m / Needs you timetable. Selecting a project opens its tasks; selecting a task
+uses that space for details and a relationship graph. The graph is limited to
+20 participants and 40 connections, with omissions and complete searchable,
+paginated lists. Running state comes from scheduler sessions, recent activity
+has an explicit 30-minute window, and missing sources display Unavailable.
+
+Chat uses project channels, the channel timeline, and a selected original
+Threads discussion or task context. On narrow screens the same sequence uses
+Back controls; the composer can be expanded while its project/task/recipient
+scope stays visible. Unread and Needs you have distinct labels and data.
+Archived project channels remain read-only. Updates announce New activity and
+wait for an explicit refresh. Saved/queued, processing, responded, failed and
+interrupted delivery states retain their meaning independently of HTTP success.
+
+The isolated 3900 preview explicitly labels demo data and disables writes.
+Normal, questions, busy, offline and stress examples share the production UI.
+Visual captures support operator approval; automated checks do not grant it.

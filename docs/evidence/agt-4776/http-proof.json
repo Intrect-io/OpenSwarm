@@ -1,0 +1,33 @@
+{
+  "verifiedAt": "2026-10-19T12:34:13.836Z",
+  "readPosition": {
+    "readSeq": 50,
+    "unread": 20,
+    "latestSeq": 70
+  },
+  "unauthenticatedOrigin": 403,
+  "bodyLimit": 413,
+  "responseLost": true,
+  "receipt": {
+    "id": "ee5d58bc-96f9-4f7c-844c-19c4cf0fdd40",
+    "repoKey": "path:a9e0b3aa53ad7ce564f60cbeb7deeac3",
+    "threadId": "937c66ab-eb56-4de7-a7ee-5b758faeae68",
+    "messageId": "a989cab4-c073-42c0-aeb2-5b5fbf3a6229",
+    "status": "queued",
+    "createdAt": 1792413253825
+  },
+  "rows": {
+    "repoKey": "path:a9e0b3aa53ad7ce564f60cbeb7deeac3",
+    "name": "validation-project",
+    "configured": true,
+    "readSeq": 50,
+    "latestSeq": 71,
+    "unread": 20
+  },
+  "pages": [
+    50,
+    21
+  ],
+  "endedRecipient": 409,
+  "boundary": "Production channel route + auth/body reader on isolated loopback HTTP server, two independent Chromium contexts. No production daemon attached."
+}

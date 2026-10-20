@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "receiptType": "independent-non-git-alias-repair-review",
+  "createdAt": "2026-10-19T10:50:05.106Z",
+  "sanitized": true,
+  "projectLabels": {
+    "physical": "physical-project",
+    "opaque": "opaque-project"
+  },
+  "originalFailureFixture": {
+    "sources": [
+      {
+        "sourceId": "old-opaque",
+        "seq": 1
+      },
+      {
+        "sourceId": "contaminated-path",
+        "seq": 2
+      }
+    ],
+    "normalRefreshRepairsPhysicalAlias": true,
+    "rawTraceRepositoryAndRepoKeyPreserved": true,
+    "originalSourceIdsAndProjectionSeqPreserved": true
+  },
+  "readState": {
+    "before": 0,
+    "after": 0,
+    "automaticallyAdvanced": false
+  },
+  "configurationTransition": {
+    "newRecordsRequired": false,
+    "traceAndThreadPositionsUnchanged": true,
+    "physicalPathAliasCorrected": true,
+    "physicalConfigured": true,
+    "opaqueConfigured": false
+  },
+  "questionIsolation": {
+    "normalRefreshAnswerHttpStatus": 202,
+    "configurationTransitionAnswerHttpStatus": 202,
+    "sameTaskActorCorrelationIsolated": true,
+    "remainingOpaqueQuestionIds": [
+      "old-opaque",
+      "transition-opaque-question"
+    ]
+  },
+  "missingArchivedWorktree": {
+    "knownAliasPreserved": true,
+    "historyReadable": true,
+    "configured": false,
+    "writableRequest": "rejected-read-only"
+  },
+  "review": {
+    "verdict": "APPROVE",
+    "additionalBlockingDefectsFound": 0,
+    "sourceFilesModified": false,
+    "scope": "Independent non-Git alias repair and missing-worktree preservation; separate from automated review, CI, visual approval and merge gates."
+  },
+  "focusedRegressionTests": {
+    "passed": 3,
+    "skipped": 38
+  }
+}

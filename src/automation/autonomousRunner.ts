@@ -32,6 +32,9 @@ import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngi
 import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { resolveOrchestratorConfig } from '../coordination/orchestratorConfig.js';
 import { OrchestratorSupervisor } from '../coordination/orchestratorSupervisor.js';
+import { repositoryCell } from '../coordination/repositoryCell.js';
+import { interruptEndedTaskDeliveries } from '../coordination/channelQueue.js';
+import { runningProjectSessions } from '../coordination/projectRuntime.js';
 import { drainCoordinationThreadOutbox } from '../coordination/coordinationThreadOutbox.js';
 import {
   normalizeOperatorQuestionCorrelations,
@@ -1983,6 +1986,8 @@ export class AutonomousRunner {
   }
 
   private async drainDurableOutbox(): Promise<void> {
+    try { interruptEndedTaskDeliveries(runningProjectSessions(this)); }
+    catch (error) { console.warn('[Channels] Recipient reconciliation unavailable:', error instanceof Error ? error.message : String(error)); }
     const threadOutcome = await drainCoordinationThreadOutbox();
     if (threadOutcome.warnings.length > 0) {
       console.warn(
@@ -3648,6 +3653,11 @@ export class AutonomousRunner {
 
   getAllowedProjects(): string[] {
     return this.config.allowedProjects ?? [];
+  }
+
+  isProjectCoordinatorAvailable(repoKey: string): boolean {
+    return this.orchestratorSupervisor !== null && this.state.isRunning
+      && this.getBackgroundServiceProjects().some((path) => repositoryCell(path).repoKey === repoKey);
   }
 
   /**
