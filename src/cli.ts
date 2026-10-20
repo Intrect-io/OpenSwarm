@@ -11,6 +11,7 @@ import { runCli } from './runners/cliRunner.js';
 import { setDefaultAdapter } from './adapters/index.js';
 import { readProviderOverride } from './core/providerOverride.js';
 import { loadConfig, validateConfig, generateSampleConfig } from './core/config.js';
+import type { SwarmConfig } from './core/types.js';
 import { formatShadowWarning, loadEnvFile } from './core/envFile.js';
 import { initTelemetry, track } from './telemetry/telemetry.js';
 import { maybeAutoUpdate } from './support/updateNotifier.js';
@@ -43,6 +44,28 @@ function loadTelemetryEnabledQuietly(quiet: boolean): boolean | undefined {
   }
 }
 
+/**
+ * `loadConfig()` with its stdout banner suppressed when `quiet`.
+ *
+ * `loadConfig` announces the config path it read (and any config warnings) via
+ * `console.log` (config.ts:908). Every `--json` command installs its own stdout
+ * redirect, but only inside its action — and the `preAction` hook below runs
+ * FIRST, so those banners land ahead of the document and `| jq` sees a syntax
+ * error instead of JSON. Measured: `openswarm exec status <id> --json` emitted
+ * three banner lines before the JSON on a machine without a provider override
+ * (a configured override skips this load entirely, which is why the bug hid).
+ */
+function loadConfigQuietly(quiet: boolean): SwarmConfig {
+  if (!quiet) return loadConfig();
+  const originalLog = console.log;
+  try {
+    console.log = () => undefined;
+    return loadConfig();
+  } finally {
+    console.log = originalLog;
+  }
+}
+
 // Anonymous, opt-out usage telemetry (INT-1992). Honors OPENSWARM_TELEMETRY=0 /
 // DO_NOT_TRACK / CI. One event per command invocation (command name only — never
 // arguments). Fire-and-forget: not awaited, and track() never throws.
@@ -50,11 +73,16 @@ initTelemetry({ version: VERSION });
 /** Start times, so the completion event can report how long the command ran. */
 const commandStartedAt = new WeakMap<object, number>();
 program.hook('preAction', (_thisCommand, actionCommand) => {
+  // Opts across the whole command chain, not just this one: commander 12 routes
+  // a parent-declared option name to the parent while parsing a subcommand, so
+  // `openswarm exec status <id> --json` leaves `--json` on `exec` and an
+  // `opts()` read here would miss it and load the config noisily.
+  const opts = actionCommand.optsWithGlobals() as { json?: boolean };
+  const quietConfigLoad = !!opts.json || actionCommand.name() === 'memory';
+
   // Honor config telemetry.enabled when a config exists (best-effort — `run`/`init`
   // may have none, in which case the env opt-out still applies).
   try {
-    const opts = actionCommand.opts() as { json?: boolean };
-    const quietConfigLoad = !!opts.json || actionCommand.name() === 'memory';
     initTelemetry({ version: VERSION, enabled: loadTelemetryEnabledQuietly(quietConfigLoad) });
   } catch {
     /* no/invalid config — leave the opt-out default */
@@ -64,8 +92,12 @@ program.hook('preAction', (_thisCommand, actionCommand) => {
   // dashboard called setDefaultAdapter). Without this, `review --max` spawned codex
   // CLI subprocesses even while the daemon ran codex-responses. Best-effort: a
   // command with no config (init) keeps the built-in default. (INT-2485)
+  //
+  // The `loadConfig()` here is a SECOND one (the telemetry read above is the
+  // first) and it announces the config path on stdout, so under `--json` both
+  // have to be quiet or the banner lands ahead of the document.
   try {
-    setDefaultAdapter(readProviderOverride() ?? loadConfig().adapter ?? 'codex');
+    setDefaultAdapter(readProviderOverride() ?? loadConfigQuietly(quietConfigLoad).adapter ?? 'codex');
   } catch {
     /* no/invalid config — keep the built-in default */
   }
@@ -603,12 +635,13 @@ program
     }
   });
 
-// openswarm exec <prompt>
+// openswarm exec <prompt> | exec --issue <id> | exec status/await/answer
 
-program
+const execCommand = program
   .command('exec')
-  .description('Execute a task via the running daemon (auto-starts if needed)')
-  .argument('<prompt>', 'Task prompt to execute')
+  .description('Deploy/observe an async worker pipeline (prompt, or a Linear issue via --issue)')
+  .argument('[prompt]', 'Task prompt to execute (daemon path — existing behavior)')
+  .option('--issue <id>', 'Deploy the worker pipeline for this Linear issue asynchronously and print its run id')
   .option('--path <path>', 'Project path (default: cwd)')
   .option('--timeout <seconds>', 'Timeout in seconds (default: 600)', parsePositiveIntegerOption)
   .option('--no-auto-start', 'Do not auto-start the service')
@@ -617,7 +650,9 @@ program
   .option('--worker-only', 'Worker only, no review')
   .option('-m, --model <model>', 'Model override for worker')
   .option('-v, --verbose', 'Enable detailed execution logging')
-  .action(async (prompt: string, opts: {
+  .option('--json', 'Emit machine-readable JSON on stdout (progress logs go to stderr)')
+  .action(async (prompt: string | undefined, opts: {
+    issue?: string;
     path?: string;
     timeout?: number;
     autoStart?: boolean;
@@ -626,9 +661,66 @@ program
     workerOnly?: boolean;
     model?: string;
     verbose?: boolean;
+    json?: boolean;
   }) => {
+    if (opts.issue) {
+      const { runExecDeployCommand } = await import('./cli/execCommand.js');
+      process.exitCode = await runExecDeployCommand({ issue: opts.issue, path: opts.path, json: opts.json });
+      return;
+    }
+    if (!prompt) {
+      // `outputHelp()` prints the usage and returns; `.help()` would call
+      // process.exit(0) before the assignment below, so a bare `openswarm exec`
+      // would exit 0 despite the documented 2. Same reason as the arg-missing
+      // branches elsewhere in this file.
+      execCommand.outputHelp();
+      process.exitCode = 2;
+      return;
+    }
     const { executePrompt } = await import('./cli/promptHandler.js');
     await executePrompt({ prompt, ...opts });
+  });
+
+// The observable half of the contract above: an external orchestrator (Claude
+// Code, omp, a script) deploys a run, watches it park, answers it, and watches
+// the redeploy. All three are read-only against the daemon; only the ledger and
+// the coordination board are touched, through the same automation database.
+
+execCommand
+  .command('status <runId>')
+  .description('Print one async exec run’s durable state (read-only; no daemon required)')
+  .option('--json', 'Emit machine-readable JSON')
+  .action(async function (this: Command, runId: string, _opts: { json?: boolean }) {
+    // `exec` declares these same option names, and commander 12 attributes a
+    // parent-declared name to the parent even when it is typed after the
+    // subcommand — so the child's own opts object is always empty here. Read
+    // the merged chain instead of duplicating the flags on both commands.
+    const opts = this.optsWithGlobals() as { path?: string; json?: boolean };
+    const { runExecStatusCommand } = await import('./cli/execCommand.js');
+    process.exitCode = await runExecStatusCommand(runId, opts);
+  });
+
+execCommand
+  .command('await <runId>')
+  .description('Block until the run elevates (needs input) or finishes, then print the elevation JSON')
+  .option('--timeout <seconds>', 'Max seconds to wait (default 3600)', parsePositiveIntegerOption)
+  .option('--json', 'Emit machine-readable JSON')
+  .action(async function (this: Command, runId: string, _opts: { timeout?: number; json?: boolean }) {
+    const opts = this.optsWithGlobals() as { path?: string; timeout?: number; json?: boolean };
+    const { runExecAwaitCommand } = await import('./cli/execCommand.js');
+    process.exitCode = await runExecAwaitCommand(runId, opts);
+  });
+
+execCommand
+  .command('answer <runId>')
+  .description('Answer a parked run’s question (or force a resume) and redeploy it')
+  .option('--correlation <id>', 'Correlation id of the pending question (from `exec await`)')
+  .option('--text <text>', 'Answer / guidance text')
+  .option('--json', 'Emit machine-readable JSON')
+  .action(async function (this: Command, runId: string, _opts: { correlation?: string; text?: string; json?: boolean }) {
+    const opts = this.optsWithGlobals() as { path?: string; correlation?: string; text?: string; json?: boolean };
+    const { runExecAnswerCommand } = await import('./cli/execCommand.js');
+    process.exitCode = await runExecAnswerCommand(runId, opts);
   });
 
 // openswarm start

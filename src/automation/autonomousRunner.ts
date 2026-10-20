@@ -68,6 +68,7 @@ import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
+import { listHeldIssueIds } from './execHold.js';
 import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from '../agents/pairPipelineTypes.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
@@ -1241,9 +1242,18 @@ export class AutonomousRunner {
     // must not churn its parks (AGT-4155 reached attempt 20 that way), and one
     // free slot must not un-park every row at once.
     let idleFillBudget = this.scheduler.hasAvailableSlot() ? this.scheduler.getAvailableSlots() : 0;
+    // `exec --issue` hands a run to an external orchestrator (Claude Code, omp,
+    // a script) that waits on `exec await` for the elevation. idle_fill would
+    // otherwise lift the park it is waiting on and re-run the task (AGT-4257's
+    // own loop, reached again through AGT-4155/AGT-4306). Read once per pass,
+    // like the budget above, so the gate costs one query per heartbeat.
+    const heldExecRuns = listHeldIssueIds();
     const filtered = tasks.filter(task => {
       const id = task.issueId || task.id;
       const isStuck = task.labels?.includes(STUCK_LABEL) ?? false;
+      // Held by an external orchestrator: every idle_fill branch below is
+      // skipped, so a park reaches the `exec await` that is watching for it.
+      const execHeld = heldExecRuns.has(id);
       let durableRun = this.durableRuns.getRun(id);
       // Set once this task has spent idle budget, so a later branch in this
       // same pass (the stuck-label recovery) neither charges it twice nor
@@ -1267,7 +1277,7 @@ export class AutonomousRunner {
         // and In Review is a published PR waiting on the merge gate. Reopening
         // either re-decomposes or re-publishes work that already exists.
         const operatorReopened = task.linearState === 'Todo' || task.explicitDispatch === true;
-        const idleReopen = !operatorReopened && task.linearState === 'Backlog' && idleFillBudget > 0;
+        const idleReopen = !operatorReopened && !execHeld && task.linearState === 'Backlog' && idleFillBudget > 0;
         if ((operatorReopened || idleReopen) && this.durableRuns.markReady(id)) {
           if (idleReopen) {
             idleFillBudget--;
@@ -1286,7 +1296,7 @@ export class AutonomousRunner {
         // (.test_venv, pytest-local) is not a human decision. Resume even when
         // Linear is still In Progress so the next heartbeat can pick the work.
         // Checked before idle_fill so a false park never spends idle budget.
-        if (!isOperatorQuestionPark && citedPathsAreEphemeral(durableRun.lastErrorMessage ?? '')) {
+        if (!execHeld && !isOperatorQuestionPark && citedPathsAreEphemeral(durableRun.lastErrorMessage ?? '')) {
           const resumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'unspecified');
           if (resumed) {
             console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (ephemeral-only guard park)`);
@@ -1308,7 +1318,7 @@ export class AutonomousRunner {
           || durableRun?.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON;
         // Nor does a free slot change a verdict that has already come back
         // twice; see idleFillWouldRepeatVerdict.
-        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark
+        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark && !execHeld
             && !this.durableRuns.idleFillWouldRepeatVerdict(id)) {
           const idleResumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'idle_fill');
           if (idleResumed) {
@@ -1319,6 +1329,11 @@ export class AutonomousRunner {
             if (lifted) durableRun = lifted;
             if (idleResumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
           }
+        }
+        // The park survives this pass — say why, once, so the daemon log and the
+        // `exec await` the orchestrator is holding agree on what is happening.
+        if (execHeld && durableRun?.state === 'NEEDS_HUMAN') {
+          console.log(`[Scheduler] ${task.issueIdentifier ?? id} held by exec elevation — awaiting the external orchestrator`);
         }
       }
 
@@ -1358,6 +1373,10 @@ export class AutonomousRunner {
           && (durableRun.retryAt ?? 0) > Date.now()
           && infraStreak < AutonomousRunner.MAX_CONSECUTIVE_INFRA_IDLE_FILL
           && durableRun.lastErrorCode !== 'superseded'
+          // A run held by an external orchestrator is re-dispatched by `exec
+          // answer`, not by a free slot: lifting its backoff here would start a
+          // second attempt while the orchestrator still owns the decision.
+          && !execHeld
           // A run that has failed three times is backed off on purpose (AGT-4673).
           // Lifting it here whenever a slot frees put the highest-priority failing
           // run ahead of 36 READY tasks, so the backoff never held (AGT-4675).

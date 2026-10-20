@@ -1,10 +1,23 @@
 import { execFileSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { RunLedger } from '../automation/runLedger.js';
+import { markExecHold, resetExecHoldForTests } from '../automation/execHold.js';
+import type { answerHumanQuestion as AnswerHumanQuestion } from './humanQuestions.js';
+
+// The hold cases need to observe the answer *call*, not just its board effect:
+// "never called" is the assertion that the refusal short-circuits before the
+// answer is published. Delegating to the real implementation by default keeps
+// the sibling question test below exercising a genuine answer.
+const answerHumanQuestion = vi.hoisted(() => vi.fn<typeof AnswerHumanQuestion>());
+vi.mock('./humanQuestions.js', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  answerHumanQuestion.mockImplementation(actual.answerHumanQuestion as typeof AnswerHumanQuestion);
+  return { ...actual, answerHumanQuestion };
+});
 
 const originalCoordinationFile = process.env.OPENSWARM_COORDINATION_FILE;
 const originalAutomationDb = process.env.OPENSWARM_AUTOMATION_DB;
@@ -16,10 +29,14 @@ async function setup() {
   dir = mkdtempSync(join(tmpdir(), 'osw-orchestrator-tracker-'));
   process.env.OPENSWARM_COORDINATION_FILE = join(dir, 'coordination.json');
   process.env.OPENSWARM_AUTOMATION_DB = join(dir, 'automation.db');
+  // The hold store reads OPENSWARM_AUTOMATION_DB through its own lazily-bound
+  // handle, so it needs the same redirect and a reset per test.
+  resetExecHoldForTests();
   const storeModule = await import('./coordinationStore.js');
   const traceModule = await import('./coordinationTrace.js');
   storeModule.resetCoordinationStoreForTests();
   traceModule.resetTraceDbForTests();
+  answerHumanQuestion.mockClear();
   return {
     store: storeModule.getCoordinationStore(),
     tools: await import('./orchestratorTrackerTools.js'),
@@ -29,6 +46,8 @@ async function setup() {
 afterEach(async () => {
   (await import('./coordinationStore.js')).resetCoordinationStoreForTests();
   (await import('./coordinationTrace.js')).resetTraceDbForTests();
+  resetExecHoldForTests();
+  answerHumanQuestion.mockClear();
   process.env.OPENSWARM_COORDINATION_FILE = originalCoordinationFile;
   process.env.OPENSWARM_AUTOMATION_DB = originalAutomationDb;
   process.env.OPENSWARM_WAREHOUSE_ROOT = originalWarehouseRoot;
@@ -113,6 +132,92 @@ describe('orchestrator tracker tools', () => {
     expect(store.exchange('hq-1')).toContainEqual(expect.objectContaining({
       kind: 'human-answer', status: 'completed', actor: 'Supervisor A', actorRole: 'orchestrator',
     }));
+  });
+
+  it('answers a same-cell question when no external orchestrator holds the task', async () => {
+    const { store, tools } = await setup();
+    await store.publish({
+      repository: '/repo', taskId: 'issue-uuid', taskLabel: 'AX-967', actor: 'worker-a', actorRole: 'worker',
+      kind: 'human-question', status: 'waiting', correlationId: 'hq-open', summary: 'Nothing holds this one',
+    });
+    const answered = await tools.executeOrchestratorTrackerTool('coordination_answer_question', {
+      correlation_id: 'hq-open', answer: 'The supervisor owns this decision.',
+    }, {
+      repository: '/repo', taskId: 'orchestrator:sweep', actor: 'orchestrator-a', actorRole: 'orchestrator',
+    });
+    expect(answered.isError).toBe(false);
+    expect(answerHumanQuestion).toHaveBeenCalledTimes(1);
+    expect(store.exchange('hq-open')).toContainEqual(expect.objectContaining({
+      kind: 'human-answer', status: 'completed',
+    }));
+  });
+
+  it('refuses a held question, failing closed when the hold store cannot be read', async () => {
+    const { store, tools } = await setup();
+    await store.publish({
+      repository: '/repo', taskId: 'issue-uuid', taskLabel: 'AX-967', actor: 'worker-a', actorRole: 'worker',
+      kind: 'human-question', status: 'waiting', correlationId: 'hq-held',
+      summary: 'Deployed by an external orchestrator',
+    });
+    markExecHold('issue-uuid', 'external:cli');
+    const context = {
+      repository: '/repo', taskId: 'orchestrator:sweep', actor: 'orchestrator-a', actorRole: 'orchestrator' as const,
+    };
+
+    const refused = await tools.executeOrchestratorTrackerTool('coordination_answer_question', {
+      correlation_id: 'hq-held', answer: 'answered behind the orchestrator\u2019s back',
+    }, context);
+    expect(refused.isError).toBe(true);
+    expect(refused.content).toContain('external orchestrator');
+    expect(refused.content).toContain('exec answer');
+    expect(answerHumanQuestion).not.toHaveBeenCalled();
+
+    // Fail closed: repoint the store at a path it cannot open (the parent is a
+    // regular file) while the hold demonstrably exists. An unreadable store must
+    // read as HELD — a wrongly refused answer costs one more sweep, a wrongly
+    // accepted one silently re-runs what the orchestrator is still deciding on.
+    // The tool must not throw.
+    writeFileSync(join(dir, 'blocker'), 'not a directory');
+    process.env.OPENSWARM_AUTOMATION_DB = join(dir, 'blocker', 'automation.db');
+    const blocked = await tools.executeOrchestratorTrackerTool('coordination_answer_question', {
+      correlation_id: 'hq-held', answer: 'still refused',
+    }, context);
+    expect(blocked.isError).toBe(true);
+    expect(blocked.content).toContain('external orchestrator');
+    expect(answerHumanQuestion).not.toHaveBeenCalled();
+
+    // Observed about the absent-table case: point at a database that opens but
+    // has no `automation_exec_runs` table (a deployment that never ran `exec`).
+    // The `SELECT` then throws, `holdTableExists()` answers false from
+    // sqlite_master, and the tool proceeds — an absent table cannot hold any run,
+    // so this is genuinely unheld rather than a failed read. The opposite
+    // direction from the blocked path above, and the reason the two differ.
+    const fresh = join(dir, 'fresh.db');
+    new Database(fresh).close();
+    process.env.OPENSWARM_AUTOMATION_DB = fresh;
+    const proceeded = await tools.executeOrchestratorTrackerTool('coordination_answer_question', {
+      correlation_id: 'hq-held', answer: 'answered because nothing holds this task',
+    }, context);
+    expect(proceeded.isError).toBe(false);
+    expect(answerHumanQuestion).toHaveBeenCalledTimes(1);
+  });
+
+  it('keys the held-question refusal on the task, not the correlation', async () => {
+    const { store, tools } = await setup();
+    for (const correlationId of ['hq-first', 'hq-second']) {
+      await store.publish({
+        repository: '/repo', taskId: 'issue-uuid', taskLabel: 'AX-967', actor: 'worker-a', actorRole: 'worker',
+        kind: 'human-question', status: 'waiting', correlationId, summary: `Question ${correlationId}`,
+      });
+    }
+    markExecHold('issue-uuid', 'external:cli');
+    const refused = await tools.executeOrchestratorTrackerTool('coordination_answer_question', {
+      correlation_id: 'hq-second', answer: 'a later question on the same held task',
+    }, {
+      repository: '/repo', taskId: 'orchestrator:sweep', actor: 'orchestrator-a', actorRole: 'orchestrator',
+    });
+    expect(refused).toMatchObject({ isError: true, content: expect.stringContaining('external orchestrator') });
+    expect(answerHumanQuestion).not.toHaveBeenCalled();
   });
 
   it('fails closed for cross-cell answers and bounded or unknown writes', async () => {

@@ -3,14 +3,50 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
+import Database from 'better-sqlite3';
 
 import type { ToolDefinition } from '../adapters/tools.js';
 import { answerHumanQuestion } from './humanQuestions.js';
 import { getCoordinationStore } from './coordinationStore.js';
 import { repositoryKey } from './repositoryCell.js';
 import { executeLedgerOverview, LEDGER_OVERVIEW_TOOL_DEFINITION } from './ledgerOverviewTool.js';
+import { EXEC_HOLD_TTL_MS } from '../automation/execHold.js';
+import { defaultAutomationDbPath } from '../automation/automationDbPath.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Whether an external orchestrator holds this run — failing CLOSED.
+ *
+ * `execHold.isExecHeld` deliberately fails open, because its reader is the
+ * heartbeat's hot path where an unreadable store must degrade to the previous
+ * behaviour rather than kill the scheduler. Here the trade runs the other way:
+ * a supervisor sweep is a paid LLM call that would resume another agent's run,
+ * so an unreadable store must read as HELD. A wrongly refused answer costs one
+ * more sweep; a wrongly accepted one silently re-runs a task the external
+ * orchestrator is still deciding on.
+ */
+function execHeldFailClosed(issueId: string, now = Date.now()): boolean {
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(defaultAutomationDbPath(), { readonly: true });
+    // A store that predates `exec` has no hold table, so it cannot hold
+    // anything: genuinely unheld, and the answer proceeds.
+    const table = db
+      .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'automation_exec_runs'")
+      .get();
+    if (!table) return false;
+    const row = db
+      .prepare('SELECT updated_at FROM automation_exec_runs WHERE issue_id = ?')
+      .get(issueId) as { updated_at: number } | undefined;
+    return !!row && now - row.updated_at <= EXEC_HOLD_TTL_MS;
+  } catch {
+    // The store is there but could not be opened or read — fail CLOSED.
+    return true;
+  } finally {
+    try { db?.close(); } catch { /* already closed */ }
+  }
+}
 const HOST_READ_MAX_BYTES = 200_000;
 const HOST_SEARCH_MAX_HITS = 50;
 
@@ -255,6 +291,20 @@ export async function executeOrchestratorTrackerTool(
     const question = getCoordinationStore().findQuestion(correlationId);
     if (!question || repositoryKey(question.repoKey, question.repository) !== repositoryKey(context.repoKey, context.repository)) {
       return { content: 'Pending question is not in this repository cell', isError: true };
+    }
+    // Refuse questions on a run an external orchestrator holds. This is the
+    // second half of the hold: `selectOrchestratorItems` filters these out of
+    // the objective, but a sweep already in flight — or a model that reached
+    // for an older correlation id — can still arrive here, and answering would
+    // resume the run behind the orchestrator that is waiting on `exec await`.
+    // Fail closed: an unreadable hold store reads as held, because the cost of
+    // a wrongly refused answer is one more supervisor sweep, and the cost of a
+    // wrongly accepted one is the silent re-run this exists to prevent.
+    if (question.taskId && execHeldFailClosed(question.taskId)) {
+      return {
+        content: `Question ${correlationId} belongs to a run held by an external orchestrator (openswarm exec --issue); it answers with \`openswarm exec answer\``,
+        isError: true,
+      };
     }
     const result = await answerHumanQuestion(
       correlationId,

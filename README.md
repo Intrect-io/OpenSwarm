@@ -79,6 +79,7 @@ openswarm resume                 # Reopen the most recent chat session (conversa
 openswarm start                  # Start full daemon (requires config.yaml)
 openswarm run "Fix the bug" -p ~/my-project   # Run a single task
 openswarm exec "Run tests" --local --pipeline # Execute via daemon
+openswarm exec --issue INT-123    # Deploy one Linear issue's pipeline async; await/answer elevate
 openswarm init                   # Interactive setup wizard (provider auth, Linear OAuth, config)
 openswarm provider               # Show/switch the active provider (interactive picker)
 openswarm provider claude        # Switch straight to a provider — a running daemon switches in place
@@ -267,8 +268,51 @@ Advisor, see [Recovery Advisor](docs/durable-recovery-advisor.md).
 | `--pipeline` | Full pipeline: worker + reviewer + tester + documenter |
 | `--worker-only` | Worker only, no review |
 | `-m, --model <model>` | Model override for worker |
+| `--json` | Emit machine-readable JSON on stdout (progress logs go to stderr) |
 
 Exit codes: `0` success · `1` failure · `2` timeout
+
+### `openswarm exec` for a Linear issue (external orchestrator)
+
+`exec --issue` runs one Linear issue's worker pipeline **asynchronously** and
+hands the run to an external main agent (Claude Code, omp, codex, a script) that
+watches it, answers it when it stops for input, and lets it continue:
+
+```bash
+openswarm exec --issue INT-123 --json
+# {"runId":"<uuid>","identifier":"INT-123","transport":"daemon","deployed":true}
+
+openswarm exec await <uuid> --timeout 3600 --json
+# {"state":"NEEDS_HUMAN","elevation":true,"verdict":"elevation",
+#  "reason":"operator_question","pendingQuestions":[{"correlationId":"hq-…",
+#  "questionClass":"clarification"}],"hint":"openswarm exec answer …"}
+
+openswarm exec answer <uuid> --correlation hq-… --text "use the staging DB" --json
+# {"resumed":"READY","transport":"daemon"}
+```
+
+`await` prints the elevation JSON when the run parks (`NEEDS_HUMAN`,
+`NEEDS_SPEC`, `NEEDS_ENV`, `NEEDS_RECONCILE`) or finishes; its exit code is
+`0` terminal, `1` elevated, `2` still running (re-invoke it — the run keeps
+going). A deploy is asynchronous, so `await` keeps polling if the ledger row is
+not there yet: `openswarm exec --issue … && openswarm exec await …` waits
+through the gap. `answer` replies to the coordination board as
+`actorRole: 'orchestrator'` and resumes the ledger row; `--correlation` must
+belong to the run named on the command line, or it is refused rather than
+written against the wrong issue. Deploy and answer both record an **exec hold**
+so the daemon's `idle_fill` cannot silently re-run the parked task behind the
+orchestrator's back; the hold expires after 24 h of silence and is refreshed by
+every `answer`.
+
+`status`/`await`/`answer` need only the UUID, so they work with Linear
+unconfigured; `--issue` resolves the identifier through Linear. Deploying needs
+the repo's `openswarm.json` Linear mapping and the issue in a deployable state
+(`Todo`, `Backlog`, `In Progress`). A daemon that is **unreachable** is retried
+as a detached local child; a daemon that is up but **refuses** — a 403/401/503 on
+its own `/api/stats` probe, or an HTTP error or `queued:0` on `/api/work` — is
+reported as-is and never routed around with a local child. If the daemon is up
+but refusing, add the repo to the daemon's `autonomous.allowedProjects` or check
+the daemon auth token.
 
 ---
 
