@@ -79,9 +79,9 @@ export function buildBwrapArgs(spec: SandboxSpec): string[] {
 
 /**
  * Wrap `argv` so it runs inside the host sandbox. Returns null when the host
- * has no sandbox — the caller decides whether that is a warning or a refusal
- * (the verify stage refuses; the worker warns once and runs open, so a
- * Windows host is not silently shut out of every task).
+ * has no sandbox — the caller decides what that means. Both the verify stage
+ * and the worker's bash tool refuse (AGT-4783); a host that cannot sandbox
+ * opts out explicitly with `autonomous.workerSandbox: off`.
  */
 export function wrapForSandbox(
   argv: string[],

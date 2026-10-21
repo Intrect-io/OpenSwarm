@@ -10,7 +10,6 @@ import { existsSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { promisify } from 'node:util';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import { webFetch, webSearch } from './webTools.js';
 import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
@@ -21,7 +20,6 @@ import { COORDINATION_TOOL_NAMES, executeCoordinationTool, type CoordinationTool
 import {
   humanSurfaceShellWriteReason,
   isHumanSurfaceReadOnlyEnabled,
-  stripHumanSurfaceEnv,
 } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import { looksLikeSandboxDenial, workerWritableRoots, wrapForSandbox } from '../support/osSandbox.js';
@@ -30,40 +28,29 @@ import { stageMemory, type RememberKind } from '../agents/stagedMemory.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
 import { crossWorktreeAuditNote } from './crossWorktreeAudit.js';
 import { publicationCommandIn, publicationFenceMessage } from './publicationFence.js';
-import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
+import { resourceAwareTestCommand, testResourceShellPrefix } from '../support/testResourceBudget.js';
 import { isCommandBlocked } from './shellCommandGuard.js';
+import { buildWorkerShellEnv } from './workerEnv.js';
 
 const execFileAsync = promisify(execFile);
 
-let sandboxUnavailableWarned = false;
-function warnSandboxUnavailableOnce(): void {
-  if (sandboxUnavailableWarned) return;
-  sandboxUnavailableWarned = true;
-  console.warn('[Tools] workerSandbox is on but this host has no sandbox-exec/bwrap — bash runs unfenced');
-}
+/**
+ * `workerSandbox: on` with no sandbox-exec/bwrap on the host used to warn once
+ * and run unfenced. An unattended worker must not silently lose its fence, so
+ * the command is refused and the operator is told how to opt out. (AGT-4783)
+ */
+export const SANDBOX_UNAVAILABLE_MESSAGE =
+  'BLOCKED: autonomous.workerSandbox is "on" but this host has neither sandbox-exec nor bwrap, '
+  + 'so the command was not run. Install the sandbox, or set autonomous.workerSandbox: off '
+  + 'to run worker shell commands unfenced on purpose.';
 
 /**
- * The daemon's launchd PATH is minimal (/usr/bin:/bin:/opt/homebrew/bin, no
- * ~/.cargo/bin or ~/.local/bin), and the `bash` tool runs non-login (`bash -c`),
- * so it never sources the user's shell profile. Result: `cargo`/`uv`/`pyenv`
- * shims are "command not found", the worker cannot build/test its Rust/Python
- * changes, and the validation gate + reviewer reject it → Max-iteration STUCK
- * (observed live on every WAVE Rust task: "cargo: command not found"). Prepend
- * the common user tool bins a login shell would have added. (INT-2485)
+ * The worker shell's environment: an allowlist with a private HOME and no
+ * GitHub/git/ssh identity (AGT-4783), plus the user tool bins a login shell
+ * would add, since `bash -c` never sources the profile (INT-2485).
  */
 export function buildBashToolEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const home = homedir();
-  const extra = [
-    path.join(home, '.cargo', 'bin'),
-    path.join(home, '.local', 'bin'),
-    path.join(home, 'go', 'bin'),
-    path.join(home, '.bun', 'bin'),
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-  ];
-  const current = (base.PATH ?? '').split(':').filter(Boolean);
-  const merged = [...extra.filter((p) => !current.includes(p)), ...current];
-  return withTestResourceBudget(stripHumanSurfaceEnv({ ...base, PATH: merged.join(':') }));
+  return buildWorkerShellEnv(base);
 }
 
 // ============ 도구 정의 (OpenAI function calling 포맷) ============
@@ -1103,7 +1090,9 @@ export async function executeTool(
             allowNetwork: true,
           })
           : null;
-        if (execOptions?.sandbox === 'on' && !fenced) warnSandboxUnavailableOnce();
+        if (execOptions?.sandbox === 'on' && !fenced) {
+          return { tool_call_id: callId, content: SANDBOX_UNAVAILABLE_MESSAGE, is_error: true };
+        }
         try {
           const { stdout, stderr } = await execFileAsync(fenced?.file ?? 'bash', fenced?.args ?? ['-c', boundedCommand], {
             cwd,

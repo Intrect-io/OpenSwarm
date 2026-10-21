@@ -700,7 +700,8 @@ export type AutonomousStartupConfig = {
   /**
    * OS fence for the worker's bash tool (AGT-4387): sandbox-exec (macOS) or
    * bwrap (Linux) with writes limited to the worktree and build caches.
-   * Default 'on'; a host without either binary warns once and runs unfenced.
+   * Default 'on'; on a host without either binary the worker's bash commands
+   * are refused (AGT-4783) — set 'off' to run them unfenced on purpose.
    */
   workerSandbox?: 'on' | 'off';
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;

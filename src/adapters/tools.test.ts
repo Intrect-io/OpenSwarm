@@ -821,17 +821,38 @@ describe('ToolExecOptions', () => {
     expect((env.PATH ?? '').split(':').filter((p) => p === cargo)).toHaveLength(1);
   });
 
-  it('buildBashToolEnv withholds human-surface credentials but preserves DevOps and DB credentials', () => {
+  // #493 kept DevOps and DB credentials in the worker shell on purpose. AGT-4783
+  // reversed that: a worker's `release.sh --help` used the inherited GitHub
+  // credentials to ship a production deploy, so the shell now gets none.
+  it('buildBashToolEnv withholds human-surface, DevOps and DB credentials alike', () => {
     const env = buildBashToolEnv({
       PATH: '/usr/bin:/bin',
       SLACK_BOT_TOKEN: 'drop',
       DISCORD_WEBHOOK_URL: 'drop',
-      GITHUB_TOKEN: 'keep',
-      POSTGRES_DSN: 'keep',
+      GITHUB_TOKEN: 'drop',
+      POSTGRES_DSN: 'drop',
     });
     expect(env).not.toHaveProperty('SLACK_BOT_TOKEN');
     expect(env).not.toHaveProperty('DISCORD_WEBHOOK_URL');
-    expect(env).toMatchObject({ GITHUB_TOKEN: 'keep', POSTGRES_DSN: 'keep' });
+    expect(env).not.toHaveProperty('GITHUB_TOKEN');
+    expect(env).not.toHaveProperty('POSTGRES_DSN');
+  });
+
+  it('a worker shell command cannot read a GitHub token the daemon holds', async () => {
+    const saved = process.env.GH_TOKEN;
+    process.env.GH_TOKEN = 'ghp_daemon_secret';
+    try {
+      const res = await executeTool(
+        makeCall('bash', { command: 'printf "[%s]" "${GH_TOKEN:-}"; printf "[%s]" "$GH_CONFIG_DIR"' }),
+        TMP_DIR,
+      );
+      expect(res.is_error).toBe(false);
+      expect(res.content).not.toContain('ghp_daemon_secret');
+      expect(res.content).toMatch(/^\[\]\[.+\]/);
+    } finally {
+      if (saved === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = saved;
+    }
   });
 
   it('bash rejects a literal human-surface webhook write before spawning it', async () => {
