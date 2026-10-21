@@ -46,7 +46,7 @@ import {
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { shouldEarlyStuckForInfeasibility } from '../support/feasibilityDetector.js';
 import { citedPathsAreEphemeral } from '../support/worktreeEphemeral.js';
-import { resolveProjectGoal } from '../support/projectGoal.js';
+import { resolveOwningProject, resolveProjectGoal } from '../support/projectGoal.js';
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { TaskScheduler, initScheduler, normalizeProjectPath } from '../orchestration/taskScheduler.js';
@@ -3600,6 +3600,7 @@ export class AutonomousRunner {
       jobProfiles: this.config.jobProfiles,
       getRolesForProject: (p) => this.getRolesForProject(p),
       getProjectGoal: (p) => resolveProjectGoal(this.config.projectAgents, p),
+      getProjectSetup: (p) => resolveOwningProject(this.config.projectAgents, p)?.setup,
       reportToDiscord,
       worktreeMode: this.config.worktreeMode ?? false,
       scheduleNextHeartbeat: () => this.scheduleNextHeartbeat(),

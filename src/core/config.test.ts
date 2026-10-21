@@ -371,6 +371,23 @@ agents:
       expect(agents?.[1].goal).toBeUndefined();
     });
 
+    it('carries workerNetwork and a project setup list to the runtime config (AGT-4798)', () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        language: 'en',
+        linear: { apiKey: 'k', teamId: 't' },
+        agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+        autonomous: {
+          enabled: true,
+          workerNetwork: 'open',
+          projectAgents: [{ projectPath: '~/dev/cgf-portal', setup: ['  uv sync --frozen  '] }],
+        },
+      }));
+      const autonomous = loadConfig('/tmp/config.json').autonomous;
+      expect(autonomous?.workerNetwork).toBe('open');
+      expect(autonomous?.projectAgents?.[0].setup).toEqual(['uv sync --frozen']);
+    });
+
     it('rejects a goal that is empty or longer than a goal should be (AGT-4662)', () => {
       const withGoal = (goal: string) => JSON.stringify({
         language: 'en',
@@ -452,6 +469,7 @@ agents:
       expect(config.autonomous?.mcpPolicies?.orchestrator.servers).toEqual(['github', 'linear']);
       expect(config.autonomous?.periodicReviews?.[0]).toMatchObject({ profile: 'hygiene' });
       expect(config.autonomous?.workerSandbox).toBe('on'); // default: the fence is on (AGT-4387)
+      expect(config.autonomous?.workerNetwork).toBe('loopback'); // default: no remote network (AGT-4798)
       expect(config.autonomous?.draftModel).toBe('deepseek/deepseek-v4-flash'); // single-model fleet knob
       expect(config.autonomous?.orchestrator).toEqual({
         enabled: true,

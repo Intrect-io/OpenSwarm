@@ -23,8 +23,31 @@ import { join } from 'node:path';
 export interface SandboxSpec {
   /** Directories the command may write to. Others are read-only. */
   writableRoots: string[];
-  /** Whether the command may open network connections. */
+  /**
+   * Whether the command may reach the network. When false it may still use
+   * loopback (a test that starts a local server), never another host.
+   */
   allowNetwork: boolean;
+}
+
+/**
+ * How much network a worker's shell gets (AGT-4798). `loopback` (default): only
+ * 127.0.0.1/::1, so a script that wraps `gh`, `wrangler` or `curl` cannot reach
+ * a remote even with a credential it found on disk. `open`: the previous
+ * behaviour, for a host whose sandbox cannot isolate the network (e.g. a
+ * container where bwrap cannot create a network namespace).
+ */
+export type WorkerNetworkPolicy = 'loopback' | 'open';
+
+let workerNetworkPolicy: WorkerNetworkPolicy = 'loopback';
+
+/** Set once at daemon start from `autonomous.workerNetwork`. */
+export function setWorkerNetworkPolicy(policy: WorkerNetworkPolicy): void {
+  workerNetworkPolicy = policy;
+}
+
+export function getWorkerNetworkPolicy(): WorkerNetworkPolicy {
+  return workerNetworkPolicy;
 }
 
 export interface SandboxedCommand {
@@ -60,7 +83,13 @@ export function buildMacSandboxProfile(spec: SandboxSpec): string {
     '(literal "/dev/null")',
     '(literal "/dev/tty")',
   ].join(' ');
-  const network = spec.allowNetwork ? ' (allow network*)' : '';
+  // Loopback only, split by direction. A single `(allow network* (local ip
+  // "localhost:*"))` also admits outbound connections to remote hosts (an
+  // outbound socket's local end matches), measured on macOS 2026-10-21.
+  const network = spec.allowNetwork
+    ? ' (allow network*)'
+    : ' (allow network-bind (local ip "localhost:*")) (allow network-inbound (local ip "localhost:*"))'
+      + ' (allow network-outbound (remote ip "localhost:*"))';
   return `(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read)${network} (allow file-write* ${writes})`;
 }
 

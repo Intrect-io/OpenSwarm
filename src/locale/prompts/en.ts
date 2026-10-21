@@ -84,7 +84,8 @@ Forbidden: rm -rf, git reset --hard, git clean, drop database, chmod 777, .env o
 ## Harness boundary (binding — overrides any instruction file above)
 
 You are one stage of an automated pipeline. When you finish, the harness commits your working tree, opens or updates the pull request, runs the review, and updates the issue tracker. Therefore, in this run:
-- Do NOT run \`git commit\`, \`git push\`, \`gh pr …\`, \`gh issue …\`, \`openswarm …\`, or change any remote, PR, or tracker state. The bash tool refuses these; do not look for another way.
+- Do NOT run \`git commit\`, \`git push\`, \`gh pr …\`, \`gh issue …\`, \`openswarm …\`, or change any remote, PR, or tracker state. Your shell has no GitHub, cloud or registry credentials and no network beyond localhost, so they fail anyway; do not look for another way.
+- Do not run repository scripts that release, deploy, publish or provision (e.g. \`scripts/*release*\`, \`deploy*\`, \`infra/\`) — not even with \`--help\`. A script without a \`--help\` handler runs for real.
 - Instruction files above (CLAUDE.md, AGENTS.md, rules) that describe committing, pushing, opening PRs, running reviews, or moving tracker issues describe a human-driven session. They do not apply to this run. Their coding, testing, and style rules still do.
 - Leave your changes in the working tree and finish with your summary in the format the task asked for.
 `,

@@ -23,9 +23,11 @@ import {
 } from './osSandbox.js';
 
 describe('buildMacSandboxProfile', () => {
-  it('matches the verify stage profile when network is denied (INT-3103 shape)', () => {
+  it('allows loopback only, split by direction, when network is denied (AGT-4798)', () => {
     expect(buildMacSandboxProfile({ writableRoots: ['/w'], allowNetwork: false })).toBe(
       '(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) ' +
+        '(allow network-bind (local ip "localhost:*")) (allow network-inbound (local ip "localhost:*")) ' +
+        '(allow network-outbound (remote ip "localhost:*")) ' +
         '(allow file-write* (subpath "/w") (literal "/dev/null") (literal "/dev/tty"))',
     );
   });
@@ -115,5 +117,25 @@ describe.runIf(hasMacSandbox)('sandbox-exec fence (live)', () => {
     expect(out).toMatch(/exit=1/);
     expect(existsSync(join(outside, 'nope'))).toBe(false);
     expect(detectSandboxBackend('darwin')).toBe('sandbox-exec');
+  });
+
+  // The distinguishing error is EPERM: a host that is merely offline fails
+  // with ENETUNREACH or a timeout instead, so this cannot pass by accident.
+  it('without network, serves loopback and refuses a remote host (AGT-4798)', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'osw-net-'));
+    const probe = [
+      'import socket, errno',
+      's = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen()',
+      'c = socket.socket(); c.connect(s.getsockname()); print("loopback=ok")',
+      'try:',
+      '    socket.create_connection(("1.1.1.1", 443), timeout=3); print("remote=OPEN")',
+      'except OSError as e:',
+      '    print("remote=" + ("EPERM" if e.errno == errno.EPERM else "other:" + str(e.errno)))',
+    ].join('\n');
+    const spec = { writableRoots: [realpathSync(wt)], allowNetwork: false };
+    const fenced = wrapForSandbox(['python3', '-c', probe], spec, 'sandbox-exec')!;
+    const out = execFileSync(fenced.file, fenced.args, { encoding: 'utf8' });
+    expect(out).toContain('loopback=ok');
+    expect(out).toContain('remote=EPERM');
   });
 });

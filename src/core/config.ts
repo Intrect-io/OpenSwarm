@@ -241,6 +241,8 @@ const ProjectAgentConfigSchema = z.object({
   })).optional(),
   /** Standing goal every stage follows for tasks in this project (AGT-4662) */
   goal: z.string().trim().min(1).max(MAX_PROJECT_GOAL_CHARS).optional(),
+  /** Dependency install commands run before the worker, network open, no credentials (AGT-4798) */
+  setup: z.array(z.string().trim().min(1)).optional(),
   /** Per-role configuration override */
   roles: ProjectRolesOverrideSchema,
 });
@@ -477,6 +479,8 @@ const AutonomousConfigSchema = z.object({
    * (bash as the daemon user, regex denylist only).
    */
   workerSandbox: z.enum(['on', 'off']).default('on'),
+  /** Network for the worker's shell: loopback only (default) or open (AGT-4798) */
+  workerNetwork: z.enum(['loopback', 'open']).default('loopback'),
   periodicReviews: z.array(z.object({
     profile: z.enum(['permissions', 'hygiene', 'security', 'review']),
     schedule: z.string().min(1),
@@ -883,6 +887,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       mcpPolicies: raw.autonomous.mcpPolicies,
       adapterRouting: raw.autonomous.adapterRouting,
       workerSandbox: raw.autonomous.workerSandbox,
+      workerNetwork: raw.autonomous.workerNetwork,
       periodicReviews: raw.autonomous.periodicReviews,
       orchestrator: raw.autonomous.orchestrator,
       orchestratorSchedule: raw.autonomous.orchestratorSchedule,

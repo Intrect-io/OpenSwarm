@@ -20,6 +20,30 @@ function projectRoot(path: string): string {
 }
 
 /**
+ * The configured project that owns `projectPath`: the most specific entry whose
+ * path is `projectPath` or one of its ancestors (a task worktree sits under its
+ * project). Settings are read from the owner only, never from an enclosing one.
+ */
+export function resolveOwningProject<T extends { projectPath: string }>(
+  agents: ReadonlyArray<T> | undefined,
+  projectPath: string,
+): T | undefined {
+  if (!agents?.length) return undefined;
+  const target = projectRoot(projectPath);
+  let owner: T | undefined;
+  let ownerRoot = '';
+  for (const agent of agents) {
+    const root = projectRoot(agent.projectPath);
+    const owns = target === root || target.startsWith(root + sep);
+    if (owns && root.length >= ownerRoot.length) {
+      owner = agent;
+      ownerRoot = root;
+    }
+  }
+  return owner;
+}
+
+/**
  * The goal configured for the project that owns `projectPath`, or undefined.
  *
  * `projectPath` may be a task worktree nested under the project (the pipeline
@@ -32,19 +56,7 @@ export function resolveProjectGoal(
   agents: ReadonlyArray<GoalBearingProject> | undefined,
   projectPath: string,
 ): string | undefined {
-  if (!agents?.length) return undefined;
-  const target = projectRoot(projectPath);
-  let owner: GoalBearingProject | undefined;
-  let ownerRoot = '';
-  for (const agent of agents) {
-    const root = projectRoot(agent.projectPath);
-    const owns = target === root || target.startsWith(root + sep);
-    if (owns && root.length >= ownerRoot.length) {
-      owner = agent;
-      ownerRoot = root;
-    }
-  }
-  const goal = owner?.goal?.trim();
+  const goal = resolveOwningProject(agents, projectPath)?.goal?.trim();
   if (!goal) return undefined;
   return goal.length > MAX_PROJECT_GOAL_CHARS ? `${goal.slice(0, MAX_PROJECT_GOAL_CHARS)}…` : goal;
 }

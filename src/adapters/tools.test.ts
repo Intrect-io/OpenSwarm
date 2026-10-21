@@ -1214,6 +1214,32 @@ describe.runIf(hasMacSandbox)('bash tool with sandbox: on (live sandbox-exec)', 
     }
   });
 
+  it('worker bash reaches loopback but not a remote host by default; workerNetwork open restores it (AGT-4798)', async () => {
+    const { setWorkerNetworkPolicy } = await import('../support/osSandbox.js');
+    const wt = await fs.mkdtemp(path.join(os.tmpdir(), 'osw-tool-net-'));
+    const probe = [
+      'import socket, errno',
+      's = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen()',
+      'c = socket.socket(); c.connect(s.getsockname()); print("loopback=ok")',
+      'try:',
+      '    socket.create_connection(("1.1.1.1", 443), timeout=3); print("remote=OPEN")',
+      'except OSError as e:',
+      '    print("remote=" + ("EPERM" if e.errno == errno.EPERM else "other"))',
+    ].join('\n');
+    await fs.writeFile(path.join(wt, 'probe.py'), probe);
+    try {
+      const fenced = await executeTool(makeCall('bash', { command: 'python3 probe.py' }), wt, createReadCache(), { sandbox: 'on' });
+      expect(fenced.content).toContain('loopback=ok');
+      expect(fenced.content).toContain('remote=EPERM');
+      setWorkerNetworkPolicy('open');
+      const open = await executeTool(makeCall('bash', { command: 'python3 probe.py' }), wt, createReadCache(), { sandbox: 'on' });
+      expect(open.content).not.toContain('remote=EPERM');
+    } finally {
+      setWorkerNetworkPolicy('loopback');
+      await fs.rm(wt, { recursive: true, force: true });
+    }
+  });
+
   it('sandbox: off (or unset) keeps the old unfenced behaviour', async () => {
     const wt = await fs.mkdtemp(path.join(os.tmpdir(), 'osw-tool-nofence-'));
     const homeTarget = path.join(homedir(), `.osw-nofence-probe-${process.pid}`);

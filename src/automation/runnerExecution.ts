@@ -177,6 +177,7 @@ export interface ExecutionContext {
   getRolesForProject: (projectPath: string) => DefaultRolesConfig | undefined;
   /** Standing goal configured for the project at this path; every stage reads it (AGT-4662). */
   getProjectGoal?: (projectPath: string) => string | undefined;
+  getProjectSetup?: (projectPath: string) => string[] | undefined; // projectAgents[].setup (AGT-4798)
   reportToDiscord: (message: string | EmbedBuilder) => Promise<void>;
   /** Git worktree mode: work in an isolated worktree per issue, auto-create PR */
   worktreeMode?: boolean;
@@ -969,6 +970,8 @@ export async function executePipeline(
   }
 
   try {
+    const setupFailure = await (await import('../agents/workerSetup.js')).setupFailureBeforeWorker(ctx.getProjectSetup?.(projectPath), actualPath, ctx.workerSandbox); // AGT-4798
+    if (setupFailure) return setupFailure;
     const roles = ctx.getRolesForProject(projectPath); // look up config using original path
     const { prepareRunCoordination, normalizeAdapterRouting } = await import('../coordination/runCoordination.js');
     const runMetadata = pipelineMetadata(task, projectPath, worktreeInfo);
