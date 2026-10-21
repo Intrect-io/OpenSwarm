@@ -394,6 +394,12 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       coordinationBoardIssueId: config.autonomous.coordinationBoardIssueId,
       mcpPolicies: config.autonomous.mcpPolicies,
       adapterRouting: config.autonomous.adapterRouting,
+      // Same trap as AGT-4122/AGT-4404: the schema, the boot log below and the
+      // pipeline all read workerSandbox, but this hand-picked mapping did not
+      // pass it, so the runner saw undefined and the bash tool (which fences only
+      // on an explicit 'on') ran unfenced while the log said "sandbox: on".
+      workerSandbox: config.autonomous.workerSandbox,
+      minFreeDiskGiB: config.autonomous.minFreeDiskGiB, // AGT-4785
       periodicReviews: config.autonomous.periodicReviews,
       orchestrator: config.autonomous.orchestrator,
       orchestratorSchedule: config.autonomous.orchestratorSchedule,

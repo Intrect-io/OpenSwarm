@@ -272,6 +272,12 @@ autonomous:
   # that need the network go in projectAgents[].setup below.
   # workerNetwork: loopback
 
+  # Free-space floor, in GiB, for every volume the daemon writes to (each
+  # allowed project, the temp dir). Below it the heartbeat stops fetching and
+  # claiming work — worktree cleanup keeps running — and resumes once space is
+  # freed; one notice each way. 0 switches the check off. (AGT-4785)
+  # minFreeDiskGiB: 10
+
   # Delegated CLI adapters (claude, codex, cursor) own their tool loop, so
   # OpenSwarm's publication fence, protected files, role tool limits and the
   # credential-free sandboxed shell do not reach them (claude even runs with

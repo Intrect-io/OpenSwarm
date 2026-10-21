@@ -718,6 +718,12 @@ export type AutonomousStartupConfig = {
    */
   workerNetwork?: 'loopback' | 'open';
   /**
+   * Free disk space, in GiB, below which the heartbeat stops claiming new work
+   * (AGT-4785). Worktree cleanup keeps running. 0 switches the check off.
+   * Default 10.
+   */
+  minFreeDiskGiB?: number;
+  /**
    * Run unattended work on delegated CLI adapters (claude/codex/cursor) even
    * though OpenSwarm's publication fence, protected files and credential-free
    * shell do not reach them (AGT-4444). Default false: the daemon refuses to

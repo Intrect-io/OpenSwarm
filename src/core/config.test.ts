@@ -371,6 +371,22 @@ agents:
       expect(agents?.[1].goal).toBeUndefined();
     });
 
+    it('carries minFreeDiskGiB to the runtime config and defaults the floor to 10 GiB (AGT-4785)', () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      const load = (autonomous: Record<string, unknown>) => {
+        vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+          language: 'en',
+          linear: { apiKey: 'k', teamId: 't' },
+          agents: [{ name: 'main', projectPath: '/p', enabled: true, paused: false }],
+          autonomous: { enabled: true, ...autonomous },
+        }));
+        return loadConfig('/tmp/config.json').autonomous;
+      };
+      expect(load({})?.minFreeDiskGiB).toBe(10);
+      expect(load({ minFreeDiskGiB: 25 })?.minFreeDiskGiB).toBe(25);
+      expect(load({ minFreeDiskGiB: 0 })?.minFreeDiskGiB).toBe(0);
+    });
+
     it('carries workerNetwork and a project setup list to the runtime config (AGT-4798)', () => {
       vi.mocked(existsSync).mockReturnValue(true);
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
