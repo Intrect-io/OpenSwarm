@@ -138,6 +138,8 @@ import {
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
+import { scopeDeclineComment, scopeDeclineMarker } from './draftGrooming.js';
+import { evaluateReadiness, formatReadinessSummary, partitionByReadiness, verdictFromDraft } from './readinessGate.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
 import { completeParentIfChildrenDone as completeParentLocally, buildTaskStateSyncComment } from '../taskState/store.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
@@ -591,7 +593,7 @@ export class AutonomousRunner {
       linearTeamId: config.linearTeamId,
       autoExecute: config.autoExecute,
       dryRun: config.dryRun,
-      includeBacklog: config.includeBacklog ?? true,
+      includeBacklog: config.includeBacklog ?? false, // AGT-4784: Todo is the ready signal
       // Same-project parallel selection only makes sense when the scheduler can
       // actually run those tasks concurrently (worktree isolation). (INT-2318)
       sameProjectParallel: (config.allowSameProjectConcurrent ?? true) && (config.worktreeMode ?? false),
@@ -2939,10 +2941,19 @@ export class AutonomousRunner {
       // Issues a person owns (a skip label, an epic, a title tag) never reach selection or
       // idle fill: the idle-fill loop inside filterAlreadyProcessed would otherwise lift a
       // parked or backed-off ledger row for them. (AGT-4682)
-      const { eligible: agentTasks, skipped: humanOwned } = partitionHumanOwned(tasks, this.config.skip ?? DEFAULT_AGENT_SKIP);
+      // Readiness comes first and is the only thing in front of idle fill that reads the tracker
+      // state: a Backlog issue must not reach `filterAlreadyProcessed`, whose idle fill would lift
+      // a park on it. (AGT-4784)
+      const skipConfig = this.config.skip ?? DEFAULT_AGENT_SKIP;
+      const { ready: readyTasks, held: notReady } = partitionByReadiness(tasks, {
+        exclusionLabels: skipConfig.labels,
+        includeBacklog: this.config.includeBacklog ?? false,
+      });
+      for (const line of formatReadinessSummary(notReady)) this.syslog(line);
+      const { eligible: agentTasks, skipped: humanOwned } = partitionHumanOwned(readyTasks, skipConfig);
       for (const line of formatSkipSummary(humanOwned)) this.syslog(line);
       if (agentTasks.length === 0) {
-        this.syslog('— Every task is a person\'s work (skip labels, epics, title tags)');
+        this.syslog('— Nothing ready for the swarm (Backlog, skip labels, epics, title tags)');
         return;
       }
 
@@ -3019,7 +3030,7 @@ export class AutonomousRunner {
     // This prevents DecisionEngine from wasting its max-slot budget on non-enabled projects.
     // AGT-4257: Backlog is a queue when slots are free. Terminal Linear
     // states are still dropped later by the decision engine.
-    const executableTasks = (this.config.includeBacklog ?? true)
+    const executableTasks = (this.config.includeBacklog ?? false)
       ? tasks
       : tasks.filter(t => t.linearState !== 'Backlog');
 
@@ -3195,6 +3206,36 @@ export class AutonomousRunner {
     return candidates;
   }
 
+  /**
+   * Drop the candidates whose pre-admission draft carries a confident decline (the issue needs a
+   * person: `human_action_only`, `decision_pending`, ...) and say so on the issue once. Only a
+   * project with a standing goal asks the drafter for the verdict, and only a verdict with the
+   * confidence and evidence `isScopeDeclined` requires counts, so a project without a goal sees
+   * no change. The draft is cached by title and description, so a held issue costs no model call
+   * on later heartbeats; editing either field makes a new draft and a new verdict.
+   */
+  private async holdDeclinedBeforeClaim(group: RunnableCandidate[], projPath: string): Promise<RunnableCandidate[]> {
+    const hasGoal = !!resolveProjectGoal(this.config.projectAgents, projPath);
+    if (!hasGoal) return group;
+    const kept: RunnableCandidate[] = [];
+    for (const candidate of group) {
+      const draft = candidate.task.preAdmissionDraft;
+      const verdict = verdictFromDraft(draft, hasGoal);
+      const decision = evaluateReadiness(candidate.task, { verdict, includeBacklog: true });
+      if (decision.claim || !draft?.scope) {
+        kept.push(candidate);
+        continue;
+      }
+      this.syslog(`⏭ Not claimed: ${taskLabel(candidate.task)} — ${decision.reason}: ${draft.scope.reason}`);
+      const source = getTaskSource();
+      if (candidate.task.issueId && source?.kind === 'linear') {
+        await source.addComment(candidate.task.issueId, scopeDeclineComment(draft.scope), scopeDeclineMarker(draft.scope))
+          .catch((err) => console.warn('[AutonomousRunner] Readiness comment failed:', err instanceof Error ? err.message : err));
+      }
+    }
+    return kept;
+  }
+
   private async detectSafeCandidateIds(candidates: RunnableCandidate[]): Promise<Set<string>> {
     // Group candidates by canonical repository identity for conflict detection.
     // A symlink/relative-path alias must not split one repository into two groups
@@ -3284,6 +3325,11 @@ export class AutonomousRunner {
           }
         }));
 
+        // The drafts above are the first look at what an issue asks for, and they are
+        // available before anything is claimed. A confident "a person has to do or decide
+        // this" verdict stops the claim here instead of after a worker has started. (AGT-4784)
+        const claimable = await this.holdDeclinedBeforeClaim(group, projPath);
+
         // A later heartbeat must compare new candidates with workers that are
         // already editing another worktree. Candidate-vs-candidate detection
         // alone leaves a race window across heartbeat cycles.
@@ -3295,7 +3341,7 @@ export class AutonomousRunner {
         // still deferred every other candidate — 11 of 12 slots idle with 126
         // executable tasks waiting (AGT-4233).
         const admission = this.config.unknownScopeAdmission ?? 'admit';
-        const runnable = group.filter(candidate => {
+        const runnable = claimable.filter(candidate => {
           let blockedBy: { label: string; reason: ScopeConflictReason } | undefined;
           for (const running of active) {
             const reason = describeScopeConflict(

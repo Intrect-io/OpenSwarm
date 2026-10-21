@@ -25,6 +25,16 @@ export function projectDraftPeers(task: TaskItem, peers?: TaskItem[]): DraftPeer
     }));
 }
 
+/** Stable per kind and reason, so the claim-time gate and this one leave a single comment between them. */
+export function scopeDeclineMarker(scope: { kind: string; reason: string }): string {
+  return `draft-scope:${createHash('sha256').update(`${scope.kind}:${scope.reason}`).digest('hex').slice(0, 24)}`;
+}
+
+export function scopeDeclineComment(scope: { kind: string; reason: string; evidence: string[] }): string {
+  return `Draft grooming did not start a worker for this issue: \`${scope.kind}\`.\n\nReason: ${scope.reason}\n\nEvidence:\n${scope.evidence.map((item) => `- ${item}`).join('\n')}\n\n`
+    + 'Change the issue so it names work this project goal can act on, then move it to Todo to run it.';
+}
+
 export async function applyDraftGates(options: {
   task: TaskItem;
   projectPath: string;
@@ -56,16 +66,10 @@ export async function applyDraftGates(options: {
   // should not cost a checkout, a worker run and two retries to find that out.
   // Opt-in per project, and only on a verdict that clears the duplicate gate's bar.
   if (options.goalScopeGate && isScopeDeclined(draft.scope)) {
-    const { kind, reason, evidence } = draft.scope;
+    const { kind, reason } = draft.scope;
     console.log(`[AutonomousRunner] Draft scope gate: ${task.issueIdentifier ?? task.issueId} is ${kind} — ${reason}`);
     if (task.issueId && source?.kind === 'linear') {
-      const marker = `draft-scope:${createHash('sha256').update(`${kind}:${reason}`).digest('hex').slice(0, 24)}`;
-      await source.addComment(
-        task.issueId,
-        `Draft grooming did not start a worker for this issue: \`${kind}\`.\n\nReason: ${reason}\n\nEvidence:\n${evidence.map((item) => `- ${item}`).join('\n')}\n\n`
-          + 'Change the issue so it names work this project goal can act on, then move it to Todo to run it.',
-        marker,
-      );
+      await source.addComment(task.issueId, scopeDeclineComment(draft.scope), scopeDeclineMarker(draft.scope));
     }
     return supersededResult('out_of_scope', draft.durationMs, `${kind}: ${reason}`);
   }

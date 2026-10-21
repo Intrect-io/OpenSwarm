@@ -3,7 +3,7 @@
 // Dependencies: none
 
 /** Why a task cannot be worked here. Closed set: the gate acts on it. */
-export const SCOPE_KINDS = ['wrong_repository', 'human_action_only', 'blocked_by_dependency', 'out_of_goal'] as const;
+export const SCOPE_KINDS = ['wrong_repository', 'human_action_only', 'blocked_by_dependency', 'out_of_goal', 'decision_pending'] as const;
 export type DraftScopeKind = (typeof SCOPE_KINDS)[number];
 
 export interface DraftScopeVerdict {
@@ -54,7 +54,7 @@ export function isScopeDeclined(scope: DraftScopeVerdict | undefined): scope is 
 export function scopePromptParts(goal: string | undefined): { field: string; rules: string } {
   if (!goal?.trim()) return { field: '', rules: '' };
   return {
-    field: ',\n  "scope": {"applicable": false, "kind": "wrong_repository" | "human_action_only" | "blocked_by_dependency" | "out_of_goal", '
+    field: ',\n  "scope": {"applicable": false, "kind": "wrong_repository" | "human_action_only" | "blocked_by_dependency" | "out_of_goal" | "decision_pending", '
       + '"confidence": 0.0, "reason": "one sentence", "evidence": ["concrete fact you verified"]}  // optional: ONLY when this task cannot be done here',
     rules: `
 ### scope (only because a Standing project goal is set)
@@ -63,6 +63,7 @@ Decide whether an autonomous worker can usefully act on this task in THIS reposi
 - human_action_only: completing it needs something only a person can do (send a message to a customer or vendor, obtain an approval, wait for an external reply, change production data by hand) and there is no code or doc change you can describe that completes it.
 - blocked_by_dependency: it needs the output of another open issue that is not done yet, and the Standing project goal makes that order binding.
 - out_of_goal: completing it would not move the Standing project goal forward.
+- decision_pending: the issue itself says a person has to decide or choose first (a title or body such as "decide whether…", "waiting for X to pick", a design question with no chosen answer) and no code or doc change completes it before that answer exists. A decision already made in the text is not pending.
 Use confidence >= 0.90 only with at least two concrete pieces of evidence (a path you searched that has nothing, the line of the task that says the action is human-only, the open issue it waits on). If the task has a code or doc deliverable you can name, it is in scope.
 `,
   };

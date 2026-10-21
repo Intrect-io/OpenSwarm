@@ -385,8 +385,12 @@ const AutonomousConfigSchema = z.object({
   maxAttempts: z.number().min(1).max(10).default(3),
   /** Allowed project paths */
   allowedProjects: z.array(z.string()).default(['~/dev']),
-  /** Treat Linear Backlog as a work queue. Default true so free slots chew parked work (AGT-4257). */
-  includeBacklog: z.boolean().optional().default(true),
+  /**
+   * Treat Linear Backlog as a work queue. Default false: moving an issue to Todo is the signal that
+   * it is ready, so an unattended daemon never picks up what nobody triaged (AGT-4784, which reverses
+   * the AGT-4257 default). Set true on a deployment that wants free slots to chew parked work.
+   */
+  includeBacklog: z.boolean().optional().default(false),
   /** Model configuration (legacy) */
   models: ModelConfigSchema,
   /** Worker timeout (ms). 0/unset = use the pipeline's per-stage ceiling
