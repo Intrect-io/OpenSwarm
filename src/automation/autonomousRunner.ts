@@ -69,6 +69,7 @@ import { t } from '../locale/index.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
 import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
 import { listHeldIssueIds } from './execHold.js';
+import { inputFingerprint, mayRedispatch } from './dispatchFingerprint.js';
 import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from '../agents/pairPipelineTypes.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
@@ -1255,6 +1256,13 @@ export class AutonomousRunner {
       // skipped, so a park reaches the `exec await` that is watching for it.
       const execHeld = heldExecRuns.has(id);
       let durableRun = this.durableRuns.getRun(id);
+      // A park or backoff that nobody has touched is not lifted by a free slot:
+      // retrying an unchanged issue after an infra_error or an operator park
+      // changes nothing (AGT-4787 — 18 dispatches of one issue in 14 hours). The
+      // input is title + description; tracker comments are not on a listed task,
+      // so an answer given only as a comment waits for an explicit dispatch.
+      const issueInput = inputFingerprint({ title: task.title, description: task.description });
+      const inputUnchanged = !!durableRun && !mayRedispatch(id, issueInput);
       // Set once this task has spent idle budget, so a later branch in this
       // same pass (the stuck-label recovery) neither charges it twice nor
       // skips a row whose park idle_fill has already erased.
@@ -1318,7 +1326,7 @@ export class AutonomousRunner {
           || durableRun?.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON;
         // Nor does a free slot change a verdict that has already come back
         // twice; see idleFillWouldRepeatVerdict.
-        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark && !execHeld
+        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark && !execHeld && !inputUnchanged
             && !this.durableRuns.idleFillWouldRepeatVerdict(id)) {
           const idleResumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'idle_fill');
           if (idleResumed) {
@@ -1377,6 +1385,7 @@ export class AutonomousRunner {
           // answer`, not by a free slot: lifting its backoff here would start a
           // second attempt while the orchestrator still owns the decision.
           && !execHeld
+          && !inputUnchanged
           // A run that has failed three times is backed off on purpose (AGT-4673).
           // Lifting it here whenever a slot frees put the highest-priority failing
           // run ahead of 36 READY tasks, so the backoff never held (AGT-4675).

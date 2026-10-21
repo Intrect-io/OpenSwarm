@@ -970,8 +970,8 @@ export async function executePipeline(
   }
 
   try {
-    const setupFailure = await (await import('../agents/workerSetup.js')).setupFailureBeforeWorker(ctx.getProjectSetup?.(projectPath), actualPath, ctx.workerSandbox); // AGT-4798
-    if (setupFailure) return setupFailure;
+    const setupFailure = await (await import('../agents/workerSetup.js')).setupFailureBeforeWorker(ctx.getProjectSetup?.(projectPath), actualPath, ctx.workerSandbox); if (setupFailure) return setupFailure; // AGT-4798
+    (await import('./dispatchFingerprint.js')).recordRunInput(task); // the input this run starts on; a later park is measured against it (AGT-4787)
     const roles = ctx.getRolesForProject(projectPath); // look up config using original path
     const { prepareRunCoordination, normalizeAdapterRouting } = await import('../coordination/runCoordination.js');
     const runMetadata = pipelineMetadata(task, projectPath, worktreeInfo);
