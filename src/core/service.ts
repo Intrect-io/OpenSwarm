@@ -437,7 +437,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     const sandboxMode = config.autonomous.workerSandbox ?? 'on';
     const backend = detectSandboxBackend();
     console.log(sandboxMode === 'on'
-      ? (backend ? `[Service] Worker sandbox: on (${backend})` : '[Service] Worker sandbox: on, but no sandbox-exec/bwrap on this host — bash runs unfenced')
+      ? (backend ? `[Service] Worker sandbox: on (${backend})` : '[Service] Worker sandbox: on, but no sandbox-exec/bwrap on this host — worker bash commands will be refused (set autonomous.workerSandbox: off to run them unfenced)')
       : '[Service] Worker sandbox: off (bash runs as the daemon user)');
   }
 
