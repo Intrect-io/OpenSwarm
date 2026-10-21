@@ -299,6 +299,19 @@ describe('service', () => {
     );
   });
 
+  it('forwards workerSandbox and minFreeDiskGiB to the runner — the mapping dropped workerSandbox, so the fence was off while the log said on (AGT-4785)', async () => {
+    const { startAutonomous } = await import('../automation/autonomousRunner.js');
+
+    await startService({
+      ...mockAutonomousConfig,
+      autonomous: { ...mockAutonomousConfig.autonomous, workerSandbox: 'on', minFreeDiskGiB: 7 },
+    } as SwarmConfig);
+
+    expect(vi.mocked(startAutonomous)).toHaveBeenCalledWith(
+      expect.objectContaining({ workerSandbox: 'on', minFreeDiskGiB: 7 }),
+    );
+  });
+
   it('reapplies a persisted provider override on boot when it differs from config', async () => {
     const { readProviderOverride } = await import('./providerOverride.js');
     const { setDefaultAdapter } = await import('../adapters/index.js');

@@ -86,6 +86,8 @@ export interface AutonomousConfig {
   adapterRouting?: { primary?: import('../adapters/types.js').AdapterName; fallbacks?: Array<'cc-router' | 'cursor' | 'codex' | 'codex-responses'>; allowReasons?: Array<'quota' | 'infra' | 'capability'> };
   /** OS fence for the worker's bash tool (AGT-4387). */
   workerSandbox?: 'on' | 'off';
+  /** Free-space floor (GiB) below which dispatch pauses; 0 switches the check off (AGT-4785). */
+  minFreeDiskGiB?: number;
   /** Periodic read-only repository review jobs. */
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Explicit high-capability project supervisor. */

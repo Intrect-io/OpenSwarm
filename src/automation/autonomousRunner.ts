@@ -70,6 +70,7 @@ import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol
 import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
 import { listHeldIssueIds } from './execHold.js';
 import { inputFingerprint, mayRedispatch } from './dispatchFingerprint.js';
+import { HostDiskGate, dispatchWritePaths } from '../support/hostHealth.js';
 import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from '../agents/pairPipelineTypes.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
@@ -533,6 +534,11 @@ export class AutonomousRunner {
   // Rate-limit hold: epoch ms until which all task execution is paused.
   // Set when any adapter returns a 429 / usage_limit_reached response (INT-1906).
   private rateLimitUntil = 0;
+  // Disk-space hold: new claims wait while the volumes we write to are nearly full (AGT-4785).
+  private readonly diskGate = new HostDiskGate(
+    () => dispatchWritePaths(this.config.allowedProjects.map((p) => normalizeProjectPath(p))),
+    () => (this.config.minFreeDiskGiB ?? 10) * 1024 ** 3,
+  );
 
   // Issues whose Linear project can't be mapped to a local repo path. Recorded on
   // the first resolve failure so they aren't re-picked every heartbeat (which
@@ -2837,6 +2843,19 @@ export class AutonomousRunner {
         return;
       }
       this.syslog('✓ Time window: allowed');
+
+      // 1.1 Disk-space hold — after the worktree sweep above, which is what frees
+      // space, and before anything is fetched or claimed. One notice per change of
+      // state, not one per heartbeat. (AGT-4785)
+      const disk = this.diskGate.evaluate();
+      if (disk.notice) {
+        console.warn(`[AutonomousRunner] ${disk.notice}`);
+        await reportToDiscord(`${disk.pause ? '⚠️' : '✅'} ${disk.notice}`);
+      }
+      if (disk.pause) {
+        this.syslog(`⏸ Disk space hold: ${disk.line}`);
+        return;
+      }
 
       // 1.2 Rate-limit hold — skip the heartbeat while a 429 pause is still active.
       // Cleared implicitly once the clock passes rateLimitUntil. (INT-1906)

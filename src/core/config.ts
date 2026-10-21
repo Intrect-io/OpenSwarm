@@ -481,6 +481,8 @@ const AutonomousConfigSchema = z.object({
   workerSandbox: z.enum(['on', 'off']).default('on'),
   /** Accept delegated CLI adapters (claude/codex/cursor) for unattended work despite the missing fences (AGT-4444) */
   allowDelegatedAdapters: z.boolean().default(false),
+  /** Free disk space (GiB) below which dispatch pauses; 0 switches the check off (AGT-4785) */
+  minFreeDiskGiB: z.number().min(0).default(10),
   /** Network for the worker's shell: loopback only (default) or open (AGT-4798) */
   workerNetwork: z.enum(['loopback', 'open']).default('loopback'),
   periodicReviews: z.array(z.object({
@@ -890,6 +892,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       adapterRouting: raw.autonomous.adapterRouting,
       workerSandbox: raw.autonomous.workerSandbox,
       workerNetwork: raw.autonomous.workerNetwork,
+      minFreeDiskGiB: raw.autonomous.minFreeDiskGiB,
       allowDelegatedAdapters: raw.autonomous.allowDelegatedAdapters,
       periodicReviews: raw.autonomous.periodicReviews,
       orchestrator: raw.autonomous.orchestrator,
