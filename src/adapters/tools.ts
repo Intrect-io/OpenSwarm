@@ -22,7 +22,7 @@ import {
   isHumanSurfaceReadOnlyEnabled,
 } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
-import { looksLikeSandboxDenial, workerWritableRoots, wrapForSandbox } from '../support/osSandbox.js';
+import { getWorkerNetworkPolicy, looksLikeSandboxDenial, workerWritableRoots, wrapForSandbox } from '../support/osSandbox.js';
 import { listNotes, readNote, writeNote } from '../support/scratchpad.js';
 import { stageMemory, type RememberKind } from '../agents/stagedMemory.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
@@ -1087,7 +1087,7 @@ export async function executeTool(
         const fenced = execOptions?.sandbox === 'on'
           ? wrapForSandbox(['bash', '-c', boundedCommand], {
             writableRoots: workerWritableRoots(cwd, execOptions.scratchpadRunId),
-            allowNetwork: true,
+            allowNetwork: getWorkerNetworkPolicy() === 'open',
           })
           : null;
         if (execOptions?.sandbox === 'on' && !fenced) {

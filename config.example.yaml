@@ -264,6 +264,14 @@ autonomous:
   # database credentials.
   # workerSandbox: on
 
+  # Network for the worker's shell (AGT-4798). loopback (default): only
+  # 127.0.0.1/::1 — a script the worker runs cannot reach GitHub, Cloudflare or
+  # a package registry, but a test can still start a local server. open: the
+  # pre-AGT-4798 behaviour, for a host whose sandbox cannot isolate the network
+  # (e.g. a container where bwrap cannot create a network namespace). Installs
+  # that need the network go in projectAgents[].setup below.
+  # workerNetwork: loopback
+
   # Deterministic baseline-diff verification (enabled by default).
   # Define repo-specific commands in .openswarm/verify.yaml; see templates/verify.example.yaml.
   verify:
@@ -320,6 +328,11 @@ autonomous:
   #     generatedOutputRules:
   #       - command: npm run generate:catalog
   #         outputs: [docs/DATA-CATALOG.md]
+  #     # Run in the worktree before the worker, network open, no credentials
+  #     # (AGT-4798). Worktrees already share installed deps via sharedPaths, so
+  #     # most projects need none; a failure ends the run before any model call.
+  #     setup:
+  #       - uv sync --frozen
 
   # Job profiles override the default Worker/Reviewer pair by task estimate.
   jobProfiles:

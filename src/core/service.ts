@@ -433,8 +433,11 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       : `[Service] Autonomous runner ready for explicit dispatch (pairMode: ${config.autonomous.pairMode}${modelInfo})`);
     // Say which fence the worker's shell runs under, so an unfenced native
     // daemon is visible in the boot log rather than discovered later. (AGT-4387)
-    const { detectSandboxBackend } = await import('../support/osSandbox.js');
+    const { detectSandboxBackend, setWorkerNetworkPolicy } = await import('../support/osSandbox.js');
     const sandboxMode = config.autonomous.workerSandbox ?? 'on';
+    const networkPolicy = config.autonomous.workerNetwork ?? 'loopback';
+    setWorkerNetworkPolicy(networkPolicy);
+    console.log(`[Service] Worker network: ${networkPolicy}`);
     const backend = detectSandboxBackend();
     console.log(sandboxMode === 'on'
       ? (backend ? `[Service] Worker sandbox: on (${backend})` : '[Service] Worker sandbox: on, but no sandbox-exec/bwrap on this host — worker bash commands will be refused (set autonomous.workerSandbox: off to run them unfenced)')

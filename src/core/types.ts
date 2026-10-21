@@ -445,6 +445,12 @@ export type ProjectAgentConfig = {
    * name the command before its outputs join the binding worker write scope. */
   generatedOutputRules?: Array<{ command: string; outputs: string[] }>;
   /**
+   * Dependency install commands run in the worktree before the worker's loop,
+   * with the network open but no credentials (AGT-4798). A failure ends the run
+   * as infra_error before any model call.
+   */
+  setup?: string[];
+  /**
    * Standing goal for every task in this project (AGT-4662). The draft, worker,
    * reviewer and planner all read it, and the draft may decline a task that
    * cannot serve it before any worktree is created.
@@ -704,6 +710,13 @@ export type AutonomousStartupConfig = {
    * are refused (AGT-4783) — set 'off' to run them unfenced on purpose.
    */
   workerSandbox?: 'on' | 'off';
+  /**
+   * Network for the worker's shell (AGT-4798). 'loopback' (default): only
+   * 127.0.0.1/::1, so nothing the worker runs can reach a remote. 'open': the
+   * pre-AGT-4798 behaviour, for a host whose sandbox cannot isolate the network.
+   * Dependency installs that need the network go in projectAgents[].setup.
+   */
+  workerNetwork?: 'loopback' | 'open';
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Explicit high-capability project supervisor. */
   orchestrator?: OrchestratorConfig;
