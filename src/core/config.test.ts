@@ -380,11 +380,13 @@ agents:
         autonomous: {
           enabled: true,
           workerNetwork: 'open',
+          allowDelegatedAdapters: true,
           projectAgents: [{ projectPath: '~/dev/cgf-portal', setup: ['  uv sync --frozen  '] }],
         },
       }));
       const autonomous = loadConfig('/tmp/config.json').autonomous;
       expect(autonomous?.workerNetwork).toBe('open');
+      expect(autonomous?.allowDelegatedAdapters).toBe(true);
       expect(autonomous?.projectAgents?.[0].setup).toEqual(['uv sync --frozen']);
     });
 
@@ -470,6 +472,7 @@ agents:
       expect(config.autonomous?.periodicReviews?.[0]).toMatchObject({ profile: 'hygiene' });
       expect(config.autonomous?.workerSandbox).toBe('on'); // default: the fence is on (AGT-4387)
       expect(config.autonomous?.workerNetwork).toBe('loopback'); // default: no remote network (AGT-4798)
+      expect(config.autonomous?.allowDelegatedAdapters).toBe(false); // default: delegated CLIs refused (AGT-4444)
       expect(config.autonomous?.draftModel).toBe('deepseek/deepseek-v4-flash'); // single-model fleet knob
       expect(config.autonomous?.orchestrator).toEqual({
         enabled: true,

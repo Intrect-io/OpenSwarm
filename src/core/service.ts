@@ -278,6 +278,10 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
   // and user-initiated dispatch (POST /api/work, dashboard buttons) all keep
   // working. `enabled: true` additionally turns the heartbeat on. (INT-3388)
   if (config.autonomous) {
+    // Refuse before anything starts: an unattended worker on a CLI-owned tool
+    // loop has none of OpenSwarm's fences. (AGT-4444)
+    const { assertUnattendedAdapters } = await import('../adapters/unattendedPolicy.js');
+    assertUnattendedAdapters(config);
     const heartbeatEnabled = config.autonomous.enabled === true;
     console.log(heartbeatEnabled
       ? '[Service] Autonomous mode auto-start enabled'
