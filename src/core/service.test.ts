@@ -202,6 +202,9 @@ describe('service', () => {
   const mockAutonomousConfig: SwarmConfig = {
     ...mockConfig,
     autonomous: {
+      // These tests exercise boot behaviour on adapter 'claude'; the adapter
+      // policy itself is covered in unattendedPolicy.test.ts. (AGT-4444)
+      allowDelegatedAdapters: true,
       enabled: true,
       pairMode: true,
       schedule: '*/30 * * * *',
@@ -247,6 +250,19 @@ describe('service', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
+
+  it('refuses to start the autonomous runner on a delegated CLI adapter unless the operator opted in (AGT-4444)', async () => {
+    const { startAutonomous } = await import('../automation/autonomousRunner.js');
+    vi.mocked(startAutonomous).mockClear();
+    const strict = {
+      ...mockAutonomousConfig,
+      adapter: 'claude',
+      autonomous: { ...mockAutonomousConfig.autonomous!, allowDelegatedAdapters: false },
+    } as SwarmConfig;
+
+    await expect(startService(strict)).rejects.toThrow(/Refusing to start the autonomous runner[\s\S]*adapter: 'claude'[\s\S]*allowDelegatedAdapters/);
+    expect(startAutonomous).not.toHaveBeenCalled();
+  });
 
   it('forwards the whole decomposition config, not a hand-picked subset', async () => {
     const { startAutonomous } = await import('../automation/autonomousRunner.js');
@@ -733,6 +749,7 @@ describe('service', () => {
       const configWithAutonomous: SwarmConfig = {
         ...mockConfig,
         autonomous: {
+          allowDelegatedAdapters: true,
           enabled: true,
           pairMode: true,
           schedule: '*/30 * * * *',

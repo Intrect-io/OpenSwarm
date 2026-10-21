@@ -717,6 +717,13 @@ export type AutonomousStartupConfig = {
    * Dependency installs that need the network go in projectAgents[].setup.
    */
   workerNetwork?: 'loopback' | 'open';
+  /**
+   * Run unattended work on delegated CLI adapters (claude/codex/cursor) even
+   * though OpenSwarm's publication fence, protected files and credential-free
+   * shell do not reach them (AGT-4444). Default false: the daemon refuses to
+   * start when such an adapter is configured.
+   */
+  allowDelegatedAdapters?: boolean;
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Explicit high-capability project supervisor. */
   orchestrator?: OrchestratorConfig;

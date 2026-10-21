@@ -272,6 +272,14 @@ autonomous:
   # that need the network go in projectAgents[].setup below.
   # workerNetwork: loopback
 
+  # Delegated CLI adapters (claude, codex, cursor) own their tool loop, so
+  # OpenSwarm's publication fence, protected files, role tool limits and the
+  # credential-free sandboxed shell do not reach them (claude even runs with
+  # bypassPermissions). The daemon refuses to start when any unattended setting
+  # names one: adapter, defaultRoles, projectAgents roles, adapterRouting
+  # primary/fallbacks, orchestrator, loopAdvisor. true accepts that on purpose.
+  # allowDelegatedAdapters: false
+
   # Deterministic baseline-diff verification (enabled by default).
   # Define repo-specific commands in .openswarm/verify.yaml; see templates/verify.example.yaml.
   verify:
