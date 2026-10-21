@@ -26,7 +26,7 @@ type InternalRunner = {
 
 const task = (id: string, over: Partial<TaskItem> = {}): TaskItem => ({
   id, issueId: id, issueIdentifier: id.toUpperCase(), source: 'linear', title: `[B1] ${id}`,
-  priority: 2, createdAt: Date.now(), linearState: 'Backlog', labels: [], ...over,
+  priority: 2, createdAt: Date.now(), linearState: 'Todo', labels: [], ...over,
 });
 
 describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () => {
@@ -50,7 +50,11 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
     vi.resetModules();
   });
 
-  async function runHeartbeat(fetched: TaskItem[], skip?: { labels: string[]; titleTags: string[]; epics: boolean }) {
+  async function runHeartbeat(
+    fetched: TaskItem[],
+    skip?: { labels: string[]; titleTags: string[]; epics: boolean },
+    extra: { includeBacklog?: boolean } = {},
+  ) {
     const [{ AutonomousRunner }, execution] = await Promise.all([
       import('./autonomousRunner.js'),
       import('./runnerExecution.js'),
@@ -58,7 +62,7 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
     const source = {
       kind: 'linear',
       fetchTasks: vi.fn(async () => fetched),
-      lookupIssueState: vi.fn(async () => ({ ok: true as const, issue: { state: 'Backlog', stateType: 'backlog' } })),
+      lookupIssueState: vi.fn(async () => ({ ok: true as const, issue: { state: 'Todo', stateType: 'unstarted' } })),
       updateState: vi.fn(async () => true), addComment: vi.fn(async () => {}),
       createTask: vi.fn(), createSubIssue: vi.fn(), logPairStart: vi.fn(),
       logPairComplete: vi.fn(), logBlocked: vi.fn(), logStuck: vi.fn(), unstick: vi.fn(),
@@ -69,7 +73,7 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
       linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
       autoExecute: true, dryRun: true, pairMode: true, maxConcurrentTasks: 4,
       automationLedgerMode: 'primary', automationDbPath: join(root, 'eligibility.db'),
-      ...(skip ? { skip } : {}),
+      ...(skip ? { skip } : {}), ...extra,
     });
     const internal = runner as unknown as InternalRunner;
     internal.refreshKnowledgeGraphs = vi.fn();
@@ -93,6 +97,15 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
     // Whatever selection receives afterwards can only be a subset of what idle fill saw.
     const selected = parallel.mock.calls.flatMap((call: [TaskItem[]]) => call[0].map((t) => t.id));
     expect(selected.filter((id: string) => id !== 'ax-1')).toEqual([]);
+  }, 60_000);
+
+  it('never hands a Backlog issue to idle fill or selection unless the project opts in (AGT-4784)', async () => {
+    const backlog = [task('bl-1', { linearState: 'Backlog' }), task('td-1')];
+    const off = await runHeartbeat(backlog);
+    expect(off.processed.mock.calls[0][0].map((t) => t.id)).toEqual(['td-1']);
+
+    const on = await runHeartbeat(backlog, undefined, { includeBacklog: true });
+    expect(on.processed.mock.calls[0][0].map((t) => t.id)).toEqual(['bl-1', 'td-1']);
   }, 60_000);
 
   it('honours configured labels, and stops everything when nothing is left for the swarm', async () => {

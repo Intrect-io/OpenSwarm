@@ -70,6 +70,19 @@ autonomous:
   schedule: "*/15 * * * *"  # Every 15 minutes
   maxAttempts: 3
   maxConcurrentTasks: 64  # Operator-controlled global capacity (maximum 256)
+  # Which issues the daemon may start (AGT-4784). Only Todo is dispatched: moving an
+  # issue to Todo is the "ready" signal, so nothing nobody triaged is picked up. Set
+  # includeBacklog: true on a deployment that wants free slots to chew parked work.
+  # Issues the daemon parks itself (cancelled runs, decomposition limits) land in
+  # Backlog and wait for a person to move them back.
+  # includeBacklog: false
+  # Issues a person owns are never started: a label (e.g. a paid-scope exclusion), an
+  # epic, or a title tag such as [결정] / [배포] / [운영]. The draft's scope verdict
+  # (project goal set) also stops an issue that needs a person or a decision.
+  # skip:
+  #   labels: ["swarm:skip", "추가 유지보수"]
+  #   titleTags: ["인수", "확인 원장", "Docs", "결정", "설계 결정", "배포", "운영"]
+  #   epics: true
   # In Progress is a live ownership signal, not a parking lot. If neither the
   # scheduler nor a durable lease owns an issue for this long, return it to Backlog.
   stalledInProgressHours: 6

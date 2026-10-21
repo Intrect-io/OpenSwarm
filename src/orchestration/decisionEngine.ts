@@ -288,7 +288,7 @@ const DEFAULT_CONFIG: DecisionEngineConfig = {
   allowedProjects: [],
   autoExecute: false,       // Default is manual approval
   dryRun: false,
-  includeBacklog: true,     // AGT-4257: Backlog is still work when slots are free
+  includeBacklog: false,    // AGT-4784: Todo is the ready signal; AGT-4257's Backlog queue is opt-in
 };
 
 function expandHomePath(input: string): string {
@@ -362,7 +362,7 @@ export function isAllowedProjectPath(projectPath: string, allowedProjects: strin
 
 /**
  * Linear states the daemon will NOT act on unless opted in. Done/Canceled are
- * terminal. Backlog is admitted when includeBacklog is true (AGT-4257 default).
+ * terminal. Backlog is admitted only when includeBacklog is true (opt-in since AGT-4784).
  */
 const NON_ACTIONABLE_LINEAR_STATES = new Set(['Backlog', 'Done', 'Canceled', 'Cancelled']);
 
@@ -370,7 +370,7 @@ const NON_ACTIONABLE_LINEAR_STATES = new Set(['Backlog', 'Done', 'Canceled', 'Ca
  * Whether the daemon should act on an issue in the given Linear state.
  * Todo/In Progress/In Review and unknown states are always actionable.
  * Done/Canceled are terminal. Backlog is a queue when includeBacklog is true
- * (DecisionEngine default and config default since AGT-4257).
+ * (opt-in; the DecisionEngine and config default is off since AGT-4784).
  */
 export function isActionableLinearState(linearState: string | undefined, includeBacklog = false): boolean {
   if (!linearState) return true; // unknown state → don't gate (conservative)

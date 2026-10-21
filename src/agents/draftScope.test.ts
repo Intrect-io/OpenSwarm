@@ -49,6 +49,21 @@ describe('isScopeDeclined (AGT-4662)', () => {
   });
 });
 
+describe('decision_pending (AGT-4784)', () => {
+  it('is accepted as a decline kind and survives parsing', () => {
+    const verdict = parseScopeVerdict({
+      applicable: false, kind: 'decision_pending', confidence: 0.95,
+      reason: 'the title asks the operator to choose', evidence: ['title: decide whether to rotate', 'no code deliverable'],
+    });
+    expect(verdict?.kind).toBe('decision_pending');
+    expect(isScopeDeclined(verdict)).toBe(true);
+  });
+
+  it('tells the drafter that a decision already made in the text is not pending', () => {
+    expect(scopePromptParts('Ship usable work.').rules).toContain('A decision already made in the text is not pending');
+  });
+});
+
 describe('scopePromptParts (AGT-4662)', () => {
   it('is empty without a goal, so a project that sets none gets the prompt it always had', () => {
     expect(scopePromptParts(undefined)).toEqual({ field: '', rules: '' });
@@ -58,7 +73,7 @@ describe('scopePromptParts (AGT-4662)', () => {
   it('asks for the verdict, names every kind, and says hard tasks stay in scope', () => {
     const { field, rules } = scopePromptParts('Ship usable work.');
     expect(field).toContain('"scope"');
-    for (const kind of ['wrong_repository', 'human_action_only', 'blocked_by_dependency', 'out_of_goal']) {
+    for (const kind of ['wrong_repository', 'human_action_only', 'blocked_by_dependency', 'out_of_goal', 'decision_pending']) {
       expect(field).toContain(kind);
       expect(rules).toContain(kind);
     }

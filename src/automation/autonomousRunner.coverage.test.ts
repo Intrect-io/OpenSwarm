@@ -337,6 +337,72 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
       });
     });
 
+    describe('readiness verdict before the claim (AGT-4784)', () => {
+      const declined = {
+        applicable: false as const, kind: 'decision_pending' as const, confidence: 0.95,
+        reason: 'the title waits on a person to choose', evidence: ['title says pending', 'no code deliverable'],
+      };
+      const withDraft = (id: string, scope?: typeof declined) => task({
+        id, issueId: `ISSUE-${id}`, issueIdentifier: id.toUpperCase(), fileScope: [`src/${id}.ts`],
+        preAdmissionDraft: { relevantFiles: [`src/${id}.ts`], ...(scope ? { scope } : {}) } as TaskItem['preAdmissionDraft'],
+      });
+      const goalCfg = (goal?: string) => cfg({
+        allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 3,
+        projectAgents: [{ projectPath: '/repo', ...(goal ? { goal } : {}) }],
+      });
+
+      it('does not claim an issue whose draft declined it, comments once with the stable marker, and still claims the rest', async () => {
+        const addComment = vi.fn(async () => {});
+        runnerExecution.setTaskSource({ kind: 'linear', addComment } as unknown as ITaskSource);
+        const internal = new AutonomousRunner(goalCfg('ship it')) as unknown as Internal;
+        const held = withDraft('held', declined);
+        const fine = withDraft('fine');
+        detectFileConflictsMock.mockResolvedValue({ safe: [fine], conflictGroups: [] });
+
+        const safe = await internal.detectSafeCandidateIds([
+          { task: held, projectPath: '/repo' }, { task: fine, projectPath: '/repo' },
+        ]);
+
+        expect(safe).toEqual(new Set(['fine']));
+        expect(detectFileConflictsMock).toHaveBeenCalledWith([fine], '/repo', { unknownScopeAdmission: 'admit' });
+        expect(addComment).toHaveBeenCalledTimes(1);
+        const [issueId, body, marker] = addComment.mock.calls[0] as unknown as [string, string, string];
+        expect(issueId).toBe('ISSUE-held');
+        expect(body).toContain('decision_pending');
+        expect(marker).toMatch(/^draft-scope:[0-9a-f]{24}$/);
+      });
+
+      it('changes nothing for a project with no goal: the drafter never asked for a verdict there', async () => {
+        const addComment = vi.fn(async () => {});
+        runnerExecution.setTaskSource({ kind: 'linear', addComment } as unknown as ITaskSource);
+        const internal = new AutonomousRunner(goalCfg()) as unknown as Internal;
+        const candidate = withDraft('nogoal', declined);
+        detectFileConflictsMock.mockResolvedValue({ safe: [candidate], conflictGroups: [] });
+
+        const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
+
+        expect(safe).toEqual(new Set(['nogoal']));
+        expect(addComment).not.toHaveBeenCalled();
+      });
+
+      it('does not hold on a weak verdict: confidence under the bar is a hunch, not a decline', async () => {
+        const internal = new AutonomousRunner(goalCfg('ship it')) as unknown as Internal;
+        const candidate = withDraft('weak', { ...declined, confidence: 0.6 });
+        detectFileConflictsMock.mockResolvedValue({ safe: [candidate], conflictGroups: [] });
+
+        expect(await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }])).toEqual(new Set(['weak']));
+      });
+
+      it('survives a comment that fails to post: the issue is still not claimed', async () => {
+        runnerExecution.setTaskSource({ kind: 'linear', addComment: vi.fn(async () => { throw new Error('linear down'); }) } as unknown as ITaskSource);
+        const internal = new AutonomousRunner(goalCfg('ship it')) as unknown as Internal;
+        const held = withDraft('held2', declined);
+
+        expect(await internal.detectSafeCandidateIds([{ task: held, projectPath: '/repo' }])).toEqual(new Set());
+        expect(detectFileConflictsMock).not.toHaveBeenCalled();
+      });
+    });
+
     it('repays a known-first deferred unknown as the next exclusive idle wave', async () => {
       const r = new AutonomousRunner(cfg({
         allowSameProjectConcurrent: true, worktreeMode: true, maxConcurrentTasks: 3,

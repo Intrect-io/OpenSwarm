@@ -332,7 +332,7 @@ agents:
       });
     });
 
-    it('defaults includeBacklog to true so free slots chew parked work (AGT-4257)', () => {
+    it('defaults includeBacklog to false so only Todo is dispatched, and honours an explicit opt-in (AGT-4784)', () => {
       const base = {
         language: 'en',
         linear: { apiKey: 'k', teamId: 't' },
@@ -340,12 +340,12 @@ agents:
       };
       vi.mocked(existsSync).mockReturnValue(true);
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { enabled: true } }));
-      expect(loadConfig('/tmp/config.json').autonomous?.includeBacklog).toBe(true);
+      expect(loadConfig('/tmp/config.json').autonomous?.includeBacklog).toBe(false);
 
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
-        ...base, autonomous: { enabled: true, includeBacklog: false },
+        ...base, autonomous: { enabled: true, includeBacklog: true },
       }));
-      expect(loadConfig('/tmp/config.json').autonomous?.includeBacklog).toBe(false);
+      expect(loadConfig('/tmp/config.json').autonomous?.includeBacklog).toBe(true);
     });
 
     it('carries a project goal from autonomous.projectAgents to the runtime config (AGT-4662)', () => {
