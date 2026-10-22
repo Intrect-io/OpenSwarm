@@ -261,8 +261,9 @@ export interface DecisionEngineConfig {
   dryRun: boolean;
 
   /**
-   * Treat Linear "Backlog" as an actionable work queue. Default true (AGT-4257)
-   * so free slots chew parked work. Set false to park Backlog again.
+   * Treat Linear "Backlog" as an actionable work queue. Default false (AGT-4784):
+   * moving an issue to Todo is the ready signal. Set true (AGT-4257's behaviour)
+   * on a deployment that wants free slots to chew parked work.
    */
   includeBacklog?: boolean;
 

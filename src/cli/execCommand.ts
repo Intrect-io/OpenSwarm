@@ -25,7 +25,9 @@
 // Exit codes: deploy 0 deployed / 1 deploy failed / 2 refused before deploying.
 // status 0 read / 2 no durable run. await 0 terminal / 1 elevated / 2 still
 // pending (timeout). answer 0 resumed+redeployed / 1 refused / 2 nothing to
-// answer.
+// answer. Any of them exits 2 with the message (and `{ "error": ... }` under
+// --json) when it throws before it can report: `await` uses 1 for "elevated",
+// so an unexpected failure must not borrow it. (`runExecGuarded`)
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -35,7 +37,8 @@ import Database from 'better-sqlite3';
 import { expandPath, loadConfig } from '../core/config.js';
 import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import { setAutomationDbPath, defaultAutomationDbPath } from '../automation/automationDbPath.js';
-import { markExecHold } from '../automation/execHold.js';
+import { clearExecHold, isExecHeld, markExecHold } from '../automation/execHold.js';
+import { WORK_ALREADY_QUEUED_REASON } from '../automation/workRunner.js';
 import { OPERATOR_QUESTION_PARK_REASON } from '../coordination/operatorAnswers.js';
 import { resolveQuestionClass, type HumanQuestionClass } from '../coordination/humanQuestions.js';
 import { loadRepoMetadata, type RepoMetadata } from '../support/repoMetadata.js';
@@ -99,6 +102,8 @@ export interface ExecRunRow {
   branchName?: string;
   worktreePath?: string;
   prUrl?: string;
+  /** Where the run was dispatched (automation_runs.project_path); `exec answer` redeploys there. */
+  projectPath?: string;
   lastErrorCode?: string;
   lastErrorMessage?: string;
   retryAt?: number;
@@ -163,6 +168,7 @@ interface ExecRunRowDb {
   branch_name: string | null;
   worktree_path: string | null;
   pr_url: string | null;
+  project_path: string | null;
   last_error_code: string | null;
   last_error_message: string | null;
   retry_at: number | null;
@@ -176,7 +182,7 @@ export function readExecRunRow(dbPath: string, issueId: string): ExecRunRow | un
   try {
     const row = db.prepare(`
       SELECT issue_id, identifier, title, state, attempt_no, branch_name, worktree_path,
-             pr_url, last_error_code, last_error_message, retry_at, updated_at
+             pr_url, project_path, last_error_code, last_error_message, retry_at, updated_at
       FROM automation_runs WHERE issue_id = ?
     `).get(issueId) as ExecRunRowDb | undefined;
     if (!row) return undefined;
@@ -189,6 +195,7 @@ export function readExecRunRow(dbPath: string, issueId: string): ExecRunRow | un
       branchName: row.branch_name ?? undefined,
       worktreePath: row.worktree_path ?? undefined,
       prUrl: row.pr_url ?? undefined,
+      projectPath: row.project_path ?? undefined,
       lastErrorCode: row.last_error_code ?? undefined,
       lastErrorMessage: row.last_error_message ?? undefined,
       retryAt: row.retry_at ?? undefined,
@@ -219,16 +226,25 @@ export function readPendingExecQuestions(dbPath: string, issueId: string): Pendi
       SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'coordination_trace'
     `).get() as { present: number } | undefined;
     if (!present) return [];
+    // One row per correlation, the earliest. A question the operator was paged about is published
+    // twice under one correlation id: the `waiting` ask (the text and the class) and then a `running`
+    // page confirmation whose summary is "Operator paged on Discord" and which carries no class.
+    // Reading both reported the confirmation as a second, approval-class question.
     const rows = db.prepare(`
       SELECT correlation_id, summary, metadata_json
       FROM coordination_trace
       WHERE task_id = ? AND kind = 'human-question' AND status IN ('waiting', 'running')
+        AND id = (
+          SELECT MIN(q.id) FROM coordination_trace q
+          WHERE q.task_id = ? AND q.kind = 'human-question' AND q.status IN ('waiting', 'running')
+            AND q.correlation_id = coordination_trace.correlation_id
+        )
         AND correlation_id NOT IN (
           SELECT correlation_id FROM coordination_trace
           WHERE task_id = ? AND kind = 'human-answer' AND status = 'completed'
         )
       ORDER BY id
-    `).all(issueId, issueId) as Array<{ correlation_id: string; summary: string; metadata_json: string | null }>;
+    `).all(issueId, issueId, issueId) as Array<{ correlation_id: string; summary: string; metadata_json: string | null }>;
     return rows.map((row) => ({
       correlationId: row.correlation_id,
       question: row.summary,
@@ -256,9 +272,12 @@ function parseMetadata(value: string | null): { questionClass?: unknown } | unde
 /** Assemble the elevation document from the two reads. */
 export function buildExecElevation(runId: string, row: ExecRunRow, questions: PendingExecQuestion[]): ExecElevation {
   const verdict = classifyRunForAwait(row.state);
+  // Guidance only travels with a question: `--text` is written to the board for a correlation, and a
+  // resume with no question carries none. A hint that offered `--text` there made the orchestrator
+  // believe its guidance landed while the run was resumed without it.
   const hint = questions.length > 0
     ? `openswarm exec answer ${runId} --correlation ${questions[0].correlationId} --text "..."`
-    : `openswarm exec answer ${runId} --text "..."`;
+    : `openswarm exec answer ${runId}`;
   return {
     runId,
     identifier: row.identifier,
@@ -278,6 +297,31 @@ export function buildExecElevation(runId: string, row: ExecRunRow, questions: Pe
 }
 
 // ---- Shared plumbing ---------------------------------------------------------
+
+/**
+ * Run an `exec` subcommand and turn a throw into an exit code an orchestrator can act on.
+ *
+ * `work` wraps its action in a try/catch; the `exec` actions are awaited under a synchronous
+ * `program.parse()`, so a throw — `daemonBaseUrl()`'s deliberate refusal to send a token over plaintext
+ * http, a ledger that cannot be opened — was an unhandled rejection: a raw stack, exit 1 and no JSON
+ * document under `--json`, after the board answer and the ledger resume had already been committed.
+ * Exit 1 is taken (`await` reports "elevated" with it, `deploy` "failed"), so every throw exits 2 with the
+ * message: "did not finish, read the error", never mistaken for an elevation document.
+ */
+export async function runExecGuarded(
+  json: boolean | undefined,
+  run: () => Promise<number>,
+  deps: Pick<ExecCommandDeps, 'out' | 'log'> = {},
+): Promise<number> {
+  try {
+    return await run();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (json) (deps.out ?? stdoutLog)(JSON.stringify({ error: message }));
+    else (deps.log ?? ((line: string) => console.error(line)))(message);
+    return 2;
+  }
+}
 
 interface ResolvedContext {
   config: SwarmConfig;
@@ -318,6 +362,8 @@ export interface ExecCommandDeps {
   getIssue?: (idOrIdentifier: string) => Promise<LinearIssueInfo | null>;
   ensureTaskSource?: () => Promise<unknown>;
   markHold?: (issueId: string, actor: string) => void;
+  /** Whether a hold already exists, read before this call writes one (default: the real store). */
+  isHeld?: (issueId: string) => boolean;
   clearHold?: (issueId: string) => void;
   daemonHealthy?: () => Promise<boolean>;
   /** Precise probe: distinguishes a reachable-but-refusing daemon from an absent one. */
@@ -400,6 +446,8 @@ interface DeployOutcome {
   transport: DeployTransport;
   ok: boolean;
   detail?: string;
+  /** The request may have reached the daemon (a transport error or a 5xx), so a run might exist anyway. */
+  ambiguous?: boolean;
   /** The command's exit code when this outcome fails: 2 refused-before-deploying, 1 failed. */
   exitCode: number;
 }
@@ -434,10 +482,13 @@ async function deployResolvedIssue(
     try {
       response = await post(repoPath, identifier);
     } catch (err) {
-      return { transport: 'daemon', ok: false, exitCode: 1, detail: `daemon request failed: ${err instanceof Error ? err.message : String(err)}` };
+      return { transport: 'daemon', ok: false, exitCode: 1, ambiguous: true, detail: `daemon request failed: ${err instanceof Error ? err.message : String(err)}` };
     }
     if (response.status !== 202) {
-      return { transport: 'daemon', ok: false, exitCode: 1, detail: `daemon refused the dispatch (HTTP ${response.status}): ${describeBody(response.body)}` };
+      return {
+        transport: 'daemon', ok: false, exitCode: 1, ambiguous: response.status >= 500,
+        detail: `daemon refused the dispatch (HTTP ${response.status}): ${describeBody(response.body)}`,
+      };
     }
     const result = response.body as { items?: Array<{ reason?: string }>; queued?: number } | undefined;
     if ((result?.queued ?? 0) === 0) {
@@ -580,6 +631,8 @@ export async function runExecDeployCommand(
     // hold that cannot be written aborts the deploy rather than shipping a run
     // nobody is protecting.
     const actor = execActor(deps);
+    // Read before this call writes one: a hold that already exists belongs to an earlier deploy.
+    const heldBefore = (deps.isHeld ?? ((issueId: string) => isExecHeld(issueId)))(issue.id);
     try {
       (deps.markHold ?? ((issueId: string, who: string) => markExecHold(issueId, who)))(issue.id, actor);
     } catch (err) {
@@ -589,6 +642,14 @@ export async function runExecDeployCommand(
 
     const deploy = await deployResolvedIssue(deps, repoPath, issue.identifier);
     if (!deploy.ok) {
+      // The hold goes in before the run exists so that a heartbeat can never idle-fill a run nobody
+      // protected. A refused deploy leaves no run for an orchestrator to await, so the hold this call
+      // wrote would only keep idle_fill and the supervisor away from an issue nobody is watching, for
+      // the full TTL (each refused retry refreshing it). Kept when it already existed, when the request
+      // may have reached the daemon (a run might exist), and when the daemon already owns the issue
+      // (`exec await` can still follow that run).
+      const releasable = !heldBefore && !deploy.ambiguous && deploy.detail !== WORK_ALREADY_QUEUED_REASON;
+      if (releasable) (deps.clearHold ?? ((issueId: string) => clearExecHold(issueId)))(issue.id);
       log(`Deploy failed (${deploy.transport}): ${deploy.detail ?? 'unknown reason'}`);
       if (opts.json) out(JSON.stringify({ runId: issue.id, identifier: issue.identifier, transport: deploy.transport, deployed: false, error: deploy.detail }));
       return deploy.exitCode;
@@ -782,6 +843,17 @@ export async function runExecAnswerCommand(
       return 2;
     }
 
+    // `--text` is the body of an answer to a question, so it needs the question's correlation. Without one
+    // there is nowhere to write it, and resuming anyway would report success (exit 0, run READY, redeployed)
+    // while the guidance was dropped and the worker parked on the same thing again. Refused before any write.
+    if (opts.text?.trim() && !opts.correlation) {
+      const message = '--text needs --correlation of a pending question: guidance is delivered as the answer to that '
+        + 'question and nothing else carries it. Omit --text to resume without guidance.';
+      if (opts.json) out(JSON.stringify({ runId: issueId, answerAccepted: null, resumed: null, transport: null, error: message }));
+      else log(message);
+      return 2;
+    }
+
     let answerAccepted: boolean | null = null;
     if (opts.correlation) {
       // Bind the correlation to THIS run before any write. `answerHumanQuestion`
@@ -851,7 +923,10 @@ export async function runExecAnswerCommand(
       return 1;
     }
 
-    const repoPath = resolve(expandPath(opts.path ?? process.cwd(), true));
+    // The run knows where it was dispatched. Falling back to the cwd first sent the redeploy of an
+    // orchestrator that answers from anywhere else to a directory the daemon refuses (403) or the
+    // detached child silently exits on, after the answer and the resume were already committed.
+    const repoPath = resolve(expandPath(opts.path ?? row.projectPath ?? process.cwd(), true));
     const identifier = row.identifier ?? issueId;
     const deploy = await deployResolvedIssue(deps, repoPath, identifier);
     if (!deploy.ok) {

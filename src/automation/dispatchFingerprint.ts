@@ -34,6 +34,7 @@
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { defaultAutomationDbPath } from './automationDbPath.js';
+import { EXECUTION_COMMENT_CONTEXT_HEADING } from './executionTaskContext.js';
 
 export interface FingerprintInput {
   title: string;
@@ -55,6 +56,19 @@ export function isDaemonComment(body: string): boolean {
 }
 
 /**
+ * The description as the issue carries it. Once a run is selected,
+ * `refreshExecutionTaskContext` appends the tracker discussion to `task.description` in place, and
+ * the pipeline records its input after that. The heartbeat fingerprints the bulk-fetched task,
+ * which has no discussion, so without this cut the two digests of an unchanged issue differ as soon
+ * as it has a single comment (the daemon's own included) and the hold never engages. (AGT-4787)
+ */
+function ownDescription(description: string | undefined): string {
+  const text = description ?? '';
+  const at = text.indexOf(EXECUTION_COMMENT_CONTEXT_HEADING);
+  return (at === -1 ? text : text.slice(0, at)).trim();
+}
+
+/**
  * A stable digest of everything a person can change about an issue. Comments are
  * hashed in the order the tracker returns them, so reordering is a change but
  * the daemon's own comments, wherever they sit, are not.
@@ -62,7 +76,7 @@ export function isDaemonComment(body: string): boolean {
 export function inputFingerprint(issue: FingerprintInput): string {
   const human = (issue.comments ?? []).map((c) => c.body.trim()).filter((body) => body && !isDaemonComment(body));
   return createHash('sha256')
-    .update(JSON.stringify([issue.title.trim(), (issue.description ?? '').trim(), human]))
+    .update(JSON.stringify([issue.title.trim(), ownDescription(issue.description), human]))
     .digest('hex');
 }
 

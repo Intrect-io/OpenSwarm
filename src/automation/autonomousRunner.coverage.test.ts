@@ -393,6 +393,45 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
         expect(await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }])).toEqual(new Set(['weak']));
       });
 
+      it('caches a decline that has no brief, so a held issue costs no draft after the first heartbeat (AGT-4784)', async () => {
+        // resolveTaskFileScope keeps a confident decline on the task but names no files. The draft cache
+        // used to store only 'drafted' scopes, so the verdict was recomputed (a model call) on every
+        // heartbeat for exactly the issues this gate exists for.
+        runnerExecution.setTaskSource({ kind: 'linear', addComment: vi.fn(async () => {}) } as unknown as ITaskSource);
+        const internal = new AutonomousRunner(goalCfg('ship it')) as unknown as Internal;
+        resolveTaskFileScopeMock.mockImplementation(async (candidate: TaskItem) => {
+          candidate.preAdmissionDraft = { relevantFiles: [], sufficient: false, scope: declined } as unknown as TaskItem['preAdmissionDraft'];
+          return [];
+        });
+        const make = () => task({ id: 'nobrief', issueId: 'ISSUE-nobrief', issueIdentifier: 'NOBRIEF', description: 'pick one' });
+        const first = make();
+        const refetched = make(); // the next heartbeat's fresh copy: no draft, no scope
+
+        expect(await internal.detectSafeCandidateIds([{ task: first, projectPath: '/repo' }])).toEqual(new Set());
+        expect(await internal.detectSafeCandidateIds([{ task: refetched, projectPath: '/repo' }])).toEqual(new Set());
+
+        expect(resolveTaskFileScopeMock).toHaveBeenCalledTimes(1);          // the second heartbeat read the cache
+        expect(refetched.preAdmissionDraft?.scope?.kind).toBe('decision_pending');
+        expect(refetched.fileScope ?? []).toEqual([]);                      // a decline is not a drafted scope
+        expect(refetched.fileScopeSource).toBeUndefined();
+      });
+
+      it('a conflict analysis failure does not claim the issue the hold just refused', async () => {
+        // The fail-closed fallback admits the first candidate of the group when analysis is
+        // unavailable. It must pick from what survived the hold, or the failure re-admits `held`.
+        runnerExecution.setTaskSource({ kind: 'linear', addComment: vi.fn(async () => {}) } as unknown as ITaskSource);
+        const internal = new AutonomousRunner(goalCfg('ship it')) as unknown as Internal;
+        const held = withDraft('held3', declined);
+        const fine = withDraft('fine3');
+        detectFileConflictsMock.mockRejectedValueOnce(new Error('knowledge graph unavailable'));
+
+        const safe = await internal.detectSafeCandidateIds([
+          { task: held, projectPath: '/repo' }, { task: fine, projectPath: '/repo' },
+        ]);
+
+        expect(safe).toEqual(new Set(['fine3']));
+      });
+
       it('survives a comment that fails to post: the issue is still not claimed', async () => {
         runnerExecution.setTaskSource({ kind: 'linear', addComment: vi.fn(async () => { throw new Error('linear down'); }) } as unknown as ITaskSource);
         const internal = new AutonomousRunner(goalCfg('ship it')) as unknown as Internal;
@@ -706,6 +745,15 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
   });
 
   describe('switchProvider', () => {
+    it('reports a delegated CLI as refused unless the operator opted in to delegated adapters (AGT-4444)', () => {
+      // The dashboard toggle asks this before switchProvider; the startup assertion only read config.yaml.
+      const strict = new AutonomousRunner(cfg({ allowDelegatedAdapters: false }));
+      expect(strict.providerSwitchViolation('claude')).toContain("'claude'");
+      expect(strict.providerSwitchViolation('codex-responses')).toBeNull();
+      expect(new AutonomousRunner(cfg()).providerSwitchViolation('cursor')).toContain("'cursor'");
+      expect(new AutonomousRunner(cfg({ allowDelegatedAdapters: true })).providerSwitchViolation('claude')).toBeNull();
+    });
+
     it('releases only provider-quota retries and clears the in-memory pause', () => {
       const r = new AutonomousRunner(cfg({ defaultAdapter: 'codex' }));
       const internal = r as unknown as Internal;

@@ -132,6 +132,44 @@ describe('idle_fill and the issue input (AGT-4787)', () => {
     expect(markReady).toHaveBeenCalledWith('AGT-1');
   });
 
+  /** A run that asked `hq-only` and parked for the exact answer, with its input recorded at start. */
+  async function parkedOnQuestion(internal: InternalRunner): Promise<void> {
+    const { RunLedger } = await import('./runLedger.js');
+    const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
+    await getCoordinationStore().publish({
+      repository: REPO, taskId: 'AGT-1', actor: 'worker-x', recipient: 'human',
+      kind: 'human-question', status: 'running', correlationId: 'hq-only', summary: 'ask',
+    });
+    const ledger = new RunLedger(dbPath);
+    const claim = ledger.claimRun('AGT-1', { ownerInstanceId: 'seed', leaseMs: 60_000, maxActiveForProject: 1 });
+    expect(claim).not.toBeNull();
+    expect(ledger.transition(claim!, 'RETRY_AT', {
+      retryAt: Date.now() + 3_600_000, errorCode: 'waiting_on_operator',
+    })).toBe(true);
+    ledger.close();
+    expect(internal.durableRuns.markNeedsHumanForQuestions('AGT-1', ['hq-only'], 'waiting for exact answer')).toBe(true);
+    await startedOn(TASK);
+  }
+
+  it('an answered ask_human park resumes although the issue is unchanged; an unanswered one stays parked', async () => {
+    // Before this, idle_fill was the only thing that resumed an answered question park, so holding
+    // idle_fill for an unchanged issue (AGT-4787) would have stranded the operator's answer.
+    const internal = await makeRunner();
+    await parkedOnQuestion(internal);
+
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([]);
+    expect(internal.durableRuns.getRun('AGT-1')?.state).toBe('NEEDS_HUMAN');
+
+    const { getCoordinationStore } = await import('../coordination/coordinationStore.js');
+    await getCoordinationStore().publish({
+      repository: REPO, taskId: 'AGT-1', actor: 'operator', recipient: 'worker-x',
+      kind: 'human-answer', status: 'completed', correlationId: 'hq-only', summary: 'answered',
+    });
+
+    expect(internal.filterAlreadyProcessed([TASK])).toEqual([TASK]); // the issue itself is still unchanged
+    expect(internal.durableRuns.getRun('AGT-1')?.state).not.toBe('NEEDS_HUMAN');
+  });
+
   it('ignores the daemon\'s own writes: a changed update time alone does not unblock', async () => {
     const internal = await makeRunner();
     internal.durableRuns.markNeedsHuman('AGT-1', 'Reviewer rejected 4 attempts: still failing lint');

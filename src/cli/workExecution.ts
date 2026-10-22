@@ -20,6 +20,7 @@ import type { ExecutionContext } from '../automation/runnerExecution.js';
 import type { ExecutionDurabilityHooks } from '../automation/durableRunCoordinator.js';
 import type { EffectClaim } from '../automation/runLedger.js';
 import type { ITaskSource } from '../automation/taskSource.js';
+import { resolveOwningProject } from '../support/projectGoal.js';
 import {
   buildCancellationEffect,
   buildCompletionEffect,
@@ -191,6 +192,13 @@ export function buildWorkExecutionContext(opts: WorkExecutionContextOptions): Ex
     guards: autonomous?.guards,
     verify: autonomous?.verify,
     maxReflections: autonomous?.maxReflections,
+    // What AutonomousRunner.getExecCtx forwards to the same pipeline. `work` and the detached child
+    // that `exec --issue` falls back to run the same worker, so a field not carried here is
+    // undefined in them: the bash tool fences only on an explicit 'on' (the worker ran unfenced
+    // with open network while the config said on/loopback), and a project's `setup` never ran.
+    // The same unmapped-field trap as AGT-4122 / AGT-4404 / AGT-4785. (AGT-4783, AGT-4798)
+    workerSandbox: autonomous?.workerSandbox,
+    getProjectSetup: (projectPath) => resolveOwningProject(autonomous?.projectAgents, projectPath)?.setup,
     durability: opts.durability,
     peerIssues: opts.peerIssues,
   };

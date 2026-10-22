@@ -10,6 +10,7 @@ import {
   inputFingerprint, isDaemonComment, mayRedispatch, recordParkedInput, recordRunInput,
   resetDispatchFingerprintForTests,
 } from './dispatchFingerprint.js';
+import { EXECUTION_COMMENT_CONTEXT_HEADING, refreshExecutionTaskContext } from './executionTaskContext.js';
 
 let dir: string;
 const saved = process.env.OPENSWARM_AUTOMATION_DB;
@@ -69,6 +70,40 @@ describe('inputFingerprint', () => {
 
   it('treats a missing description like an empty one', () => {
     expect(inputFingerprint({ title: 't' })).toBe(inputFingerprint({ title: 't', description: '', comments: [] }));
+  });
+});
+
+describe('the comment history a selected run appends to the description (AGT-4787)', () => {
+  // executePipeline's first line is `task = await prepareTaskExecutionContext(task)`, which appends the
+  // tracker discussion to task.description; recordRunInput runs after it. The heartbeat fingerprints
+  // the bulk-fetched task, which has no discussion. Both sides must still agree on an unchanged issue.
+  async function selectedRun(comments: Array<{ body: string; createdAt: string }>) {
+    const task = { id: 'AX-1', issueId: 'AX-1', ...issue } as { id: string; issueId: string; title: string; description: string };
+    await refreshExecutionTaskContext(task as never, { getExecutionComments: async () => comments } as never);
+    return task;
+  }
+  const history = [
+    { body: '🧭 **[OpenSwarm] Task execution started**', createdAt: '2026-10-20T01:00:00Z' },
+    { body: 'Please use option B.', createdAt: '2026-10-20T02:00:00Z' },
+  ];
+
+  it('fingerprints an issue the same with or without the appended history', async () => {
+    const task = await selectedRun(history);
+    expect(task.description).toContain(EXECUTION_COMMENT_CONTEXT_HEADING); // the helper really appended it
+    expect(inputFingerprint({ title: task.title, description: task.description })).toBe(inputFingerprint(issue));
+  });
+
+  it('holds an unchanged issue after a run recorded its input post-refresh', async () => {
+    recordRunInput(await selectedRun(history)); // what executePipeline does for an issue that already has comments
+    expect(mayRedispatch('AX-1', inputFingerprint(issue))).toBe(false); // what the next heartbeat asks
+  });
+
+  it('still lifts once a person edits the description, with the history appended or not', async () => {
+    recordRunInput(await selectedRun(history));
+    expect(mayRedispatch('AX-1', inputFingerprint({ ...issue, description: 'It drops rows. Use the staging DB.' }))).toBe(true);
+    const edited = await selectedRun(history);
+    edited.description = `Rewritten by a person.${edited.description.slice(issue.description.length)}`;
+    expect(inputFingerprint({ title: edited.title, description: edited.description })).not.toBe(inputFingerprint(issue));
   });
 });
 

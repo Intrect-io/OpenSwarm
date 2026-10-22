@@ -664,8 +664,8 @@ const execCommand = program
     json?: boolean;
   }) => {
     if (opts.issue) {
-      const { runExecDeployCommand } = await import('./cli/execCommand.js');
-      process.exitCode = await runExecDeployCommand({ issue: opts.issue, path: opts.path, json: opts.json });
+      const { runExecDeployCommand, runExecGuarded } = await import('./cli/execCommand.js');
+      process.exitCode = await runExecGuarded(opts.json, () => runExecDeployCommand({ issue: opts.issue!, path: opts.path, json: opts.json }));
       return;
     }
     if (!prompt) {
@@ -696,8 +696,8 @@ execCommand
     // subcommand — so the child's own opts object is always empty here. Read
     // the merged chain instead of duplicating the flags on both commands.
     const opts = this.optsWithGlobals() as { path?: string; json?: boolean };
-    const { runExecStatusCommand } = await import('./cli/execCommand.js');
-    process.exitCode = await runExecStatusCommand(runId, opts);
+    const { runExecStatusCommand, runExecGuarded } = await import('./cli/execCommand.js');
+    process.exitCode = await runExecGuarded(opts.json, () => runExecStatusCommand(runId, opts));
   });
 
 execCommand
@@ -707,8 +707,8 @@ execCommand
   .option('--json', 'Emit machine-readable JSON')
   .action(async function (this: Command, runId: string, _opts: { timeout?: number; json?: boolean }) {
     const opts = this.optsWithGlobals() as { path?: string; timeout?: number; json?: boolean };
-    const { runExecAwaitCommand } = await import('./cli/execCommand.js');
-    process.exitCode = await runExecAwaitCommand(runId, opts);
+    const { runExecAwaitCommand, runExecGuarded } = await import('./cli/execCommand.js');
+    process.exitCode = await runExecGuarded(opts.json, () => runExecAwaitCommand(runId, opts));
   });
 
 execCommand
@@ -719,8 +719,8 @@ execCommand
   .option('--json', 'Emit machine-readable JSON')
   .action(async function (this: Command, runId: string, _opts: { correlation?: string; text?: string; json?: boolean }) {
     const opts = this.optsWithGlobals() as { path?: string; correlation?: string; text?: string; json?: boolean };
-    const { runExecAnswerCommand } = await import('./cli/execCommand.js');
-    process.exitCode = await runExecAnswerCommand(runId, opts);
+    const { runExecAnswerCommand, runExecGuarded } = await import('./cli/execCommand.js');
+    process.exitCode = await runExecGuarded(opts.json, () => runExecAnswerCommand(runId, opts));
   });
 
 // openswarm start

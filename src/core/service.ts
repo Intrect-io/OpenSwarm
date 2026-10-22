@@ -280,7 +280,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
   if (config.autonomous) {
     // Refuse before anything starts: an unattended worker on a CLI-owned tool
     // loop has none of OpenSwarm's fences. (AGT-4444)
-    const { assertUnattendedAdapters } = await import('../adapters/unattendedPolicy.js');
+    const { assertUnattendedAdapters, providerSwitchViolation } = await import('../adapters/unattendedPolicy.js');
     assertUnattendedAdapters(config);
     const heartbeatEnabled = config.autonomous.enabled === true;
     console.log(heartbeatEnabled
@@ -400,6 +400,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       // on an explicit 'on') ran unfenced while the log said "sandbox: on".
       workerSandbox: config.autonomous.workerSandbox,
       minFreeDiskGiB: config.autonomous.minFreeDiskGiB, // AGT-4785
+      allowDelegatedAdapters: config.autonomous.allowDelegatedAdapters, // AGT-4444: a provider switch meets the same policy
       periodicReviews: config.autonomous.periodicReviews,
       orchestrator: config.autonomous.orchestrator,
       orchestratorSchedule: config.autonomous.orchestratorSchedule,
@@ -427,7 +428,16 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     // restart silently reverts to config.yaml's adapter. Reusing switchProvider keeps the role +
     // jobProfile remapping identical to a live dashboard toggle.
     const providerOverride = readProviderOverride();
-    if (providerOverride && providerOverride !== (config.adapter ?? 'codex')) {
+    // The assertion above read config.yaml only. An override naming a delegated CLI would route
+    // unattended work around it, so it meets the same policy and the same opt-in. A stale override
+    // file must not keep the daemon from starting, so it is ignored loudly instead. (AGT-4444)
+    const refusedOverride = providerOverride
+      ? providerSwitchViolation(providerOverride, config.autonomous.allowDelegatedAdapters)
+      : null;
+    if (providerOverride && refusedOverride) {
+      console.warn(`[Service] Ignoring provider override '${providerOverride.replace(/[\r\n]/g, '')}': ${refusedOverride}. `
+        + 'Set autonomous.allowDelegatedAdapters: true to accept that on purpose, or run `openswarm provider <name>` to replace it.');
+    } else if (providerOverride && providerOverride !== (config.adapter ?? 'codex')) {
       setDefaultAdapter(providerOverride);
       runnerInstance.switchProvider(providerOverride);
       // The override silently wins over config.yaml — make that divergence loud so the

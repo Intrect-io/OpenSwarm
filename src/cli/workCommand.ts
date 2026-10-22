@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
 import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
+import { setWorkerNetworkPolicy } from '../support/osSandbox.js';
 import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { linearIssueToTask } from '../orchestration/decisionEngine.js';
@@ -546,6 +547,9 @@ async function runWorkCommandInner(
 
   // Same file for the ledger and the coordination trace — see setAutomationDbPath.
   setAutomationDbPath(config.autonomous?.automationDbPath);
+  // The daemon sets the worker's network policy once at boot (core/service.ts); a standalone run has
+  // no service.ts, so `autonomous.workerNetwork: open` would otherwise be ignored here. (AGT-4798)
+  setWorkerNetworkPolicy(config.autonomous?.workerNetwork ?? 'loopback');
   const coordinator = (deps.createCoordinator
     ?? ((o: { dbPath?: string; maxActive: number }) => new DurableRunCoordinator({
       mode: 'primary',

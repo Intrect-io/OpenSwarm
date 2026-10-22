@@ -157,6 +157,46 @@ describe('detectFileConflicts Knowledge Graph fallback (no declared fileScope)',
     expect(draftTask).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a confident decline that comes without a usable brief, leaving the scope unknown (AGT-4784)', async () => {
+    // `decision_pending` / `human_action_only` drafts name no files, so they are never `sufficient`.
+    // The pre-claim hold reads the verdict off task.preAdmissionDraft, and this function used to drop
+    // any draft that was not sufficient, so exactly those issues were claimed.
+    mockAnalyzeIssue.mockResolvedValue(null);
+    const decline = {
+      taskType: 'other', intentSummary: 'a person has to pick', relevantFiles: [] as string[],
+      suggestedApproach: '', completionCriteria: [] as string[], sufficient: false,
+      registrySnapshot: [], durationMs: 1,
+      scope: {
+        applicable: false as const, kind: 'decision_pending' as const, confidence: 0.95,
+        reason: 'the title waits on a person to choose', evidence: ['title says decide', 'no code deliverable'],
+      },
+    };
+    const candidate = task('declined', 2);
+
+    const scope = await resolveTaskFileScope(candidate, project, { draftTask: async () => decline });
+
+    expect(scope).toEqual([]);
+    expect(candidate.fileScope).toBeUndefined();
+    expect(candidate.fileScopeSource).toBeUndefined();
+    expect(candidate.preAdmissionDraft?.scope?.kind).toBe('decision_pending');
+  });
+
+  it('does not keep a weak verdict: under the confidence bar it is a hunch, not a decline', async () => {
+    mockAnalyzeIssue.mockResolvedValue(null);
+    const candidate = task('weak', 2);
+    await resolveTaskFileScope(candidate, project, {
+      draftTask: async () => ({
+        taskType: 'other', intentSummary: '', relevantFiles: [] as string[], suggestedApproach: '',
+        completionCriteria: [] as string[], sufficient: false, registrySnapshot: [], durationMs: 1,
+        scope: {
+          applicable: false as const, kind: 'decision_pending' as const, confidence: 0.6,
+          reason: 'maybe', evidence: ['one thing'],
+        },
+      }),
+    });
+    expect(candidate.preAdmissionDraft).toBeUndefined();
+  });
+
   it('admits KG scopes that reduce to unknown after volatile paths are removed', async () => {
     // Both tasks resolve to a non-null impact, but every module normalizes
     // away (node_modules / dist are filtered as volatile), so `modules.size`

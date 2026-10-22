@@ -277,6 +277,36 @@ describe('OllamaCloudAdapter', () => {
     expect(new OllamaCloudAdapter().getTransport()).toBe('local');
   });
 
+  it('enforces the publication fence on the direct transport, as every other native adapter does (AGT-4783)', async () => {
+    // The direct route (OLLAMA_API_KEY set) built its loop options by hand and kept only `protectedFiles`,
+    // so a fenced worker could `git push` while the local transport refused it.
+    process.env.OLLAMA_API_KEY = 'test-key';
+    delete process.env.OLLAMA_CLOUD_BASE_URL;
+    const bodies: Array<{ messages: Array<{ role: string; content?: string }> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).endsWith('/chat/completions')) {
+        return new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 });
+      }
+      bodies.push(JSON.parse(String(init?.body)));
+      const sse = bodies.length === 1
+        ? 'data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function",'
+          + '"function":{"name":"bash","arguments":"{\\"command\\":\\"git push origin HEAD\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+          + 'data: [DONE]\n'
+        : 'data: {"choices":[{"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n';
+      return new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+    }));
+
+    const result = await new OllamaCloudAdapter().run({
+      prompt: 'push it', cwd: process.cwd(), model: 'deepseek-v4.1-flash:cloud',
+      enableTools: true, maxTurns: 3, forbidPublication: true,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(bodies).toHaveLength(2);
+    const toolReply = bodies[1].messages.filter((m) => m.role === 'tool').at(-1);
+    expect(toolReply?.content).toMatch(/^PUBLICATION_FENCED:/);
+  }, 30_000);
+
   it('retries a transient 5xx on the direct transport and sends the plain id to the chat endpoint', async () => {
     process.env.OLLAMA_API_KEY = 'test-key';
     delete process.env.OLLAMA_CLOUD_BASE_URL;

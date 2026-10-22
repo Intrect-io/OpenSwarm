@@ -13,6 +13,12 @@ import type { AutonomousRunner } from './autonomousRunner.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { broadcastEvent } from '../core/eventHub.js';
 
+/**
+ * Why a dispatch of an issue the scheduler already owns is skipped. `exec --issue` compares against it:
+ * that refusal leaves a run for the caller to await, every other refusal leaves none.
+ */
+export const WORK_ALREADY_QUEUED_REASON = 'already queued or running';
+
 export interface WorkDispatchRequest {
   issueIds: string[];
   projectPath: string;
@@ -272,7 +278,7 @@ export async function dispatchWork(
       item.status = 'skipped';
       if (rejectionReason === 'duplicate') {
         // Another live dispatch/heartbeat owns this issue on the scheduler.
-        item.reason = 'already queued or running';
+        item.reason = WORK_ALREADY_QUEUED_REASON;
         continue;
       }
       // 'stopping': the runner is shutting down, nobody will ever run this.

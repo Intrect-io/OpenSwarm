@@ -12,6 +12,7 @@ import {
   normalizeConflictScope,
 } from './conflictScope.js';
 import { selectGreedyMaximalIndependentSet } from './conflictAdmission.js';
+import { isScopeDeclined } from '../agents/draftScope.js';
 import {
   canonicalExistingRepoFiles,
   MAX_VALIDATED_DIRECT_FILES,
@@ -170,6 +171,11 @@ export async function resolveTaskFileScope(
           return relevantFiles;
         }
       }
+      // A confident "a person has to do or decide this" verdict is never a sufficient brief — it
+      // names no files — yet the pre-claim hold reads it off the task (AGT-4784). Dropping it here is
+      // what let `decision_pending` and `human_action_only` issues through to a claim and a worktree.
+      // The scope stays unknown: only the verdict is kept.
+      if (draft && isScopeDeclined(draft.scope)) task.preAdmissionDraft = draft;
     } catch (err) {
       console.warn(`[ConflictDetector] Pre-admission draft failed for ${task.id}:`, err);
     }

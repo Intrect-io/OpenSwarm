@@ -359,7 +359,7 @@ DISCORD_CHANNEL_ID=your-channel-id
 | `github` | Repos list for CI monitoring |
 | `agents` | Agent definitions (name, projectPath, heartbeat interval) |
 | `autonomous` | Schedule, pair mode, role models, decomposition settings (`maxChildrenPerTask` applies to both the runner and human `/plan`; `dailyLimit` paces the unsupervised runner only — AGT-4123) |
-| `autonomous.includeBacklog` | Treat Linear Backlog as a work queue (default `true`) |
+| `autonomous.includeBacklog` | Treat Linear Backlog as a work queue (default `false`: moving an issue to Todo is the ready signal; set `true` on a deployment that wants free slots to chew the Backlog) |
 | `autonomous.unknownScopeAdmission` | `admit` (default): worktrees isolate — predicted file overlap does not defer. `serialize`: Codex-era fail-closed |
 | `prProcessor` | PR auto-improvement schedule, retry limits, conflict resolver config |
 
@@ -403,7 +403,7 @@ The `openrouter` adapter runs OpenSwarm's own agentic tool loop (read/search/edi
 
 Each autonomous run snapshots the current Claude Code instruction hierarchy (`~/.claude/CLAUDE.md`, user rules, repository `CLAUDE.md`/`AGENTS.md`, and matching `.claude/rules`) once and applies the same capsule to orchestrator, worker, reviewer, Codex, CC-Router, and Cursor. The dashboard shows the capsule digest and source/error counts, not the rule bodies.
 
-`adapterRouting.primary` must name the adapter the worker actually runs (`adapter:` at the top of the config, or `roles.worker.adapter`); a policy whose primary is some other adapter is ignored, and the fallbacks never engage. Role MCP grants and the coordination tools (`coordination_read`, `coordination_peers`, `coordination_publish`, `coordination_thread_*`, `ask_human`) additionally require an adapter that runs OpenSwarm's own tool loop — `codex-responses`, `cc-router`, `gpt`, `openrouter`, `atlascloud`, `lmstudio`, `local`. The delegated CLIs (`codex`, `claude`, `cursor`) bring their own tool loop, so those grants do not reach them; OpenSwarm logs a warning rather than pretending they applied.
+`adapterRouting.primary` must name the adapter the worker actually runs (`adapter:` at the top of the config, or `roles.worker.adapter`); a policy whose primary is some other adapter is ignored, and the fallbacks never engage. Role MCP grants and the coordination tools (`coordination_read`, `coordination_peers`, `coordination_publish`, `coordination_thread_*`, `ask_human`) additionally require an adapter that runs OpenSwarm's own tool loop — `codex-responses`, `cc-router`, `gpt`, `openrouter`, `atlascloud`, `lmstudio`, `local`. The delegated CLIs (`codex`, `claude`, `cursor`) bring their own tool loop, so those grants do not reach them; for interactive CLI use OpenSwarm logs a warning rather than pretending they applied. The daemon is stricter: a config with an `autonomous` section that names a delegated adapter anywhere (`adapter`, `defaultRoles`, `projectAgents` roles, `adapterRouting` primary or fallbacks, `orchestrator`, `loopAdvisor`) refuses to start unless `autonomous.allowDelegatedAdapters: true` accepts the missing fences on purpose.
 
 A configured `coordinationBoardIssueId` turns one project-scoped tracker issue into the durable agent board. Worker advice/delegation, Discord questions, adapter routes, periodic reviews, and MCP denials are visible through `GET /api/coordination`, SSE, and the **AGENT COORDINATION** dashboard panel. Tool arguments, prompts, credentials, and rule bodies are redacted or omitted.
 
@@ -426,7 +426,7 @@ autonomous:
   coordinationBoardIssueId: AGT-3993
   adapterRouting:
     primary: codex-responses
-    fallbacks: [cc-router, cursor]
+    fallbacks: [cc-router]   # `cursor` is a delegated CLI: add it only with allowDelegatedAdapters: true
     allowReasons: [quota, infra, capability]
   mcpPolicies:
     orchestrator:

@@ -268,6 +268,34 @@ describe('buildWorkExecutionContext (INT-3387)', () => {
     expect(ctx.allowedProjects).toEqual(['/repo']);
   });
 
+  it('carries the worker sandbox and the project setup the daemon carries (AGT-4783, AGT-4798)', () => {
+    // `openswarm work` and the detached child of `exec --issue` run the same worker as the daemon. A field
+    // not carried here is undefined there: the bash tool fences only on an explicit 'on', and a project's
+    // `setup` never runs. service.test.ts pins the daemon's mapping; this pins the CLI's.
+    const ctx = buildWorkExecutionContext({
+      repoPath: '/repo',
+      autonomous: {
+        enabled: true, pairMode: true, schedule: '* * * * *', allowedProjects: ['/repo'],
+        workerSandbox: 'on',
+        projectAgents: [{ projectPath: '/repo', setup: ['uv sync --frozen'] }],
+      } as never,
+    });
+    expect(ctx.workerSandbox).toBe('on');
+    expect(ctx.getProjectSetup?.('/repo')).toEqual(['uv sync --frozen']);
+    // A task worktree sits under its project, and a project owns every path beneath it.
+    expect(ctx.getProjectSetup?.('/repo/worktree/AGT-1')).toEqual(['uv sync --frozen']);
+    expect(ctx.getProjectSetup?.('/elsewhere')).toBeUndefined();
+  });
+
+  it('carries an explicit workerSandbox: off, and leaves it unset when there is no autonomous section', () => {
+    const off = buildWorkExecutionContext({
+      repoPath: '/repo',
+      autonomous: { enabled: true, pairMode: true, schedule: '* * * * *', allowedProjects: [], workerSandbox: 'off' } as never,
+    });
+    expect(off.workerSandbox).toBe('off');
+    expect(buildWorkExecutionContext({ repoPath: '/repo' }).workerSandbox).toBeUndefined();
+  });
+
   it('routes notifications to the injected log and applies the adapter override to roles', async () => {
     const lines: string[] = [];
     const ctx = buildWorkExecutionContext({
