@@ -479,8 +479,9 @@ const AutonomousConfigSchema = z.object({
   /**
    * OS fence for the worker's bash tool (AGT-4387). 'on' (default) wraps every
    * bash call in sandbox-exec / bwrap: writes limited to the worktree, temp
-   * and build caches, network open. 'off' restores the pre-AGT-4387 behaviour
-   * (bash as the daemon user, regex denylist only).
+   * and build caches, network loopback-only unless `workerNetwork: open`
+   * (AGT-4798). 'off' restores the pre-AGT-4387 behaviour (bash as the daemon
+   * user, regex denylist only).
    */
   workerSandbox: z.enum(['on', 'off']).default('on'),
   /** Accept delegated CLI adapters (claude/codex/cursor) for unattended work despite the missing fences (AGT-4444) */

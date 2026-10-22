@@ -724,6 +724,18 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             return;
           }
 
+          // The toggle re-points every unattended role, so it meets the same refusal the daemon
+          // applies at startup to config.yaml (AGT-4444). `openswarm provider` surfaces the 403.
+          const refused = runnerRef?.providerSwitchViolation(provider);
+          if (refused) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error: `Refusing to switch the autonomous runner to "${provider}": ${refused}. `
+                + 'Set autonomous.allowDelegatedAdapters: true to accept that on purpose.',
+            }));
+            return;
+          }
+
           setDefaultAdapter(provider);
           runnerRef?.switchProvider(provider);
           // switchProvider persists only when a runner is attached. Always write

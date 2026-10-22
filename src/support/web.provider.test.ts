@@ -52,6 +52,7 @@ describe('POST /api/provider persistence (INT-3284)', () => {
   it('still writes override when a runner is attached (idempotent with switchProvider)', async () => {
     const runner = {
       switchProvider: vi.fn(),
+      providerSwitchViolation: vi.fn(() => null),
       getEnabledProjects: vi.fn(() => []),
       getAllowedProjects: vi.fn(() => []),
       enableProject: vi.fn(),
@@ -71,5 +72,33 @@ describe('POST /api/provider persistence (INT-3284)', () => {
     expect(res.status).toBe(200);
     expect(runner.switchProvider).toHaveBeenCalledWith('gpt');
     expect(writeProviderOverrideMock).toHaveBeenCalledWith('gpt');
+  });
+
+  it('refuses a switch the runner refuses (a delegated CLI the operator did not opt in to), and persists nothing (AGT-4444)', async () => {
+    // One click on the dashboard used to undo the startup refusal: the toggle only checked isKnownAdapter.
+    const runner = {
+      switchProvider: vi.fn(),
+      providerSwitchViolation: vi.fn(() => "'claude' delegates the tool loop to its own CLI"),
+      getEnabledProjects: vi.fn(() => []),
+      getAllowedProjects: vi.fn(() => []),
+      enableProject: vi.fn(),
+      disableProject: vi.fn(),
+      updateAllowedProjects: vi.fn(),
+      registerProjectPath: vi.fn(),
+    } as unknown as AutonomousRunner;
+    setWebRunner(runner);
+
+    const port = await freePort();
+    await startWebServer(port);
+    const res = await fetch(`http://127.0.0.1:${port}/api/provider`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'claude' }),
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain('allowDelegatedAdapters: true');
+    expect(runner.switchProvider).not.toHaveBeenCalled();
+    expect(writeProviderOverrideMock).not.toHaveBeenCalled();
   });
 });

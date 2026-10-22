@@ -76,7 +76,8 @@ import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './expl
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
-import { setAutomationDbPath } from './automationDbPath.js';
+import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
+import { providerSwitchViolation } from '../adapters/unattendedPolicy.js';
 import {
   findPullRequestForBranch,
   inspectWorktreeRecovery,
@@ -96,7 +97,7 @@ import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
 import { scanRepository } from '../registry/entityScanner.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import {
@@ -140,6 +141,7 @@ import { planStalledInProgress } from './stalledInProgress.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
 import { scopeDeclineComment, scopeDeclineMarker } from './draftGrooming.js';
 import { evaluateReadiness, formatReadinessSummary, partitionByReadiness, verdictFromDraft } from './readinessGate.js';
+import { isScopeDeclined } from '../agents/draftScope.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
 import { completeParentIfChildrenDone as completeParentLocally, buildTaskStateSyncComment } from '../taskState/store.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
@@ -513,6 +515,24 @@ export class AutonomousRunner {
     return getTaskState(issueId)?.execution?.blockedReason === OPERATOR_PARK_REASON;
   }
 
+  /**
+   * Resume a NEEDS_HUMAN ask_human park whose exact-correlation questions are all answered.
+   *
+   * The board read comes first and is only a filter — the ledger's contract re-reads the trace and
+   * decides — so a heartbeat over many parked runs does not open a write transaction for each.
+   */
+  private resumeAnsweredQuestionPark(issueId: string): boolean {
+    try {
+      if (!getCoordinationStore().allQuestionsAnswered(issueId)) return false;
+      const resumed = this.durableRuns.resumeNeedsHumanForQuestions(issueId);
+      if (!resumed) return false;
+      if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
+      return true;
+    } catch { // cxt-ignore: error_swallow — an unreadable board must not stall the heartbeat
+      return false;
+    }
+  }
+
   private answerArrivedFor(issueId: string): boolean {
     try {
       return shouldReadmitEarly({
@@ -538,7 +558,13 @@ export class AutonomousRunner {
   private rateLimitUntil = 0;
   // Disk-space hold: new claims wait while the volumes we write to are nearly full (AGT-4785).
   private readonly diskGate = new HostDiskGate(
-    () => dispatchWritePaths(this.config.allowedProjects.map((p) => normalizeProjectPath(p))),
+    // The directory holding the automation database is measured too: on a deployment whose state
+    // lives on its own volume, a full state volume fails ledger writes (SQLITE_FULL) while every
+    // project volume and the temp dir still look healthy.
+    () => dispatchWritePaths(
+      this.config.allowedProjects.map((p) => normalizeProjectPath(p)),
+      [dirname(this.config.automationDbPath ?? defaultAutomationDbPath())],
+    ),
     () => (this.config.minFreeDiskGiB ?? 10) * 1024 ** 3,
   );
 
@@ -1319,6 +1345,18 @@ export class AutonomousRunner {
             durableRun = this.durableRuns.getRun(id);
             if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
           }
+        }
+        // An answered ask_human question resumes on its own contract, not on a free slot. The
+        // ledger refuses every other trigger for this park (`resumeNeedsHuman`), and nothing in the
+        // daemon called the contract (`exec answer` aside), so the idle_fill below was what
+        // delivered an operator's answer — by accident, since it lifts an unanswered park too. Once
+        // idle_fill stands down for an issue nobody edited (AGT-4787), an answer would otherwise
+        // wait for an edit nobody needs to make.
+        if (!execHeld && durableRun?.lastErrorCode === OPERATOR_QUESTION_PARK_REASON
+            && this.resumeAnsweredQuestionPark(id)) {
+          console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (the operator answered)`);
+          answered++;
+          durableRun = this.durableRuns.getRun(id) ?? durableRun;
         }
         // The same-fingerprint infra circuit parks a run so that an operator
         // changes something before it runs again; a free slot changes nothing.
@@ -3251,6 +3289,9 @@ export class AutonomousRunner {
     // Detect file conflicts per project using Knowledge Graph
     const safeTasks = new Set<string>(); // task IDs safe to enqueue
     for (const [projPath, group] of byProject) {
+      // What survives the pre-claim hold. The fail-closed fallback below must pick from this, not
+      // from `group`, or an analysis failure would admit the very issue the hold just refused.
+      let claimable: RunnableCandidate[] = group;
       try {
         await Promise.all(group.map(async c => {
           const cacheKey = `${projPath}\0${c.task.id}`;
@@ -3273,8 +3314,12 @@ export class AutonomousRunner {
             fileScope: string[]; draft: NonNullable<TaskItem['preAdmissionDraft']>;
             description?: string; executionCommentsLoaded?: boolean;
           }): void => {
-            c.task.fileScope = [...entry.fileScope];
-            c.task.fileScopeSource = 'drafted';
+            // A cached decline names no files: the scope stays unknown instead of becoming an
+            // empty "drafted" one. (AGT-4784)
+            if (entry.fileScope.length > 0) {
+              c.task.fileScope = [...entry.fileScope];
+              c.task.fileScopeSource = 'drafted';
+            }
             c.task.preAdmissionDraft = { ...entry.draft, relevantFiles: [...entry.fileScope] };
             c.task.description = entry.description;
             c.task.executionCommentsLoaded = entry.executionCommentsLoaded;
@@ -3310,7 +3355,11 @@ export class AutonomousRunner {
               pa => projPath.includes(pa.projectPath.replace('~', '')),
             )?.generatedOutputRules,
           });
-          if (c.task.fileScopeSource === 'drafted' && c.task.preAdmissionDraft) {
+          // A confident decline is cached like a drafted scope: it is as expensive to recompute, and
+          // the pre-claim hold reads it on every heartbeat, so a held issue must cost no model call
+          // after the first. It is never a 'drafted' scope — it names no files. (AGT-4784)
+          const declinedDraft = !!c.task.preAdmissionDraft && isScopeDeclined(c.task.preAdmissionDraft.scope);
+          if ((c.task.fileScopeSource === 'drafted' || declinedDraft) && c.task.preAdmissionDraft) {
             const entry = {
               fingerprint, fileScope: [...(c.task.fileScope ?? [])], draft: c.task.preAdmissionDraft,
               description: c.task.description,
@@ -3328,7 +3377,7 @@ export class AutonomousRunner {
         // The drafts above are the first look at what an issue asks for, and they are
         // available before anything is claimed. A confident "a person has to do or decide
         // this" verdict stops the claim here instead of after a worker has started. (AGT-4784)
-        const claimable = await this.holdDeclinedBeforeClaim(group, projPath);
+        claimable = await this.holdDeclinedBeforeClaim(group, projPath);
 
         // A later heartbeat must compare new candidates with workers that are
         // already editing another worktree. Candidate-vs-candidate detection
@@ -3408,8 +3457,8 @@ export class AutonomousRunner {
         // 분석 실패는 동시 편집 안전성을 증명하지 못한 상태다. 저장소마다
         // 하나만 통과시켜 직렬화하고, 나머지는 다음 heartbeat로 미룬다.
         console.warn(`[AutonomousRunner] Conflict detection failed for ${projPath}:`, err);
-        for (const id of failClosedConflictFallback(group)) safeTasks.add(id);
-        for (const deferred of group.slice(1)) {
+        for (const id of failClosedConflictFallback(claimable)) safeTasks.add(id);
+        for (const deferred of claimable.slice(1)) {
           this.syslog(`Conflict analysis unavailable — serializing: ${deferred.task.issueIdentifier || deferred.task.id.slice(0, 8)} ${deferred.task.title}`);
         }
       }
@@ -4012,6 +4061,16 @@ export class AutonomousRunner {
         }
       }
     }
+  }
+
+  /**
+   * Why this runner may not be switched to `adapter`, or null. A delegated CLI owns its tool loop,
+   * so the fences the daemon refused to start without (AGT-4444) would not reach it; the operator's
+   * `allowDelegatedAdapters` is the only way past. Callers that take the adapter from outside the
+   * process (the dashboard toggle, `openswarm provider`) ask this before `switchProvider`.
+   */
+  providerSwitchViolation(adapter: AdapterName): string | null {
+    return providerSwitchViolation(adapter, this.config.allowDelegatedAdapters);
   }
 
   switchProvider(adapter: AdapterName): void {

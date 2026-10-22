@@ -39,6 +39,8 @@ export interface TesterOptions {
    */
   toolAllow?: string[];
   toolDeny?: string[];
+  /** OS fence for this stage's bash tool: `autonomous.workerSandbox`, as for the worker (AGT-4387). */
+  sandbox?: 'on' | 'off';
 }
 
 export interface TesterResult extends ExecutionBoundarySignals {
@@ -143,6 +145,11 @@ export async function runTester(options: TesterOptions): Promise<TesterResult> {
       reasoningEffort: options.reasoningEffort,
       toolAllow: options.toolAllow,
       toolDeny: options.toolDeny,
+      // The same fences the worker's shell runs under: a stage's bash tool is the same tool, and the
+      // credential-free env alone does not stop a repo script from writing outside the worktree, reaching
+      // the network or publishing. Only the worker stage forwarded them. (AGT-4783, AGT-4798, AGT-4418)
+      sandbox: options.sandbox,
+      forbidPublication: true,
     });
 
     const result = parseTesterOutput(raw.stdout);

@@ -375,6 +375,53 @@ describe('service', () => {
     });
   });
 
+  it('ignores a persisted provider override naming a delegated CLI unless the operator opted in (AGT-4444)', async () => {
+    // assertUnattendedAdapters reads config.yaml only; the override is applied after it, so without this
+    // check `openswarm provider claude` (or one dashboard click) plus a restart put the unattended
+    // runner on a CLI with none of the fences the daemon refuses to start without.
+    const { readProviderOverride } = await import('./providerOverride.js');
+    const { setDefaultAdapter } = await import('../adapters/index.js');
+    const { startAutonomous } = await import('../automation/autonomousRunner.js');
+    vi.mocked(readProviderOverride).mockReturnValue('claude');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const strict = {
+        ...mockAutonomousConfig,
+        adapter: 'codex-responses',
+        autonomous: { ...mockAutonomousConfig.autonomous!, allowDelegatedAdapters: false },
+      } as SwarmConfig;
+
+      await startService(strict);
+
+      const runner = await vi.mocked(startAutonomous).mock.results[0].value;
+      expect(runner.switchProvider).not.toHaveBeenCalled();
+      expect(setDefaultAdapter).not.toHaveBeenCalledWith('claude');
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("Ignoring provider override 'claude'"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('still reapplies a delegated provider override when the operator opted in', async () => {
+    const { readProviderOverride } = await import('./providerOverride.js');
+    const { startAutonomous } = await import('../automation/autonomousRunner.js');
+    vi.mocked(readProviderOverride).mockReturnValue('claude');
+
+    await startService({ ...mockAutonomousConfig, adapter: 'codex-responses' } as SwarmConfig); // fixture opts in
+
+    const runner = await vi.mocked(startAutonomous).mock.results[0].value;
+    expect(runner.switchProvider).toHaveBeenCalledWith('claude');
+  });
+
+  it('forwards allowDelegatedAdapters to the runner so a later provider switch meets the same policy (AGT-4444)', async () => {
+    const { startAutonomous } = await import('../automation/autonomousRunner.js');
+    await startService({
+      ...mockAutonomousConfig,
+      autonomous: { ...mockAutonomousConfig.autonomous!, allowDelegatedAdapters: true },
+    } as SwarmConfig);
+    expect(vi.mocked(startAutonomous).mock.calls[0][0]).toMatchObject({ allowDelegatedAdapters: true });
+  });
+
   it('does not reapply provider override when it matches the configured adapter', async () => {
     const { readProviderOverride } = await import('./providerOverride.js');
     const { setDefaultAdapter } = await import('../adapters/index.js');

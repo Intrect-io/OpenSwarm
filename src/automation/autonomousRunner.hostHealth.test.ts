@@ -17,6 +17,11 @@ vi.mock('../memory/repoKnowledge.js', () => ({
   promoteStagedMemories: vi.fn(async () => 0),
 }));
 vi.mock('../linear/projectUpdater.js', () => ({ updateProjectAfterTask: vi.fn(async () => {}) }));
+// A passthrough spy: the real measurement still runs, the test only reads which paths it was given.
+vi.mock('../support/hostHealth.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../support/hostHealth.js')>();
+  return { ...actual, dispatchWritePaths: vi.fn(actual.dispatchWritePaths) };
+});
 
 type InternalRunner = {
   heartbeatParallel: ReturnType<typeof vi.fn>;
@@ -93,6 +98,17 @@ describe('heartbeat holds dispatch when the disk is nearly full (AGT-4785)', () 
     internal.durableRuns.close();
     const pauses = warn.mock.calls.filter((c) => String(c[0]).includes('Dispatch paused'));
     expect(pauses).toHaveLength(1);
+  }, 60_000);
+
+  it('measures the volume that holds the automation database, not only the projects and the temp dir', async () => {
+    // A deployment whose state sits on its own volume fills it independently: ledger writes fail with
+    // SQLITE_FULL while every project volume still looks healthy.
+    const { runner, internal } = await setup(UNREACHABLE_FLOOR_GIB);
+    const { dispatchWritePaths } = await import('../support/hostHealth.js');
+    await runner.heartbeat();
+    internal.durableRuns.close();
+    const [, extra] = vi.mocked(dispatchWritePaths).mock.calls.at(-1)!;
+    expect(extra).toContain(root); // automationDbPath is join(root, 'hosthealth.db')
   }, 60_000);
 
   it('a floor of 0 switches the check off and the heartbeat proceeds to fetch', async () => {

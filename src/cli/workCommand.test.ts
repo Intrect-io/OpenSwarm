@@ -240,6 +240,23 @@ describe('runWorkCommand — review-finding gates (INT-3387)', () => {
 });
 
 describe('runWorkCommand — direct issue ids (INT-3387)', () => {
+  it('applies autonomous.workerNetwork to the worker sandbox, which only core/service.ts did before (AGT-4798)', async () => {
+    const { getWorkerNetworkPolicy, setWorkerNetworkPolicy } = await import('../support/osSandbox.js');
+    try {
+      const open = baseDeps({
+        loadConfig: () => ({ autonomous: { maxConcurrentTasks: 1, workerNetwork: 'open' } }) as unknown as SwarmConfig,
+      });
+      expect(await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, open)).toBe(WORK_EXIT_OK);
+      expect(getWorkerNetworkPolicy()).toBe('open');
+
+      const dflt = baseDeps();
+      expect(await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, dflt)).toBe(WORK_EXIT_OK);
+      expect(getWorkerNetworkPolicy()).toBe('loopback');
+    } finally {
+      setWorkerNetworkPolicy('loopback');
+    }
+  });
+
   it('deploys one pipeline per issue with the work command contract in the context', async () => {
     const deps = baseDeps();
     const code = await runWorkCommand(

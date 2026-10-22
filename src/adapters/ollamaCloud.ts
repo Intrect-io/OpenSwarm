@@ -402,6 +402,15 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
       finishValidator: options.finishValidator,
       finishValidatorMaxRetries: options.finishValidatorMaxRetries,
       protectedFiles: options.protectedFiles,
+      // The fences OpenSwarm's own loop enforces for an unattended stage. The local transport
+      // forwards all of them (local.ts) and so does every other native adapter; this literal kept
+      // only `protectedFiles`, so a worker on the direct route (OLLAMA_API_KEY set) ran with no
+      // write fence, no loopback-only network and no publication fence while the boot log said
+      // "Worker sandbox: on" and unattendedPolicy counted ollama-cloud as fenced. (AGT-4783, AGT-4444)
+      forbidPublication: options.forbidPublication,
+      sandbox: options.sandbox,
+      scratchpadRunId: options.scratchpadRunId,
+      memoryContext: options.memoryContext,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       memoryTools: options.memoryTools,

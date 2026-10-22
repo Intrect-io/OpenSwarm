@@ -26,7 +26,27 @@ export function unattendedAdapterViolation(name: string): string | null {
     + 'role tool limits and the credential-free sandboxed shell do not apply to it';
 }
 
-interface RoleLike { adapter?: string; enabled?: boolean }
+/**
+ * Why the unattended runner may not be pointed at `adapter` after startup, or null.
+ *
+ * `assertUnattendedAdapters` reads config.yaml once, at boot. Three things re-point every role
+ * afterwards without going through it: the persisted provider override (re-applied right after the
+ * assertion), `POST /api/provider` (the dashboard toggle) and `openswarm provider`. Each of them
+ * has to meet the same policy, with the same opt-in, or one click undoes the refusal. (AGT-4444)
+ */
+export function providerSwitchViolation(
+  adapter: string,
+  allowDelegatedAdapters: boolean | undefined,
+): string | null {
+  return allowDelegatedAdapters === true ? null : unattendedAdapterViolation(adapter);
+}
+
+interface RoleLike {
+  adapter?: string;
+  enabled?: boolean;
+  /** Worker fan-out: in `execute` mode every candidate runs a worker on its own adapter (`workerFanout.ts`). */
+  fanout?: { enabled?: boolean; mode?: string; candidates?: ReadonlyArray<{ adapter?: string }> };
+}
 type RolesLike = Partial<Record<string, RoleLike | undefined>>;
 
 /** The part of `SwarmConfig` that decides which adapters unattended runs can reach. */
@@ -44,9 +64,18 @@ export interface UnattendedAdapterConfig {
 
 function* roleAdapters(roles: RolesLike | undefined, where: string): Generator<[string, string]> {
   for (const [role, value] of Object.entries(roles ?? {})) {
-    // A role the operator switched off never runs, so its adapter is not reachable.
-    if (!value?.adapter || value.enabled === false) continue;
-    yield [`${where}.${role}.adapter`, value.adapter];
+    // A role the operator switched off never runs, so neither its adapter nor its fan-out is reachable.
+    if (!value || value.enabled === false) continue;
+    if (value.adapter) yield [`${where}.${role}.adapter`, value.adapter];
+    // A role can have no adapter of its own and still fan out. In `execute` mode each candidate runs an
+    // unattended worker on its own adapter, which the role's adapter check never sees; in `report` mode
+    // the gate only decides and nothing runs, so it is not reachable. (workerFanoutGate.ts)
+    const fanout = value.fanout;
+    if (fanout && fanout.enabled !== false && fanout.mode === 'execute') {
+      for (const [i, candidate] of (fanout.candidates ?? []).entries()) {
+        if (candidate.adapter) yield [`${where}.${role}.fanout.candidates[${i}].adapter`, candidate.adapter];
+      }
+    }
   }
 }
 

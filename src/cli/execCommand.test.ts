@@ -63,10 +63,12 @@ import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import type { RepoMetadata } from '../support/repoMetadata.js';
 import { RunLedger, RUN_STATES } from '../automation/runLedger.js';
 import { OPERATOR_QUESTION_PARK_REASON } from '../coordination/operatorAnswers.js';
+import { WORK_ALREADY_QUEUED_REASON } from '../automation/workRunner.js';
 import {
   ANSWERABLE_STATES,
   AWAIT_ELEVATION_STATES,
   AWAIT_TERMINAL_STATES,
+  buildExecElevation,
   classifyRunForAwait,
   readExecRunRow,
   readPendingExecQuestions,
@@ -283,7 +285,7 @@ const TRACE_SEEDS: TraceSeed[] = [
   { correlationId: 'hq-z', taskId: 'uuid-other', kind: 'human-question', status: 'waiting', summary: 'Someone else’s question' },
 ];
 
-function seedTrace(): void {
+function seedTrace(seeds: readonly TraceSeed[] = TRACE_SEEDS): void {
   const db = new Database(dbPath);
   try {
     db.exec(TRACE_DDL);
@@ -293,7 +295,7 @@ function seedTrace(): void {
         kind, status, correlation_id, summary, metadata_json, fingerprint
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    TRACE_SEEDS.forEach((seed, index) => {
+    seeds.forEach((seed, index) => {
       insert.run(
         `evt-${index}`,
         index + 1,
@@ -342,6 +344,9 @@ function deployDeps(overrides: Partial<ExecCommandDeps> = {}): TestDeps {
     getIssue: async () => issue(),
     daemonHealthy: async () => true,
     postWork: async () => ({ status: 202, body: { workId: 'w', items: [{ status: 'queued' }], queued: 1, skipped: 0 } }),
+    // Hermetic: no hold exists beforehand and releasing one touches no store, unless a test says otherwise.
+    isHeld: () => false,
+    clearHold: () => undefined,
     ...overrides,
   });
 }
@@ -468,6 +473,25 @@ describe('readPendingExecQuestions', () => {
     expect(byId.get('hq-f')?.questionClass).toBe('approval');
   });
 
+  it('reports a paged question once: the "operator paged" confirmation is not a second question', () => {
+    // postHumanQuestionOnce publishes the `waiting` ask and then, once Discord delivered the page, a
+    // `running` event under the SAME correlation id with the marker as its summary and no class.
+    const pagedDb = join(dir, 'paged.db');
+    const original = dbPath;
+    dbPath = pagedDb;
+    try {
+      seedTrace([
+        { correlationId: 'hq-p', taskId: UUID_MAIN, kind: 'human-question', status: 'waiting', summary: 'Which branch?', metadataJson: '{"questionClass":"clarification"}' },
+        { correlationId: 'hq-p', taskId: UUID_MAIN, kind: 'human-question', status: 'running', summary: 'Operator paged on Discord', metadataJson: null },
+      ]);
+      expect(readPendingExecQuestions(pagedDb, UUID_MAIN)).toEqual([
+        { correlationId: 'hq-p', question: 'Which branch?', questionClass: 'clarification' },
+      ]);
+    } finally {
+      dbPath = original;
+    }
+  });
+
   it('reads no questions for a task that has none', () => {
     expect(readPendingExecQuestions(dbPath, 'uuid-unknown')).toEqual([]);
   });
@@ -590,8 +614,10 @@ describe('runExecDeployCommand', () => {
 
   it('fails when the daemon answers 202 but queued nothing, quoting its reason', async () => {
     const markHold = vi.fn();
+    const clearHold = vi.fn();
     const deps = deployDeps({
       markHold,
+      clearHold,
       postWork: async () => ({ status: 202, body: { items: [{ reason: 'state is In Progress' }], queued: 0, skipped: 1 } }),
     });
     const code = await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps);
@@ -600,9 +626,70 @@ describe('runExecDeployCommand', () => {
     expect(code).toBe(2);
     expect(deps.logs.join('\n')).toMatch(/state is In Progress/);
     expect(JSON.parse(deps.outs.join('\n'))).toMatchObject({ deployed: false, error: 'state is In Progress' });
-    // The hold is already written and stays: the deploy was refused, but the
-    // window that matters (a run existing without a hold) never opened.
+    // The hold went in before the deploy so no run could exist unprotected. The deploy was refused, so no
+    // run exists and the hold it wrote is released instead of keeping idle_fill off the issue for 24h.
     expect(markHold).toHaveBeenCalledTimes(1);
+    expect(clearHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN);
+  });
+
+  describe('releasing the hold when the deploy is refused', () => {
+    const refuse = (postWork: NonNullable<ExecCommandDeps['postWork']>, extra: Partial<ExecCommandDeps> = {}) => {
+      const clearHold = vi.fn();
+      const deps = deployDeps({ markHold: vi.fn(), clearHold, postWork, ...extra });
+      return { deps, clearHold };
+    };
+
+    it.each([
+      ['an HTTP 403 (outside allowedProjects)', async () => ({ status: 403, body: { error: 'not allowed' } })],
+      ['an HTTP 409 (rate-limit window)', async () => ({ status: 409, body: { error: 'paused' } })],
+    ])('releases it on %s: nothing was deployed', async (_label, postWork) => {
+      const { deps, clearHold } = refuse(postWork);
+      expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).not.toBe(0);
+      expect(clearHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN);
+    });
+
+    it('releases it when the daemon refuses its own health probe and when a detached child cannot start', async () => {
+      const probe = refuse(async () => ({ status: 202, body: { queued: 1 } }), { daemonProbe: async () => ({ kind: 'refused', status: 403 }) });
+      expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, probe.deps)).toBe(2);
+      expect(probe.clearHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN);
+
+      const child = refuse(async () => ({ status: 202, body: { queued: 1 } }), {
+        daemonProbe: async () => ({ kind: 'down' }), spawnWorkChild: () => ({ ok: false, reason: 'dist/cli.js missing' }),
+      });
+      expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, child.deps)).toBe(1);
+      expect(child.clearHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN);
+    });
+
+    it('keeps it when the daemon already owns the issue: `exec await` can still follow that run', async () => {
+      const { deps, clearHold } = refuse(async () => ({
+        status: 202, body: { items: [{ reason: WORK_ALREADY_QUEUED_REASON }], queued: 0, skipped: 1 },
+      }));
+      expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(2);
+      expect(clearHold).not.toHaveBeenCalled();
+    });
+
+    it('keeps it when the request may have reached the daemon (a 5xx or a transport error)', async () => {
+      const serverError = refuse(async () => ({ status: 503, body: { error: 'busy' } }));
+      expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, serverError.deps)).toBe(1);
+      expect(serverError.clearHold).not.toHaveBeenCalled();
+
+      const dropped = refuse(async () => { throw new Error('socket hang up'); });
+      expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, dropped.deps)).toBe(1);
+      expect(dropped.clearHold).not.toHaveBeenCalled();
+    });
+
+    it('keeps a hold that existed before this call: it belongs to an earlier deploy', async () => {
+      const { deps, clearHold } = refuse(async () => ({ status: 403, body: { error: 'not allowed' } }), { isHeld: () => true });
+      expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(1);
+      expect(clearHold).not.toHaveBeenCalled();
+    });
+
+    it('never releases it after a successful deploy', async () => {
+      const clearHold = vi.fn();
+      const deps = deployDeps({ markHold: vi.fn(), clearHold });
+      expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(0);
+      expect(clearHold).not.toHaveBeenCalled();
+    });
   });
 
   it('quotes the daemon’s own reason when a 202 queues nothing and gives none', async () => {
@@ -1055,7 +1142,18 @@ describe('runExecAnswerCommand', () => {
     expect(answerQuestion).toHaveBeenCalledWith('hq-a', 'use main', 'external:test');
     expect(order).toEqual(['answer', 'resume', 'hold', 'deploy']);
     expect(markHold).toHaveBeenCalledWith(UUID_MAIN, 'external:test');
-    expect(postWork).toHaveBeenCalledWith(process.cwd(), 'INT-1');
+    // The run was registered under REPO: that is where it is redeployed, whatever the cwd of the caller is.
+    expect(postWork).toHaveBeenCalledWith(REPO, 'INT-1');
+  });
+
+  it('redeploys to --path when given, over the run\'s recorded path', async () => {
+    const postWork = vi.fn(async () => ({ status: 202, body: { queued: 1 } }));
+    const deps = baseDeps({
+      answerQuestion: async () => ({ accepted: true }), markHold: vi.fn(), daemonHealthy: async () => true, postWork,
+      openLedger: () => fakeLedger({ resumeNeedsHumanForQuestions: () => 'READY' }),
+    });
+    expect(await runExecAnswerCommand(UUID_MAIN, { correlation: 'hq-a', path: '/elsewhere', json: true }, deps)).toBe(0);
+    expect(postWork).toHaveBeenCalledWith('/elsewhere', 'INT-1');
   });
 
   it('accepts an empty answer text as a pure resume', async () => {
@@ -1153,6 +1251,34 @@ describe('runExecAnswerCommand', () => {
     expect(JSON.parse(deps.outs.join('\n'))).toMatchObject({ answerAccepted: true, resumed: 'READY', transport: 'daemon' });
     // readmit won, so the plain reopen was never needed.
     expect(markReady).not.toHaveBeenCalled();
+  });
+
+  it('refuses --text without --correlation instead of resuming the run and dropping the guidance', async () => {
+    // Guidance is delivered as the answer to a question; with no correlation there is nowhere to write it.
+    // The command used to resume and redeploy anyway and report exit 0, while the worker parked again on
+    // the same thing, because the text had reached no board, ledger or comment.
+    const openLedger = vi.fn(() => fakeLedger());
+    const markHold = vi.fn();
+    const postWork = vi.fn(async () => ({ status: 202, body: { queued: 1 } }));
+    const deps = baseDeps({ openLedger, markHold, postWork, daemonHealthy: async () => true });
+
+    const code = await runExecAnswerCommand(UUID_MAIN, { text: 'use the staging DB', json: true }, deps);
+
+    expect(code).toBe(2);
+    const doc = JSON.parse(deps.outs.join('\n'));
+    expect(doc).toMatchObject({ runId: UUID_MAIN, answerAccepted: null, resumed: null });
+    expect(doc.error).toContain('--text needs --correlation');
+    expect(openLedger).not.toHaveBeenCalled();
+    expect(markHold).not.toHaveBeenCalled();
+    expect(postWork).not.toHaveBeenCalled();
+  });
+
+  it('offers --text in the next-command hint only where a question can carry it', () => {
+    const row = readExecRunRow(dbPath, UUID_MAIN)!;
+    const question = { correlationId: 'hq-a', question: 'Which branch?', questionClass: 'clarification' as const };
+    expect(buildExecElevation(UUID_MAIN, row, [question]).hint)
+      .toBe(`openswarm exec answer ${UUID_MAIN} --correlation hq-a --text "..."`);
+    expect(buildExecElevation(UUID_MAIN, row, []).hint).toBe(`openswarm exec answer ${UUID_MAIN}`);
   });
 
   it('skips the question contract entirely when the park is not an operator question', async () => {

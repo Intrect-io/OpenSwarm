@@ -329,6 +329,8 @@ export class PairPipeline extends EventEmitter {
         toolDeny: this.config.roles?.tester?.tools?.deny,
         // Task/jobProfile effort wins; the role's own declared effort is the floor.
         reasoningEffort: effortForTask(this.config, context.task) ?? this.config.roles?.tester?.effort,
+        // Every stage's bash tool is the worker's bash tool: it runs under the same OS fence. (AGT-4783)
+        sandbox: this.config.workerSandbox,
       }),
     });
     return testerResult;
@@ -635,6 +637,7 @@ export class PairPipeline extends EventEmitter {
             toolAllow: this.config.roles?.documenter?.tools?.allow,
             toolDeny: this.config.roles?.documenter?.tools?.deny,
             reasoningEffort: effortForTask(this.config, context.task) ?? this.config.roles?.documenter?.effort,
+            sandbox: this.config.workerSandbox,
           });
           context.documenterResult = result as DocumenterResult;
           break;
@@ -655,6 +658,7 @@ export class PairPipeline extends EventEmitter {
             toolAllow: this.config.roles?.auditor?.tools?.allow,
             toolDeny: this.config.roles?.auditor?.tools?.deny,
             reasoningEffort: effortForTask(this.config, context.task) ?? this.config.roles?.auditor?.effort,
+            sandbox: this.config.workerSandbox,
           });
           context.auditorResult = result as AuditorResult;
           break;
@@ -675,6 +679,7 @@ export class PairPipeline extends EventEmitter {
             toolAllow: this.config.roles?.['skill-documenter']?.tools?.allow,
             toolDeny: this.config.roles?.['skill-documenter']?.tools?.deny,
             reasoningEffort: effortForTask(this.config, context.task) ?? this.config.roles?.['skill-documenter']?.effort,
+            sandbox: this.config.workerSandbox,
           });
           context.skillDocumenterResult = result as SkillDocumenterResult;
           break;

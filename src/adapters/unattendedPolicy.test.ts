@@ -7,11 +7,14 @@
 // `defaultRoles` but not `adapterRouting.fallbacks` would pass the first test
 // and still route unattended work to a CLI that has no fences.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { loadConfig } from '../core/config.js';
 import {
   DELEGATED_ADAPTERS,
   assertUnattendedAdapters,
   collectUnattendedAdapterViolations,
+  providerSwitchViolation,
   unattendedAdapterViolation,
   type UnattendedAdapterConfig,
 } from './unattendedPolicy.js';
@@ -88,6 +91,80 @@ describe('collectUnattendedAdapterViolations', () => {
   it('treats only an explicit true as an opt-in', () => {
     for (const value of [false, undefined]) {
       expect(collectUnattendedAdapterViolations({ adapter: 'claude', autonomous: { allowDelegatedAdapters: value } })).toHaveLength(1);
+    }
+  });
+});
+
+describe('worker fan-out candidates', () => {
+  // `candidates[].adapter` accepts any adapter. In `execute` mode runWorkerFanout runs each candidate as an
+  // unattended worker on that adapter, so a delegated CLI there is the same hole as `role.adapter`.
+  const fanout = (over: Record<string, unknown> = {}) => ({
+    mode: 'execute', candidates: [{ adapter: 'openrouter' }, { adapter: 'claude' }], ...over,
+  });
+
+  it('refuses a delegated candidate in execute mode, naming the candidate, for a default and a project role', () => {
+    const viaDefault = collectUnattendedAdapterViolations(safe({ defaultRoles: { worker: { fanout: fanout() } } }));
+    expect(viaDefault).toHaveLength(1);
+    expect(viaDefault[0]).toContain('autonomous.defaultRoles.worker.fanout.candidates[1].adapter');
+    const viaProject = collectUnattendedAdapterViolations(safe({
+      projectAgents: [{ projectPath: '/repo', roles: { worker: { fanout: fanout() } } }],
+    }));
+    expect(viaProject[0]).toContain('autonomous.projectAgents[/repo].roles.worker.fanout.candidates[1].adapter');
+  });
+
+  it('still checks a role that names no adapter of its own', () => {
+    // The role-level check skipped any role without `adapter`, which is where a fan-out-only role lives.
+    const violations = collectUnattendedAdapterViolations(safe({
+      defaultRoles: { worker: { adapter: undefined, fanout: fanout({ candidates: [{ adapter: 'cursor' }] }) } },
+    }));
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain("'cursor'");
+  });
+
+  it('lets through what cannot run: report mode, a disabled fan-out, a disabled role, or in-process candidates', () => {
+    expect(collectUnattendedAdapterViolations(safe({ defaultRoles: { worker: { fanout: fanout({ mode: 'report' }) } } }))).toEqual([]);
+    expect(collectUnattendedAdapterViolations(safe({ defaultRoles: { worker: { fanout: fanout({ enabled: false }) } } }))).toEqual([]);
+    expect(collectUnattendedAdapterViolations(safe({ defaultRoles: { worker: { enabled: false, fanout: fanout() } } }))).toEqual([]);
+    expect(collectUnattendedAdapterViolations(safe({
+      defaultRoles: { worker: { fanout: fanout({ candidates: [{ adapter: 'openrouter' }, { adapter: 'codex-responses' }, {}] }) } },
+    }))).toEqual([]);
+  });
+
+  it('honours the opt-in', () => {
+    expect(collectUnattendedAdapterViolations(safe({ allowDelegatedAdapters: true, defaultRoles: { worker: { fanout: fanout() } } }))).toEqual([]);
+  });
+});
+
+describe('providerSwitchViolation', () => {
+  // assertUnattendedAdapters reads config.yaml once, at boot. The provider override, the dashboard toggle
+  // and `openswarm provider` re-point every role afterwards, so they meet the same policy and opt-in.
+  it('refuses a delegated CLI and lets an in-process adapter through, unless the operator opted in', () => {
+    for (const name of DELEGATED_ADAPTERS) {
+      expect(providerSwitchViolation(name, false), name).toContain(`'${name}'`);
+      expect(providerSwitchViolation(name, undefined), `${name} unset is not an opt-in`).not.toBeNull();
+      expect(providerSwitchViolation(name, true), `${name} opted in`).toBeNull();
+    }
+    expect(providerSwitchViolation('codex-responses', false)).toBeNull();
+    expect(providerSwitchViolation('openrouter', undefined)).toBeNull();
+  });
+});
+
+describe('the shipped example config', () => {
+  it('passes the policy it ships next to', () => {
+    // `cp config.example.yaml config.yaml` is the documented install (README, docker-compose). Its
+    // adapterRouting once listed `cursor` as a fallback, which this policy refuses, so a deployment
+    // copied from the example never came up. The refusal happens only after the web server, Discord
+    // and the scheduler have started, and nothing else loads the example through the policy.
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const config = loadConfig(fileURLToPath(new URL('../../config.example.yaml', import.meta.url)));
+      expect(config.autonomous).toBeDefined();
+      expect(collectUnattendedAdapterViolations(config)).toEqual([]);
+      expect(() => assertUnattendedAdapters(config)).not.toThrow();
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
     }
   });
 });

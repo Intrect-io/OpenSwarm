@@ -88,6 +88,8 @@ export interface AutonomousConfig {
   workerSandbox?: 'on' | 'off';
   /** Free-space floor (GiB) below which dispatch pauses; 0 switches the check off (AGT-4785). */
   minFreeDiskGiB?: number;
+  /** Operator opt-in to delegated CLI adapters; the runner reads it when the provider is switched (AGT-4444). */
+  allowDelegatedAdapters?: boolean;
   /** Periodic read-only repository review jobs. */
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Explicit high-capability project supervisor. */

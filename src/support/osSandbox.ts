@@ -12,8 +12,10 @@
 // Policy, measured on cgf-portal (2026-09-17, AGT-4387): a worker needs to
 // write its worktree, the temp dir, and the package-manager caches (uv, npm,
 // cargo, wrangler's log dir). Everything else — other repos, ~/.ssh, the
-// daemon's own state and credentials — stays read-only. Network stays open:
-// workers install dependencies and call the tracker.
+// daemon's own state and credentials — stays read-only. The worker's network
+// is loopback-only by default (AGT-4798): dependency installs belong to the
+// project's `setup` step, which runs with the network open, and a test can
+// still start a local server. `workerNetwork: open` restores the old behaviour.
 
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';

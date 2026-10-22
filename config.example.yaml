@@ -117,14 +117,16 @@ autonomous:
   # `primary` must name the same adapter this file selects above (adapter:), or
   # routing silently disables — the worker only consults a policy whose primary
   # is the adapter it is actually running.
-  # Only typed failures may route to CC-Router or an authenticated Cursor CLI;
-  # a failing test or a reviewer verdict never does.
+  # Only typed failures may route to a fallback; a failing test or a reviewer
+  # verdict never does. `cursor` (and `codex`) are delegated CLIs that bring
+  # their own tool loop, so the daemon refuses to start with one listed here
+  # unless allowDelegatedAdapters: true (below) accepts that on purpose.
   #   quota      — provider usage limit / 429 on the primary
   #   infra      — spawn, auth, or timeout failure before the agent ran
   #   capability — the primary is not installed or not serving on this machine
   adapterRouting:
     primary: codex-responses
-    fallbacks: [cc-router, cursor]
+    fallbacks: [cc-router]
     allowReasons: [quota, infra, capability]
 
   # Exact role-scoped MCP grants. Reads are allowed from listed servers; writes
@@ -270,7 +272,8 @@ autonomous:
 
   # OS fence for the worker's bash tool (AGT-4387). on (default): every bash
   # call runs under sandbox-exec (macOS) / bwrap (Linux) with writes limited to
-  # the worktree, temp dir and package caches; network stays open. A host with
+  # the worktree, temp dir and package caches; network is loopback-only unless
+  # workerNetwork (below) says open. A host with
   # neither binary refuses worker bash commands instead of running them open
   # (AGT-4783). off: bash runs unfenced with only the regex denylist. Either way
   # the shell gets an allowlisted env and a private HOME — no GitHub, cloud or

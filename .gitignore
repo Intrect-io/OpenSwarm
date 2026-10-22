@@ -31,8 +31,12 @@ config-docker.yaml
 swarm.log
 
 # Environment
+# `.env.*` also covers hand-made backups such as `.env.bak-<date>`, which hold the same tokens as
+# `.env` and would otherwise be staged by `git add -A`. The tracked template stays visible.
 .env
-.env.local
+.env.*
+!.env.example
+nohup.out
 
 # IDE
 .idea/

@@ -14,6 +14,9 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 
 const runWorker = vi.fn();
 const runReviewer = vi.fn();
+const runDocumenter = vi.fn();
+const runAuditor = vi.fn();
+const runSkillDocumenter = vi.fn();
 const getDefaultModel = vi.fn();
 
 vi.mock('./worker.js', async () => {
@@ -24,6 +27,21 @@ vi.mock('./worker.js', async () => {
 vi.mock('./reviewer.js', async () => {
   const actual = await vi.importActual<typeof import('./reviewer.js')>('./reviewer.js');
   return { ...actual, runReviewer };
+});
+
+vi.mock('./documenter.js', async () => {
+  const actual = await vi.importActual<typeof import('./documenter.js')>('./documenter.js');
+  return { ...actual, runDocumenter };
+});
+
+vi.mock('./auditor.js', async () => {
+  const actual = await vi.importActual<typeof import('./auditor.js')>('./auditor.js');
+  return { ...actual, runAuditor };
+});
+
+vi.mock('./skillDocumenter.js', async () => {
+  const actual = await vi.importActual<typeof import('./skillDocumenter.js')>('./skillDocumenter.js');
+  return { ...actual, runSkillDocumenter };
 });
 
 vi.mock('../adapters/index.js', async () => {
@@ -64,6 +82,9 @@ describe('PairPipeline per-role tool scope and effort', () => {
       confidencePercent: 100,
     });
     runReviewer.mockResolvedValue({ decision: 'approve', feedback: 'approved' });
+    runDocumenter.mockResolvedValue({ success: true, updatedFiles: [], apiDocsUpdated: false, summary: 'docs' });
+    runAuditor.mockResolvedValue({ success: true, bsScore: 0, criticalCount: 0, warningCount: 0, minorCount: 0, issues: [], summary: 'clean' });
+    runSkillDocumenter.mockResolvedValue({ success: true, updatedFiles: [], summary: 'skills' });
     getDefaultModel.mockResolvedValue('codex-live-model');
   });
 
@@ -130,5 +151,30 @@ describe('PairPipeline per-role tool scope and effort', () => {
     expect(runWorker).toHaveBeenCalledWith(expect.objectContaining<Partial<WorkerOptions>>({
       reasoningEffort: 'high',
     }));
+  });
+
+  it("hands the worker sandbox setting to every stage that has a shell, not only the worker (AGT-4783)", async () => {
+    // Each stage's bash tool is the worker's bash tool. Only the worker stage got the OS fence, so a repo
+    // script run by the documenter or the auditor could still write outside the worktree and reach the network.
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const roleOf = { enabled: true, timeoutMs: 0 };
+    const pipeline = new PairPipeline({
+      stages: ['worker', 'reviewer', 'documenter', 'auditor', 'skill-documenter'],
+      maxIterations: 1,
+      workerSandbox: 'on',
+      skipAuditorUnderFileCount: 0, // the worker mock reports one changed file; the default threshold is 3
+      roles: {
+        worker: { ...roleOf, model: 'w' }, reviewer: { ...roleOf, model: 'r' },
+        documenter: { ...roleOf, model: 'd' }, auditor: { ...roleOf, model: 'a' },
+        'skill-documenter': { ...roleOf, model: 's' },
+      },
+    });
+
+    await pipeline.run(task(), process.cwd());
+
+    expect(runWorker).toHaveBeenCalledWith(expect.objectContaining({ sandbox: 'on' }));
+    expect(runDocumenter).toHaveBeenCalledWith(expect.objectContaining({ sandbox: 'on' }));
+    expect(runAuditor).toHaveBeenCalledWith(expect.objectContaining({ sandbox: 'on' }));
+    expect(runSkillDocumenter).toHaveBeenCalledWith(expect.objectContaining({ sandbox: 'on' }));
   });
 });

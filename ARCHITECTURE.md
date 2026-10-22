@@ -58,10 +58,11 @@ graph LR
 
 Admission under `unknownScopeAdmission: admit` (default, vela):
 
-1. `includeBacklog: true` — Backlog is a queue.
-2. `idle_fill` lifts `NEEDS_HUMAN` / `RETRY_AT` / legacy backoff when Linear still wants the card.
+0. Before anything is fetched: the disk floor (`minFreeDiskGiB`, `support/hostHealth.ts`, AGT-4785) pauses the heartbeat. Right after the fetch, `partitionByReadiness` (`automation/readinessGate.ts`, AGT-4784) drops Backlog and skip-label issues, so they never reach `filterAlreadyProcessed`.
+1. `includeBacklog: false` (default since AGT-4784) — Todo is the ready signal. A deployment that wants free slots to chew the Backlog (vela) must set `includeBacklog: true`.
+2. `idle_fill` lifts `NEEDS_HUMAN` / `RETRY_AT` / legacy backoff when Linear still wants the card — except for an issue held by an `exec` orchestrator (`automation/execHold.ts`) or whose title and description are unchanged since its run started (`automation/dispatchFingerprint.ts`, AGT-4787).
 3. Predicted file overlap does **not** defer. Worktrees isolate; merge later.
-4. Still skipped: Linear Done/Canceled, parent/EPIC umbrellas, live `CLAIMED`/`EXECUTING` leases, unresolved deps, unmapped/disabled projects.
+4. Still skipped: Linear Done/Canceled, parent/EPIC umbrellas, live `CLAIMED`/`EXECUTING` leases, unresolved deps, unmapped/disabled projects. `detectSafeCandidateIds` also drops an issue whose draft carries a confident "a person has to do or decide this" verdict before the claim.
 
 `serialize` restores Codex-era fail-closed overlap holds.
 
@@ -71,7 +72,7 @@ Admission under `unknownScopeAdmission: admit` (default, vela):
 - `RunState` (`automation/runLedgerTypes.ts`) — `READY`…`DONE` plus `RETRY_AT`, `NEEDS_HUMAN`, `NEEDS_RECONCILE`.
 - `ParkResumeTrigger` — `idle_fill` | `explicit_dispatch` | `tracker_todo` | `sandbox_quarantine_dispatch` | `unspecified`.
 - `UnknownScopeAdmission` — `'admit' | 'serialize'`.
-- Config: `src/core/config.ts` `AutonomousConfigSchema` (`includeBacklog` default true, `unknownScopeAdmission` default admit).
+- Config: `src/core/config.ts` `AutonomousConfigSchema` (`includeBacklog` default false since AGT-4784, `unknownScopeAdmission` default admit).
 
 ## 확장 지점
 
@@ -86,8 +87,8 @@ Admission under `unknownScopeAdmission: admit` (default, vela):
 - **`vela-build.sh <sha>`는 `origin/main`만 fetch한다.** PR SHA는 `builds/4e8ba24`에서 `git fetch origin <branch>` 먼저.
 - **PR SHA를 돌리는 동안 `.last-built-sha`는 `origin/main` tip을 유지**하지 않으면 autodeploy cron이 main으로 롤백한다.
 - **`unknownScopeAdmission: admit`를 heartbeat만 바꾸고 claim 게이트를 안 바꾸면** 큐에는 들어가고 `claimRun`이 null — 슬롯이 다시 빈다.
-- **`isActionableLinearState(state)` 헬퍼 기본은 Backlog park.** 엔진/config 기본은 `includeBacklog: true`. `undefined`를 spread하면 DEFAULT true를 덮는다 — constructor가 `?? true`로 고정한다.
-- **AGT-4155 park loop**: Linear `In Progress`만으로 park를 열면 claim→exec→park가 heartbeat마다 돈다. 지금은 `idle_fill`이 의도적으로 연다 (싼 모델이 빈 슬롯을 씹도록). `serialize`/질문 대기를 되살릴 때 이 루프를 다시 열지 말 것.
+- **`isActionableLinearState(state)` helper parks Backlog by default**, and since AGT-4784 so do the engine, config and runner (`includeBacklog: false`; every reader spells it `?? false`). `undefined` must keep meaning false: never spread an `undefined` over the default, and never reintroduce a `?? true`.
+- **AGT-4155 park loop**: opening a park on Linear `In Progress` alone makes claim→exec→park spin every heartbeat. `idle_fill` opens parks on purpose (cheap models chew free slots), except where `execHold` or an unchanged `dispatchFingerprint` holds the park (AGT-4787). Do not reopen this loop when reviving `serialize` or question waits.
 - **drafted `docs/integrations.md` 같은 광역 fileScope**는 한 레포의 카드를 전부 한 conflict group으로 묶는다. `admit`이 아니면 슬롯이 비어 있는 채로 1장만 산다.
 - 로컬 워크스페이스 `fix/agt-4220-…`의 dirty `store.ts` / `autonomousRunner.ts`는 이 스택과 섞지 말 것.
 
