@@ -8,6 +8,27 @@ describe('TraceCollector', () => {
     collector = new TraceCollector();
   });
 
+  it('bounds retained names, metadata, and error payloads by UTF-8 bytes', () => {
+    const bounded = new TraceCollector();
+    const traceId = bounded.startTrace('😀'.repeat(100_000), { kept: 'yes', huge: 'x'.repeat(100_000) });
+    const spanId = bounded.startSpan(traceId, 'é'.repeat(100_000), undefined, { kept: 'yes', huge: 'y'.repeat(100_000) })!;
+    bounded.recordError(traceId, spanId, {
+      message: 'm'.repeat(100_000), stack: 's'.repeat(100_000), code: 'c'.repeat(100_000),
+    });
+
+    const trace = bounded.getTrace(traceId)!;
+    const span = trace.spans[0];
+    expect(Buffer.byteLength(trace.name, 'utf8')).toBeLessThanOrEqual(1024);
+    expect(Buffer.byteLength(span.name, 'utf8')).toBeLessThanOrEqual(1024);
+    expect(Buffer.byteLength(JSON.stringify(trace.metadata), 'utf8')).toBeLessThanOrEqual(4096);
+    expect(Buffer.byteLength(JSON.stringify(span.metadata), 'utf8')).toBeLessThanOrEqual(4096);
+    expect(Buffer.byteLength(JSON.stringify(span.errorInfo), 'utf8')).toBeLessThanOrEqual(4096);
+    expect(trace.metadata.kept).toBe('yes');
+    expect(span.metadata.kept).toBe('yes');
+    expect(trace.name.endsWith('…')).toBe(true);
+    expect(span.name.endsWith('…')).toBe(true);
+  });
+
   // ============================================
   // Trace 생성/종료
   // ============================================
@@ -321,7 +342,7 @@ describe('TraceCollector', () => {
       expect(span.metadata.array).toHaveLength(3);
     });
 
-    it('should handle very large metadata values', () => {
+    it('should bound very large metadata values', () => {
       const traceId = collector.startTrace('session');
       const largeString = 'A'.repeat(100000);
       collector.startSpan(traceId, 'worker', undefined, {
@@ -330,7 +351,8 @@ describe('TraceCollector', () => {
 
       const trace = collector.getTrace(traceId);
       const span = trace!.spans[0];
-      expect((span.metadata.largeData as string).length).toBe(100000);
+      expect(Buffer.byteLength(span.metadata.largeData as string, 'utf8')).toBeLessThanOrEqual(4096);
+      expect((span.metadata.largeData as string).endsWith('…')).toBe(true);
     });
 
     it('should handle special characters in span names and traces', () => {
