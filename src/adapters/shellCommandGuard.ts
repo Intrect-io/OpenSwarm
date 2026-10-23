@@ -186,8 +186,9 @@ interface SubstitutionSpan {
  */
 function substitutionSpanAt(command: string, i: number): SubstitutionSpan | 'none' | 'unclosed' {
   const char = command[i];
+  const processSubstitution = (char === '<' || char === '>') && command[i + 1] === '(';
   const dollar = char === '$' && (command[i + 1] === '(' || command[i + 1] === '{');
-  if (char !== '`' && !dollar) return 'none';
+  if (char !== '`' && !dollar && !processSubstitution) return 'none';
   const end = endOfSubstitution(command, i);
   if (end < 0) return 'unclosed';
   const runsCommand = char === '`' || command[i + 1] === '(';
@@ -299,6 +300,17 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
       continue;
     }
     if (char === '>' || char === '<') {
+      const span = substitutionSpanAt(command, i);
+      if (span === 'unclosed') return null;
+      if (span !== 'none') {
+        if (isWordChar(word[word.length - 1]) || isWordChar(command[span.end])) return null;
+        word += span.text;
+        wordStarted = true;
+        atWordStart = false;
+        if (span.runsCommand) nested.push(span.body);
+        i = span.end - 1;
+        continue;
+      }
       endWord();
       atWordStart = true;
       redirectTarget = false;
