@@ -294,7 +294,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     const linearConfigured = !!(config.linearApiKey && config.linearTeamId);
     const selectedTaskSource = selectTaskSource(linearConfigured, async () => {
       await linear.ensureLinearAuthFresh(); // refresh OAuth token (no-op for API key) each heartbeat
-      const issues = await linear.getMyIssues({ slim: true, timeoutMs: 300000 });
+      const issues = await linear.getMyIssues({ slim: true, timeoutMs: 300000, milestone: config.autonomous?.scope?.milestone });
       const { linearIssueToTask } = await import('../orchestration/decisionEngine.js');
       // One lock, one load, one write for the whole fetch — not one of each per issue (AGT-4659).
       syncTaskStatesFromIssues(issues.map((issue: any) => ({

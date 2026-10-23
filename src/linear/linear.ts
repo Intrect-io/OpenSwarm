@@ -587,7 +587,7 @@ export async function getNextBacklogIssue(
  * Options for getMyIssues
  */
 export interface GetMyIssuesOptions {
-  agentLabel?: string;
+  agentLabel?: string; milestone?: string;
   /**
    * Slim mode: skip N+1 queries for comments/labels/project.
    * Returns only core fields (id, identifier, title, description, priority, state, project).
@@ -687,10 +687,10 @@ export async function getMyIssues(
     ? { agentLabel: agentLabelOrOptions }
     : agentLabelOrOptions ?? {};
 
-  const { agentLabel, slim = false, timeoutMs = 30000 } = opts;
+  const { agentLabel, milestone, slim = false, timeoutMs = 30000 } = opts;
 
   // Generate cache key
-  const cacheKey = `${agentLabel || 'all'}:${slim}`;
+  const cacheKey = `${agentLabel || 'all'}:${slim}:${milestone ?? ''}`;
 
   // Check cache first
   const cached = myIssuesCache.get(cacheKey);
@@ -712,7 +712,7 @@ export async function getMyIssues(
     const result: LinearIssueInfo[] = [];
 
     const extraFilter: Record<string, unknown> = {};
-    if (agentLabel) extraFilter.labels = { name: { eq: agentLabel } };
+    if (agentLabel) extraFilter.labels = { name: { eq: agentLabel } }; if (milestone) extraFilter.projectMilestone = { name: { eq: milestone } };
 
     if (slim) {
       // Separate queries per state → tag each issue without resolver calls.
