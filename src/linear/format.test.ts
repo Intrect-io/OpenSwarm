@@ -28,8 +28,21 @@ describe('linear/format', () => {
         heading: 'Task complete',
         date: new Date('2026-06-23T00:00:00Z'),
       });
-      expect(body.startsWith('**Task complete**')).toBe(true);
+      expect(body.startsWith('🧭 **[OpenSwarm] Task complete**')).toBe(true);
       expect(body).toContain('_via OpenSwarm · 2026-06-23_');
+    });
+
+    it('always starts with the daemon signature regardless of optional content', () => {
+      const inputs = [
+        { heading: 'Minimal' },
+        { heading: 'With summary', summary: 'Done.' },
+        { heading: 'With sections', sections: [{ label: 'Result', body: 'Done.' }] },
+        { heading: 'With meta', meta: { Run: '42' } },
+        { heading: 'With all', summary: 'Done.', sections: [{ label: 'Result', body: 'Done.' }], meta: { Run: '42' } },
+      ];
+      for (const input of inputs) {
+        expect(formatAutomationComment(input)).toMatch(/^🧭 \*\*\[OpenSwarm\] /);
+      }
     });
 
     it('keeps short facts inline and renders lists as bullets', () => {

@@ -138,7 +138,7 @@ export interface AutomationCommentInput {
  * carrying just enough trace to find the run later.
  */
 export function formatAutomationComment(input: AutomationCommentInput): string {
-  const parts: string[] = [`**${input.heading}**`];
+  const parts: string[] = [`🧭 **[OpenSwarm] ${input.heading}**`];
 
   if (input.summary?.trim()) parts.push(input.summary.trim());
 
