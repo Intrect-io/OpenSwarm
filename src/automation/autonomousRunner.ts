@@ -70,7 +70,7 @@ import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol
 import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
 import { listHeldIssueIds } from './execHold.js';
 import { inputFingerprint, mayRedispatch } from './dispatchFingerprint.js';
-import { HostDiskGate, dispatchWritePaths } from '../support/hostHealth.js';
+import { HostDiskGate, dispatchWritePaths, isHostResourceError } from '../support/hostHealth.js';
 import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from '../agents/pairPipelineTypes.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
@@ -946,6 +946,13 @@ export class AutonomousRunner {
       // edited files) STUCK in production. (INT-2010)
       if (result.finalStatus === 'infra_error') {
         const detail = pickPipelineFailureDetail(result) || 'infra/CLI execution error';
+        if (isHostResourceError(detail)) {
+          const hold = this.diskGate.resourceFailure(detail);
+          console.error(`[Scheduler] ${taskCtx} stopped dispatch after a host resource failure: ${detail}`);
+          if (hold.notice) await reportToDiscord(`⚠️ ${hold.notice}`);
+          this.scheduleNextHeartbeat();
+          return;
+        }
         if (task.issueId) {
           // Fixed mid-range backoff — we intentionally don't bump failure counts,
           // so there's no attempt number to scale by.

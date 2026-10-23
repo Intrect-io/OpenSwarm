@@ -125,6 +125,16 @@ export class HostDiskGate {
     private readonly minFreeBytes: () => number = () => DEFAULT_MIN_FREE_BYTES,
   ) {}
 
+  /** Latch a host-resource failure into the same pause/one-notice path as a low-space reading. */
+  resourceFailure(detail: string): DispatchGateDecision {
+    const first = !this.low;
+    this.low = true;
+    const line = `Host resource failure: ${detail}`;
+    return first
+      ? { pause: true, line, notice: `Dispatch paused: ${line}. New work waits until host resources recover.` }
+      : { pause: true, line };
+  }
+
   /** Measure now and decide. A floor of zero or less switches the check off. */
   evaluate(): DispatchGateDecision {
     const floor = this.minFreeBytes();
