@@ -57,6 +57,7 @@ import {
 import type { DefaultRolesConfig } from '../core/types.js';
 import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
+import { DispatchRamp } from './dispatchRamp.js';
 import { pipelineExecutionBoundary } from '../agents/stageExecutionBoundary.js';
 import * as execution from './runnerExecution.js';
 import { draftFingerprint, pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
@@ -331,6 +332,7 @@ export class AutonomousRunner {
   private config: AutonomousConfig;
   private engine: DecisionEngine;
   private scheduler: TaskScheduler;
+  private readonly dispatchRamp: DispatchRamp;
   private readonly durableRuns: DurableRunCoordinator;
   private outboxDrain: Promise<void> | null = null;
   private readonly schedulerHandlers = new Set<Promise<void>>();
@@ -601,6 +603,7 @@ export class AutonomousRunner {
 
   constructor(config: AutonomousConfig) {
     this.config = config;
+    this.dispatchRamp = new DispatchRamp(config.dispatchRampClaims ?? 2);
     // Config files may retain model pins from a previous provider. Normalize
     // them before the first heartbeat; switchProvider() used to do this only
     // after a live dashboard toggle, so a restart leaked OpenRouter model ids
@@ -3005,9 +3008,6 @@ export class AutonomousRunner {
         this.syslog(`  Filtered: ${agentTasks.length} → ${filteredTasks.length} (skipped ${agentTasks.length - filteredTasks.length} completed/failed)`);
       }
 
-      // Parallel processing mode. vela runs this branch on every heartbeat
-      // (maxConcurrentTasks 12, pairMode true) — an early `return` here used to
-      // skip everything below, including the retrospective lane (AGT-4181):
       // it was configured and deployed for 9+ hours (2026-09-02 20:26–
       // 2026-09-03 07:55) and never ran once, because vela never takes the
       // serial branch the lane's call sat in. `else` instead of `return` so
@@ -3062,7 +3062,7 @@ export class AutonomousRunner {
     }
 
     // Fill all available slots (worktree mode isolates each task)
-    const maxSlots = availableSlots;
+    const maxSlots = this.dispatchRamp.budget(availableSlots);
 
     // Pre-filter tasks to enabled projects only (before DecisionEngine selection)
     // This prevents DecisionEngine from wasting its max-slot budget on non-enabled projects.
