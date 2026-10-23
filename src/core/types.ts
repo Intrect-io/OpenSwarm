@@ -638,6 +638,7 @@ export type AutonomousStartupConfig = {
   maxAttempts: number;
   /** Allowed project paths */
   allowedProjects: string[];
+  scope?: { milestone?: string };
   /** Treat Linear Backlog as a work queue (legacy). Default false = Backlog parked (R5). */
   includeBacklog?: boolean;
   /** Model configuration (legacy) */
