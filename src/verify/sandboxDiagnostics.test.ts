@@ -160,8 +160,11 @@ describe('makeSystemProbe', () => {
     // the real invocation is a probe that answers a different question.
     const { readFileSync } = await import('node:fs');
     const runner = readFileSync(new URL('./runner.ts', import.meta.url), 'utf8');
-    const invocation = runner.split('\n').find((line) => line.includes('--ro-bind'));
-    expect(invocation).toBeDefined();
+    const invocationStart = runner.indexOf('invocationArgs = [', runner.indexOf('const writableRoot = dirname(root);'));
+    const invocationEnd = runner.indexOf('];', invocationStart);
+    const invocation = runner.slice(invocationStart, invocationEnd);
+    expect(invocationStart).toBeGreaterThanOrEqual(0);
+    expect(invocationEnd).toBeGreaterThan(invocationStart);
     for (const namespaceFlag of ['--unshare-net', '--dev', '--proc']) {
       expect(invocation).toContain(namespaceFlag);
     }

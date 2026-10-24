@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -23,6 +23,8 @@ function git(...args: string[]): string {
 function verify(run: string, timeoutMs = 2_000): VerifyCommand {
   return { name: 'fixture', run, kind: 'test', timeoutMs };
 }
+
+const uvAvailable = spawnSync('uv', ['--version'], { stdio: 'ignore' }).status === 0;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'openswarm-verify-runner-'));
@@ -87,6 +89,128 @@ describe('runVerify', () => {
       expect.stringMatching(/export OPENSWARM_TEST_PARALLELISM=\d+ .* && npm test -- --maxWorkers=\d+$/),
       2_000,
     );
+  });
+
+  it('uses the host uv cache in offline mode inside the sandbox', async () => {
+    const originalHome = process.env.HOME;
+    const cacheHome = join(root, 'cache-home');
+    const uvCache = join(cacheHome, '.cache', 'uv');
+    await mkdir(uvCache, { recursive: true });
+    process.env.HOME = cacheHome;
+    const execute = vi.fn(async () => ({
+      output: 'head: 2 passed', exitCode: 0, signal: null, timedOut: false,
+      truncated: false, outputLimitExceeded: false,
+    }));
+    try {
+      const [evidence] = await runVerify({
+        projectPath: repo,
+        commands: [verify('uv run --frozen python -m pytest -q')],
+        baseRef: 'HEAD',
+        sandboxExecutorSessionFactory: async () => ({ execute }),
+        sandboxScratchRoot: root,
+      });
+      expect(evidence.headStatus).toBe('pass');
+      expect(execute).toHaveBeenCalledWith(expect.stringContaining(`export UV_CACHE_DIR='${uvCache}' && export UV_OFFLINE=1`), 2_000);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
+
+  it.skipIf(!uvAvailable)('runs a uv-locked pytest fixture for base and head in the real network-denied sandbox', async () => {
+    const fixture = join(root, 'uv-fixture');
+    const uv = execFileSync('which', ['uv'], { encoding: 'utf8' }).trim();
+    await mkdir(fixture, { recursive: true });
+    await writeFile(join(fixture, 'pyproject.toml'), [
+      '[project]', 'name = "verify-uv-fixture"', 'version = "0.1.0"',
+      'requires-python = ">=3.11"', 'dependencies = ["pytest==8.4.2"]', '',
+    ].join('\n'));
+    await writeFile(join(fixture, 'test_sample.py'), [
+      'import socket',
+      'def test_head_only():',
+      '    assert True',
+      'def test_network_is_denied():',
+      '    with socket.socket() as sock:',
+      '        sock.settimeout(0.5)',
+      '        try:',
+      '            sock.connect(("1.1.1.1", 443))',
+      '        except OSError:',
+      '            return',
+      '        assert False, "network unexpectedly reachable"',
+      '',
+    ].join('\n'));
+    execFileSync('uv', ['lock'], { cwd: fixture, stdio: 'pipe' });
+    execFileSync('uv', ['sync', '--frozen'], { cwd: fixture, stdio: 'pipe' });
+    await rm(join(fixture, '.venv'), { recursive: true, force: true });
+    execFileSync('git', ['init', '-b', 'main', fixture], { stdio: 'pipe' });
+    execFileSync('git', ['-C', fixture, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', fixture, 'config', 'user.name', 'Test']);
+    execFileSync('git', ['-C', fixture, 'add', '-A']);
+    execFileSync('git', ['-C', fixture, 'commit', '-m', 'base fixture']);
+    await writeFile(join(fixture, 'test_sample.py'), [
+      'import socket',
+      'def test_head_only():',
+      '    assert False',
+      'def test_network_is_denied():',
+      '    with socket.socket() as sock:',
+      '        sock.settimeout(0.5)',
+      '        try:',
+      '            sock.connect(("1.1.1.1", 443))',
+      '        except OSError:',
+      '            return',
+      '        assert False, "network unexpectedly reachable"',
+      '',
+    ].join('\n'));
+
+    const [evidence] = await runVerify({
+      projectPath: fixture,
+      commands: [verify(`${uv} run --frozen python -m pytest -q`, 30_000)],
+      baseRef: 'HEAD',
+    });
+
+    expect(evidence.baseStatus, evidence.rawOutputTail).toBe('pass');
+    expect(evidence.headStatus, evidence.rawOutputTail).toBe('fail');
+    expect(evidence.newFailure).toBe(true);
+    expect(evidence.rawOutputTail).toMatch(/2 passed/);
+    expect(evidence.rawOutputTail).toMatch(/1 failed/);
+
+    const originalHome = process.env.HOME;
+    const emptyHome = join(root, 'empty-cache-home');
+    await mkdir(join(emptyHome, '.cache', 'uv'), { recursive: true });
+    process.env.HOME = emptyHome;
+    try {
+      const [coldCache] = await runVerify({
+        projectPath: fixture,
+        commands: [verify(`${uv} run --frozen python -m pytest -q`, 30_000)],
+        baseRef: 'HEAD',
+      });
+      expect(coldCache, coldCache.rawOutputTail).toMatchObject({
+        baseStatus: 'fail', headStatus: 'fail', newFailure: false, environmentFailure: true,
+      });
+      expect(coldCache.rawOutputTail).toMatch(/offline|cache|download/i);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  }, 120_000);
+
+  it('reports an offline uv cache miss as an environment failure rather than a pass', async () => {
+    const execute = vi.fn(async () => ({
+      output: 'error: Failed to download package: cache miss while offline',
+      exitCode: 2, signal: null, timedOut: false, truncated: false, outputLimitExceeded: false,
+    }));
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('uv run --frozen python -m pytest -q')],
+      baseRef: 'HEAD',
+      sandboxExecutorSessionFactory: async () => ({ execute }),
+      sandboxScratchRoot: root,
+    });
+
+    expect(evidence).toMatchObject({
+      baseStatus: 'fail', headStatus: 'fail', newFailure: false, environmentFailure: true,
+    });
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 
   it('fails closed when the strict companion cannot attest instead of falling back to host execution', async () => {

@@ -49,22 +49,14 @@ export const VERIFY_DEPENDENCY_INPUTS = new Set([
 ]);
 
 /** Shared dependency directories the verify sandbox may bind read-only from the live tree. */
-export const VERIFY_ALLOWED_DEPENDENCY_DIRS = new Set([
-  'node_modules', '.venv-verify', '.venv', 'venv',
-]);
+export { VERIFY_ALLOWED_DEPENDENCY_DIRS, VERIFY_TOOLCHAIN_PATH_PREFIXES, buildVerifyToolchainPath } from './toolchainPath.js';
+import { VERIFY_ALLOWED_DEPENDENCY_DIRS, buildVerifyToolchainPath } from './toolchainPath.js';
 
 /**
  * Read-only toolchain PATH prefixes verification may inherit. Anything else on
  * the host PATH (writable home dirs, arbitrary tool installs) stays out of the
  * sandbox so a malicious checkout cannot pick an unexpected binary via PATH.
  */
-export const VERIFY_TOOLCHAIN_PATH_PREFIXES = [
-  '/usr/bin',
-  '/bin',
-  '/usr/local/bin',
-  '/opt/homebrew/bin',
-] as const;
-
 export interface VerifyEvidence {
   command: VerifyCommand;
   baseStatus: 'pass' | 'fail' | 'infra' | 'skipped';
@@ -289,7 +281,7 @@ function isEnvironmentFailure(output: string): boolean {
     // uv / pip driven from inside the network-less verification sandbox: the
     // environment cannot be built, so neither run is a verdict. (AGT-4407)
     /Failed to initialize cache at/i,
-    /error: Failed to (?:download|fetch|prepare|sync)/i,
+    /(?:error: )?Failed to (?:download|fetch|prepare|sync)/i,
     /No solution found when resolving dependencies/i,
     /(?:Network is unreachable|Temporary failure in name resolution|Could not resolve host|nodename nor servname provided)/i,
     /No virtual environment found/i,
@@ -314,64 +306,6 @@ async function terminateVerificationProcesses(processGroupId: number | undefined
     try { process.kill(-processGroupId, 'SIGKILL'); } catch { /* already exited */ }
   }
   await terminateProcessesWithEnvMarker(marker);
-}
-
-/**
- * Build the sandbox PATH from project-local dependency bins plus an explicit
- * read-only toolchain allowlist. Host PATH entries outside those prefixes are
- * dropped, so a writable tool install or an attacker-planted directory on the
- * host PATH cannot shadow a toolchain binary inside the verify sandbox.
- *
- * Project bins come FIRST: the sandbox must run the checkout's own
- * `node_modules/.bin/vitest`, not a system-wide one.
- */
-export function buildVerifyToolchainPath(
-  envPath: string | undefined,
-  root: string,
-  cwd: string = root,
-): string {
-  const entries: string[] = [];
-  const seen = new Set<string>();
-  const add = (candidate: string): void => {
-    if (!candidate || seen.has(candidate)) return;
-    seen.add(candidate);
-    entries.push(candidate);
-  };
-
-  for (const base of [cwd, root]) {
-    add(join(base, 'node_modules', '.bin'));
-    for (const venv of VERIFY_ALLOWED_DEPENDENCY_DIRS) {
-      if (venv === 'node_modules') continue;
-      add(join(base, venv, process.platform === 'win32' ? 'Scripts' : 'bin'));
-    }
-  }
-
-  // The interpreter running this verification comes right after the project bins.
-  // Its directory is trustworthy by construction — the daemon chose it — and it
-  // is the entry that covers every layout (/opt/hostedtoolcache/node/<v>/bin,
-  // Homebrew, a version manager) without opening $HOME. Ahead of the generic
-  // prefixes on purpose: this host's /usr/local/bin/node is a different major
-  // version, and the sandbox must run the interpreter the daemon runs.
-  add(dirname(process.execPath));
-
-  for (const prefix of VERIFY_TOOLCHAIN_PATH_PREFIXES) add(prefix);
-
-  for (const part of (envPath ?? '').split(delimiter)) {
-    if (!part) continue;
-    const normalized = part.replace(/\\/g, '/').replace(/\/+$/, '');
-    const allowedPrefix = VERIFY_TOOLCHAIN_PATH_PREFIXES.some(
-      (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`),
-    );
-    const projectLocal = /(?:^|\/)(?:node_modules\/\.bin|(?:\.venv-verify|\.venv|venv)\/(?:bin|Scripts))$/
-      .test(normalized);
-    // Node version managers install under */bin — keep those so `node`/`npm`
-    // remain reachable without opening the entire home directory PATH.
-    const versionManagerBin = /(?:^|\/)(?:\.?nvm|fnm|asdf|volta|n)(?:\/|$)/.test(normalized)
-      && normalized.endsWith('/bin');
-    if (allowedPrefix || projectLocal || versionManagerBin) add(part);
-  }
-
-  return entries.join(delimiter);
 }
 
 /** Working sandbox memoized, broken one re-probed — see makeSandboxCache. */
@@ -417,6 +351,7 @@ async function runWithSandboxExecutor(
     const result = await session.execute([
       `cd -- ${shellQuote(relativeCwd)}`,
       `export PATH=${shellQuote(toolchainPath)}`,
+      ...(env.UV_CACHE_DIR ? [`export UV_CACHE_DIR=${shellQuote(env.UV_CACHE_DIR)}`, 'export UV_OFFLINE=1'] : []),
       ...(vegaWorkspace ? [`export VEGA_EXTRA_PATHS=${shellQuote(vegaWorkspace)}`] : []),
       // Bundled VEGA toolsets intentionally use the narrower headless-workspace
       // contract instead of VEGA_EXTRA_PATHS.  Both settings name this same
@@ -506,6 +441,12 @@ async function runCommand(
     CMAKE_BUILD_PARALLEL_LEVEL: env.CMAKE_BUILD_PARALLEL_LEVEL,
     GOMAXPROCS: env.GOMAXPROCS,
     UV_CONCURRENT_BUILDS: env.UV_CONCURRENT_BUILDS,
+    // uv needs to create lock and temporary files in its cache even in offline
+    // mode, so bind only this cache writable. Network access remains disabled.
+    // Offline mode makes a missing artifact an explicit environment failure.
+    ...(env.HOME && existsSync(join(env.HOME, '.cache', 'uv'))
+      ? { UV_CACHE_DIR: join(env.HOME, '.cache', 'uv'), UV_OFFLINE: '1' }
+      : {}),
   }, undefined);
   for (const key of ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ', 'SystemRoot', 'ComSpec', 'PATHEXT']) {
     if (env[key] !== undefined) safeEnv[key] = env[key];
@@ -539,7 +480,11 @@ async function runCommand(
     if (!sandbox.available) return { status: 'fail', output: formatSandboxUnavailable(sandbox) };
     executable = sandbox.executable;
     const writableRoot = dirname(root);
-    invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', boundedCommand.run];
+    invocationArgs = [
+      '--ro-bind', '/', '/', '--bind', writableRoot, writableRoot,
+      ...(safeEnv.UV_CACHE_DIR ? ['--bind', safeEnv.UV_CACHE_DIR, safeEnv.UV_CACHE_DIR] : []),
+      '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', boundedCommand.run,
+    ];
   } else if (process.platform === 'win32') {
     return { status: 'fail', output: '[security] OS verification sandbox is unavailable on this Windows host' };
   }
