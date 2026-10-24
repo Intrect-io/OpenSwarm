@@ -145,38 +145,53 @@ export function buildSessionList(
   return { sessions, recent };
 }
 
+/** Outcome of server-side taskId → worktree resolution. */
+export type TaskWorktreeResolution =
+  | { kind: 'ok'; worktreePath: string; branch?: string; projectPath: string }
+  | { kind: 'no_project' }
+  | { kind: 'no_worktree' };
+
 /**
  * Server-side taskId → worktree mapping. Ledger first (attachWorktree records
  * the real path), then the deterministic `{projectPath}/worktree/{issueId}`
- * layout. Returns null when nothing exists on disk — never a guessed path.
+ * layout. Requires an authoritative project path (running task or durable
+ * record) — never treats a worktree path as the project identity. Returns
+ * `no_worktree` when nothing exists on disk — never a guessed path.
  */
 export function resolveTaskWorktree(
   runner: AutonomousRunner,
   taskId: string,
-): { worktreePath: string; branch?: string; projectPath: string } | null {
+): TaskWorktreeResolution {
   // Clients hold the session list's taskId (= taskEventKey); accept the raw
   // task.id too so nothing depends on which spelling a caller saved.
   const running = runner
     .getRunningTasks()
     .find((t) => taskEventKey(t.task) === taskId || t.task.id === taskId);
   const issueId = running?.task.issueId ?? taskId;
-  const projectPath = running?.projectPath;
-
   const record = runner.getDurableRun(issueId);
+
+  // Authoritative project identity only — never fall back to worktreePath.
+  const projectPath = (running?.projectPath ?? record?.projectPath)?.trim();
+  if (!projectPath) {
+    // Known durable/running identity without a project is a client/server
+    // contract failure (400), not a missing resource (404).
+    if (running || record) return { kind: 'no_project' };
+    return { kind: 'no_worktree' };
+  }
+
   if (record?.worktreePath && existsSync(record.worktreePath)) {
     return {
+      kind: 'ok',
       worktreePath: record.worktreePath,
       branch: record.branchName,
-      projectPath: projectPath ?? record.projectPath ?? record.worktreePath,
+      projectPath,
     };
   }
-  if (projectPath) {
-    const conventional = `${projectPath}/worktree/${issueId}`;
-    if (existsSync(conventional)) {
-      return { worktreePath: conventional, branch: record?.branchName, projectPath };
-    }
+  const conventional = `${projectPath}/worktree/${issueId}`;
+  if (existsSync(conventional)) {
+    return { kind: 'ok', worktreePath: conventional, branch: record?.branchName, projectPath };
   }
-  return null;
+  return { kind: 'no_worktree' };
 }
 
 const DIFF_DEFAULT_MAX_BYTES = 16_000;
@@ -210,7 +225,9 @@ export async function tryHandleWorkSessionRoutes(
       history,
       (task) => {
         const resolved = resolveTaskWorktree(runner, task.task.id);
-        return resolved ? { worktreePath: resolved.worktreePath, branch: resolved.branch } : {};
+        return resolved.kind === 'ok'
+          ? { worktreePath: resolved.worktreePath, branch: resolved.branch }
+          : {};
       },
       stageModels,
     );
@@ -252,7 +269,11 @@ export async function tryHandleWorkSessionRoutes(
       return true;
     }
     const resolved = resolveTaskWorktree(runner, taskId);
-    if (!resolved) {
+    if (resolved.kind === 'no_project') {
+      writeJson(res, 400, { error: `No authoritative project path for task ${taskId}` });
+      return true;
+    }
+    if (resolved.kind !== 'ok') {
       writeJson(res, 404, { error: `No worktree for task ${taskId}` });
       return true;
     }

@@ -193,6 +193,7 @@ describe('resolveTaskWorktree', () => {
       })),
     });
     expect(resolveTaskWorktree(runner, 't1')).toEqual({
+      kind: 'ok',
       worktreePath: '/repo/worktree/ledger-path',
       branch: 'swarm/INT-t1',
       projectPath: '/repo',
@@ -202,16 +203,46 @@ describe('resolveTaskWorktree', () => {
   it('falls back to the conventional layout for a running task without a ledger row', () => {
     const runner = mkRunner({ getRunningTasks: vi.fn(() => [runningTask('t1')]) });
     expect(resolveTaskWorktree(runner, 't1')).toEqual({
+      kind: 'ok',
       worktreePath: '/repo/worktree/t1',
       branch: undefined,
       projectPath: '/repo',
     });
   });
 
-  it('returns null when nothing exists on disk — never a guessed path', () => {
+  it('returns no_worktree when nothing exists on disk — never a guessed path', () => {
     existsSyncImpl.mockReturnValue(false);
     const runner = mkRunner({ getRunningTasks: vi.fn(() => [runningTask('t1')]) });
-    expect(resolveTaskWorktree(runner, 't1')).toBeNull();
+    expect(resolveTaskWorktree(runner, 't1')).toEqual({ kind: 'no_worktree' });
+  });
+
+  it('requires an authoritative project path — never uses worktreePath as project identity', () => {
+    const runner = mkRunner({
+      getRunningTasks: vi.fn(() => []),
+      getDurableRun: vi.fn(() => ({
+        worktreePath: '/repo/worktree/orphan',
+        branchName: 'swarm/orphan',
+        projectPath: '',
+      })),
+    });
+    expect(resolveTaskWorktree(runner, 'orphan')).toEqual({ kind: 'no_project' });
+  });
+
+  it('uses durable record projectPath when the task is no longer running', () => {
+    const runner = mkRunner({
+      getRunningTasks: vi.fn(() => []),
+      getDurableRun: vi.fn(() => ({
+        worktreePath: '/repo/worktree/t1',
+        branchName: 'swarm/INT-t1',
+        projectPath: '/repo',
+      })),
+    });
+    expect(resolveTaskWorktree(runner, 't1')).toEqual({
+      kind: 'ok',
+      worktreePath: '/repo/worktree/t1',
+      branch: 'swarm/INT-t1',
+      projectPath: '/repo',
+    });
   });
 });
 
@@ -268,6 +299,21 @@ describe('GET /api/work/diff', () => {
   it('400s without taskId and 503s without a runner', async () => {
     expect((await call('/api/work/diff', mkRunner())).status).toBe(400);
     expect((await call('/api/work/diff?taskId=t1', undefined)).status).toBe(503);
+  });
+
+  it('400s when a durable session has no authoritative project path', async () => {
+    const runner = mkRunner({
+      getRunningTasks: vi.fn(() => []),
+      getDurableRun: vi.fn(() => ({
+        worktreePath: '/repo/worktree/orphan',
+        branchName: 'swarm/orphan',
+        projectPath: '',
+      })),
+    });
+    const { status, body } = await call('/api/work/diff?taskId=orphan', runner);
+    expect(status).toBe(400);
+    expect(body.error).toContain('authoritative project path');
+    expect(gitTracker.getWorkingDiffDetail).not.toHaveBeenCalled();
   });
 
   it('404s when the task has no worktree, without touching git', async () => {

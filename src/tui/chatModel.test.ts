@@ -1,5 +1,20 @@
 import { describe, it, expect } from 'vitest';
-import { chatReducer, initialChatState, parseInput, matchSlash, movePaletteSelection, dedupeDoubledGrapheme, normalizeConfirm, isActivityNoise, historyToMessages, messagesToHistory, type ChatLine } from './chatModel.js';
+import {
+  chatReducer,
+  initialChatState,
+  parseInput,
+  matchSlash,
+  movePaletteSelection,
+  dedupeDoubledGrapheme,
+  normalizeConfirm,
+  isActivityNoise,
+  historyToMessages,
+  messagesToHistory,
+  boundChatHistory,
+  buildConversationPrompt,
+  MAX_CHAT_HISTORY,
+  type ChatLine,
+} from './chatModel.js';
 
 describe('chatReducer (EPIC INT-1813 S4)', () => {
   it('appends user and system lines', () => {
@@ -28,6 +43,45 @@ describe('chatReducer (EPIC INT-1813 S4)', () => {
   it('clear resets to the initial state', () => {
     const s = chatReducer({ history: [{ role: 'user', content: 'x' }], streaming: 'y' }, { type: 'clear' });
     expect(s).toEqual(initialChatState);
+  });
+
+  it(`bounds retained history to ${MAX_CHAT_HISTORY} lines`, () => {
+    let s = initialChatState;
+    for (let i = 0; i < MAX_CHAT_HISTORY + 40; i++) {
+      s = chatReducer(s, { type: 'user', content: `msg-${i}` });
+    }
+    expect(s.history).toHaveLength(MAX_CHAT_HISTORY);
+    expect(s.history[0]?.content).toBe('msg-40');
+    expect(s.history.at(-1)?.content).toBe(`msg-${MAX_CHAT_HISTORY + 39}`);
+  });
+});
+
+describe('chat history budgets (long sessions)', () => {
+  it('boundChatHistory keeps the newest window', () => {
+    const lines = Array.from({ length: 250 }, (_, i) => ({ role: 'user' as const, content: `u${i}` }));
+    const bounded = boundChatHistory(lines);
+    expect(bounded).toHaveLength(MAX_CHAT_HISTORY);
+    expect(bounded[0]?.content).toBe('u50');
+    expect(bounded.at(-1)?.content).toBe('u249');
+  });
+
+  it('prompt construction and persisted messages obey the same budget', () => {
+    const history: ChatLine[] = Array.from({ length: 260 }, (_, i) =>
+      i % 2 === 0
+        ? { role: 'user', content: `user-${i}` }
+        : { role: 'assistant', content: `asst-${i}` },
+    );
+    const retained = boundChatHistory(history);
+    expect(retained).toHaveLength(MAX_CHAT_HISTORY);
+
+    const persisted = boundChatHistory(historyToMessages(retained), MAX_CHAT_HISTORY);
+    expect(persisted.length).toBeLessThanOrEqual(MAX_CHAT_HISTORY);
+    expect(persisted.every((m) => m.role === 'user' || m.role === 'assistant')).toBe(true);
+
+    const prompt = buildConversationPrompt(persisted);
+    expect(prompt).not.toContain('user-0');
+    expect(prompt).toContain(persisted.at(-1)!.content);
+    expect(prompt.split('\n\n').length).toBeLessThanOrEqual(MAX_CHAT_HISTORY + 2);
   });
 });
 

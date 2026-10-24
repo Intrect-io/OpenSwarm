@@ -17,6 +17,9 @@ import {
   normalizeConfirm,
   isActivityNoise,
   historyToMessages,
+  boundChatHistory,
+  buildConversationPrompt,
+  MAX_CHAT_HISTORY,
   SLASH_COMMANDS,
   type ChatLine,
 } from '../chatModel.js';
@@ -25,21 +28,14 @@ import { ChatInput } from '../components/ChatInput.js';
 import { CommandPalette } from '../components/CommandPalette.js';
 import { SelectList } from '../components/SelectList.js';
 import { listAdapterNames } from '../../adapters/index.js';
-import { callChatModel, loadDefaultProvider, saveSession, generateSessionId, type Message } from '../../support/chatSession.js';
+import { callChatModel, loadDefaultProvider, saveSession, generateSessionId } from '../../support/chatSession.js';
 import { getDefaultChatModel, listChatModels } from '../../support/chatBackend.js';
 import { runPlanCommand, type PlanIO } from '../../support/planCommand.js';
 import { runGoalCommand, buildGoalPursuitPrompt, GOAL_PURSUIT_MAX_TURNS } from '../../support/goalCommand.js';
 import type { AdapterName } from '../../adapters/types.js';
 import { track } from '../../telemetry/telemetry.js';
 
-function buildConversationPrompt(messages: Message[]): string {
-  if (messages.length <= 1) return messages[0]?.content ?? '';
-  return [
-    'Use the following conversation history as context. Continue by answering the latest user message.',
-    '',
-    messages.map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${m.content}`).join('\n\n'),
-  ].join('\n');
-}
+export { buildConversationPrompt, MAX_CHAT_HISTORY, boundChatHistory } from '../chatModel.js';
 
 export interface ChatPanelProps {
   active: boolean;
@@ -62,7 +58,10 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
   const [state, dispatch] = useReducer(
     chatReducer,
     undefined,
-    () => (initialHistory && initialHistory.length > 0 ? { history: initialHistory, streaming: null } : initialChatState),
+    () =>
+      initialHistory && initialHistory.length > 0
+        ? { history: boundChatHistory(initialHistory), streaming: null }
+        : initialChatState,
   );
   const [input, setInput] = useState('');
   const [paletteIndex, setPaletteIndex] = useState(0);
@@ -112,13 +111,15 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
   // Persist the conversation on every change so it survives exit and can be
   // reopened with `openswarm resume`. System/UI lines are dropped by
   // historyToMessages; an active goal rides along so resume can restart it. (INT-2014)
+  // Retained history is already capped at MAX_CHAT_HISTORY; persist the same budget.
   useEffect(() => {
     if (state.history.length === 0) return;
+    const messages = boundChatHistory(historyToMessages(state.history), MAX_CHAT_HISTORY);
     void saveSession({
       id: sessionIdRef.current,
       provider,
       model,
-      messages: historyToMessages(state.history),
+      messages,
       totalCost: 0,
       totalTokens: 0,
       createdAt: createdAtRef.current,
@@ -406,7 +407,11 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
         return;
       }
       dispatch({ type: 'user', content: parsed.text });
-      await streamChat(buildConversationPrompt([...historyToMessages(state.history), { role: 'user', content: parsed.text }]));
+      const promptMessages = boundChatHistory(
+        [...historyToMessages(state.history), { role: 'user' as const, content: parsed.text }],
+        MAX_CHAT_HISTORY,
+      );
+      await streamChat(buildConversationPrompt(promptMessages));
     },
     [pending, runCommand, streamChat, goalActive, busy, state.history],
   );
