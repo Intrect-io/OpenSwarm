@@ -36,6 +36,7 @@ type InternalRunner = {
   filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[];
   resolveProjectPath(task: TaskItem): Promise<string | null>;
   reconcileDurableArtifacts(tasks: TaskItem[]): Promise<void>;
+  reconcileMissingWorktreePointers(): Promise<void>;
   scheduler: TaskScheduler;
   deferredShutdownCleanup: Promise<void> | null;
 };
@@ -702,6 +703,30 @@ esac
 
     expect(internal.durableRuns.getRun('unpublished')).toMatchObject({ state: 'NEEDS_RECONCILE' });
     expect(logPairComplete).not.toHaveBeenCalled();
+    internal.durableRuns.close();
+  });
+
+  it('reconciles several missing worktree rows without repeated state changes or a heartbeat failure (AGT-4518)', async () => {
+    const { AutonomousRunner } = await import('./autonomousRunner.js');
+    const runner = new AutonomousRunner({
+      linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
+      autoExecute: true, dryRun: true,
+      automationLedgerMode: 'primary', automationDbPath: join(root, 'multi-stale-worktrees.db'),
+    });
+    const internal = runner as unknown as InternalRunner;
+    for (const issueId of ['stale-one', 'stale-two', 'stale-three']) {
+      internal.durableRuns.importLegacyRun({
+        issueId, source: 'linear', identifier: issueId, title: issueId,
+        projectPath: '/repo', state: 'RETRY_AT',
+        worktreePath: join(root, `already-removed-${issueId}`),
+      });
+    }
+
+    await expect(internal.reconcileMissingWorktreePointers()).resolves.toBeUndefined();
+    expect(internal.durableRuns.listRuns()).toHaveLength(3);
+    expect(internal.durableRuns.listRuns().map((run) => run.state)).toEqual(['RETRY_AT', 'RETRY_AT', 'RETRY_AT']);
+    await expect(internal.reconcileMissingWorktreePointers()).resolves.toBeUndefined();
+    expect(internal.durableRuns.listRuns().map((run) => run.state)).toEqual(['RETRY_AT', 'RETRY_AT', 'RETRY_AT']);
     internal.durableRuns.close();
   });
 
