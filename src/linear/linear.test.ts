@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers, populateBlockedBy, type LinearIssueInfo, type RawIssueNode } from './linear.js';
+import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, logBlocked, logWorkComplete, logWorkStart, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers, populateBlockedBy, type LinearIssueInfo, type RawIssueNode } from './linear.js';
 import { LinearClient } from '@linear/sdk';
 
 // createSubIssue reads the module-level client singleton (getClient()), set only
@@ -400,5 +400,25 @@ describe('populateBlockedBy', () => {
     const result = [info('ax-1')];
     populateBlockedBy(result, new Map([['ax-1', { id: 'ax-1', identifier: 'AX-1', title: 'ax-1', priority: 2, inverseRelations: null }]]));
     expect(result[0].blockedBy).toBeUndefined();
+  });
+});
+
+describe('state-change comment ordering', () => {
+  it.each([
+    ['start', logWorkStart, ['issue-1', 'agent-1'], 'In Progress'],
+    ['complete', logWorkComplete, ['issue-1', 'agent-1', 'done'], 'Done'],
+    ['blocked', logBlocked, ['issue-1', 'agent-1', 'reason'], 'Todo'],
+  ])('%s comments before changing state', async (_label, action, args, expectedState) => {
+    const events: string[] = [];
+    const fakeClient = {
+      createComment: vi.fn(async () => { events.push('comment'); return { success: true }; }),
+      issue: vi.fn(async () => ({ team: Promise.resolve({ id: 'team-1' }) })),
+      team: vi.fn(async () => ({ states: async () => ({ nodes: [{ id: 'state-1', name: expectedState }] }) })),
+      updateIssue: vi.fn(async () => { events.push('state'); return { success: true }; }),
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1');
+    await (action as (...values: string[]) => Promise<void>)(...(args as string[]));
+    expect(events).toEqual(['comment', 'state']);
   });
 });
