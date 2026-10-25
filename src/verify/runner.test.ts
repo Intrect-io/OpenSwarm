@@ -41,6 +41,19 @@ afterEach(async () => {
 });
 
 describe('runVerify', () => {
+  it('logs verify sandbox bytes and the live sandbox count at creation and cleanup', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await runVerify({ projectPath: repo, commands: [verify('true')], baseRef: 'HEAD', sandboxScratchRoot: root });
+      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('[Verify] sandbox usage'));
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatch(/phase=create bytes=\d+ live=1/);
+      expect(lines[1]).toMatch(/phase=remove bytes=\d+ live=1/);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('routes strict verification through the companion and keeps scratch checkouts under its allowed root', async () => {
     const canonicalScratchRoot = await realpath(root);
     const execute = vi.fn(async () => ({
