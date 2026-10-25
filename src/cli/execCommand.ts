@@ -37,7 +37,7 @@ import Database from 'better-sqlite3';
 import { expandPath, loadConfig } from '../core/config.js';
 import type { LinearIssueInfo, SwarmConfig } from '../core/types.js';
 import { setAutomationDbPath, defaultAutomationDbPath } from '../automation/automationDbPath.js';
-import { clearExecHold, isExecHeld, markExecHold } from '../automation/execHold.js';
+import { claimExecHold, markExecHold, releaseExecHoldIf, type ExecHoldClaim } from '../automation/execHold.js';
 import { WORK_ALREADY_QUEUED_REASON } from '../automation/workRunner.js';
 import { OPERATOR_QUESTION_PARK_REASON } from '../coordination/operatorAnswers.js';
 import { resolveQuestionClass, type HumanQuestionClass } from '../coordination/humanQuestions.js';
@@ -361,10 +361,12 @@ export interface ExecCommandDeps {
   loadRepoMetadata?: (path: string) => Promise<RepoMetadata | null>;
   getIssue?: (idOrIdentifier: string) => Promise<LinearIssueInfo | null>;
   ensureTaskSource?: () => Promise<unknown>;
+  /** `exec answer` re-marks a hold; the deploy path uses claimHold/releaseHold instead. */
   markHold?: (issueId: string, actor: string) => void;
-  /** Whether a hold already exists, read before this call writes one (default: the real store). */
-  isHeld?: (issueId: string) => boolean;
-  clearHold?: (issueId: string) => void;
+  /** Write the deploy's hold and report whether one already existed, atomically (default: the real store). */
+  claimHold?: (issueId: string, actor: string) => ExecHoldClaim;
+  /** Release the hold a claim wrote, unless a later claim has replaced it (default: the real store). */
+  releaseHold?: (issueId: string, stamp: number) => void;
   daemonHealthy?: () => Promise<boolean>;
   /** Precise probe: distinguishes a reachable-but-refusing daemon from an absent one. */
   daemonProbe?: () => Promise<DaemonProbeResult>;
@@ -631,10 +633,11 @@ export async function runExecDeployCommand(
     // hold that cannot be written aborts the deploy rather than shipping a run
     // nobody is protecting.
     const actor = execActor(deps);
-    // Read before this call writes one: a hold that already exists belongs to an earlier deploy.
-    const heldBefore = (deps.isHeld ?? ((issueId: string) => isExecHeld(issueId)))(issue.id);
+    // Read and written in one step: a hold that already exists belongs to an earlier deploy, and two
+    // deploys of one issue must not both conclude that the hold is theirs to release.
+    let claim: ExecHoldClaim;
     try {
-      (deps.markHold ?? ((issueId: string, who: string) => markExecHold(issueId, who)))(issue.id, actor);
+      claim = (deps.claimHold ?? ((issueId: string, who: string) => claimExecHold(issueId, who)))(issue.id, actor);
     } catch (err) {
       log(`Could not record the exec hold: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
@@ -648,8 +651,8 @@ export async function runExecDeployCommand(
       // the full TTL (each refused retry refreshing it). Kept when it already existed, when the request
       // may have reached the daemon (a run might exist), and when the daemon already owns the issue
       // (`exec await` can still follow that run).
-      const releasable = !heldBefore && !deploy.ambiguous && deploy.detail !== WORK_ALREADY_QUEUED_REASON;
-      if (releasable) (deps.clearHold ?? ((issueId: string) => clearExecHold(issueId)))(issue.id);
+      const releasable = !claim.wasHeld && !deploy.ambiguous && deploy.detail !== WORK_ALREADY_QUEUED_REASON;
+      if (releasable) (deps.releaseHold ?? ((issueId: string, stamp: number) => releaseExecHoldIf(issueId, stamp)))(issue.id, claim.stamp);
       log(`Deploy failed (${deploy.transport}): ${deploy.detail ?? 'unknown reason'}`);
       if (opts.json) out(JSON.stringify({ runId: issue.id, identifier: issue.identifier, transport: deploy.transport, deployed: false, error: deploy.detail }));
       return deploy.exitCode;
