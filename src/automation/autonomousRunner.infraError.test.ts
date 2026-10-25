@@ -11,6 +11,7 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { AutonomousConfig } from './runnerTypes.js';
 import type { ITaskSource } from './taskSource.js';
 import { RETRY_RAMP_FROM_ATTEMPT } from './durableRunCoordinator.js';
+import { HostDiskGate } from '../support/hostHealth.js';
 
 // Regression for INT-2010: adapter CLI/infra failures (the worker/reviewer never
 // ran) must NOT drive a completable issue to durable STUCK. They get a backoff
@@ -42,14 +43,14 @@ const task = (): TaskItem => ({
   createdAt: Date.now(),
 });
 
-const result = (finalStatus: PipelineResult['finalStatus']): PipelineResult => ({
+const result = (finalStatus: PipelineResult['finalStatus'], error = 'codex CLI failed with code 1'): PipelineResult => ({
   success: false,
   sessionId: 'pipeline-1',
   iterations: 0,
   totalDuration: 5,
   finalStatus,
   stages: [],
-  workerResult: { success: false, summary: '', filesChanged: [], commands: [], output: '', error: 'codex CLI failed with code 1' },
+  workerResult: { success: false, summary: '', filesChanged: [], commands: [], output: '', error },
 });
 
 function mockTaskSource() {
@@ -105,6 +106,25 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
     const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
     expect(history).toHaveLength(6);
     expect(history.every((entry: { failureCause?: string }) => entry.failureCause === 'infra')).toBe(true);
+  });
+
+  it('parks dispatch on ENOSPC without scheduling a retry', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg());
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      scheduler.startTask(task(), '/repo', async () => result('infra_error', 'tester: git exited with code 128: No space left on device'));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+
+    expect((runner as unknown as { failedTaskRetryTimes: Map<string, number> }).failedTaskRetryTimes.has('ISSUE-1')).toBe(false);
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('stopped dispatch after a host resource failure'));
+    const gate = new HostDiskGate(() => []);
+    expect(gate.resourceFailure('No space left on device').notice).toBeDefined();
+    expect(gate.resourceFailure('No space left on device').notice).toBeUndefined();
   });
 
   it('retries a pair-level stuck result with fresh outer context before requiring a human', async () => {
