@@ -23,7 +23,7 @@ import { changeShapeSection } from './publicationChangeShape.js';
 import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFreshness.js';
 import { publicationClaimEvidence } from './publicationClaimEvidence.js';
 import { loadRepoMetadata } from './repoMetadata.js';
-import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, type SandboxConfig } from './sharedPathDetection.js';
+import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, secretSharedPathsWarning, type SandboxConfig } from './sharedPathDetection.js';
 import { copyIsolatedPath } from './isolatedPath.js';
 import { hasEditableInstallInto, rebasePythonEnvironment } from '../verify/pythonEnvironment.js';
 import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
@@ -192,7 +192,7 @@ async function linkSharedPaths(repoPath: string, worktreePath: string): Promise<
     console.warn(`[Worktree] openswarm.json unreadable; skipping sharedPaths config:`, err);
   }
 
-  const shared = resolveSharedPaths(repoPath, meta);
+  const shared = resolveSharedPaths(repoPath, meta), secretWarning = secretSharedPathsWarning(shared); if (secretWarning) console.warn(secretWarning);
   if (shared.length === 0 && !(meta?.sandbox?.sharedPaths?.length)) {
     const warning = emptyDetectionWarning(repoPath, detectSharedPaths(repoPath));
     if (warning) console.warn(warning);
