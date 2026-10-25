@@ -648,6 +648,7 @@ export type AutonomousStartupConfig = {
   reviewerTimeoutMs?: number;
   /** Max concurrent tasks */
   maxConcurrentTasks?: number;
+  dispatchRampClaims?: number;
   /** Move unowned In Progress issues back to Backlog after this many idle hours. */
   stalledInProgressHours?: number;
   /** Issues the heartbeat must not pick because a person owns them (labels, epics, title tags). */

@@ -399,9 +399,8 @@ const AutonomousConfigSchema = z.object({
   workerTimeoutMs: z.number().min(0).default(0),
   /** Reviewer timeout (ms). 0/unset = pipeline per-stage ceiling (not unlimited). */
   reviewerTimeoutMs: z.number().min(0).default(0),
-  /** Operator-controlled global task capacity. Safety comes from scopes and leases, not a hidden low cap. */
   maxConcurrentTasks: z.number().int().min(1).max(256).default(64),
-  /** Retire stale tracker claims so In Progress means a worker actually owns the task. */
+  dispatchRampClaims: z.number().int().min(1).max(256).default(2),
   stalledInProgressHours: z.number().min(1).max(168).default(6),
   /** Issues the heartbeat must not pick because a person owns them (AGT-4682). */
   skip: AgentSkipConfigSchema,
@@ -847,6 +846,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       workerTimeoutMs: raw.autonomous.workerTimeoutMs,
       reviewerTimeoutMs: raw.autonomous.reviewerTimeoutMs,
       maxConcurrentTasks: raw.autonomous.maxConcurrentTasks,
+      dispatchRampClaims: raw.autonomous.dispatchRampClaims,
       stalledInProgressHours: raw.autonomous.stalledInProgressHours,
       skip: raw.autonomous.skip,
       maxConcurrentPerProject: raw.autonomous.maxConcurrentPerProject,
