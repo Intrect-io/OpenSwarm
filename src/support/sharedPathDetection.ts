@@ -14,7 +14,8 @@
 // also walks the workspace tree — bounded, and only into directories that carry
 // a workspace manifest, so a stray `venv` folder in a fixture is never linked.
 
-import { existsSync, readdirSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
 /** Always-gitignored dependency dirs safe to auto-link without a config. */
@@ -41,6 +42,34 @@ const SKIPPED_DIRECTORIES = new Set([
 
 export interface SandboxConfig {
   sandbox?: { sharedPaths?: string[] } | null;
+}
+
+/** Top-level ignored paths that are not shared or readable from the worktree. */
+export function unsharedGitignoredPaths(repoPath: string, sharedPaths: string[] = []): string[] {
+  let entries: string[];
+  try { entries = readdirSync(repoPath).sort(); } catch { return []; }
+  const missing: string[] = [];
+  for (const name of entries) {
+    if (name === '.git') continue;
+    try {
+      execFileSync('git', ['-C', repoPath, 'check-ignore', '-q', '--', name], { stdio: 'ignore' });
+      const path = join(repoPath, name);
+      const stat = statSync(path);
+      const covered = sharedPaths.some((shared) => shared === name || shared.startsWith(`${name}/`));
+      const uid = process.getuid?.();
+      const groups = new Set([process.getgid?.(), ...(process.getgroups?.() ?? [])]);
+      const readBit = uid === stat.uid ? 0o400 : groups.has(stat.gid) ? 0o040 : 0o004;
+      try { accessSync(path, constants.R_OK); } catch { missing.push(name); continue; }
+      // Root can bypass Unix mode checks, so evaluate access for the worker identity.
+      if ((stat.mode & readBit) === 0 || !covered) missing.push(name);
+    } catch { /* tracked or not ignored */ }
+  }
+  return missing;
+}
+
+export function gitignoredPathsWarning(paths: string[]): string | null {
+  if (!paths.length) return null;
+  return `[Worktree] ${paths.length} gitignored path(s) from the source are absent from this worktree (${paths.join(', ')}); expose them through sandbox.sharedPaths or do not use their absence as a conclusion.`;
 }
 
 export interface SharedPathDetection {

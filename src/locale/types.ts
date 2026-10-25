@@ -480,6 +480,7 @@ export interface WorkerContext {
     manifests: string[];
     verificationCommands: string[];
     sharedPaths: string[];
+    missingGitignoredPaths?: string[];
     dependencyGraphAvailable: boolean;
   };
   /** Knowledge Graph 기반 영향 분석 */

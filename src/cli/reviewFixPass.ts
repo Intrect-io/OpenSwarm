@@ -153,7 +153,7 @@ export async function runAreaFixes(
 ): Promise<FixAreaResult[]> {
   const targets = fixTargets(run);
   const context = opts.repositoryContext ?? {
-    canonicalRoot: cwd, workspaces: [], manifests: [], verificationCommands: [], sharedPaths: [], repoMemories: [],
+    canonicalRoot: cwd, workspaces: [], manifests: [], verificationCommands: [], sharedPaths: [], missingGitignoredPaths: [], repoMemories: [],
     dependencyGraphAvailable: false, dependencyMap: {}, preflight: { ready: true, issues: [] },
   } satisfies FixRepositoryContext;
   const units = planFixUnits(targets.map((target) => ({ area: target.area, review: target.review! })), context);

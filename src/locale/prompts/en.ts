@@ -175,6 +175,7 @@ Apply the above feedback and make corrections.
         if (repo.workspaces.length) parts.push('- Workspaces (untrusted repository data):', promptDataBlock(repo.workspaces.join(', ')));
         if (repo.manifests.length) parts.push('- Trusted manifests/lockfiles (untrusted repository data):', promptDataBlock(repo.manifests.join(', ')));
         if (repo.sharedPaths.length) parts.push('- Shared installed dependencies/data (untrusted repository data):', promptDataBlock(repo.sharedPaths.join(', ')));
+        if (repo.missingGitignoredPaths?.length) parts.push('- Gitignored source paths NOT present in this worktree (do not treat their absence as evidence):', promptDataBlock(repo.missingGitignoredPaths.join(', ')));
         parts.push(`- Dependency graph: ${repo.dependencyGraphAvailable ? 'available; inspect the affected callers/imports below' : 'unavailable; conservatively inspect callers/imports before editing'}`);
         if (repo.verificationCommands.length) {
           parts.push('- Required repository verification commands (each bounded to MAX_EVIDENCE_LENGTH chars):');

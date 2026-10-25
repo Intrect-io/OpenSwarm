@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,6 +8,8 @@ import {
   detectSharedPaths,
   emptyDetectionWarning,
   resolveSharedPaths,
+  unsharedGitignoredPaths,
+  gitignoredPathsWarning,
 } from './sharedPathDetection.js';
 
 describe('detectSharedPaths (AGT-4043)', () => {
@@ -100,6 +103,37 @@ describe('detectSharedPaths (AGT-4043)', () => {
       dir(workspace, '.venv');
     }
     expect(detectSharedPaths(repo).shared).toEqual(['w1/.venv', 'w2/.venv', 'w3/.venv', 'w4/.venv']);
+  });
+});
+
+
+describe('unsharedGitignoredPaths (AGT-4041)', () => {
+  let repo: string;
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'openswarm-ignored-paths-'));
+    execFileSync('git', ['init', '-q', repo]);
+    writeFileSync(join(repo, '.gitignore'), 'ignored-data\nignored-dir/\npartial\nlocked\n');
+  });
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  it('returns none when no ignored paths exist', () => {
+    writeFileSync(join(repo, 'tracked.txt'), 'x');
+    expect(unsharedGitignoredPaths(repo)).toEqual([]);
+  });
+  it('counts ignored paths not included in sharedPaths', () => {
+    mkdirSync(join(repo, 'ignored-data'));
+    writeFileSync(join(repo, 'partial'), 'x');
+    expect(unsharedGitignoredPaths(repo, ['partial'])).toEqual(['ignored-data']);
+  });
+  it('reports partially shared ignored paths', () => {
+    mkdirSync(join(repo, 'ignored-data'));
+    mkdirSync(join(repo, 'partial'));
+    expect(unsharedGitignoredPaths(repo, ['partial'])).toEqual(['ignored-data']);
+    expect(gitignoredPathsWarning(['ignored-data'])).toContain('1 gitignored path(s)');
+  });
+  it('counts ignored paths with no read permission even when running as root', () => {
+    mkdirSync(join(repo, 'locked'));
+    chmodSync(join(repo, 'locked'), 0);
+    expect(unsharedGitignoredPaths(repo)).toEqual(['locked']);
   });
 });
 
