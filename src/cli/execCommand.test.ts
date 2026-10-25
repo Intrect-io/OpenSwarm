@@ -336,6 +336,10 @@ function baseDeps(overrides: Partial<ExecCommandDeps> = {}): TestDeps {
   return Object.assign(deps, { outs, logs });
 }
 
+const CLAIM_STAMP = 7;
+const HELD_STAMP = 9;
+const freshClaim = () => ({ wasHeld: false, stamp: CLAIM_STAMP });
+
 /** Deps that get a deploy past every gate: metadata mapped, issue deployable. */
 function deployDeps(overrides: Partial<ExecCommandDeps> = {}): TestDeps {
   return baseDeps({
@@ -345,8 +349,8 @@ function deployDeps(overrides: Partial<ExecCommandDeps> = {}): TestDeps {
     daemonHealthy: async () => true,
     postWork: async () => ({ status: 202, body: { workId: 'w', items: [{ status: 'queued' }], queued: 1, skipped: 0 } }),
     // Hermetic: no hold exists beforehand and releasing one touches no store, unless a test says otherwise.
-    isHeld: () => false,
-    clearHold: () => undefined,
+    claimHold: freshClaim,
+    releaseHold: () => undefined,
     ...overrides,
   });
 }
@@ -515,7 +519,7 @@ describe('runExecDeployCommand', () => {
     const order: string[] = [];
     const deps = deployDeps({
       isGitRepo: undefined, // exercise the real `existsSync(join(path, '.git'))` gate
-      markHold: () => { order.push('hold'); },
+      claimHold: () => { order.push('hold'); return freshClaim(); },
       postWork: async () => { order.push('deploy'); return { status: 202, body: { queued: 1 } }; },
       spawnWorkChild: () => { order.push('spawn'); return { ok: true }; },
     });
@@ -527,51 +531,51 @@ describe('runExecDeployCommand', () => {
   });
 
   it('refuses a repo with no Linear project mapping', async () => {
-    const markHold = vi.fn();
-    const deps = deployDeps({ loadRepoMetadata: async () => metadata(undefined), markHold });
+    const claimHold = vi.fn(freshClaim);
+    const deps = deployDeps({ loadRepoMetadata: async () => metadata(undefined), claimHold });
     const code = await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps);
     expect(code).toBe(2);
     expect(deps.logs.join('\n')).toMatch(/has no Linear project mapping/);
-    expect(markHold).not.toHaveBeenCalled();
+    expect(claimHold).not.toHaveBeenCalled();
   });
 
   it('refuses a repo whose metadata is absent entirely', async () => {
-    const markHold = vi.fn();
-    const deps = deployDeps({ loadRepoMetadata: async () => null, markHold });
+    const claimHold = vi.fn(freshClaim);
+    const deps = deployDeps({ loadRepoMetadata: async () => null, claimHold });
     expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath }, deps)).toBe(2);
-    expect(markHold).not.toHaveBeenCalled();
+    expect(claimHold).not.toHaveBeenCalled();
   });
 
   it('refuses an issue that belongs to a different Linear project', async () => {
-    const markHold = vi.fn();
+    const claimHold = vi.fn(freshClaim);
     const deps = deployDeps({
       getIssue: async () => issue({ project: { id: 'other', name: 'X' } }),
-      markHold,
+      claimHold,
     });
     const code = await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps);
     expect(code).toBe(2);
     expect(deps.logs.join('\n')).toMatch(/belongs to a different Linear project/);
-    expect(markHold).not.toHaveBeenCalled();
+    expect(claimHold).not.toHaveBeenCalled();
   });
 
   it('refuses an issue in a skipped workflow state', async () => {
-    const markHold = vi.fn();
-    const deps = deployDeps({ getIssue: async () => issue({ state: 'Done' }), markHold });
+    const claimHold = vi.fn(freshClaim);
+    const deps = deployDeps({ getIssue: async () => issue({ state: 'Done' }), claimHold });
     const code = await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps);
     expect(code).toBe(2);
     expect(deps.logs.join('\n')).toMatch(/INT-1 is Done — nothing to deploy\./);
-    expect(markHold).not.toHaveBeenCalled();
+    expect(claimHold).not.toHaveBeenCalled();
   });
 
   it('deploys via a healthy daemon, writing the hold first', async () => {
     const order: string[] = [];
-    const markHold = vi.fn((_issueId: string, _actor: string) => { order.push('hold'); });
+    const claimHold = vi.fn((_issueId: string, _actor: string) => { order.push('hold'); return freshClaim(); });
     const postWork = vi.fn(async (_path: string, _identifier: string) => {
       order.push('deploy');
       return { status: 202, body: { workId: 'w', items: [{ status: 'queued' }], queued: 1, skipped: 0 } };
     });
     const spawnWorkChild = vi.fn(() => ({ ok: true }));
-    const deps = deployDeps({ markHold, postWork, spawnWorkChild });
+    const deps = deployDeps({ claimHold, postWork, spawnWorkChild });
 
     const code = await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps);
 
@@ -583,13 +587,13 @@ describe('runExecDeployCommand', () => {
       deployed: true,
     });
     expect(order).toEqual(['hold', 'deploy']);
-    expect(markHold).toHaveBeenCalledWith(UUID_MAIN, 'external:test');
+    expect(claimHold).toHaveBeenCalledWith(UUID_MAIN, 'external:test');
     expect(postWork).toHaveBeenCalledWith(repoPath, 'INT-1');
     expect(spawnWorkChild).not.toHaveBeenCalled();
   });
 
   it('prints the follow-up await command for a human', async () => {
-    const deps = deployDeps({ markHold: vi.fn() });
+    const deps = deployDeps({ claimHold: vi.fn(freshClaim) });
     expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath }, deps)).toBe(0);
     expect(deps.outs.join('\n')).toMatch(new RegExp(`Next: openswarm exec await ${UUID_MAIN}`));
     expect(deps.outs.join('\n')).toMatch(/transport: daemon/);
@@ -598,7 +602,7 @@ describe('runExecDeployCommand', () => {
   it.each([403, 500])('surfaces a daemon HTTP %i refusal and never falls back to a child', async (status) => {
     const spawnWorkChild = vi.fn(() => ({ ok: true }));
     const deps = deployDeps({
-      markHold: vi.fn(),
+      claimHold: vi.fn(freshClaim),
       postWork: async () => ({ status, body: { error: 'not in the daemon allowed projects' } }),
       spawnWorkChild,
     });
@@ -613,11 +617,11 @@ describe('runExecDeployCommand', () => {
   });
 
   it('fails when the daemon answers 202 but queued nothing, quoting its reason', async () => {
-    const markHold = vi.fn();
-    const clearHold = vi.fn();
+    const claimHold = vi.fn(freshClaim);
+    const releaseHold = vi.fn();
     const deps = deployDeps({
-      markHold,
-      clearHold,
+      claimHold,
+      releaseHold,
       postWork: async () => ({ status: 202, body: { items: [{ reason: 'state is In Progress' }], queued: 0, skipped: 1 } }),
     });
     const code = await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps);
@@ -628,73 +632,73 @@ describe('runExecDeployCommand', () => {
     expect(JSON.parse(deps.outs.join('\n'))).toMatchObject({ deployed: false, error: 'state is In Progress' });
     // The hold went in before the deploy so no run could exist unprotected. The deploy was refused, so no
     // run exists and the hold it wrote is released instead of keeping idle_fill off the issue for 24h.
-    expect(markHold).toHaveBeenCalledTimes(1);
-    expect(clearHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN);
+    expect(claimHold).toHaveBeenCalledTimes(1);
+    expect(releaseHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN, CLAIM_STAMP);
   });
 
   describe('releasing the hold when the deploy is refused', () => {
     const refuse = (postWork: NonNullable<ExecCommandDeps['postWork']>, extra: Partial<ExecCommandDeps> = {}) => {
-      const clearHold = vi.fn();
-      const deps = deployDeps({ markHold: vi.fn(), clearHold, postWork, ...extra });
-      return { deps, clearHold };
+      const releaseHold = vi.fn();
+      const deps = deployDeps({ claimHold: vi.fn(freshClaim), releaseHold, postWork, ...extra });
+      return { deps, releaseHold };
     };
 
     it.each([
       ['an HTTP 403 (outside allowedProjects)', async () => ({ status: 403, body: { error: 'not allowed' } })],
       ['an HTTP 409 (rate-limit window)', async () => ({ status: 409, body: { error: 'paused' } })],
     ])('releases it on %s: nothing was deployed', async (_label, postWork) => {
-      const { deps, clearHold } = refuse(postWork);
+      const { deps, releaseHold } = refuse(postWork);
       expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).not.toBe(0);
-      expect(clearHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN);
+      expect(releaseHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN, CLAIM_STAMP);
     });
 
     it('releases it when the daemon refuses its own health probe and when a detached child cannot start', async () => {
       const probe = refuse(async () => ({ status: 202, body: { queued: 1 } }), { daemonProbe: async () => ({ kind: 'refused', status: 403 }) });
       expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, probe.deps)).toBe(2);
-      expect(probe.clearHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN);
+      expect(probe.releaseHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN, CLAIM_STAMP);
 
       const child = refuse(async () => ({ status: 202, body: { queued: 1 } }), {
         daemonProbe: async () => ({ kind: 'down' }), spawnWorkChild: () => ({ ok: false, reason: 'dist/cli.js missing' }),
       });
       expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, child.deps)).toBe(1);
-      expect(child.clearHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN);
+      expect(child.releaseHold).toHaveBeenCalledExactlyOnceWith(UUID_MAIN, CLAIM_STAMP);
     });
 
     it('keeps it when the daemon already owns the issue: `exec await` can still follow that run', async () => {
-      const { deps, clearHold } = refuse(async () => ({
+      const { deps, releaseHold } = refuse(async () => ({
         status: 202, body: { items: [{ reason: WORK_ALREADY_QUEUED_REASON }], queued: 0, skipped: 1 },
       }));
       expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(2);
-      expect(clearHold).not.toHaveBeenCalled();
+      expect(releaseHold).not.toHaveBeenCalled();
     });
 
     it('keeps it when the request may have reached the daemon (a 5xx or a transport error)', async () => {
       const serverError = refuse(async () => ({ status: 503, body: { error: 'busy' } }));
       expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, serverError.deps)).toBe(1);
-      expect(serverError.clearHold).not.toHaveBeenCalled();
+      expect(serverError.releaseHold).not.toHaveBeenCalled();
 
       const dropped = refuse(async () => { throw new Error('socket hang up'); });
       expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, dropped.deps)).toBe(1);
-      expect(dropped.clearHold).not.toHaveBeenCalled();
+      expect(dropped.releaseHold).not.toHaveBeenCalled();
     });
 
     it('keeps a hold that existed before this call: it belongs to an earlier deploy', async () => {
-      const { deps, clearHold } = refuse(async () => ({ status: 403, body: { error: 'not allowed' } }), { isHeld: () => true });
+      const { deps, releaseHold } = refuse(async () => ({ status: 403, body: { error: 'not allowed' } }), { claimHold: () => ({ wasHeld: true, stamp: HELD_STAMP }) });
       expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(1);
-      expect(clearHold).not.toHaveBeenCalled();
+      expect(releaseHold).not.toHaveBeenCalled();
     });
 
     it('never releases it after a successful deploy', async () => {
-      const clearHold = vi.fn();
-      const deps = deployDeps({ markHold: vi.fn(), clearHold });
+      const releaseHold = vi.fn();
+      const deps = deployDeps({ claimHold: vi.fn(freshClaim), releaseHold });
       expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(0);
-      expect(clearHold).not.toHaveBeenCalled();
+      expect(releaseHold).not.toHaveBeenCalled();
     });
   });
 
   it('quotes the daemon’s own reason when a 202 queues nothing and gives none', async () => {
     const deps = deployDeps({
-      markHold: vi.fn(),
+      claimHold: vi.fn(freshClaim),
       postWork: async () => ({ status: 202, body: { items: [], queued: 0, skipped: 0 } }),
     });
     const code = await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps);
@@ -704,7 +708,7 @@ describe('runExecDeployCommand', () => {
 
   it('keeps exit 1 for a daemon HTTP 500 — a no-action 202 is a refusal (2), a failure is 1', async () => {
     const deps = deployDeps({
-      markHold: vi.fn(),
+      claimHold: vi.fn(freshClaim),
       postWork: async () => ({ status: 500, body: { error: 'boom' } }),
     });
     const code = await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps);
@@ -718,7 +722,7 @@ describe('runExecDeployCommand', () => {
       const spawnWorkChild = vi.fn(() => ({ ok: true }));
       const postWork = vi.fn(async () => ({ status: 202, body: { queued: 1 } }));
       const deps = deployDeps({
-        markHold: vi.fn(),
+        claimHold: vi.fn(freshClaim),
         daemonProbe: async () => ({ kind: 'refused', status }),
         postWork,
         spawnWorkChild,
@@ -738,7 +742,7 @@ describe('runExecDeployCommand', () => {
     const spawnWorkChild = vi.fn(() => ({ ok: true }));
     const postWork = vi.fn(async () => ({ status: 202, body: { queued: 1 } }));
     const deps = deployDeps({
-      markHold: vi.fn(),
+      claimHold: vi.fn(freshClaim),
       daemonProbe: async () => ({ kind: 'down' }),
       postWork,
       spawnWorkChild,
@@ -760,7 +764,7 @@ describe('runExecDeployCommand', () => {
     const spawnWorkChild = vi.fn(() => ({ ok: true }));
     const postWork = vi.fn(async () => ({ status: 202, body: { queued: 1 } }));
     const deps = deployDeps({
-      markHold: vi.fn(),
+      claimHold: vi.fn(freshClaim),
       daemonHealthy: async () => false,
       postWork,
       spawnWorkChild,
@@ -775,7 +779,7 @@ describe('runExecDeployCommand', () => {
 
   it('falls back to a detached child only when the daemon is unreachable', async () => {
     const spawnWorkChild = vi.fn(() => ({ ok: true }));
-    const deps = deployDeps({ markHold: vi.fn(), daemonHealthy: async () => false, spawnWorkChild });
+    const deps = deployDeps({ claimHold: vi.fn(freshClaim), daemonHealthy: async () => false, spawnWorkChild });
     const code = await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps);
     expect(code).toBe(0);
     expect(JSON.parse(deps.outs.join('\n'))).toEqual({
@@ -790,7 +794,7 @@ describe('runExecDeployCommand', () => {
 
   it('fails when the child cannot be started, quoting its reason', async () => {
     const deps = deployDeps({
-      markHold: vi.fn(),
+      claimHold: vi.fn(freshClaim),
       daemonHealthy: async () => false,
       spawnWorkChild: () => ({ ok: false, reason: 'dist/cli.js not found' }),
     });
@@ -804,7 +808,7 @@ describe('runExecDeployCommand', () => {
     const postWork = vi.fn(async () => ({ status: 202, body: { queued: 1 } }));
     const spawnWorkChild = vi.fn(() => ({ ok: true }));
     const deps = deployDeps({
-      markHold: () => { throw new Error('database is locked'); },
+      claimHold: () => { throw new Error('database is locked'); },
       postWork,
       spawnWorkChild,
     });
@@ -818,15 +822,15 @@ describe('runExecDeployCommand', () => {
 
   it('honours OPENSWARM_EXEC_ACTOR for the hold actor', async () => {
     process.env.OPENSWARM_EXEC_ACTOR = 'external:claude-code';
-    const markHold = vi.fn();
-    const deps = deployDeps({ markHold, actor: undefined });
+    const claimHold = vi.fn(freshClaim);
+    const deps = deployDeps({ claimHold, actor: undefined });
     expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath }, deps)).toBe(0);
-    expect(markHold).toHaveBeenCalledWith(UUID_MAIN, 'external:claude-code');
+    expect(claimHold).toHaveBeenCalledWith(UUID_MAIN, 'external:claude-code');
   });
 
   it('resolves an identifier through the tracker', async () => {
     const getIssue = vi.fn(async () => issue({ id: UUID_MAIN, identifier: 'INT-1' }));
-    const deps = deployDeps({ getIssue, markHold: vi.fn() });
+    const deps = deployDeps({ getIssue, claimHold: vi.fn(freshClaim) });
     expect(await runExecDeployCommand({ issue: 'INT-1', path: repoPath, json: true }, deps)).toBe(0);
     expect(getIssue).toHaveBeenCalledWith('INT-1');
     expect(JSON.parse(deps.outs.join('\n')).runId).toBe(UUID_MAIN);
@@ -836,7 +840,7 @@ describe('runExecDeployCommand', () => {
 describe('runExecDeployCommand — default daemon transport', () => {
   /** Deploy deps with no injected probe, post or spawn: the module's own defaults run. */
   const defaultTransportDeps = () => deployDeps({
-    markHold: vi.fn(), daemonHealthy: undefined, postWork: undefined,
+    claimHold: freshClaim, daemonHealthy: undefined, postWork: undefined,
   });
   type FetchArgs = [string, RequestInit | undefined];
   const fetchMock = vi.fn<(...args: FetchArgs) => Promise<Response>>();
@@ -970,11 +974,13 @@ describe('runExecStatusCommand', () => {
 
   it('leaves the run and its hold untouched — status is read-only', async () => {
     const markHold = vi.fn();
-    const clearHold = vi.fn();
-    const deps = baseDeps({ markHold, clearHold });
+    const claimHold = vi.fn(freshClaim);
+    const releaseHold = vi.fn();
+    const deps = baseDeps({ markHold, claimHold, releaseHold });
     expect(await runExecStatusCommand(UUID_MAIN, { json: true }, deps)).toBe(0);
     expect(markHold).not.toHaveBeenCalled();
-    expect(clearHold).not.toHaveBeenCalled();
+    expect(claimHold).not.toHaveBeenCalled();
+    expect(releaseHold).not.toHaveBeenCalled();
     expect(readExecRunRow(dbPath, UUID_MAIN)?.state).toBe('NEEDS_HUMAN');
   });
 });
@@ -1081,11 +1087,13 @@ describe('runExecAwaitCommand', () => {
 
   it('leaves the hold and the run alone — await never writes', async () => {
     const markHold = vi.fn();
-    const clearHold = vi.fn();
-    const deps = baseDeps({ markHold, clearHold, sleep: async () => undefined });
+    const claimHold = vi.fn(freshClaim);
+    const releaseHold = vi.fn();
+    const deps = baseDeps({ markHold, claimHold, releaseHold, sleep: async () => undefined });
     expect(await runExecAwaitCommand(UUID_MAIN, { json: true }, deps)).toBe(1);
     expect(markHold).not.toHaveBeenCalled();
-    expect(clearHold).not.toHaveBeenCalled();
+    expect(claimHold).not.toHaveBeenCalled();
+    expect(releaseHold).not.toHaveBeenCalled();
     expect(readExecRunRow(dbPath, UUID_MAIN)).toMatchObject({ state: 'NEEDS_HUMAN', attemptNo: 1 });
   });
 });

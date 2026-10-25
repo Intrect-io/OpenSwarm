@@ -104,6 +104,61 @@ export function markExecHold(issueId: string, actor: string, now = Date.now()): 
   }
 }
 
+export interface ExecHoldClaim {
+  /** A live hold existed before this claim wrote one: it belongs to an earlier deploy. */
+  wasHeld: boolean;
+  /** The `updated_at` this claim wrote. Strictly greater than any value the row held, so no two claims share one. */
+  stamp: number;
+}
+
+/**
+ * Write a hold and report, in the same transaction, whether one was already live.
+ *
+ * `exec --issue` used to read `isExecHeld` and then call `markExecHold`. Two orchestrators deploying
+ * the same issue could both read "not held", both write, and when the first deploy was refused it
+ * cleared a hold the second deploy still depended on, leaving that run for idle_fill to take. Reading
+ * and writing under one `IMMEDIATE` transaction makes the second claim see the first, and the stamp
+ * lets {@link releaseExecHoldIf} tell its own write from a later one.
+ *
+ * Throws like {@link markExecHold}: a run deployed without its hold is one idle_fill will re-run.
+ */
+export function claimExecHold(issueId: string, actor: string, now = Date.now()): ExecHoldClaim {
+  const handle = connect();
+  if (!handle) throw new Error('Could not open the automation database to record the exec hold');
+  try {
+    return handle.transaction((): ExecHoldClaim => {
+      const prior = handle
+        .prepare('SELECT updated_at FROM automation_exec_runs WHERE issue_id = ?')
+        .get(issueId) as { updated_at: number } | undefined;
+      const stamp = prior ? Math.max(now, prior.updated_at + 1) : now;
+      handle.prepare(`
+        INSERT INTO automation_exec_runs(issue_id, actor, created_at, updated_at)
+        VALUES(?, ?, ?, ?)
+        ON CONFLICT(issue_id) DO UPDATE SET
+          actor = excluded.actor,
+          updated_at = excluded.updated_at
+      `).run(issueId, actor, stamp, stamp);
+      return { wasHeld: !!prior && now - prior.updated_at <= EXEC_HOLD_TTL_MS, stamp };
+    }).immediate();
+  } catch (err) {
+    throw new Error(`Could not record the exec hold for ${issueId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * Release a hold only if it is still the one `stamp` names. Any later claim or `exec answer` re-mark
+ * moved `updated_at`, so the row is someone else's now and is left alone. Never throws.
+ */
+export function releaseExecHoldIf(issueId: string, stamp: number): void {
+  const handle = connect();
+  if (!handle) return;
+  try {
+    handle.prepare('DELETE FROM automation_exec_runs WHERE issue_id = ? AND updated_at = ?').run(issueId, stamp);
+  } catch (err) {
+    console.warn('[ExecHold] Conditional release failed:', err instanceof Error ? err.message : err);
+  }
+}
+
 /**
  * Release a hold.
  *

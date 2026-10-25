@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 
 import {
-  EXEC_HOLD_TTL_MS, clearExecHold, isExecHeld, listHeldIssueIds, markExecHold, resetExecHoldForTests,
+  EXEC_HOLD_TTL_MS, claimExecHold, clearExecHold, isExecHeld, listHeldIssueIds, markExecHold, releaseExecHoldIf, resetExecHoldForTests,
 } from './execHold.js';
 
 let dir: string;
@@ -169,5 +169,72 @@ describe('exec hold store', () => {
     expect(isExecHeld('i1')).toBe(false);
     markExecHold('i2', 'external:cli');
     expect([...listHeldIssueIds()]).toEqual(['i2']);
+  });
+});
+
+describe('claimExecHold / releaseExecHoldIf (two deploys of one issue)', () => {
+  it('reports whether a live hold existed, in the same step that writes one', () => {
+    const first = claimExecHold('i1', 'external:a', 1_000);
+    expect(first.wasHeld).toBe(false);
+    expect(isExecHeld('i1', 1_000)).toBe(true);
+
+    const second = claimExecHold('i1', 'external:b', 1_000);
+    expect(second.wasHeld).toBe(true);
+  });
+
+  it('gives every claim its own stamp, even inside one millisecond', () => {
+    const a = claimExecHold('i1', 'external:a', 5_000);
+    const b = claimExecHold('i1', 'external:b', 5_000);
+    const c = claimExecHold('i1', 'external:c', 5_000);
+    expect(new Set([a.stamp, b.stamp, c.stamp]).size).toBe(3);
+    expect(b.stamp).toBeGreaterThan(a.stamp);
+    expect(c.stamp).toBeGreaterThan(b.stamp);
+  });
+
+  it('does not treat an expired hold as live, and the new claim restarts the clock', () => {
+    markExecHold('i1', 'external:old', 1_000);
+    const later = 1_000 + EXEC_HOLD_TTL_MS + 1;
+    const claim = claimExecHold('i1', 'external:new', later);
+    expect(claim.wasHeld).toBe(false);
+    expect(isExecHeld('i1', later)).toBe(true);
+  });
+
+  it('releases a hold only while it is still the claim\'s own', () => {
+    const mine = claimExecHold('i1', 'external:a', 2_000);
+    releaseExecHoldIf('i1', mine.stamp);
+    expect(isExecHeld('i1', 2_000)).toBe(false);
+  });
+
+  it('leaves a hold alone once a later deploy has claimed it: the interleaving that used to strand a live run', () => {
+    // A and B both start before either has written. With read-then-write both saw "not held"; here
+    // B's claim sees A's, and A's refused deploy must not remove the hold B's deploy depends on.
+    const a = claimExecHold('i1', 'external:a', 3_000);
+    const b = claimExecHold('i1', 'external:b', 3_000);
+    expect(b.wasHeld).toBe(true);
+
+    releaseExecHoldIf('i1', a.stamp);
+
+    expect(isExecHeld('i1', 3_000)).toBe(true);
+  });
+
+  it('leaves a hold alone when `exec answer` re-marked it after the claim', () => {
+    const a = claimExecHold('i1', 'external:a', 4_000);
+    markExecHold('i1', 'external:a', 4_500);
+    releaseExecHoldIf('i1', a.stamp);
+    expect(isExecHeld('i1', 4_500)).toBe(true);
+  });
+
+  it('keeps a stamp that matches a different issue from releasing this one', () => {
+    const a = claimExecHold('i1', 'external:a', 6_000);
+    claimExecHold('i2', 'external:a', 6_000);
+    releaseExecHoldIf('i2', a.stamp + 1_000);
+    expect(isExecHeld('i1', 6_000)).toBe(true);
+    expect(isExecHeld('i2', 6_000)).toBe(true);
+  });
+
+  it('fails closed like markExecHold: an unwritable store throws', () => {
+    writeFileSync(join(dir, 'automation.db'), 'not a sqlite database');
+    resetExecHoldForTests();
+    expect(() => claimExecHold('i1', 'external:a')).toThrow(/exec hold/);
   });
 });
