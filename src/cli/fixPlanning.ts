@@ -10,7 +10,7 @@ import type { TrustedVerifyPlan } from '../agents/deterministicTester.js';
 import { scanProject, toProjectSlug } from '../knowledge/index.js';
 import { recallRepoKnowledge, repoKey, type RepoMemoryBrief } from '../memory/repoKnowledge.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
-import { resolveSharedPaths } from '../support/worktreeManager.js';
+import { resolveSharedPaths, unsharedGitignoredPaths } from '../support/sharedPathDetection.js';
 
 export interface FixDependencyMapEntry {
   imports: string[];
@@ -25,6 +25,7 @@ export interface FixRepositoryContext {
   manifests: string[];
   verificationCommands: string[];
   sharedPaths: string[];
+  missingGitignoredPaths: string[];
   repoMemories: RepoMemoryBrief[];
   dependencyGraphAvailable: boolean;
   dependencyMap: Record<string, FixDependencyMapEntry>;
@@ -210,6 +211,7 @@ export async function buildFixRepositoryContext(
     verificationCommands: (plan?.commands ?? []).map((command) =>
       `${command.cwd ? `(${command.cwd}) ` : ''}${command.run}`),
     sharedPaths: sharedPaths.map((path) => toRelative(canonicalRoot, join(canonicalRoot, path))),
+    missingGitignoredPaths: unsharedGitignoredPaths(canonicalRoot, sharedPaths),
     repoMemories,
     dependencyGraphAvailable,
     dependencyMap,
@@ -360,6 +362,7 @@ export function workerContextForFixUnit(unit: FixUnit, context: FixRepositoryCon
       manifests: context.manifests,
       verificationCommands: context.verificationCommands,
       sharedPaths: context.sharedPaths,
+      missingGitignoredPaths: context.missingGitignoredPaths,
       dependencyGraphAvailable: unit.dependencyGraphBacked,
     },
   };

@@ -14,7 +14,8 @@
 // also walks the workspace tree — bounded, and only into directories that carry
 // a workspace manifest, so a stray `venv` folder in a fixture is never linked.
 
-import { existsSync, readdirSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
 /** Always-gitignored dependency dirs safe to auto-link without a config. */
@@ -41,6 +42,31 @@ const SKIPPED_DIRECTORIES = new Set([
 
 export interface SandboxConfig {
   sandbox?: { sharedPaths?: string[] } | null;
+}
+
+/** Top-level ignored paths that are not shared or readable from the worktree. */
+export function unsharedGitignoredPaths(repoPath: string, sharedPaths: string[] = []): string[] {
+  const shared = new Set(sharedPaths);
+  let entries: string[];
+  try { entries = readdirSync(repoPath).sort(); } catch { return []; }
+  const missing: string[] = [];
+  for (const name of entries) {
+    if (name === '.git' || [...shared].some((path) => path === name || path.startsWith(`${name}/`))) continue;
+    try {
+      execFileSync('git', ['-C', repoPath, 'check-ignore', '-q', '--', name], { stdio: 'ignore' });
+      const path = join(repoPath, name);
+      const mode = statSync(path).mode;
+      try { accessSync(path, constants.R_OK); } catch { missing.push(name); continue; }
+      // Root can bypass Unix read bits, so check them explicitly as well.
+      if ((mode & 0o444) === 0) missing.push(name);
+    } catch { /* tracked or not ignored */ }
+  }
+  return missing;
+}
+
+export function gitignoredPathsWarning(paths: string[]): string | null {
+  if (!paths.length) return null;
+  return `[Worktree] ${paths.length} gitignored path(s) from the source are absent from this worktree (${paths.join(', ')}); expose them through sandbox.sharedPaths or do not use their absence as a conclusion.`;
 }
 
 export interface SharedPathDetection {
