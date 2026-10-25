@@ -14,7 +14,7 @@ import { c, status } from '../support/colors.js';
 import { enableHumanSurfaceReadOnly } from '../mcp/humanSurfacePolicy.js';
 import { MAX_PROJECT_GOAL_CHARS } from '../support/projectGoal.js';
 import { wireSandboxExecutorIfEnabled } from '../sandboxExecutor/runtime.js';
-
+import { AutonomousScopeSchema } from './scopeSchema.js';
 export { validateConfig } from './configValidation.js';
 
 // Constants
@@ -384,7 +384,7 @@ const AutonomousConfigSchema = z.object({
   /** Pair mode max attempts */
   maxAttempts: z.number().min(1).max(10).default(3),
   /** Allowed project paths */
-  allowedProjects: z.array(z.string()).default(['~/dev']),
+  allowedProjects: z.array(z.string()).default(['~/dev']), scope: AutonomousScopeSchema,
   /**
    * Treat Linear Backlog as a work queue. Default false: moving an issue to Todo is the signal that
    * it is ready, so an unattended daemon never picks up what nobody triaged (AGT-4784, which reverses
@@ -837,7 +837,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       enabled: raw.autonomous.enabled,
       pairMode: raw.autonomous.pairMode,
       schedule: raw.autonomous.schedule,
-      maxAttempts: raw.autonomous.maxAttempts,
+      maxAttempts: raw.autonomous.maxAttempts, scope: raw.autonomous.scope,
       allowedProjects: raw.autonomous.allowedProjects,
       includeBacklog: raw.autonomous.includeBacklog,
       models: raw.autonomous.models ? {

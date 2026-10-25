@@ -115,10 +115,12 @@ describe('fetchIssuesForStates pagination', () => {
   it('collects every page', async () => {
     let page = 0;
     const queries: string[] = [];
+    const variables: Array<Record<string, unknown> | undefined> = [];
     const linear = {
       client: {
-        rawRequest: async (query: string) => {
+        rawRequest: async (query: string, vars?: Record<string, unknown>) => {
           queries.push(query);
+          variables.push(vars);
           return ({ data: { issues: {
           nodes: [{ id: `id-${page}`, identifier: `INT-${page}`, title: 't', priority: 2 }],
           pageInfo: { hasNextPage: page++ === 0, endCursor: `cursor-${page}` },
@@ -126,7 +128,9 @@ describe('fetchIssuesForStates pagination', () => {
         },
       },
     } as unknown as LinearClient;
-    expect((await fetchIssuesForStates(linear, ['Todo'])).nodes.map((node) => node.id)).toEqual(['id-0', 'id-1']);
+    expect((await fetchIssuesForStates(linear, ['Todo'], {
+      projectMilestone: { name: { eq: 'S4 — Gate Trustworthiness' } },
+    })).nodes.map((node) => node.id)).toEqual(['id-0', 'id-1']);
     expect(queries[0]).toMatch(/\burl\b/);
     // The native blockers ride the same request (AGT-4050): one nested field,
     // not one `inverseRelations()` resolver call per issue — measured 100
@@ -135,6 +139,11 @@ describe('fetchIssuesForStates pagination', () => {
     // One child is enough to tell an epic from a task (AGT-4682); the swarm must not pick an epic.
     expect(queries[0]).toMatch(/children\(first: 1\) \{ nodes \{ id \} \}/);
     expect(queries).toHaveLength(2);
+    expect(variables[0]?.filter).toEqual({
+      projectMilestone: { name: { eq: 'S4 — Gate Trustworthiness' } },
+      team: { id: { eq: 'team-1' } },
+      state: { name: { in: ['Todo'] } },
+    });
   });
 
   it('reports explicit truncation instead of silently returning a partial set', async () => {
