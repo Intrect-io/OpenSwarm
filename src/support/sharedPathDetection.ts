@@ -46,19 +46,22 @@ export interface SandboxConfig {
 
 /** Top-level ignored paths that are not shared or readable from the worktree. */
 export function unsharedGitignoredPaths(repoPath: string, sharedPaths: string[] = []): string[] {
-  const shared = new Set(sharedPaths);
   let entries: string[];
   try { entries = readdirSync(repoPath).sort(); } catch { return []; }
   const missing: string[] = [];
   for (const name of entries) {
-    if (name === '.git' || [...shared].some((path) => path === name || path.startsWith(`${name}/`))) continue;
+    if (name === '.git') continue;
     try {
       execFileSync('git', ['-C', repoPath, 'check-ignore', '-q', '--', name], { stdio: 'ignore' });
       const path = join(repoPath, name);
-      const mode = statSync(path).mode;
+      const stat = statSync(path);
+      const covered = sharedPaths.some((shared) => shared === name || shared.startsWith(`${name}/`));
+      const uid = process.getuid?.();
+      const groups = new Set([process.getgid?.(), ...(process.getgroups?.() ?? [])]);
+      const readBit = uid === stat.uid ? 0o400 : groups.has(stat.gid) ? 0o040 : 0o004;
       try { accessSync(path, constants.R_OK); } catch { missing.push(name); continue; }
-      // Root can bypass Unix read bits, so check them explicitly as well.
-      if ((mode & 0o444) === 0) missing.push(name);
+      // Root can bypass Unix mode checks, so evaluate access for the worker identity.
+      if ((stat.mode & readBit) === 0 || !covered) missing.push(name);
     } catch { /* tracked or not ignored */ }
   }
   return missing;
