@@ -32,3 +32,13 @@ commands.allow = ["get_close_to_tray"]
 identifier = "allow-set-close-to-tray"
 description = "Allows the trusted main/settings windows to change the close-to-tray preference."
 commands.allow = ["set_close_to_tray"]
+
+[[permission]]
+identifier = "allow-ade-get"
+description = "Allows the bundled ADE workspace page to read allowlisted daemon surfaces (sessions, session log, diff, run status) through the shell."
+commands.allow = ["ade_get"]
+
+[[permission]]
+identifier = "allow-ade-subscribe-events"
+description = "Allows the bundled ADE workspace page to receive the daemon's run events, relayed by the shell."
+commands.allow = ["ade_subscribe_events"]

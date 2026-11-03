@@ -182,6 +182,7 @@ pub fn set_server_url(url: String, window: tauri::WebviewWindow) -> Result<(), S
 
 /// English-only labels shared by the tray and settings window.
 pub struct Strings {
+    pub ade: &'static str,
     pub open: &'static str,
     pub hide: &'static str,
     pub settings: &'static str,
@@ -193,7 +194,8 @@ pub struct Strings {
 
 pub fn strings() -> Strings {
     Strings {
-        open: "Open OpenSwarm",
+        ade: "Open ADE workspace",
+        open: "Open dashboard",
         hide: "Hide",
         settings: "Settings…",
         restart: "Restart daemon",
