@@ -25,7 +25,13 @@ export interface DoDContract {
    * means the run is held for a person instead (testRemovalGate.ts).
    */
   tests?: {
-    allowRemoval: boolean;
+    allowRemoval?: boolean;
+    /**
+     * Globs of existing test / test-runner config files the worker may edit.
+     * Without one, the pair pipeline protects every tracked grader file
+     * (src/agents/protectedFiles.ts); new test files are always writable.
+     */
+    allowEdits?: string[];
   };
 }
 
@@ -94,15 +100,25 @@ export function parseDoDContract(description?: string): ParsedDoDContract {
     return { error: repairs.error ?? 'DoD contract automation.maxRepairs is invalid' };
   }
   const tests = raw.tests === undefined ? undefined : isRecord(raw.tests) ? raw.tests : null;
-  if (tests === null || (tests && typeof tests.allowRemoval !== 'boolean')) {
+  if (tests === null || (tests && tests.allowRemoval !== undefined && typeof tests.allowRemoval !== 'boolean')) {
     return { error: 'DoD contract tests.allowRemoval must be a boolean' };
+  }
+  const allowEdits = tests?.allowEdits;
+  if (allowEdits !== undefined && (!Array.isArray(allowEdits) || allowEdits.length > 50
+    || !allowEdits.every((glob) => typeof glob === 'string' && glob.length > 0 && glob.length <= 200))) {
+    return { error: 'DoD contract tests.allowEdits must be a list of up to 50 non-empty glob strings' };
   }
   return {
     contract: {
       version: 1,
       completion: { noChanges },
       automation: { scopeMismatch, maxRepairs: repairs.value },
-      ...(tests ? { tests: { allowRemoval: tests.allowRemoval as boolean } } : {}),
+      ...(tests ? {
+        tests: {
+          ...(tests.allowRemoval !== undefined ? { allowRemoval: tests.allowRemoval as boolean } : {}),
+          ...(allowEdits !== undefined ? { allowEdits: allowEdits as string[] } : {}),
+        },
+      } : {}),
     },
   };
 }

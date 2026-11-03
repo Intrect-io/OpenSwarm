@@ -77,6 +77,7 @@ export { buildTaskPrefix } from './pipelineTaskPrefix.js';
 export { stageTimeoutMs } from './stageTimeouts.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
 import { buildReviewerStageOptions } from './reviewerStageOptions.js';
+import { computeProtectedFiles } from './protectedFiles.js';
 
 
 type RunControl = { signal?: AbortSignal; stuck: StuckDetector };
@@ -177,6 +178,8 @@ export class PairPipeline extends EventEmitter {
         context.trustedVerifyCommands = plan.commands; context.trustedVerifyPackageJsonByDirectory = plan.packageJsonByDirectory;
         context.trustedVerifyInputFingerprint = await captureVerifyInputFingerprint(projectPath);
       } catch (error) { context.trustedVerifyError = error; }
+      // Captured once, before any worker edit: the grader is the run's starting tree.
+      context.protectedFiles = await computeProtectedFiles(projectPath, task);
       context.recovery = await LoopRecovery.create(context, opts?.recovery, startTime);
       if (this.config.securityAudit?.enabled) {
         context.securityBaseline = await captureSecurityAuditBaseline(projectPath, this.config.securityAudit);
@@ -511,6 +514,7 @@ export class PairPipeline extends EventEmitter {
             // Only a scope meant as the edit target is enforced; see
             // enforcedFileScope for which provenances qualify and why.
             fileScope: enforcedFileScope(context.task),
+            protectedFiles: context.protectedFiles,
             resumedTaskFiles: this.config.resumedTaskFiles,
             runSnapshotHash: context.runSnapshotHash,
             issueIdentifier: context.task.issueIdentifier || context.task.issueId,

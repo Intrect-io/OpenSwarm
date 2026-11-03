@@ -196,6 +196,8 @@ export interface PipelineContext {
   workerEscalation?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high' };
   /** The missing-validation-evidence gate has already nudged once this session — after that it defers to the reviewer instead of consuming more iterations (INT-2485). */
   validationNudged?: boolean;
+  /** Tracked test / test-runner config files the worker may not edit this run (protectedFiles.ts). */
+  protectedFiles?: string[];
   /** Commands captured before the worker runs, preventing self-modification of the verification gate. */
   trustedVerifyCommands?: VerifyCommand[];
   trustedVerifyPackageJsonByDirectory?: Record<string, string>;
