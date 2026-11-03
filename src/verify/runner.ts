@@ -1,8 +1,7 @@
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
 import { access, cp, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { constants, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -19,6 +18,7 @@ import { terminateProcessesWithEnvMarker } from '../adapters/processTree.js';
 import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import type { VerifyCommand } from './manifest.js';
 import { rebasePythonEnvironment } from './pythonEnvironment.js';
+import { pinTrustedTestConfig } from './trustedConfig.js';
 import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
@@ -767,7 +767,7 @@ async function createVerifySandboxRoot(prefix: string, scratchRoot?: string): Pr
 async function createHeadSandbox(
   projectPath: string,
   commands: VerifyCommand[],
-  scratchRoot?: string,
+  scratchRoot?: string, baseRef?: string,
 ): Promise<{ root: string; project: string }> {
   const root = await createVerifySandboxRoot('.openswarm-verify-head-', scratchRoot);
   const project = join(root, 'worktree');
@@ -803,9 +803,9 @@ async function createHeadSandbox(
       );
       await rebasePythonEnvironment(projectPath, project, sharedPath);
     }
-    // Validate what was actually copied, closing the source validation/copy
-    // race before any repository-controlled command can execute.
+    // Close the copy race first (no escaping link is left to write through), then pin config.
     await validateSandboxSymlinks(project, sharedPaths);
+    if (baseRef) await pinTrustedTestConfig(projectPath, project, baseRef);
     return { root, project };
   } catch (error) {
     await rm(root, { recursive: true, force: true });
@@ -949,7 +949,7 @@ async function runVerifyInSlot(options: RunVerifyOptions): Promise<VerifyEvidenc
     const started = Date.now();
     let sandbox: Awaited<ReturnType<typeof createHeadSandbox>>;
     try {
-      sandbox = await createHeadSandbox(options.projectPath, [command], scratchRoot);
+      sandbox = await createHeadSandbox(options.projectPath, [command], scratchRoot, options.baseRef);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.startsWith('[security]')) throw error;
