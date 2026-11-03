@@ -9,6 +9,7 @@
 //
 // Common: tray icon + window toggle + settings window + close-to-tray.
 
+mod ade;
 pub mod client_config;
 mod daemon_health;
 mod flavor;
@@ -216,7 +217,7 @@ fn trusted_command_window<R: tauri::Runtime>(
 /// invoke request, unlike global events (whose `EventTarget` is only a destination).
 #[tauri::command]
 fn open_url(window: tauri::WebviewWindow, url: String) -> Result<(), String> {
-    if !trusted_command_window(&window, &["main", "settings"]) {
+    if !trusted_command_window(&window, &["main", "settings", ade::ADE_WINDOW]) {
         return Err("untrusted WebView sender".into());
     }
     open_external_url(url)
@@ -813,7 +814,7 @@ pub fn run() {
     // Must be the first plugin: a second shell instance exits immediately and
     // only restores the existing main window.
     builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-        show_main_window(app);
+        ade::show_ade_window(app);
     }));
 
     builder = builder
@@ -832,6 +833,8 @@ pub fn run() {
         request_restart,
         restart_daemon,
         test_daemon_connection,
+        ade::ade_get,
+        ade::ade_subscribe_events,
     ]);
 
     let app = builder
@@ -858,6 +861,9 @@ pub fn run() {
                 .inner_size(980.0, 760.0)
                 .min_inner_size(420.0, 480.0)
                 .resizable(true)
+                // The ADE workspace is the window the app opens with; this
+                // one (the daemon's own dashboard) stays reachable from the tray.
+                .visible(false)
                 .center();
 
             // Overlay title bar is a macOS-only API — Windows/Linux keep the default bar.
@@ -888,8 +894,11 @@ pub fn run() {
                 }
             }
 
+            ade::build_ade_window(app);
+
             // Tray menu
             let s = strings();
+            let ade_item = MenuItemBuilder::with_id("ade", s.ade).build(app)?;
             let show_item = MenuItemBuilder::with_id("show", s.open).build(app)?;
             let hide_item = MenuItemBuilder::with_id("hide", s.hide).build(app)?;
             let settings_item = MenuItemBuilder::with_id("settings", s.settings).build(app)?;
@@ -897,7 +906,7 @@ pub fn run() {
                 MenuItemBuilder::with_id("restart-daemon", s.restart).build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", s.quit).build(app)?;
             let menu = MenuBuilder::new(app)
-                .items(&[&show_item, &hide_item])
+                .items(&[&ade_item, &show_item, &hide_item])
                 .separator()
                 .items(&[&settings_item, &restart_item])
                 .separator()
@@ -914,10 +923,13 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id().as_ref() {
+                    "ade" => ade::show_ade_window(app),
                     "show" => show_main_window(app),
                     "hide" => {
-                        if let Some(win) = app.get_webview_window("main") {
-                            let _ = win.hide(); // cxt-ignore: error_swallow
+                        for label in ["main", ade::ADE_WINDOW] {
+                            if let Some(win) = app.get_webview_window(label) {
+                                let _ = win.hide(); // cxt-ignore: error_swallow
+                            }
                         }
                     }
                     "settings" => open_settings_window(app),
@@ -963,7 +975,7 @@ pub fn run() {
             // Closing the main window hides it (reopenable from the tray) unless
             // the user disabled close-to-tray in settings.
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
+                if window.label() == "main" || window.label() == ade::ADE_WINDOW {
                     if close_to_tray_enabled() {
                         let _ = window.hide(); // cxt-ignore: error_swallow
                         api.prevent_close();
@@ -982,7 +994,7 @@ pub fn run() {
         // app is clicked; with close-to-tray the main window is merely hidden
         // and must be restored here (review finding).
         #[cfg(target_os = "macos")]
-        tauri::RunEvent::Reopen { .. } => show_main_window(app_handle),
+        tauri::RunEvent::Reopen { .. } => ade::show_ade_window(app_handle),
         _ => {
             let _ = app_handle;
         }

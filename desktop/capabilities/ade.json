@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "ade",
+  "description": "ADE workspace window. It shows only the bundled page (tauri asset origin) and reads the daemon through the shell's allowlisted, read-only ade_get / ade_subscribe_events commands; no remote origin, no mutating command.",
+  "windows": ["ade"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-ade-get",
+    "allow-ade-subscribe-events",
+    "allow-open-url"
+  ]
+}

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenSwarm ADE</title>
+    <link rel="stylesheet" href="ade.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <span class="brand">OpenSwarm</span>
+      <span class="sep">/</span>
+      <span class="crumb" id="crumb">Workspace</span>
+      <span class="spacer"></span>
+      <span class="status" id="stream-status" data-state="connecting">Connecting…</span>
+    </header>
+    <main class="panes">
+      <section class="pane sessions" aria-label="Runs and sessions">
+        <div class="pane-head">
+          <h2>Runs</h2>
+          <span class="count" id="session-count"></span>
+        </div>
+        <ol class="session-list" id="session-list"></ol>
+        <p class="empty" id="session-empty" hidden>No runs yet. The daemon has nothing running, queued, or recently finished.</p>
+      </section>
+      <section class="pane log" aria-label="Session log">
+        <div class="pane-head">
+          <h2 id="log-title">Log</h2>
+          <span class="meta" id="log-meta"></span>
+        </div>
+        <div class="log-body" id="log-body" tabindex="0"></div>
+        <p class="empty" id="log-empty">Select a run to follow its transcript.</p>
+      </section>
+      <section class="pane review" aria-label="Diff and verification">
+        <div class="run-card" id="run-card" hidden>
+          <div class="run-state"><span class="pill" id="run-state"></span><span class="attempt" id="run-attempt"></span></div>
+          <p class="run-detail" id="run-detail"></p>
+          <a class="pr-link" id="run-pr" href="#" hidden>Open pull request</a>
+        </div>
+        <div class="pane-head">
+          <h2>Verification</h2>
+        </div>
+        <ol class="verify-lines" id="verify-lines"></ol>
+        <p class="empty small" id="verify-empty">No verification output for this run yet.</p>
+        <div class="pane-head">
+          <h2>Diff</h2>
+          <span class="meta" id="diff-meta"></span>
+        </div>
+        <div class="diff-body" id="diff-body"></div>
+        <p class="empty small" id="diff-empty">No working-tree changes for this run.</p>
+      </section>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
