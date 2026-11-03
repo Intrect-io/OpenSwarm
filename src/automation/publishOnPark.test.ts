@@ -4,6 +4,8 @@ import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 const commitAndCreatePRWithHead = vi.hoisted(() => vi.fn());
 vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
+// The worktrees here are fake paths; the gate itself is tested in testRemovalGate.test.ts.
+vi.mock('./testRemovalGate.js', () => ({ TEST_REMOVAL_PARK_REASON: 'active_tests_removed', testRemovalHold: async () => null }));
 
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishFinishedRun, publishParkedIfNeeded, publishParkedWork, publishStuckWork, shouldPublishParkedWork, summarizeFailure } from './publishOnPark.js';

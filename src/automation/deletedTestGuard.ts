@@ -14,7 +14,7 @@
 // This check is deterministic on purpose: "the diff removes test cases" is a
 // property of the text, and does not need a model to have an opinion about it.
 
-/** A test file's `it(`/`test(` case count, before and after. */
+/** A test file's active case count, before and after. */
 export interface TestCaseDelta {
   file: string;
   before: number;
@@ -28,15 +28,112 @@ export interface DeletedTestFinding {
   removed: number;
 }
 
-// `it(`, `test(`, `it.each(`, `test.only(`, … but not `it.skip` being counted
-// twice via `describe`. Deliberately loose: this counts declarations, and the
-// only thing it has to get right is the DIRECTION of the change between two
-// versions of the same file, which a consistent undercount preserves.
-const TEST_CASE = /(?:^|[\s;{}])(?:it|test)(?:\.\w+)*\s*(?:\(|`)/g;
+// What counts is ACTIVE cases. Turning `it(` into `it.skip(` removes a test
+// from the suite as surely as deleting it, and an earlier version of this
+// guard counted both the same (round-1 redteam, 2026-11-03). Deliberately
+// loose otherwise: this counts declarations, and the only thing it has to get
+// right is the DIRECTION of the change between two versions of the same file,
+// which a consistent undercount preserves.
 
-/** How many test cases a file declares. */
-export function countTestCases(source: string): number {
-  return source.match(TEST_CASE)?.length ?? 0;
+/** Test files the guard reads: JS/TS `*.test.*`/`*.spec.*`, pytest modules, Go `_test.go`. */
+export type TestFileKind = 'js' | 'python' | 'go';
+
+export function testFileKind(file: string): TestFileKind | null {
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(file)) return 'js';
+  if (/(^|\/)test_[^/]*\.py$/.test(file) || /_test\.py$/.test(file)) return 'python';
+  if (/_test\.go$/.test(file)) return 'go';
+  return null;
+}
+
+// `it(`, `test(`, `it.each(`, `test.only(`, `xit(` … not `submit(` or `foo.it(`.
+const JS_CASE = /(?<![\w$.])(x?)(?:it|test)((?:\.\w+)*)\s*[(`]/g;
+const JS_SUITE = /(?<![\w$.])(x?)describe((?:\.\w+)*)\s*\(/g;
+const INACTIVE_MODIFIER = /\.(?:skip|todo|skipIf)\b/;
+
+/** Index just past the `)` that closes the `(` at `open`, skipping string literals. */
+function closingParen(source: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      for (i++; i < source.length && source[i] !== ch; i++) if (source[i] === '\\') i++;
+      continue;
+    }
+    if (ch === '(') depth++;
+    else if (ch === ')' && --depth === 0) return i + 1;
+  }
+  return source.length;
+}
+
+function countJsCases(source: string): number {
+  const skippedSuites: Array<[number, number]> = [];
+  for (const m of source.matchAll(JS_SUITE)) {
+    if (m[1] || INACTIVE_MODIFIER.test(m[2])) {
+      const open = m.index + m[0].length - 1;
+      skippedSuites.push([open, closingParen(source, open)]);
+    }
+  }
+  let count = 0;
+  for (const m of source.matchAll(JS_CASE)) {
+    if (m[1] || INACTIVE_MODIFIER.test(m[2])) continue;
+    if (skippedSuites.some(([from, to]) => m.index > from && m.index < to)) continue;
+    count++;
+  }
+  return count;
+}
+
+const PY_SKIP_DECORATOR = /^\s*@(?:pytest\.mark\.skip(?:if)?|unittest\.skip\w*)\b/;
+
+/** The decorator lines directly above line `index`. */
+function decoratorsAbove(lines: string[], index: number): string[] {
+  const found: string[] = [];
+  for (let i = index - 1; i >= 0 && /^\s*@/.test(lines[i]); i--) found.push(lines[i]);
+  return found;
+}
+
+function countPythonCases(source: string): number {
+  if (/^pytestmark\s*=.*pytest\.mark\.skip/m.test(source)) return 0;
+  const lines = source.split('\n');
+  let count = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const def = lines[i].match(/^(\s*)(?:async\s+)?def\s+test\w*\s*\(/);
+    if (!def) continue;
+    if (decoratorsAbove(lines, i).some(d => PY_SKIP_DECORATOR.test(d))) continue;
+    // A method inherits a skip on its class.
+    const indent = def[1].length;
+    let skippedByClass = false;
+    if (indent > 0) {
+      for (let j = i - 1; j >= 0; j--) {
+        const cls = lines[j].match(/^(\s*)class\s+\w+/);
+        if (cls && cls[1].length < indent) {
+          skippedByClass = decoratorsAbove(lines, j).some(d => PY_SKIP_DECORATOR.test(d));
+          break;
+        }
+      }
+    }
+    if (!skippedByClass) count++;
+  }
+  return count;
+}
+
+const GO_TEST = /^func\s+Test\w*\s*\(\s*(\w+)\s+\*testing\.T\s*\)[^{]*\{/gm;
+
+function countGoCases(source: string): number {
+  let count = 0;
+  for (const m of source.matchAll(GO_TEST)) {
+    const body = source.slice(m.index + m[0].length).replace(/^\s+/, '');
+    if (body.startsWith(`${m[1]}.Skip`)) continue;
+    count++;
+  }
+  return count;
+}
+
+/** How many active test cases a file declares (JS/TS unless `file` says otherwise). */
+export function countTestCases(source: string, file = 'file.test.ts'): number {
+  const kind = testFileKind(file) ?? 'js';
+  if (kind === 'python') return countPythonCases(source);
+  if (kind === 'go') return countGoCases(source);
+  return countJsCases(source);
 }
 
 /**
@@ -50,9 +147,9 @@ export function findDeletedTests(
 ): DeletedTestFinding {
   const files: TestCaseDelta[] = [];
   for (const { file, before, after } of changed) {
-    if (!/\.(test|spec)\.[cm]?[jt]sx?$/.test(file)) continue;
-    const from = before === null ? 0 : countTestCases(before);
-    const to = after === null ? 0 : countTestCases(after);
+    if (!testFileKind(file)) continue;
+    const from = before === null ? 0 : countTestCases(before, file);
+    const to = after === null ? 0 : countTestCases(after, file);
     if (to < from) files.push({ file, before: from, after: to });
   }
   files.sort((a, b) => (b.before - b.after) - (a.before - a.after));
@@ -113,7 +210,7 @@ export async function collectTestCaseDeltas(
 
   const names = (await run(['diff', '--name-only', `${base}..HEAD`])).split('\n')
     .map(n => n.trim())
-    .filter(n => /\.(test|spec)\.[cm]?[jt]sx?$/.test(n));
+    .filter(n => testFileKind(n) !== null);
 
   const changed: Array<{ file: string; before: string | null; after: string | null }> = [];
   for (const file of names) {

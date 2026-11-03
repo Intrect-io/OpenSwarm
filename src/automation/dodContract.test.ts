@@ -33,6 +33,14 @@ describe('DoD contract', () => {
     expect(parseDoDContract('```openswarm:dod\n{"version":1,"completion":{"noChanges":"park"},"automation":{"scopeMismatch":"retry_ephemeral","maxRepairs":1.5}}\n```').error).toContain('0 to 3');
   });
 
+  it('parses an optional tests.allowRemoval and rejects a non-boolean one', () => {
+    const base = '"version":1,"completion":{"noChanges":"park"},"automation":{"scopeMismatch":"park"}';
+    expect(parseDoDContract(`\`\`\`openswarm:dod\n{${base},"tests":{"allowRemoval":true}}\n\`\`\``).contract?.tests).toEqual({ allowRemoval: true });
+    expect(parseDoDContract(`\`\`\`openswarm:dod\n{${base}}\n\`\`\``).contract?.tests).toBeUndefined();
+    expect(parseDoDContract(`\`\`\`openswarm:dod\n{${base},"tests":{"allowRemoval":"yes"}}\n\`\`\``).error).toContain('tests.allowRemoval');
+    expect(parseDoDContract(`\`\`\`openswarm:dod\n{${base},"tests":true}\n\`\`\``).error).toContain('tests.allowRemoval');
+  });
+
   it('ignores descriptions without a contract for legacy issues', () => {
     expect(parseDoDContract('No machine policy here')).toEqual({});
   });

@@ -33,6 +33,7 @@ import type { VerifyConfig } from '../core/types.js';
 import { pipelineExecutionBoundary, type StageBoundaryResults } from '../agents/stageExecutionBoundary.js';
 
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
+import { TEST_REMOVAL_PARK_REASON, testRemovalHold } from './testRemovalGate.js';
 
 /** Runs once after a reviewed publication succeeded and was durably recorded. */
 export type ApprovedPublicationHook = (publication: {
@@ -315,6 +316,18 @@ export async function publishApprovedWork(
 ): Promise<void> {
   // Create PR (worktree mode + pipeline success = finalStatus 'approved')
   if (worktreeInfo && result.success && result.finalStatus === 'approved') {
+    // Before the lease fence: `beforePublish` moves the run to PUBLISHING, and a
+    // held run must park from where it is, not from a publication it never made.
+    const removal = await testRemovalHold(worktreeInfo.worktreePath, task.description);
+    if (removal) {
+      result.success = false;
+      result.finalStatus = 'failed';
+      result.failureDetail = `publication: ${removal.reason}`;
+      result.operatorPark = { code: TEST_REMOVAL_PARK_REASON, reason: removal.reason };
+      broadcastEvent({ type: 'log', data: { taskId: task.issueId || task.id, stage: 'pr', line: `Publication held: ${removal.reason}` } });
+      console.warn(`[Runner] Publication held for ${task.issueIdentifier}: ${removal.reason}`);
+      return;
+    }
     const publishAllowed = await durability?.beforePublish() ?? true;
     if (!publishAllowed) {
       result.success = false;
