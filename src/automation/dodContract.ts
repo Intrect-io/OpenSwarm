@@ -19,6 +19,14 @@ export interface DoDContract {
     scopeMismatch: DoDScopeMismatchPolicy;
     maxRepairs: number;
   };
+  /**
+   * `allowRemoval: true` lets an unattended run publish a change that lowers
+   * the count of active test cases (deleted, or turned into skip/todo). Absent
+   * means the run is held for a person instead (testRemovalGate.ts).
+   */
+  tests?: {
+    allowRemoval: boolean;
+  };
 }
 
 export interface ParsedDoDContract {
@@ -85,11 +93,16 @@ export function parseDoDContract(description?: string): ParsedDoDContract {
   if (repairs.error || repairs.value === undefined) {
     return { error: repairs.error ?? 'DoD contract automation.maxRepairs is invalid' };
   }
+  const tests = raw.tests === undefined ? undefined : isRecord(raw.tests) ? raw.tests : null;
+  if (tests === null || (tests && typeof tests.allowRemoval !== 'boolean')) {
+    return { error: 'DoD contract tests.allowRemoval must be a boolean' };
+  }
   return {
     contract: {
       version: 1,
       completion: { noChanges },
       automation: { scopeMismatch, maxRepairs: repairs.value },
+      ...(tests ? { tests: { allowRemoval: tests.allowRemoval as boolean } } : {}),
     },
   };
 }

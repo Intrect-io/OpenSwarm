@@ -26,6 +26,7 @@ issue description is executed.
 | Worker claimed success with zero diff and no reason | Park | Always park — that is an unfinished run, not a no-op |
 | Publication fence lists *only* ephemeral artifacts | One bounded retry (residual) | `automation.scopeMismatch` and `maxRepairs` (0–3) |
 | A source/test/docs file is outside reserved scope | Park | Always park — a contract cannot widen write scope |
+| The change lowers the active test count of a test file (a case deleted, or turned into `skip`/`todo`/`xit`/`@pytest.mark.skip`/`t.Skip`) | Park before the reviewed publication (`active_tests_removed`) | `"tests": { "allowRemoval": true }` publishes it |
 | Malformed `openswarm:dod` block | Park, with the parse error | — |
 
 `completion.noChanges` may be `complete` only when the worker actually stated

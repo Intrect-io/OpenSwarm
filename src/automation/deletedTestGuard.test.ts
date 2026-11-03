@@ -97,6 +97,40 @@ describe('deleted test guard (AGT-4277)', () => {
     expect(notice).toContain('say so in the description');
   });
 
+  it('counts a skip conversion as a removed case', () => {
+    // Round-1 redteam (2026-11-03): `it(` -> `it.skip(` used to count 1 -> 1.
+    const before = "it('a', () => {});\nit('b', () => {});\ndescribe('s', () => { it('c', () => {}); });";
+    const skipped = "it.skip('a', () => {});\nit.todo('b');\ndescribe.skip('s', () => { it('c', () => {}); });";
+    const xed = "xit('a', () => {});\nit.skipIf(true)('b', () => {});\nxdescribe('s', () => { it('c', () => {}); });";
+    expect(countTestCases(before)).toBe(3);
+    expect(countTestCases(skipped)).toBe(0);
+    expect(countTestCases(xed)).toBe(0);
+    expect(findDeletedTests([{ file: 'a.test.ts', before, after: skipped }]).removed).toBe(3);
+    // A suite that only CONTAINS the word skip in a title is still active.
+    expect(countTestCases("describe('skip handling', () => { it('works', () => {}); });")).toBe(1);
+  });
+
+  it('counts removed pytest and go test cases', () => {
+    const pyBefore = 'import pytest\n\ndef test_a():\n    pass\n\nasync def test_b():\n    pass\n\nclass TestC:\n    def test_c(self):\n        pass\n';
+    const pyAfter = 'import pytest\n\n@pytest.mark.skip(reason="flaky")\ndef test_a():\n    pass\n\n@pytest.mark.skip\nclass TestC:\n    def test_c(self):\n        pass\n';
+    expect(countTestCases(pyBefore, 'tests/test_mod.py')).toBe(3);
+    expect(countTestCases(pyAfter, 'tests/test_mod.py')).toBe(0);
+    expect(countTestCases('pytestmark = pytest.mark.skip\ndef test_a():\n    pass\n', 'mod_test.py')).toBe(0);
+
+    const goBefore = 'package x\n\nfunc TestA(t *testing.T) {\n\tif 1 != 1 { t.Fatal() }\n}\n\nfunc TestB(t *testing.T) {\n\tt.Log("x")\n}\n';
+    const goAfter = 'package x\n\nfunc TestA(t *testing.T) {\n\tt.Skip("later")\n}\n';
+    expect(countTestCases(goBefore, 'pkg/x_test.go')).toBe(2);
+    expect(countTestCases(goAfter, 'pkg/x_test.go')).toBe(0);
+
+    const finding = findDeletedTests([
+      { file: 'tests/test_mod.py', before: pyBefore, after: pyAfter },
+      { file: 'pkg/x_test.go', before: goBefore, after: null },
+      { file: 'pkg/helpers.py', before: pyBefore, after: '' },
+    ]);
+    expect(finding.removed).toBe(5);
+    expect(finding.files.map(f => f.file)).toEqual(['tests/test_mod.py', 'pkg/x_test.go']);
+  });
+
   it('reads the delta out of git, treating an absent side as zero', async () => {
     const run = async (args: string[]) => {
       if (args[0] === 'merge-base') return 'base-sha\n';
