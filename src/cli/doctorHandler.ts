@@ -35,7 +35,7 @@ function checkName(label: string): string | undefined {
   if (label === 'config') return 'config';
   if (label === 'linear') return 'linear';
   if (label.startsWith('port ')) return 'ports';
-  if (label === 'codex' || label === 'claude') return 'providers';
+  if (label === 'codex' || label === 'claude' || label === 'claude auth') return 'providers';
   if (label === 'git') return 'git';
   if (label === 'gh') return 'gh';
   return undefined;
@@ -105,6 +105,20 @@ export async function handleDoctor(): Promise<void> {
     const path = await which(bin);
     if (path) line('ok', `cli: ${bin}`, path);
     else line(missStatus, `cli: ${bin}`, `not on PATH (${note})`);
+    if (bin === 'claude' && path) {
+      // OpenSwarm runs claude without the operator's user settings, so auth
+      // that lives only in ~/.claude/settings.json `env` is lifted into the
+      // child env. Report where it will come from — names, never values.
+      const { describeClaudeAuthSource } = await import('../adapters/claudeEnv.js');
+      const source = describeClaudeAuthSource(process.env);
+      const detail: Record<typeof source, string> = {
+        env: 'ANTHROPIC_* from the process env',
+        'user-settings': 'ANTHROPIC_* from ~/.claude settings env (injected into the child)',
+        'oauth-file': 'OAuth credentials file',
+        none: 'no ANTHROPIC_* key and no OAuth file — run `claude` once to log in',
+      };
+      line(source === 'none' ? 'warn' : 'ok', 'claude auth', detail[source]);
+    }
   }
 
   // 4) LLM providers (env keys + OAuth profiles + PATH binaries + local servers)

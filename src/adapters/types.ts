@@ -150,6 +150,14 @@ export interface CliRunOptions {
   /** Enforce read-only tool exposure/execution where the adapter supports OpenSwarm's tool layer. */
   readOnly?: boolean;
   /**
+   * Environment the child starts from, instead of the daemon's whole
+   * `process.env`. A caller that hands the child a shell with no reason to see
+   * the daemon's other credentials passes an allowlisted env here
+   * (`safeInheritedEnv`). The adapter's own `CliCommandSpec.env` overlay is
+   * still applied on top.
+   */
+  baseEnv?: NodeJS.ProcessEnv;
+  /**
    * Expose the file/bash tool set to the agentic loop. Defaults to each adapter's
    * normal behavior (usually on). Set false for plain conversational completion
    * (the chat CLI) so the model answers directly instead of running tools.
@@ -226,6 +234,11 @@ export interface CliCommandSpec {
   stdinFile?: string;
   /** Adapter-owned temporary paths removed after the child settles. */
   cleanupPaths?: string[];
+  /**
+   * Adapter-specific environment overlay, applied after the worker env is
+   * built. A key mapped to `undefined` is removed from the child's env.
+   */
+  env?: Record<string, string | undefined>;
 }
 
 /**

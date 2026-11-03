@@ -1,4 +1,3 @@
-import { EventEmitter } from 'node:events';
 import { rm } from 'node:fs/promises';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -6,22 +5,18 @@ const testHome = vi.hoisted(() => ({
   path: `/tmp/openswarm-scheduler-${process.pid}`,
 }));
 
-const spawned = vi.hoisted(() => ({
-  processes: [] as Array<EventEmitter & {
-    stdout: EventEmitter;
-    stderr: EventEmitter;
-    kill: ReturnType<typeof vi.fn>;
-  }>,
+const pending = vi.hoisted(() => ({
+  finishers: [] as Array<(success: boolean) => void>,
 }));
 
-const spawnMock = vi.hoisted(() => vi.fn());
+const runClaudeTaskMock = vi.hoisted(() => vi.fn());
 
 vi.mock('os', () => ({
   homedir: () => testHome.path,
 }));
 
-vi.mock('child_process', () => ({
-  spawn: spawnMock,
+vi.mock('../adapters/claudeTask.js', () => ({
+  runClaudeTask: runClaudeTaskMock,
 }));
 
 import {
@@ -33,40 +28,30 @@ import {
   stopAllSchedules,
 } from './scheduler.js';
 
-function mockSpawn(closeDelayMs: number | null = 0): void {
-  spawnMock.mockImplementation(() => {
-    const proc = Object.assign(new EventEmitter(), {
-      stdout: new EventEmitter(),
-      stderr: new EventEmitter(),
-      kill: vi.fn(),
-    });
-    spawned.processes.push(proc);
-    if (closeDelayMs === null) {
-      // Keep the process open until the test emits close.
-    } else if (closeDelayMs === 0) {
-      queueMicrotask(() => proc.emit('close', 0));
-    } else {
-      setTimeout(() => proc.emit('close', 0), closeDelayMs);
-    }
-    return proc;
-  });
+/** `held` keeps each run in flight until the test finishes it. */
+function mockRuns(held = false): void {
+  runClaudeTaskMock.mockImplementation(() => new Promise((resolve) => {
+    const finish = (success: boolean) => resolve({ success, stdout: '', resultText: '' });
+    if (held) pending.finishers.push(finish);
+    else queueMicrotask(() => finish(true));
+  }));
 }
 
 describe('runNow bypass execution', () => {
   beforeEach(async () => {
     stopAllSchedules();
-    spawned.processes = [];
-    spawnMock.mockReset();
+    pending.finishers = [];
+    runClaudeTaskMock.mockReset();
     await rm(testHome.path, { recursive: true, force: true });
   });
 
   it('uses the scheduled-job path when bypassing the time window', async () => {
-    mockSpawn();
+    mockRuns();
     await addSchedule('nightly', testHome.path, 'do work', '0 3 * * *');
 
     await expect(runNow('nightly', true)).resolves.toBe(true);
 
-    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(runClaudeTaskMock).toHaveBeenCalledTimes(1);
     expect(getRecentResults(1)[0]).toMatchObject({ success: true });
     expect((await listSchedules())[0]).toMatchObject({
       name: 'nightly',
@@ -76,7 +61,7 @@ describe('runNow bypass execution', () => {
   });
 
   it('does not start a second bypass run for a job that is already running', async () => {
-    mockSpawn(null);
+    mockRuns(true);
     await addSchedule('nightly', testHome.path, 'do work', '0 3 * * *');
 
     const first = runNow('nightly', true);
@@ -86,9 +71,9 @@ describe('runNow bypass execution', () => {
     expect(getRunningJobs()).toHaveLength(1);
 
     await expect(runNow('nightly', true)).resolves.toBe(false);
-    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(runClaudeTaskMock).toHaveBeenCalledTimes(1);
 
-    spawned.processes[0].emit('close', 0);
+    pending.finishers[0](true);
     await expect(first).resolves.toBe(true);
   });
 });

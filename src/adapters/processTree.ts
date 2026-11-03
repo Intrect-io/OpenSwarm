@@ -597,27 +597,66 @@ export function terminateCliProcessTree(
  */
 export async function terminateProcessesWithEnvMarker(marker: string): Promise<void> {
   if (process.platform === 'win32' || marker.length < 24) return;
-  const childProcess = await import('node:child_process');
-  if (typeof childProcess.execFile !== 'function') return;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    let stdout = '';
-    try {
-      stdout = await new Promise<string>((resolveOutput, rejectOutput) => {
-        childProcess.execFile('ps', ['eww', '-axo', 'pid=,command='], {
-          encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 5_000,
-        }, (error, output) => error ? rejectOutput(error) : resolveOutput(output));
-      });
-    } catch {
-      return;
-    }
-    const pids = stdout.split('\n')
-      .filter((line) => line.includes(marker))
-      .map((line) => Number.parseInt(line.trim().split(/\s+/, 1)[0] ?? '', 10))
-      .filter((pid) => Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid);
-    if (pids.length === 0) return;
+    const pids = process.platform === 'linux'
+      ? listPidsWithEnvMarkerFromProc(marker)
+      : await listPidsWithEnvMarkerFromPs(marker);
+    if (pids === null || pids.length === 0) return;
     for (const pid of pids) {
       try { process.kill(pid, 'SIGKILL'); } catch { /* raced with exit */ }
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
   }
+}
+
+function isReapablePid(pid: number): boolean {
+  return Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid;
+}
+
+/**
+ * Linux: read each process's environment from /proc. procps `ps` rejects the
+ * BSD `eww -axo` form outright ("-x requires ..."), so the ps path below found
+ * nothing here and every escaped descendant leaked. Only processes we may
+ * read (same user) are visible, which is exactly the set we could signal.
+ */
+function listPidsWithEnvMarkerFromProc(marker: string): number[] | null {
+  let entries: string[];
+  try {
+    entries = readdirSync('/proc');
+  } catch {
+    return null;
+  }
+  const pids: number[] = [];
+  for (const entry of entries) {
+    const pid = Number(entry);
+    if (!isReapablePid(pid)) continue;
+    try {
+      const environ = readFileSync(`/proc/${pid}/environ`, 'utf8');
+      // `marker` is either a whole `KEY=value` entry or just the value.
+      if (environ.split('\0').some((entry) => entry === marker || entry.endsWith(`=${marker}`))) pids.push(pid);
+    } catch {
+      // Exited, or not ours to read.
+    }
+  }
+  return pids;
+}
+
+/** BSD/macOS: `ps eww` appends each process's environment to its command. */
+async function listPidsWithEnvMarkerFromPs(marker: string): Promise<number[] | null> {
+  const childProcess = await import('node:child_process');
+  if (typeof childProcess.execFile !== 'function') return null;
+  let stdout = '';
+  try {
+    stdout = await new Promise<string>((resolveOutput, rejectOutput) => {
+      childProcess.execFile('ps', ['eww', '-axo', 'pid=,command='], {
+        encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 5_000,
+      }, (error, output) => error ? rejectOutput(error) : resolveOutput(output));
+    });
+  } catch {
+    return null;
+  }
+  return stdout.split('\n')
+    .filter((line) => line.includes(marker))
+    .map((line) => Number.parseInt(line.trim().split(/\s+/, 1)[0] ?? '', 10))
+    .filter(isReapablePid);
 }

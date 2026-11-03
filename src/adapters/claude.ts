@@ -22,6 +22,7 @@ import { t } from '../locale/index.js';
 import { extractSummary } from './resultParsing.js';
 import { writeClaudeMcpConfig } from './memoryMcp.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+import { buildClaudeEnvOverlay, inheritsUserSettings } from './claudeEnv.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -96,6 +97,22 @@ export class ClaudeCliAdapter implements CliAdapter {
     // something behind for the next run.
     const mcpConfig = options.memoryTools !== false && !options.readOnly ? writeClaudeMcpConfig() : undefined;
     if (mcpConfig) args.push('--mcp-config', mcpConfig);
+    // Keep the operator's interactive setup out of a headless run (see
+    // claudeEnv.ts). A worker still loads the target repo's project/local
+    // settings. A read-only run loads no settings at all: the repo under review
+    // is untrusted, and its settings hooks are shell commands that run outside
+    // the tool allowlist. `--bare` is not used — it accepts only
+    // ANTHROPIC_API_KEY/apiKeyHelper, not an auth-token proxy.
+    // AskUserQuestion has no one to answer it in `-p` and would stall the run
+    // until the dialog timeout.
+    const baseEnv = options.baseEnv ?? process.env;
+    // The switch belongs to the daemon, not the child: an allowlisted baseEnv
+    // (dev tasks) never carries OPENSWARM_* keys.
+    const loadsUserSettings = inheritsUserSettings(process.env);
+    if (!loadsUserSettings) {
+      args.push('--setting-sources', options.readOnly ? '' : 'project,local');
+    }
+    if (!options.readOnly) args.push('--disallowedTools', 'AskUserQuestion');
     args.push('--model', model);
     if (options.maxTurns) args.push('--max-turns', String(options.maxTurns));
     return {
@@ -103,6 +120,7 @@ export class ClaudeCliAdapter implements CliAdapter {
       args,
       stdinFile: promptFile,
       cleanupPaths: mcpConfig ? [dirname(mcpConfig)] : [],
+      env: buildClaudeEnvOverlay(baseEnv, { loadsUserSettings }),
     };
   }
 
@@ -114,7 +132,8 @@ export class ClaudeCliAdapter implements CliAdapter {
     try {
       const costInfo = extractCostFromStreamJson(raw.stdout);
       if (costInfo) {
-        console.log(`[Worker] Cost: ${formatCost(costInfo)}`);
+        // stderr: `openswarm review --json` owns stdout.
+        console.error(`[Worker] Cost: ${formatCost(costInfo)}`);
       }
 
       const resultText = extractResultFromStreamJson(raw.stdout);
@@ -137,7 +156,8 @@ export class ClaudeCliAdapter implements CliAdapter {
     try {
       const costInfo = extractCostFromStreamJson(raw.stdout);
       if (costInfo) {
-        console.log(`[Reviewer] Cost: ${formatCost(costInfo)}`);
+        // stderr: `openswarm review --json` owns stdout.
+        console.error(`[Reviewer] Cost: ${formatCost(costInfo)}`);
       }
 
       let resultText = '';

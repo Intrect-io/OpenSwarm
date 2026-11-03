@@ -867,6 +867,9 @@ describe('ToolExecOptions', () => {
 });
 
 describe('search_files without ripgrep', () => {
+  // A PATH holding only `git`, as on the hosted runner: Ubuntu ships rg in /usr/bin, so that is not rg-free.
+  const binWithOnlyGit = async (prefix: string) => { const d = await fs.mkdtemp(path.join(os.tmpdir(), prefix)); await fs.symlink(path.join(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), 'git'), path.join(d, 'git')); return d; };
+
   // Observed on a real GitHub Actions run of the review gate: five consecutive
   // `spawn rg ENOENT`, and the reviewer still returned `approve`. An agent whose
   // search always errors stops searching and reviews the diff without ever
@@ -878,10 +881,8 @@ describe('search_files without ripgrep', () => {
     await fs.writeFile(path.join(repo, 'a.ts'), 'const needle = 1;\nconst other = 2;\n');
     execFileSync('git', ['add', '-A'], { cwd: repo });
 
-    // A PATH with no rg on it, which is what the hosted runner effectively had.
     const savedPath = process.env.PATH;
-    const emptyBin = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-bin-'));
-    process.env.PATH = `${emptyBin}:/usr/bin:/bin`;
+    process.env.PATH = await binWithOnlyGit('openswarm-bin-');
     try {
       const result = await executeTool(
         makeCall('search_files', { pattern: 'needle', path: repo }),
@@ -900,8 +901,7 @@ describe('search_files without ripgrep', () => {
     // never ran reads as evidence of absence.
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-nogit-'));
     const savedPath = process.env.PATH;
-    const emptyBin = await fs.mkdtemp(path.join(os.tmpdir(), 'openswarm-bin2-'));
-    process.env.PATH = `${emptyBin}:/usr/bin:/bin`;
+    process.env.PATH = await binWithOnlyGit('openswarm-bin2-');
     try {
       const result = await executeTool(
         makeCall('search_files', { pattern: 'needle', path: outside }),
