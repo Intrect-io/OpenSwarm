@@ -16,7 +16,8 @@ async function loadFreshModule() {
   // Clear any RUNNER_* overrides inherited from the shell (e.g. CI) so every path
   // derives from tempHome, independent of the ambient environment. (INT-2543)
   for (const v of ['OPENSWARM_RUNNER_TASK_STATE_FILE', 'OPENSWARM_RUNNER_REJECTION_STATE_FILE',
-    'OPENSWARM_RUNNER_PIPELINE_HISTORY_FILE', 'OPENSWARM_RUNNER_DECOMPOSITION_STATE_FILE']) {
+    'OPENSWARM_RUNNER_PIPELINE_HISTORY_FILE', 'OPENSWARM_RUNNER_DECOMPOSITION_STATE_FILE',
+    'OPENSWARM_DAILY_PACE_FILE', 'OPENSWARM_PROJECT_SELECTION_FILE']) {
     vi.stubEnv(v, '');
   }
   mod = await import('./runnerState.js');

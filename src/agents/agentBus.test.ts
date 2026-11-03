@@ -4,9 +4,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdir, utimes, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { AgentBus, createBus, type StepCompletedPayload, type ContextUpdatePayload, type FileChangedPayload } from './agentBus.js';
+import { AgentBus, BUS_DIR, createBus, type StepCompletedPayload, type ContextUpdatePayload, type FileChangedPayload } from './agentBus.js';
 
 describe('agentBus', () => {
   let bus: AgentBus;
@@ -250,7 +249,7 @@ describe('agentBus', () => {
       const executionId = `stale-lock-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const staleBus = createBus(executionId);
       await staleBus.init('workflow-123');
-      const lockPath = resolve(homedir(), '.openswarm', 'bus', executionId, 'context.lock');
+      const lockPath = resolve(BUS_DIR, executionId, 'context.lock');
       await mkdir(lockPath);
       const old = new Date(Date.now() - 60_000);
       await utimes(lockPath, old, old);
@@ -627,7 +626,7 @@ describe('agentBus', () => {
       const executionId = `ordering-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const orderingBus = createBus(executionId);
       await orderingBus.init('workflow-123');
-      const messagesPath = resolve(homedir(), '.openswarm', 'bus', executionId, 'messages');
+      const messagesPath = resolve(BUS_DIR, executionId, 'messages');
       const received = vi.fn();
       orderingBus.on('log', received);
       const message = (id: string) => JSON.stringify({

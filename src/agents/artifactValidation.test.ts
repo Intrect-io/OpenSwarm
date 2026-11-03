@@ -2,10 +2,10 @@
 // fan-out must not silently proceed on a failed baseline capture.
 
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentBus } from './agentBus.js';
+import { AgentBus, BUS_DIR } from './agentBus.js';
 import { parseAuditorOutput } from './auditor.js';
 import { parseDocumenterOutput } from './documenter.js';
 
@@ -26,7 +26,7 @@ describe('agentBus malformed history quarantine', () => {
 
     await bus.publish('log', 'step-1', { message: 'valid' });
 
-    const messagesDir = resolve(homedir(), '.openswarm', 'bus', (bus as unknown as { executionId: string }).executionId, 'messages');
+    const messagesDir = resolve(BUS_DIR, (bus as unknown as { executionId: string }).executionId, 'messages');
     const corruptPath = join(messagesDir, '9999-corrupt.json');
     await writeFile(corruptPath, '{ not json', 'utf-8');
     const wrongShapePath = join(messagesDir, '9998-wrong-shape.json');
