@@ -102,7 +102,7 @@ export interface RepositoryAdmissionPolicy {
   unknownScopeAdmission?: 'serialize' | 'admit';
   maxAttemptsPerHour?: number;
   maxFailuresPerHour?: number;
-  maxCostUsdPerDay?: number;
+  maxCostUsdPerDay?: number; globalMaxCostUsdPerDay?: number; unknownAttemptCostUsd?: number; // runLedgerCost.ts
   circuitCooldownMs?: number;
 }
 
@@ -602,7 +602,7 @@ export class DurableRunCoordinator {
       unknownScopeAdmission: admission?.unknownScopeAdmission,
       maxAttemptsPerHour: admission?.maxAttemptsPerHour,
       maxFailuresPerHour: admission?.maxFailuresPerHour,
-      maxCostUsdPerDay: admission?.maxCostUsdPerDay,
+      maxCostUsdPerDay: admission?.maxCostUsdPerDay, globalMaxCostUsdPerDay: admission?.globalMaxCostUsdPerDay, unknownAttemptCostUsd: admission?.unknownAttemptCostUsd,
       circuitCooldownMs: admission?.circuitCooldownMs,
     });
     if (!claim) {

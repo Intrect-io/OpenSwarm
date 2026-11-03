@@ -477,13 +477,13 @@ const AutonomousConfigSchema = z.object({
     allowReasons: z.array(z.enum(['quota', 'infra', 'capability'])).default(['quota', 'infra', 'capability']),
   }).optional(),
   /**
-   * OS fence for the worker's bash tool (AGT-4387). 'on' (default) wraps every
-   * bash call in sandbox-exec / bwrap: writes limited to the worktree, temp
-   * and build caches, network loopback-only unless `workerNetwork: open`
-   * (AGT-4798). 'off' restores the pre-AGT-4387 behaviour (bash as the daemon
-   * user, regex denylist only).
+   * OS fence for the worker's bash tool (AGT-4387). 'on' (default) wraps bash in sandbox-exec / bwrap:
+   * writes limited to the worktree, temp and build caches, network loopback-only unless
+   * `workerNetwork: open` (AGT-4798). 'off' restores bash as the daemon user, regex denylist only.
    */
   workerSandbox: z.enum(['on', 'off']).default('on'),
+  /** Daemon-wide daily spend ceiling across repositories, and the estimate per attempt with no recorded cost (runLedgerCost.ts) */
+  spend: z.object({ maxCostUsdPerDay: z.number().positive().optional(), unknownAttemptCostUsd: z.number().min(0).optional() }).optional(),
   /** Accept delegated CLI adapters (claude/codex/cursor) for unattended work despite the missing fences (AGT-4444) */
   allowDelegatedAdapters: z.boolean().default(false),
   /** Free disk space (GiB) below which dispatch pauses; 0 switches the check off (AGT-4785) */
@@ -897,7 +897,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       adapterRouting: raw.autonomous.adapterRouting,
       workerSandbox: raw.autonomous.workerSandbox,
       workerNetwork: raw.autonomous.workerNetwork,
-      minFreeDiskGiB: raw.autonomous.minFreeDiskGiB,
+      minFreeDiskGiB: raw.autonomous.minFreeDiskGiB, spend: raw.autonomous.spend,
       allowDelegatedAdapters: raw.autonomous.allowDelegatedAdapters,
       periodicReviews: raw.autonomous.periodicReviews,
       orchestrator: raw.autonomous.orchestrator,

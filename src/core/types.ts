@@ -724,6 +724,12 @@ export type AutonomousStartupConfig = {
    */
   minFreeDiskGiB?: number;
   /**
+   * Daemon-wide daily spend ceiling across repositories, next to each
+   * repository's own `automation.maxCostUsdPerDay`, and the estimate an attempt
+   * with no recorded cost counts at (default: the recent mean of known costs).
+   */
+  spend?: { maxCostUsdPerDay?: number; unknownAttemptCostUsd?: number };
+  /**
    * Run unattended work on delegated CLI adapters (claude/codex/cursor) even
    * though OpenSwarm's publication fence, protected files and credential-free
    * shell do not reach them (AGT-4444). Default false: the daemon refuses to

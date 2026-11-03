@@ -69,6 +69,34 @@ async function portFree(port: number): Promise<boolean> {
   });
 }
 
+/**
+ * How much of the last week's spend the automation ledger can actually see.
+ * Opens the database read-only (never creates or migrates one) and says
+ * nothing when there is no ledger yet.
+ */
+export async function spendVisibility(dbPath?: string, now = Date.now()): Promise<{ status: Status; detail: string } | null> {
+  const { existsSync } = await import('node:fs');
+  const { defaultAutomationDbPath } = await import('../automation/automationDbPath.js');
+  const path = dbPath ?? defaultAutomationDbPath();
+  if (!existsSync(path)) return null;
+  try {
+    const { default: Database } = await import('better-sqlite3');
+    const { unknownCostRatio } = await import('../automation/runLedgerCost.js');
+    const db = new Database(path, { readonly: true, fileMustExist: true });
+    try {
+      const { attempts, unknown, ratio } = unknownCostRatio(db, now);
+      if (attempts === 0) return { status: 'ok', detail: 'no attempts in the last 7 days' };
+      const pct = Math.round(ratio * 100);
+      const detail = `${unknown}/${attempts} attempts in 7 days have no recorded cost (${pct}%); spend ceilings count them at an estimate`;
+      return { status: ratio > 0.5 ? 'warn' : 'ok', detail };
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    return { status: 'warn', detail: `could not read ${path}: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
 export async function handleDoctor(): Promise<void> {
   failedChecks = new Set<string>();
   console.log(banner('doctor — environment check'));
@@ -153,6 +181,10 @@ export async function handleDoctor(): Promise<void> {
   const hasKey = !!process.env.LINEAR_API_KEY;
   if (hasOAuth || hasKey) line('ok', 'linear', hasOAuth ? 'OAuth profile' : 'API key');
   else line('warn', 'linear', 'not configured — local SQLite issue store will be used');
+
+  // 8) Spend visibility: attempts whose cost the ledger never saw (round-1 redteam B-F2).
+  const spend = await spendVisibility();
+  if (spend) line(spend.status, 'spend ledger', spend.detail);
 
   console.log('');
   // Which checks failed, by name. Twelve external installs ran `doctor` and only
