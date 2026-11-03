@@ -121,6 +121,25 @@ describe('missing-worktree reconciliation', () => {
     expect(classifyOriginLookupFailure(Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' })).kind).toBe('permanent');
   });
 
+  it('a new incident after the pointer cleared elsewhere starts its backoff over', async () => {
+    // Round-2 redteam B-F3: the backoff row outlived the incident, so the next
+    // one began silent at the six-hour delay.
+    const lsRemote = vi.fn(async () => { throw gitError('fatal: Could not resolve host: github.com'); });
+    const runs = [run('INT-20')];
+    const h = harness(runs, lsRemote);
+    h.store.set('INT-20', { failures: 7, nextAt: 0, cause: 'old' });
+
+    runs.length = 0; // the pointer was cleared by another path
+    await reconcileMissingWorktrees(h.deps);
+    expect(h.store.get('INT-20')).toBeUndefined();
+
+    runs.push(run('INT-20', { stateVersion: 9 })); // a later, separate incident
+    await reconcileMissingWorktrees(h.deps);
+    expect(h.store.get('INT-20')).toMatchObject({ failures: 1 });
+    expect(h.log.warn).toHaveBeenCalledTimes(1);
+    expect(String(h.log.warn.mock.calls[0][0])).toContain('next try in 5 min');
+  });
+
   it('probes concurrently instead of one 30 s lookup after another', async () => {
     let inFlight = 0;
     let peak = 0;

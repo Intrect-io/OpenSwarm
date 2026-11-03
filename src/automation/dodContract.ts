@@ -7,6 +7,8 @@
 // belong to the repository's trusted verify manifest; this contract only tells
 // the coordinator which deterministic outcomes it may resolve automatically.
 
+import { issueOwnText } from './executionTaskContext.js';
+
 export type DoDNoChangesPolicy = 'park' | 'complete';
 export type DoDScopeMismatchPolicy = 'park' | 'retry_ephemeral';
 
@@ -69,8 +71,11 @@ function parseMaxRepairs(raw: unknown): { value?: number; error?: string } {
  * of silently ignoring it.
  */
 export function parseDoDContract(description?: string): ParsedDoDContract {
-  if (!description) return {};
-  const match = description.match(FENCE);
+  // Only the issue's own text is authoritative; the appended comment history is
+  // not — it carries earlier workers' summaries (round-2 redteam A-F1).
+  const own = issueOwnText(description);
+  if (!own) return {};
+  const match = own.match(FENCE);
   if (!match) return {};
   const source = match[1];
   if (Buffer.byteLength(source, 'utf8') > MAX_DESCRIPTION_CONTRACT_BYTES) {

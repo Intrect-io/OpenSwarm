@@ -26,11 +26,13 @@
 // and the trusted verify config are the backstop.
 
 import { execFile } from 'node:child_process';
-import { basename } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import { testFileKind } from '../automation/deletedTestGuard.js';
 import { parseDoDContract } from '../automation/dodContract.js';
-import { isPinnedTestConfig } from '../verify/trustedConfig.js';
+import { issueOwnText } from '../automation/executionTaskContext.js';
+import { isPinnedTestConfig, isRunnerConfig, referencedTestSupportFiles } from '../verify/trustedConfig.js';
 
 const exec = promisify(execFile);
 
@@ -109,9 +111,18 @@ export async function computeProtectedFiles(projectPath: string, task: Protected
     console.warn(`[ProtectedFiles] Could not list tracked files in ${projectPath}; no files protected:`, error);
     return [];
   }
-  const candidates = tracked.filter(isGraderFile);
+  // Setup modules the runner configs load are part of the grader too (round-2 redteam A-F3).
+  const support = new Set<string>();
+  for (const config of tracked.filter(isRunnerConfig)) {
+    const source = await readFile(join(projectPath, config), 'utf8').catch(() => '');
+    for (const ref of referencedTestSupportFiles(config, source)) support.add(ref);
+  }
+  const candidates = tracked.filter((file) => isGraderFile(file) || support.has(file));
   const allowEdits = parseDoDContract(task.description).contract?.tests?.allowEdits ?? [];
   const allowed = allowEdits.map(globToRegExp);
-  const named = namedByIssue(candidates, `${task.title ?? ''}\n${task.description ?? ''}`);
+  // The issue's own words only: the appended comment history carries earlier
+  // workers' summaries, and "the issue names this file" must not be grantable
+  // by the worker (round-2 redteam A-F1).
+  const named = namedByIssue(candidates, `${task.title ?? ''}\n${issueOwnText(task.description)}`);
   return candidates.filter((file) => !named.has(file) && !allowed.some((pattern) => pattern.test(file)));
 }

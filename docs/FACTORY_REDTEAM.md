@@ -63,3 +63,55 @@ Each round follows the same protocol:
 - The ADE desktop workspace: Linux build and CI (#863), the bundled workspace
   over a read-only allowlisted proxy (#864), and confirmed stop/retry actions
   with the token kept in the shell (#869).
+
+## Round 2
+
+- **Date:** 2026-11-04.
+- **Target:** origin/main `d18c11c`, the state after every round-1 fix and the
+  ADE (#859–#869).
+- **Mode:** default (2 parallel agents).
+- **Axis A:** L2/trust (who controls which input). Persona: penetration
+  tester for CI/CD and agent platforms. Reference incidents:
+  `pull_request_target` poisoned pipeline execution, prompt-injection-driven
+  tool misuse, `conftest.py`/jest-setup hijacking.
+- **Axis B:** L1/state (invariants and stuck states). Persona:
+  formal-verification engineer for distributed job state machines.
+  Reference incidents: DynamoDB 2015 metadata storm, Kubernetes controller
+  hot loops, Celery/Temporal auxiliary state not cleared on other exit paths.
+- **Layers:** both axes are from layers round 1 did not use (it used L4 and
+  L3).
+- **Duplicate rate:** 0%. A-F2 and A-F3 both widen what `pinTrustedTestConfig`
+  pins, but they are different inputs (an untracked ignored file vs a tracked
+  file under another name) and neither fix removes the other. No B finding
+  shares a cause with an A finding.
+- **Rejection rate:** 0% of the six reported findings. Each agent also rejected
+  candidates of its own:
+  - A: the ADE proxy, the token handling, and auth lifting under the #842
+    policy.
+  - B: an exit-less `active_tests_removed` park, and protected files changing
+    mid-run. Both had evidence of a working exit or of being computed once.
+- **Check:** every finding was re-checked against the code before its verdict.
+
+| # | Axis | Vector | Trigger | Damage | Reproduction (verified) | Verdict | Severity | Fix (this branch) | Proof |
+|---|---|---|---|---|---|---|---|---|---|
+| A-F1 | L2/trust | The opt-outs (`tests.allowRemoval`, `tests.allowEdits`, "the issue names this file") were read from `task.description`, which by then carries the tracker comment history, earlier workers' summaries included | A worker writes a DoD block or a test file name in its summary; the next attempt reads it as the issue's | The graded party disables the active-test gate and unprotects the tests; any commenter can too | `executionTaskContext.ts:51` appends comments to `description`; `linear.ts:355` posts `workerSummary`; `dodContract.ts` `FENCE` takes the first block anywhere; `protectedFiles.ts`/`testRemovalGate.ts` read that text | CONFIRMED | critical | `issueOwnText()` cuts the description at `EXECUTION_COMMENT_CONTEXT_HEADING`; `parseDoDContract` (also used by `coordinatorResolution`) and the name rule read only that | `pairPipeline.protectedFiles.test.ts` "ignores opt-outs that appear only in the appended comment history"; `testRemovalGate.test.ts` "does not take allowRemoval from the appended comment history" |
+| A-F2 | L2/trust | A gitignored test-runner config bypassed the base pin | Add `tests/conftest.py` to `.gitignore`, then create it with `collect_ignore` | Verify goes green without collecting the failing test; the PR diff shows only one `.gitignore` line | `runner.ts:144-150` copies ignored files into the sandbox; `trustedConfig.ts:119` listed only `--exclude-standard` untracked files | CONFIRMED | major | `findPinnedFiles` walks the sandbox (skipping dependency, build and cache trees) for every pinned file. One git does not track fails closed; one that differs from base is pinned | `runner.trustedConfig.test.ts` "a gitignored head-only conftest.py cannot turn a failing check green" (fails with the walk disabled) |
+| A-F3 | L2/trust | Setup modules the pinned config loads (`setupFiles`, `globalSetup`, `vitest.setup.ts`, `jest.setup.js` …) were neither pinned nor protected | Edit the setup module to skip or mock the failing path | The pinned config loads the change's own setup code | `protectedFiles.ts` `isGraderFile` and `trustedConfig.ts` `PINNED_CONFIG` had no setup patterns; this repo's `vitest.config.ts` uses `setupFiles: ['./vitest.setup.ts']` | CONFIRMED | major | Setup/teardown names added to `PINNED_CONFIG`; `referencedTestSupportFiles` resolves each base runner config's `setupFiles`/`setupFilesAfterEnv`/`globalSetup`/`globalTeardown`/`snapshotSerializers`, and both pinning and `protectedFiles` cover them | `runner.trustedConfig.test.ts` "a head-only vitest.setup.ts change cannot turn a failing check green"; `pairPipeline.protectedFiles.test.ts` "protects the setup modules a runner config loads, whatever their name" |
+| B-F1 | L1/state | The rate-limit streak counted results, not retries: N parallel workers hitting one 429 ramped N steps at once | 8 workers share a quota burst (the default `maxConcurrentTasks` is 64) | One momentary limit became a one-hour daemon-wide pause, and later a false `degraded` notice | `rateLimitBackoff.ts:73-77` `hits++` on every call; round-1 test pinned 6 same-instant hits = 32 min | CONFIRMED | major | A hit that lands while a pause is in force only extends to a later provider reset time; only a hit after the pause ends escalates | `rateLimitBackoff.test.ts` "counts same-instant hits from parallel workers as one step" |
+| B-F2 | L1/state | Pre-model results (`rate_limited`, `superseded`, `deferred`) have no cost, so they counted at the unknown-cost estimate | A rate-limit storm with a ceiling configured | The spend circuit opens without one model call, and holds until UTC midnight | `pipelinePreflight.ts` result has no `totalCost`; `durableRunCoordinator.ts:787` stores NULL; `runLedgerCost.ts` excluded only `operator_remediated` | CONFIRMED | major | `NO_SPEND_STATUSES` are excluded from the unknown count; in-flight and crashed attempts (no result) still count | `runLedger.costCircuit.test.ts` "rate-limited attempts without cost do not count toward the ceiling" |
+| B-F3 | L1/state | The origin-lookup backoff row outlived its incident, because only a probe success or a permanent verdict cleared it | The pointer clears another way, then the same issue loses its worktree again | The new incident started at the long delay with no log line (`failures === 1` never true), reintroducing round-1 B-F3's "cause nowhere" | Only `missingWorktreeReconciler.ts` touches `automation_origin_lookup_backoff`; no other cleanup path | CONFIRMED | major (B reported "minor–major") | Each sweep calls `store.retainOnly(candidate issue ids)` before probing | `reconcileMissingWorktree.test.ts` "a new incident after the pointer cleared elsewhere starts its backoff over" |
+
+**Residual limits, not defects of this branch:**
+
+- B-F2: a run that was rate-limited **after** spending (mid-run) and reported
+  no cost is now counted as zero rather than at the estimate.
+- A-F3: setup references are resolved from string literals in the runner
+  config. A config that builds the path at runtime is not followed. The
+  sandbox walk still pins any setup-named file.
+- Delegated CLI adapters still do not receive `protectedFiles` (the #842
+  policy keeps them out of unattended runs unless the operator opts in).
+
+## Open
+
+None. Every round-2 critical or major finding is fixed on this branch with a
+test.

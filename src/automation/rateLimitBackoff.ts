@@ -73,6 +73,14 @@ export class RateLimitStreak {
   hit(resetsAt: number | undefined, now = Date.now()): number {
     if (this.hits > 0 && now > this.until + STREAK_GAP_MS) this.reset();
     if (this.hits === 0) this.startedAt = now;
+    // A result that lands while a pause is already in force is the same 429
+    // seen by another parallel worker, not a retry that failed again: count it
+    // once. Otherwise eight workers hitting one quota burst at the same moment
+    // ramped straight to the one-hour cap (round-2 redteam B-F1).
+    if (this.hits > 0 && now < this.until) {
+      if (resetsAt != null) this.until = Math.max(this.until, resetsAt);
+      return this.until;
+    }
     this.hits++;
     this.until = Math.max(this.until, resetsAt ?? now + rateLimitDelayMs(this.hits));
     const degraded = this.degradation(now);

@@ -43,14 +43,27 @@ describe('rate-limit backoff', () => {
 
     // Per issue: a rate-limited issue waits for the daemon-wide pause, not a flat
     // minute — and its own attempt count (ordinary failures included) plays no part.
-    for (let i = 0; i < 6; i++) globalRateLimit.hit(undefined, now);
-    const pausedUntil = globalRateLimit.pausedUntil(now);
-    expect(pausedUntil - now).toBe(32 * MIN);
-    expect(retryAtFor(rateLimited(), now, 1)).toBe(pausedUntil);
-    expect(retryAtFor(rateLimited(), now, 40)).toBe(pausedUntil);
+    let at = now;
+    for (let i = 0; i < 5; i++) at = globalRateLimit.hit(undefined, at); // pauses of 1, 2, 4, 8, 16 min
+    const during = at - MIN;
+    expect(globalRateLimit.pausedUntil(during)).toBe(at);
+    expect(at - now).toBe(31 * MIN);
+    expect(retryAtFor(rateLimited(), during, 1)).toBe(at);
+    expect(retryAtFor(rateLimited(), during, 40)).toBe(at);
 
     // A quiet stretch after the pause expires starts a new streak at 60 s.
     expect(streak.hit(undefined, t + 30 * MIN) - (t + 30 * MIN)).toBe(RATE_LIMIT_BASE_MS);
+  });
+
+  it('counts same-instant hits from parallel workers as one step', () => {
+    // Round-2 redteam B-F1: eight workers on one quota all get the same 429.
+    const now = 2_000_000;
+    const streak = new RateLimitStreak(() => {});
+    let until = 0;
+    for (let i = 0; i < 8; i++) until = streak.hit(undefined, now + i);
+    expect(until - now).toBe(RATE_LIMIT_BASE_MS);
+    // The retry after the pause is the next step, not the ninth.
+    expect(streak.hit(undefined, until) - until).toBe(2 * MIN);
   });
 
   it('uses the provider reset time when given', () => {

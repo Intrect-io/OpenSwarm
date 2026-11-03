@@ -99,6 +99,24 @@ describe('spend ceiling', () => {
     ledger.close();
   });
 
+  it('rate-limited attempts without cost do not count toward the ceiling', () => {
+    // Round-2 redteam B-F2: a preflight rate limit spends nothing, so a storm of
+    // them must not trip the spend circuit until midnight.
+    const ledger = new RunLedger(dbPath());
+    for (let i = 0; i < 20; i++) {
+      const id = `RL-${i}`;
+      register(ledger, id, '/repo-rl');
+      const c = claim(ledger, id, 2_000 + i)!;
+      expect(ledger.recordAttemptResult(c, { success: false, finalStatus: 'rate_limited' }, 2_010 + i)).toBe(true);
+      expect(ledger.transition(c, 'CANCELLED', {}, 2_011 + i)).toBe(true);
+    }
+    const db = (ledger as unknown as { db: Database.Database }).db;
+    expect(dailySpend(db, 3_000, { projectPath: '/repo-rl', unknownAttemptCostUsd: 0.1 })).toMatchObject({ unknownAttempts: 0, totalUsd: 0 });
+    register(ledger, 'RL-next', '/repo-rl');
+    expect(claim(ledger, 'RL-next', 3_000, { maxCostUsdPerDay: 1, unknownAttemptCostUsd: 0.1 })).not.toBeNull();
+    ledger.close();
+  });
+
   it('estimates an unknown cost from the recent mean of known ones', () => {
     const path = dbPath();
     const ledger = new RunLedger(path);
