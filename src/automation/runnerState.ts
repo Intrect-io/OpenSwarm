@@ -155,8 +155,8 @@ export const TASK_STATE_FILE = process.env.OPENSWARM_RUNNER_TASK_STATE_FILE || j
 export const PIPELINE_HISTORY_FILE = process.env.OPENSWARM_RUNNER_PIPELINE_HISTORY_FILE || join(homedir(), '.claude', 'openswarm-pipeline-history.json');
 export const REJECTION_STATE_FILE = process.env.OPENSWARM_RUNNER_REJECTION_STATE_FILE || join(homedir(), '.claude', 'openswarm-rejection-state.json');
 export const DECOMPOSITION_STATE_FILE = process.env.OPENSWARM_RUNNER_DECOMPOSITION_STATE_FILE || join(homedir(), '.claude', 'openswarm-decomposition-state.json');
-export const DAILY_PACE_FILE = join(homedir(), '.openswarm', 'daily-pace.json');
-export const PROJECT_SELECTION_FILE = join(homedir(), '.openswarm', 'project-selection.json');
+export const DAILY_PACE_FILE = process.env.OPENSWARM_DAILY_PACE_FILE || join(homedir(), '.openswarm', 'daily-pace.json');
+export const PROJECT_SELECTION_FILE = process.env.OPENSWARM_PROJECT_SELECTION_FILE || join(homedir(), '.openswarm', 'project-selection.json');
 const MAX_PIPELINE_HISTORY = 100;
 const MAX_REJECTION_ATTEMPTS = 3;
 
@@ -185,7 +185,7 @@ export interface DailyPaceState {
 let paceState: PaceState | null = null;
 
 function ensurePaceDir(): void {
-  const dir = join(homedir(), '.openswarm');
+  const dir = dirname(DAILY_PACE_FILE);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }

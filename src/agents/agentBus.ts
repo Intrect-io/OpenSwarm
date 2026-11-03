@@ -105,7 +105,14 @@ export interface SharedContext {
 
 // Bus Implementation (File-based)
 
-const BUS_DIR = resolve(homedir(), '.openswarm/bus');
+/** Root of every execution's bus directory; OPENSWARM_BUS_DIR redirects it (tests do). */
+export const BUS_DIR = process.env.OPENSWARM_BUS_DIR || resolve(homedir(), '.openswarm/bus');
+/**
+ * How long an execution's bus directory outlives its last write. Nothing removed
+ * them before: a long-lived host held 4,709 directories (81MB), most of them test
+ * fixtures and finished runs that no reader would open again.
+ */
+export const BUS_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const CONTEXT_LOCK_STALE_MS = 30_000;
 const MAX_RETAINED_MESSAGES = 1_000;
 const MAX_CONTEXT_ENTRIES = 1_000;
@@ -567,6 +574,12 @@ export class AgentBus {
  * Create new bus instance
  */
 export function createBus(executionId?: string): AgentBus {
+  if (!pruneStarted) {
+    // Once per process and off the caller's path: a bus is created at workflow
+    // start, and a slow sweep must never delay or fail the run it belongs to.
+    pruneStarted = true;
+    void pruneStaleBuses().catch(() => {});
+  }
   const id = executionId || `exec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   return new AgentBus(id);
 }
@@ -602,4 +615,44 @@ export async function listActiveBuses(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+let pruneStarted = false;
+
+/**
+ * Remove execution directories not written to within `ttlMs`.
+ *
+ * Age is the newest mtime of the directory, its context file and its messages
+ * directory, so a bus still receiving messages is never taken. Returns the ids
+ * removed. A directory that cannot be measured is left alone.
+ */
+export async function pruneStaleBuses(
+  options: { ttlMs?: number; now?: number; dir?: string } = {},
+): Promise<string[]> {
+  const { ttlMs = BUS_RETENTION_MS, now = Date.now(), dir = BUS_DIR } = options;
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const entry of entries) {
+    const root = resolve(dir, entry);
+    let newest = 0;
+    try {
+      const stat = await fs.lstat(root);
+      if (!stat.isDirectory()) continue;
+      newest = stat.mtimeMs;
+      for (const inner of ['context.json', 'messages']) {
+        const innerStat = await fs.stat(resolve(root, inner)).catch(() => null);
+        if (innerStat) newest = Math.max(newest, innerStat.mtimeMs);
+      }
+    } catch {
+      continue;
+    }
+    if (now - newest < ttlMs) continue;
+    await fs.rm(root, { recursive: true, force: true }).then(() => removed.push(entry), () => {});
+  }
+  return removed;
 }

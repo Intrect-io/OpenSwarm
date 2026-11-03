@@ -82,3 +82,12 @@ process.env.OPENSWARM_SNAPSHOT = '0';
 // every test run, and fixtures ("issue-uuid"/"Serial task", "1"/INT-1) were
 // appended to 4000+ real rows. Redirected per worker like the rest.
 process.env.OPENSWARM_TASK_STATE_FILE = join(tmpdir(), 'openswarm-test-task-state', workerScope, 'task-state.json');
+
+// Two more live-state paths the suite reached (AGT redteam round 1, 2026-11-03):
+// recordProjectCompletion appended `unknown` completions to the operator's
+// ~/.openswarm/daily-pace.json (the dashboard's completedToday counted them), and
+// every AgentBus test left an execution directory in ~/.openswarm/bus. Per worker
+// because the bus prune and the pace reload both read the whole location back.
+process.env.OPENSWARM_DAILY_PACE_FILE = join(tmpdir(), 'openswarm-test-pace', workerScope, 'daily-pace.json');
+process.env.OPENSWARM_PROJECT_SELECTION_FILE = join(tmpdir(), 'openswarm-test-pace', workerScope, 'project-selection.json');
+process.env.OPENSWARM_BUS_DIR = join(tmpdir(), 'openswarm-test-bus', workerScope);

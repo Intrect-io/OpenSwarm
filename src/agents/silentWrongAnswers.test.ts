@@ -141,6 +141,8 @@ describe('AgentBus.publish', () => {
   /** Load AgentBus with BUS_DIR pointed at a temp home (it is module-level). */
   async function loadBus() {
     vi.resetModules();
+    // vitest.setup.ts redirects the bus with OPENSWARM_BUS_DIR; follow the temp home instead.
+    vi.stubEnv('OPENSWARM_BUS_DIR', resolve(home, '.openswarm/bus'));
     vi.doMock('node:os', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:os')>();
       return { ...actual, default: { ...actual, homedir: () => home }, homedir: () => home };
@@ -159,6 +161,7 @@ describe('AgentBus.publish', () => {
   afterEach(() => {
     vi.doUnmock('node:os');
     vi.doUnmock('os');
+    vi.unstubAllEnvs();
   });
 
   const messagesDir = (executionId: string) => resolve(home, '.openswarm/bus', executionId, 'messages');
