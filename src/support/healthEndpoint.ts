@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { getHeapStatistics } from 'node:v8';
 import { credentialProbeSnapshot } from '../core/credentialProbes.js';
+import { globalRateLimit, type RateLimitDegradation } from '../automation/rateLimitBackoff.js';
 
 export interface HealthPayload {
   status: 'ok';
@@ -48,6 +49,12 @@ export interface HealthPayload {
    * contract above is unchanged when nothing was probed.
    */
   credentials?: Record<string, { status: 'ok' | 'dead' | 'unreachable'; identity?: string; reason?: string }>;
+  /**
+   * Present only while the daemon is degraded: today, a rate-limit streak that
+   * has lasted past DEGRADED_AFTER_MS (rateLimitBackoff.ts). `status` stays
+   * 'ok' — the process is alive and serving; this says it is not doing work.
+   */
+  degraded?: RateLimitDegradation;
 }
 
 const MB = 1024 * 1024;
@@ -78,6 +85,7 @@ export function buildHealthPayload(
     instanceId?: string;
     memory?: { heapUsedBytes: number; heapLimitBytes: number; rssBytes: number };
     credentials?: HealthPayload['credentials'];
+    degraded?: RateLimitDegradation | null;
   } = {},
 ): HealthPayload {
   const env = deps.env ?? process.env;
@@ -100,7 +108,13 @@ export function buildHealthPayload(
     uptime_s: Math.floor(uptimeS),
     ...memoryFields(deps.memory),
     ...credentialField(deps.credentials),
+    ...degradedField(deps.degraded),
   };
+}
+
+function degradedField(provided: RateLimitDegradation | null | undefined): Pick<HealthPayload, 'degraded'> {
+  const degraded = provided === undefined ? globalRateLimit.degradation() : provided;
+  return degraded ? { degraded } : {};
 }
 
 function credentialField(

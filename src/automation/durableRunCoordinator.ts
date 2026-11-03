@@ -13,6 +13,7 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
+import { rateLimitRetryAt } from './rateLimitBackoff.js';
 import {
   RunLedger,
   type EffectClaim,
@@ -146,14 +147,11 @@ function fencedResult(result: PipelineResult): PipelineResult {
   };
 }
 
-/**
- * Attempt number from which a failing run's retry delay doubles per attempt. The
- * runner's idle fill reads the same value to leave such a run alone (AGT-4675).
- */
+/** Attempt from which a failing run's retry delay doubles; idle fill reads it too (AGT-4675). */
 export const RETRY_RAMP_FROM_ATTEMPT = 4;
 
 export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): number {
-  if (result.finalStatus === 'rate_limited') return result.rateLimitResetsAt ?? now + 60_000;
+  if (result.finalStatus === 'rate_limited') return rateLimitRetryAt(result.rateLimitResetsAt, now, attemptNo);
   if (result.finalStatus === 'deferred') return Math.max(now + 1_000, result.retryAt ?? 0);
   if (result.finalStatus === 'superseded') {
     // A first overlap can disappear quickly, but a still-open PR or persistent

@@ -152,6 +152,7 @@ import {
 import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
 import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
 import { coordinatorResolutionComment, planCoordinatorResolution } from './coordinatorResolution.js';
+import { globalRateLimit } from './rateLimitBackoff.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -922,11 +923,10 @@ export class AutonomousRunner {
       const taskCtx = this.formatTaskContext(task);
       this.recordPipelineHistory(task, result);
 
-      // Rate-limited: pause execution until the quota resets. Do NOT count it as a
-      // task failure, run the rejection/block path, or post a Linear comment —
-      // that is exactly the retry-spam this issue fixes. (INT-1906)
+      // Rate-limited: pause (ramping, rateLimitBackoff.ts) — not a task failure, no rejection
+      // path, no Linear comment; that is the retry-spam INT-1906 fixed.
       if (result.finalStatus === 'rate_limited') {
-        const resetsAt = result.rateLimitResetsAt ?? Date.now() + 60_000;
+        const resetsAt = globalRateLimit.hit(result.rateLimitResetsAt);
         this.rateLimitUntil = resetsAt;
         const waitSec = Math.max(0, Math.ceil((resetsAt - Date.now()) / 1000));
         const resetsLabel = new Date(resetsAt).toISOString();
@@ -3646,7 +3646,7 @@ export class AutonomousRunner {
     // reporting or state change — no failure count, no card spam. Same as the
     // scheduler 'failed' handler's rate_limited branch. (INT-1906)
     if (result.finalStatus === 'rate_limited') {
-      const resetsAt = result.rateLimitResetsAt ?? Date.now() + 60_000;
+      const resetsAt = globalRateLimit.hit(result.rateLimitResetsAt);
       this.rateLimitUntil = resetsAt;
       const waitSec = Math.max(0, Math.ceil((resetsAt - Date.now()) / 1000));
       const resetsLabel = new Date(resetsAt).toISOString();
