@@ -16,6 +16,7 @@
 // index is never touched and a renamed test file is not counted as deleted.
 
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -108,6 +109,9 @@ export async function testRemovalHold(
   } = {},
 ): Promise<TestRemovalHold | null> {
   if (testRemovalAllowed(description)) return null;
+  // No tree, nothing to commit: the publication fails on its own, with a more
+  // precise error than this gate could give.
+  if (!existsSync(worktreePath)) return null;
   try {
     const resolveBase = deps.resolveBase ?? (async (path: string) => {
       const { resolveBaseRef } = await import('../support/worktreeManager.js');

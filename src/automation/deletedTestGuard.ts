@@ -40,8 +40,8 @@ export type TestFileKind = 'js' | 'python' | 'go';
 
 export function testFileKind(file: string): TestFileKind | null {
   if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(file)) return 'js';
-  if (/(^|\/)test_[^/]*\.py$/.test(file) || /_test\.py$/.test(file)) return 'python';
-  if (/_test\.go$/.test(file)) return 'go';
+  if (/(^|\/)test_[^/]*\.py$/.test(file) || file.endsWith('_test.py')) return 'python';
+  if (file.endsWith('_test.go')) return 'go';
   return null;
 }
 
