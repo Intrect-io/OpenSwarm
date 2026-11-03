@@ -162,6 +162,10 @@ export interface ClaimOptions {
   maxAttemptsPerHour?: number;
   maxFailuresPerHour?: number;
   maxCostUsdPerDay?: number;
+  /** Daemon-wide daily ceiling across repositories (config `autonomous.spend`, runLedgerCost.ts). */
+  globalMaxCostUsdPerDay?: number;
+  /** Estimate per attempt with no recorded cost; default: the recent mean of known costs. */
+  unknownAttemptCostUsd?: number;
   circuitCooldownMs?: number;
 }
 

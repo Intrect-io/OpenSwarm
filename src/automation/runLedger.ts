@@ -1,5 +1,6 @@
 import { reconcileExpiredRowsInDb } from './runLedgerExpired.js';
 import Database from 'better-sqlite3';
+import { costCeilingReason, recordUnfencedAttemptCost } from './runLedgerCost.js';
 import { RunRecoveryStore } from './runRecoveryStore.js';
 import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
@@ -509,19 +510,11 @@ export class RunLedger {
         }
       }
 
-      if (options.maxCostUsdPerDay != null) {
-        const dayStart = new Date(now);
-        dayStart.setUTCHours(0, 0, 0, 0);
-        const cost = (this.db.prepare(`
-          SELECT COALESCE(SUM(a.cost_usd), 0) AS cost
-          FROM automation_attempts a
-          JOIN automation_runs r ON r.issue_id = a.issue_id
-          WHERE r.project_path = ? AND a.started_at >= ?
-        `).get(row.project_path, dayStart.getTime()) as { cost: number }).cost;
-        if (cost >= options.maxCostUsdPerDay) {
-          openCircuit(`daily cost budget exhausted: $${cost.toFixed(4)}/$${options.maxCostUsdPerDay.toFixed(4)}`);
-          return null;
-        }
+      // Per-repository and daemon-wide ceilings; cost-less attempts count at an estimate (runLedgerCost.ts).
+      const costReason = costCeilingReason(this.db, options, row.project_path, now);
+      if (costReason) {
+        openCircuit(costReason);
+        return null;
       }
 
       const activeRows = this.db.prepare(`
@@ -690,7 +683,10 @@ export class RunLedger {
         claim.leaseEpoch,
         now,
       );
-      if (updated.changes !== 1) return false;
+      if (updated.changes !== 1) {
+        recordUnfencedAttemptCost(this.db, claim, input.costUsd); // the spend is real even if the result is not
+        return false;
+      }
 
       const countsAsFailure = !input.success && !NON_FAILURE_RESULT_STATUSES.includes(input.finalStatus)
         && (input.finalStatus !== 'infra_error' || input.repositoryInfra === true);

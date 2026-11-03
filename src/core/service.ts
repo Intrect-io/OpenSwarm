@@ -400,6 +400,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       // on an explicit 'on') ran unfenced while the log said "sandbox: on".
       workerSandbox: config.autonomous.workerSandbox,
       minFreeDiskGiB: config.autonomous.minFreeDiskGiB, // AGT-4785
+      spend: config.autonomous.spend,
       allowDelegatedAdapters: config.autonomous.allowDelegatedAdapters, // AGT-4444: a provider switch meets the same policy
       periodicReviews: config.autonomous.periodicReviews,
       orchestrator: config.autonomous.orchestrator,
