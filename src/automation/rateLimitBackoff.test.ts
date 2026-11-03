@@ -27,9 +27,6 @@ afterEach(() => {
 describe('rate-limit backoff', () => {
   it('ramps rate_limited retries without a reset time up to one hour', () => {
     const now = 1_000_000;
-    // Per issue: the attempt number drives the ramp.
-    const delays = [1, 2, 3, 4, 5, 6, 7, 8, 20].map((attempt) => retryAtFor(rateLimited(), now, attempt) - now);
-    expect(delays).toEqual([1, 2, 4, 8, 16, 32, 60, 60, 60].map((m) => m * MIN));
     expect(rateLimitDelayMs(1)).toBe(RATE_LIMIT_BASE_MS);
     expect(rateLimitDelayMs(1000)).toBe(RATE_LIMIT_MAX_MS);
 
@@ -43,6 +40,14 @@ describe('rate-limit backoff', () => {
       t = until; // the next attempt runs when the pause ends, and is limited again
     }
     expect(pauses).toEqual([1, 2, 4, 8, 16, 32, 60, 60].map((m) => m * MIN));
+
+    // Per issue: a rate-limited issue waits for the daemon-wide pause, not a flat
+    // minute — and its own attempt count (ordinary failures included) plays no part.
+    for (let i = 0; i < 6; i++) globalRateLimit.hit(undefined, now);
+    const pausedUntil = globalRateLimit.pausedUntil(now);
+    expect(pausedUntil - now).toBe(32 * MIN);
+    expect(retryAtFor(rateLimited(), now, 1)).toBe(pausedUntil);
+    expect(retryAtFor(rateLimited(), now, 40)).toBe(pausedUntil);
 
     // A quiet stretch after the pause expires starts a new streak at 60 s.
     expect(streak.hit(undefined, t + 30 * MIN) - (t + 30 * MIN)).toBe(RATE_LIMIT_BASE_MS);

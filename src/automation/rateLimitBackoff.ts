@@ -10,8 +10,9 @@
 // rate_limited, at 576 a day, and nobody was told. A quota that is gone for
 // hours was being asked every minute.
 //
-// Now the delay doubles from 60 s to a one-hour cap while the limiting
-// continues, a provider's reset time still wins, and a streak that lasts past
+// Now the daemon-wide pause doubles from 60 s to a one-hour cap while the
+// limiting continues, a rate-limited issue waits for that pause instead of a
+// flat minute, a provider's reset time still wins, and a streak that lasts past
 // DEGRADED_AFTER_MS turns health to `degraded` and sends ONE notification.
 
 /** First delay when the provider gave no reset time. */
@@ -32,9 +33,16 @@ export function rateLimitDelayMs(hit: number): number {
   return Math.min(RATE_LIMIT_MAX_MS, RATE_LIMIT_BASE_MS * 2 ** exponent);
 }
 
-/** When to retry a rate-limited issue on its `attemptNo`-th attempt. */
-export function rateLimitRetryAt(resetsAt: number | undefined, now: number, attemptNo: number): number {
-  return resetsAt ?? now + rateLimitDelayMs(attemptNo);
+/**
+ * When to retry a rate-limited issue.
+ *
+ * Not scaled by the issue's own attempt count: that count includes ordinary
+ * failures, and an issue that failed twelve times would wait an hour on its
+ * first rate limit (AGT-4673 pins this). The quota is the daemon's, so the
+ * ramp lives in the daemon-wide streak and the issue waits for its pause.
+ */
+export function rateLimitRetryAt(resetsAt: number | undefined, now: number, streak: RateLimitStreak = globalRateLimit): number {
+  return resetsAt ?? Math.max(now + RATE_LIMIT_BASE_MS, streak.pausedUntil(now));
 }
 
 export interface RateLimitDegradation {
@@ -78,6 +86,11 @@ export class RateLimitStreak {
       )).catch((error) => console.warn('[RateLimit] Could not send the degraded notice:', error));
     }
     return this.until;
+  }
+
+  /** When the current streak's pause ends, or 0 when no streak is running. */
+  pausedUntil(now = Date.now()): number {
+    return this.hits > 0 && now <= this.until + STREAK_GAP_MS ? this.until : 0;
   }
 
   /** The current degradation, or null when no streak has lasted long enough. */

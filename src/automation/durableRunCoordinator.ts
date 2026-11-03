@@ -151,7 +151,7 @@ function fencedResult(result: PipelineResult): PipelineResult {
 export const RETRY_RAMP_FROM_ATTEMPT = 4;
 
 export function retryAtFor(result: PipelineResult, now: number, attemptNo = 1): number {
-  if (result.finalStatus === 'rate_limited') return rateLimitRetryAt(result.rateLimitResetsAt, now, attemptNo);
+  if (result.finalStatus === 'rate_limited') return rateLimitRetryAt(result.rateLimitResetsAt, now);
   if (result.finalStatus === 'deferred') return Math.max(now + 1_000, result.retryAt ?? 0);
   if (result.finalStatus === 'superseded') {
     // A first overlap can disappear quickly, but a still-open PR or persistent
