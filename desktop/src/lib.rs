@@ -1,6 +1,7 @@
 // OpenSwarm desktop shell (INT-3388 M2).
 //
-// A thin Tauri client attaching to the launchd-managed OpenSwarm daemon
+// A thin Tauri client attaching to the OpenSwarm daemon (launchd on macOS;
+// on Linux a systemd user unit or a docker container the shell does not own)
 // (com.intrect.openswarm, http://127.0.0.1:3847). Ported and reduced from
 // vega-agent's desktop shell: the Python sidecar lifecycle, auto-updater, and
 // mobile branches are gone; the origin-trust system, boot splash log tail, and
@@ -91,8 +92,9 @@ fn progress_script(pct: u32, label: &str) -> String {
 fn backend_failure_script(backend: &str, log_path: &str) -> String {
     let backend = js_string(backend);
     let log_path = js_string(log_path);
+    let start_hint = js_string(daemon_start_hint());
     format!(
-        r#"document.body.replaceChildren();const box=document.createElement('div');box.style.cssText='font-family:sans-serif;padding:40px;color:#e6edf3;background:#0d1117';const title=document.createElement('h2');title.textContent='데몬 연결 실패';const detail=document.createElement('p');detail.textContent='OpenSwarm 데몬('+{backend}+')에 접속할 수 없습니다.';const hint=document.createElement('p');hint.style.color='#9aa4b2';hint.textContent='데몬이 설치되지 않았다면 OpenSwarm 저장소에서 npm run service:install 을 실행하세요.';const logs=document.createElement('p');logs.style.color='#9aa4b2';logs.textContent={log_path}+' 의 로그를 확인하세요.';box.append(title,detail,hint,logs);document.body.append(box)"#
+        r#"document.body.replaceChildren();const box=document.createElement('div');box.style.cssText='font-family:sans-serif;padding:40px;color:#e6edf3;background:#0d1117';const title=document.createElement('h2');title.textContent='데몬 연결 실패';const detail=document.createElement('p');detail.textContent='OpenSwarm 데몬('+{backend}+')에 접속할 수 없습니다.';const hint=document.createElement('p');hint.style.color='#9aa4b2';hint.textContent={start_hint};const logs=document.createElement('p');logs.style.color='#9aa4b2';logs.textContent={log_path}+' 의 로그를 확인하세요.';box.append(title,detail,hint,logs);document.body.append(box)"#
     )
 }
 
@@ -303,9 +305,29 @@ fn restart_daemon_service() -> Result<(), String> {
     }
 }
 
+/// What to run to restart the daemon where the shell does not own its service.
+///
+/// On Linux the daemon is a systemd user unit or a docker container (the Vela
+/// host runs the `openswarm` container), and which one is a host decision the
+/// shell cannot verify without privileges it should not hold. So it names the
+/// commands instead of guessing and running one.
+pub(crate) fn manual_restart_hint() -> &'static str {
+    "This shell does not restart the daemon on this platform. Restart it from a terminal: \
+     `systemctl --user restart openswarm` (systemd user unit) or \
+     `docker restart openswarm` (container)."
+}
+
 #[cfg(not(target_os = "macos"))]
 fn restart_daemon_service() -> Result<(), String> {
-    Err("Daemon restart via launchctl is only supported on macOS.".into())
+    Err(manual_restart_hint().into())
+}
+
+/// Shown on the "cannot reach the daemon" page: how to start one on this platform.
+pub(crate) fn daemon_start_hint() -> &'static str {
+    #[cfg(target_os = "macos")]
+    return "데몬이 설치되지 않았다면 OpenSwarm 저장소에서 npm run service:install 을 실행하세요.";
+    #[cfg(not(target_os = "macos"))]
+    return "데몬을 시작하세요: OpenSwarm 저장소에서 npm start, 또는 systemctl --user start openswarm / docker start openswarm.";
 }
 
 // ── Daemon health / readiness ─────────────────────────────────────────────────
@@ -1429,5 +1451,39 @@ mod log_tail_tests {
         assert_eq!(t.read_new_lines(), vec!["ok"]);
         assert_eq!(t.pos, bytes.len() as u64 + 6);
         let _ = std::fs::remove_file(&p);
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+
+    #[test]
+    fn manual_restart_hint_names_both_service_managers() {
+        let hint = manual_restart_hint();
+        assert!(hint.contains("systemctl --user restart openswarm"));
+        assert!(hint.contains("docker restart openswarm"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn restart_off_macos_reports_the_commands_instead_of_running_one() {
+        let err = restart_daemon_service().expect_err("the shell must not restart the daemon here");
+        assert_eq!(err, manual_restart_hint());
+    }
+
+    #[test]
+    fn backend_failure_page_carries_this_platforms_start_hint() {
+        let script = backend_failure_script("http://127.0.0.1:3847", "/tmp/logs");
+        assert!(script.contains(&js_string(daemon_start_hint())));
+        #[cfg(not(target_os = "macos"))]
+        assert!(!script.contains("service:install"));
+    }
+
+    #[test]
+    fn shell_log_dir_is_created_under_a_per_app_directory() {
+        let dir = flavor::log_dir();
+        assert!(dir.is_dir(), "log_dir() must create {}", dir.display());
+        assert!(dir.components().any(|c| c.as_os_str() == flavor::name()));
     }
 }
