@@ -88,7 +88,7 @@ import { publishStuckWork } from './publishOnPark.js';
 import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
 import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
 import { draftPullRequestCause } from './draftPullRequestCause.js';
-import { missingWorktreeDisposition } from './missingWorktreeDisposition.js';
+import { reconcileMissingWorktrees } from './missingWorktreeReconciler.js';
 import { isExecutionLive } from './executionLiveness.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
@@ -96,9 +96,7 @@ import { STUCK_LABEL } from '../linear/index.js';
 import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
 import { scanRepository } from '../registry/entityScanner.js';
 import { readFileSync, existsSync } from 'node:fs';
-import { execFile } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { promisify } from 'node:util';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import {
   describeScopeConflict,
@@ -111,7 +109,6 @@ import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 export { pickPipelineFailureDetail } from './runnerState.js';
 import type { AdapterName } from '../adapters/types.js';
 
-const execFileAsync = promisify(execFile);
 import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
 import type { ModelRole } from '../adapters/modelCompat.js';
 import { isTimeoutError } from '../adapters/errorClassification.js';
@@ -1775,61 +1772,14 @@ export class AutonomousRunner {
   }
 
   /** Sweep stale ledger pointers before artifact recovery or pruning can act on them. */
+  // Classified failures, durable per-run backoff, concurrent probes: missingWorktreeReconciler.ts (round-1 redteam B-F3).
   private async reconcileMissingWorktreePointers(): Promise<void> {
-    if (!this.durableRuns.isPrimary || this.stopping) return;
-    const terminal = new Set(['DONE', 'DECOMPOSED', 'CANCELLED']);
-    for (const run of this.durableRuns.listRuns()) {
-      if (this.stopping) return;
-      if (terminal.has(run.state) || !run.worktreePath || existsSync(run.worktreePath)) continue;
-      if (!['READY', 'RETRY_AT', 'NEEDS_HUMAN'].includes(run.state)) continue;
-
-      let branchOnOrigin = false;
-      let branchProbeFailed = false;
-      if (run.branchName) {
-        try {
-          const { stdout } = await execFileAsync('git', [
-            '-C', run.projectPath, 'ls-remote', 'origin', `refs/heads/${run.branchName}`,
-          ], { timeout: 30_000 });
-          branchOnOrigin = Boolean(stdout.trim());
-        } catch {
-          branchProbeFailed = true;
-        }
-      }
-      if (branchProbeFailed) {
-        console.warn(`[Reconciler] Origin branch lookup failed for missing worktree ${run.identifier ?? run.issueId}; retaining pointer`);
-        continue;
-      }
-
-      let pr;
-      if (run.branchName) {
-        try {
-          pr = await findPullRequestForBranch(run.projectPath, run.branchName);
-        } catch (error) {
-          console.warn(`[Reconciler] GitHub lookup failed for missing worktree ${run.identifier ?? run.issueId}; retaining pointer:`, error);
-          continue;
-        }
-      }
-      const prefix = `Worktree gone before publication; branch \`${run.branchName ?? '(none)'}\` ${branchOnOrigin ? 'is on origin' : 'is not on origin'}`;
-      // Only a draft on a RETRY_AT row can be the leftover of an unfinished
-      // attempt, so only then pay for the sibling lookup (AGT-4664).
-      const siblingPullRequestCount = pr?.isDraft && run.state === 'RETRY_AT' && run.identifier && run.branchName
-        ? (await findDuplicateIssuePRs(run.projectPath, run.identifier, run.branchName)).length
-        : 0;
-      const disposition = missingWorktreeDisposition({
-        state: run.state,
-        hasPullRequest: Boolean(pr),
-        pullRequestIsDraft: Boolean(pr?.isDraft),
-        siblingPullRequestCount,
-      });
-      if (this.durableRuns.reconcileMissingWorktree(
-        run,
-        disposition,
-        pr ? `${prefix}; PR exists: ${pr.url}` : prefix,
-        !branchOnOrigin,
-      )) {
-        console.log(`[Reconciler] ${run.identifier ?? run.issueId}: cleared missing worktree pointer (${disposition})`);
-      }
-    }
+    await reconcileMissingWorktrees({
+      durableRuns: this.durableRuns,
+      stopping: () => this.stopping,
+      findPullRequestForBranch,
+      findDuplicateIssuePRs,
+    });
   }
 
   private async reconcileDurableArtifacts(tasks: TaskItem[]): Promise<void> {
