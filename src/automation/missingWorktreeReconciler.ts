@@ -93,7 +93,7 @@ export function memoryBackoffStore(): OriginLookupBackoffStore {
     get: (id) => map.get(id),
     set: (id, v) => { map.set(id, v); },
     clear: (id) => { map.delete(id); },
-    retainOnly: (ids) => { for (const id of [...map.keys()]) if (!ids.has(id)) map.delete(id); },
+    retainOnly: (ids) => { for (const id of map.keys()) if (!ids.has(id)) map.delete(id); },
   };
 }
 
@@ -169,7 +169,7 @@ async function defaultLsRemote(projectPath: string, branch: string): Promise<str
 
 /** Run `task` over `items`, at most `limit` at a time. */
 async function pool<T, R>(items: T[], limit: number, task: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
+  const results: R[] = [];
   let next = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (next < items.length) {

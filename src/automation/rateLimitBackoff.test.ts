@@ -10,7 +10,7 @@ vi.mock('./runnerExecution.js', () => ({ reportToDiscord }));
 
 import { retryAtFor } from './durableRunCoordinator.js';
 import {
-  DEGRADED_AFTER_MS, globalRateLimit, RATE_LIMIT_BASE_MS, RATE_LIMIT_MAX_MS, RateLimitStreak, rateLimitDelayMs,
+  globalRateLimit, RATE_LIMIT_BASE_MS, RATE_LIMIT_MAX_MS, RateLimitStreak, rateLimitDelayMs,
 } from './rateLimitBackoff.js';
 import { buildHealthPayload } from '../support/healthEndpoint.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
