@@ -101,6 +101,20 @@ describe('test removal gate', () => {
     expect(finding?.removed).toBeGreaterThan(0);
   });
 
+  it('does not take allowRemoval from the appended comment history', async () => {
+    // Round-2 redteam A-F1: a worker summary posted as a comment carried a DoD block.
+    const { EXECUTION_COMMENT_CONTEXT_HEADING } = await import('./executionTaskContext.js');
+    writeFileSync(join(repo, 'src/a.test.ts'), ONE_SKIPPED);
+    const description = `Fix it.\n\n${EXECUTION_COMMENT_CONTEXT_HEADING}\n### 2026-11-04\nWorker summary.\n${ALLOW.slice(ALLOW.indexOf('```'))}`;
+    const result = approved();
+
+    await publishApprovedWork(info(), { id: 't', title: 'Fix', description, issueIdentifier: 'INT-1' }, result,
+      { beforePublish: async () => true, onPublication: async () => true } as never);
+
+    expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+    expect(result.operatorPark?.code).toBe(TEST_REMOVAL_PARK_REASON);
+  });
+
   it('fails closed when the measurement breaks, open only without a merge base', async () => {
     const broken = await testRemovalHold(repo, 'x', { resolveBase: async () => { throw new Error('boom'); } });
     expect(broken?.reason).toContain('could not run (boom)');

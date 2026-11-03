@@ -99,6 +99,38 @@ describe('trusted test-runner config', () => {
     expect(testSettings.rawOutputTail).toContain('pyproject.toml (its test/coverage settings changed)');
   });
 
+  it('a gitignored head-only conftest.py cannot turn a failing check green', async () => {
+    // Round-2 redteam A-F2: git does not list an ignored file, but the sandbox copies it.
+    await commitBase({});
+    await writeFile(join(repo, '.gitignore'), 'tests/conftest.py\n');
+    await mkdir(join(repo, 'tests'), { recursive: true });
+    await writeFile(join(repo, 'tests/conftest.py'), "collect_ignore = ['exclude-bad']\n");
+    await writeFile(join(repo, 'src/value.txt'), 'broken\n');
+    expect(git('check-ignore', 'tests/conftest.py')).toBe('tests/conftest.py');
+
+    const [evidence] = await runVerify({ projectPath: repo, commands: [check(RUNNER('tests/conftest.py'))], baseRef: 'main' });
+
+    expect(evidence).toMatchObject({ headStatus: 'fail', newFailure: true, securityFailure: true });
+    expect(evidence.rawOutputTail).toContain('tests/conftest.py (a test-runner config git does not track');
+  });
+
+  it('a head-only vitest.setup.ts change cannot turn a failing check green', async () => {
+    // Round-2 redteam A-F3: the config is pinned, so the change edits what the config loads.
+    await commitBase({
+      'vitest.config.ts': "export default { test: { setupFiles: ['./test/bootstrap.ts'] } };\n",
+      'test/bootstrap.ts': '// base setup\n',
+      'vitest.setup.ts': '// base\n',
+    });
+    await writeFile(join(repo, 'src/value.txt'), 'broken\n');
+    await writeFile(join(repo, 'test/bootstrap.ts'), '// exclude-bad\n');
+    await writeFile(join(repo, 'vitest.setup.ts'), '// exclude-bad\n');
+
+    const [byReference] = await runVerify({ projectPath: repo, commands: [check(RUNNER('test/bootstrap.ts'))], baseRef: 'main' });
+    expect(byReference).toMatchObject({ headStatus: 'fail', baseStatus: 'pass', newFailure: true });
+    const [byName] = await runVerify({ projectPath: repo, commands: [check(RUNNER('vitest.setup.ts'))], baseRef: 'main' });
+    expect(byName).toMatchObject({ headStatus: 'fail', baseStatus: 'pass', newFailure: true });
+  });
+
   it('leaves an untouched config and ordinary files alone', async () => {
     await commitBase({ 'vitest.config.ts': "export default { test: { exclude: ['exclude-bad'] } };\n" });
     await writeFile(join(repo, 'src/value.txt'), 'broken\n');

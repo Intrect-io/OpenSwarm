@@ -83,11 +83,18 @@ export interface OriginLookupBackoffStore {
   get(issueId: string): OriginLookupBackoff | undefined;
   set(issueId: string, value: OriginLookupBackoff): void;
   clear(issueId: string): void;
+  /** Drop every row whose run is not in `issueIds` (its incident ended some other way). */
+  retainOnly(issueIds: ReadonlySet<string>): void;
 }
 
 export function memoryBackoffStore(): OriginLookupBackoffStore {
   const map = new Map<string, OriginLookupBackoff>();
-  return { get: (id) => map.get(id), set: (id, v) => { map.set(id, v); }, clear: (id) => { map.delete(id); } };
+  return {
+    get: (id) => map.get(id),
+    set: (id, v) => { map.set(id, v); },
+    clear: (id) => { map.delete(id); },
+    retainOnly: (ids) => { for (const id of map.keys()) if (!ids.has(id)) map.delete(id); },
+  };
 }
 
 let sqliteStore: { path: string; store: OriginLookupBackoffStore } | undefined;
@@ -113,10 +120,15 @@ export function sqliteBackoffStore(path = defaultAutomationDbPath()): OriginLook
       ON CONFLICT(issue_id) DO UPDATE SET failures = excluded.failures, next_at = excluded.next_at, cause = excluded.cause
     `);
     const clear = db.prepare('DELETE FROM automation_origin_lookup_backoff WHERE issue_id = ?');
+    const ids = db.prepare('SELECT issue_id AS id FROM automation_origin_lookup_backoff');
     store = {
       get: (id) => get.get(id) as OriginLookupBackoff | undefined,
       set: (id, v) => { set.run(id, v.failures, v.nextAt, v.cause); },
       clear: (id) => { clear.run(id); },
+      retainOnly: (keep) => {
+        const stale = (ids.all() as Array<{ id: string }>).map((row) => row.id).filter((id) => !keep.has(id));
+        if (stale.length) db.transaction(() => { for (const id of stale) clear.run(id); })();
+      },
     };
   } catch (error) {
     console.warn('[Reconciler] Origin lookup backoff store unavailable, keeping it in memory:', error instanceof Error ? error.message : error);
@@ -157,7 +169,7 @@ async function defaultLsRemote(projectPath: string, branch: string): Promise<str
 
 /** Run `task` over `items`, at most `limit` at a time. */
 async function pool<T, R>(items: T[], limit: number, task: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
+  const results: R[] = [];
   let next = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (next < items.length) {
@@ -185,6 +197,10 @@ export async function reconcileMissingWorktrees(deps: MissingWorktreeReconcileDe
   const candidates = durableRuns.listRuns().filter((run) => !terminal.has(run.state)
     && run.worktreePath && !exists(run.worktreePath)
     && ['READY', 'RETRY_AT', 'NEEDS_HUMAN'].includes(run.state));
+  // A run whose pointer cleared, whose worktree came back, or that finished
+  // another way ends its incident; its backoff must not carry over to the next
+  // one, which would then start silent at the long delay (round-2 redteam B-F3).
+  store.retainOnly(new Set(candidates.map((run) => run.issueId)));
 
   const probes = await pool<ReconcileRun, Probe>(candidates, CONCURRENCY, async (run) => {
     if (deps.stopping()) return null;

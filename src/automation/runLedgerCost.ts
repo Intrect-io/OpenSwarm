@@ -24,6 +24,8 @@ import type Database from 'better-sqlite3';
 /** Estimate per cost-less attempt when there is no recent known cost to average. */
 export const DEFAULT_UNKNOWN_ATTEMPT_COST_USD = 0.1;
 const ESTIMATE_WINDOW_MS = 7 * 24 * 60 * 60_000;
+/** Results that end an attempt before any model call: no cost to estimate. */
+export const NO_SPEND_STATUSES = ['rate_limited', 'superseded', 'deferred'] as const;
 
 export interface CostCeilingOptions {
   /** Per-repository daily ceiling (openswarm.json `automation.maxCostUsdPerDay`). */
@@ -68,15 +70,20 @@ export function dailySpend(
 ): DailySpend {
   const since = utcDayStart(now);
   const scoped = options.projectPath !== undefined;
+  // An attempt that ended before any model call (rate limited at preflight,
+  // superseded, deferred) spent nothing; estimating it turned a rate-limit storm
+  // into a spend-circuit trip that holds until midnight (round-2 redteam B-F2).
   const row = db.prepare(`
     SELECT COALESCE(SUM(a.cost_usd), 0) AS known,
-           SUM(CASE WHEN a.cost_usd IS NULL THEN 1 ELSE 0 END) AS unknown
+           SUM(CASE WHEN a.cost_usd IS NULL
+                     AND COALESCE(a.result_status, '') NOT IN (${NO_SPEND_STATUSES.map(() => '?').join(', ')})
+                    THEN 1 ELSE 0 END) AS unknown
     FROM automation_attempts a
     JOIN automation_runs r ON r.issue_id = a.issue_id
     WHERE a.started_at >= ?
       AND COALESCE(a.result_status, '') != 'operator_remediated'
       ${scoped ? 'AND r.project_path = ?' : ''}
-  `).get(...(scoped ? [since, options.projectPath] : [since])) as { known: number; unknown: number | null };
+  `).get(...NO_SPEND_STATUSES, ...(scoped ? [since, options.projectPath] : [since])) as { known: number; unknown: number | null };
   const unknownAttempts = row.unknown ?? 0;
   const estimate = unknownAttempts > 0 ? unknownAttemptEstimateUsd(db, now, options.unknownAttemptCostUsd) : 0;
   return {
