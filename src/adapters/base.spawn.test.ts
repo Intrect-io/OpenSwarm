@@ -664,3 +664,51 @@ describe('delegated-CLI capability guards', () => {
     warn.mockRestore();
   });
 });
+
+describe('child environment (baseEnv + adapter overlay)', () => {
+  function closingProc() {
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 131,
+      stdout: new PassThrough(), stderr: new PassThrough(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }), kill: vi.fn(),
+    });
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        proc.stdout.end('');
+        proc.emit('close', 0);
+      });
+      return proc;
+    });
+  }
+  const adapterWith = (env?: Record<string, string | undefined>): CliAdapter => ({
+    name: 'fixture', capabilities: { supportsStreaming: false, supportsJsonOutput: false, supportsModelSelection: false, managedGit: false, supportedSkills: [] },
+    isAvailable: async () => true, getDefaultModel: async () => 'fixture',
+    buildCommand: () => ({ command: 'fixture-cli', args: [], env }),
+    parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+    parseReviewerOutput: () => ({ decision: 'approve', feedback: '', issues: [], suggestions: [] }),
+  });
+  const childEnv = () => (spawnMock.mock.calls[0][2] as { env: NodeJS.ProcessEnv }).env;
+
+  it('starts from baseEnv instead of the daemon env when the caller passes one', async () => {
+    const saved = process.env.LINEAR_API_KEY;
+    process.env.LINEAR_API_KEY = 'daemon-only-secret';
+    try {
+      closingProc();
+      await spawnCli(adapterWith(), { prompt: 'x', cwd: process.cwd(), baseEnv: { PATH: '/usr/bin', HOME: '/h' } });
+      expect(childEnv().LINEAR_API_KEY).toBeUndefined();
+      expect(childEnv().HOME).toBe('/h');
+    } finally {
+      if (saved === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = saved;
+    }
+  });
+
+  it('applies the adapter overlay: strings set, undefined removes, input untouched', async () => {
+    const baseEnv: NodeJS.ProcessEnv = { PATH: '/usr/bin', CLAUDECODE: '1' };
+    closingProc();
+    await spawnCli(adapterWith({ CLAUDECODE: undefined, ANTHROPIC_AUTH_TOKEN: 'tok' }), { prompt: 'x', cwd: process.cwd(), baseEnv });
+    expect('CLAUDECODE' in childEnv()).toBe(false);
+    expect(childEnv().ANTHROPIC_AUTH_TOKEN).toBe('tok');
+    expect(baseEnv.CLAUDECODE).toBe('1');
+  });
+});

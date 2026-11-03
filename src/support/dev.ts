@@ -2,13 +2,18 @@
 // OpenSwarm - Development Task Execution
 // ============================================
 
-import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readdirSync, statSync, writeFileSync, appendFileSync, mkdirSync, realpathSync, closeSync, fstatSync, openSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import { checkWorkAllowed, getTimeWindowSummary } from './timeWindow.js';
 import { extractCostFromStreamJson, formatCost } from './costTracker.js';
 import { expandPath } from '../core/config.js';
 import { safeInheritedEnv, CLAUDE_CLI_ENV_KEYS } from './spawnEnv.js';
+import { runClaudeTask } from '../adapters/claudeTask.js';
+
+/** Wall-clock ceiling for one dev task; the process group is killed after it. */
+const DEV_TASK_TIMEOUT_MS = 30 * 60_000;
+/** Turn ceiling for one dev task. */
+const DEV_TASK_MAX_TURNS = 50;
 
 /**
  * Known repository list (alias -> path)
@@ -32,7 +37,7 @@ type DevTask = {
   repo: string;
   path: string;
   task: string;
-  process: ChildProcess;
+  controller: AbortController;
   output: string;
   startedAt: number;
   requestedBy: string;
@@ -161,28 +166,12 @@ export async function runDevTask(
 
   const taskId = `${repo}-${Date.now()}`;
 
-  // Run Claude CLI (bypass permissions for autonomous execution)
-  const claudeProcess = spawn('claude', [
-    '-p', task,
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--permission-mode', 'bypassPermissions'
-  ], {
-    cwd: path,
-    // Not `process.env`. This child runs with bypassPermissions — it has a
-    // shell — and the parent holds every provider key, the Linear token, and
-    // npm/GitHub credentials, none of which the claude CLI needs. It keeps its
-    // own (via HOME, or the ANTHROPIC_/CLAUDE_ variables an operator may
-    // authenticate through) and nothing else.
-    env: safeInheritedEnv(CLAUDE_CLI_ENV_KEYS),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
+  const controller = new AbortController();
   const devTask: DevTask = {
     repo,
     path,
     task,
-    process: claudeProcess,
+    controller,
     output: '',
     startedAt: Date.now(),
     requestedBy,
@@ -190,10 +179,9 @@ export async function runDevTask(
 
   activeTasks.set(taskId, devTask);
 
-  // Completion is delivered by exactly one of close/error, and cancelTask does
-  // not remove the entry, so a second run for the same repo cannot be started
-  // while the SIGTERM'd child is still shutting down (a new run's entry would
-  // otherwise be deleted, and its onComplete fired, by the old child's close).
+  // Completion is delivered exactly once, and cancelTask does not remove the
+  // entry, so a second run for the same repo cannot be started while the
+  // cancelled child is still shutting down.
   let finalized = false;
   const finalize = (resultText: string, code: number | null): void => {
     if (finalized) return;
@@ -206,57 +194,51 @@ export async function runDevTask(
     }
   };
 
-  // Collect stdout
-  claudeProcess.stdout?.on('data', (data: Buffer) => {
-    const chunk = data.toString();
-    devTask.output += chunk;
+  // Not awaited: the caller gets the task id immediately and hears about
+  // progress and completion through the callbacks.
+  void runClaudeTask({
+    prompt: task,
+    cwd: path,
+    timeoutMs: DEV_TASK_TIMEOUT_MS,
+    maxTurns: DEV_TASK_MAX_TURNS,
+    signal: controller.signal,
+    // Not `process.env`. This child runs with bypassPermissions — it has a
+    // shell — and the parent holds every provider key, the Linear token, and
+    // npm/GitHub credentials, none of which the claude CLI needs. It keeps its
+    // own (via HOME, or the ANTHROPIC_/CLAUDE_ variables an operator may
+    // authenticate through) and nothing else.
+    baseEnv: safeInheritedEnv(CLAUDE_CLI_ENV_KEYS),
+    onLog: (line) => {
+      devTask.output += `${line}\n`;
+      try {
+        onProgress?.(`${line}\n`);
+      } catch (callbackError) {
+        console.error(`[Dev] onProgress failed for ${taskId}:`, callbackError);
+      }
+    },
+  }).then((result) => {
+    let resultText = result.resultText || devTask.output;
+    let code: number | null = result.success ? 0 : 1;
     try {
-      onProgress?.(chunk);
-    } catch (callbackError) {
-      console.error(`[Dev] onProgress failed for ${taskId}:`, callbackError);
-    }
-  });
-
-  // Collect stderr
-  claudeProcess.stderr?.on('data', (data: Buffer) => {
-    const chunk = data.toString();
-    devTask.output += chunk;
-  });
-
-  // Handle completion
-  claudeProcess.on('close', (code) => {
-    let resultText = devTask.output;
-    try {
-      // Extract cost from stream-json output
-      const costInfo = extractCostFromStreamJson(devTask.output);
+      const costInfo = extractCostFromStreamJson(result.stdout);
       if (costInfo) {
         console.log(`[Dev] ${repo} cost: ${formatCost(costInfo)}`);
       }
-
-      // Extract result text from stream-json for output
-      try {
-        const lines = devTask.output.split('\n').filter(Boolean);
-        const resultLine = lines.find((l) => l.includes('"type":"result"'));
-        if (resultLine) {
-          const parsed = JSON.parse(resultLine);
-          if (parsed.result) resultText = parsed.result;
-        }
-      } catch { /* use original */ }
-
-      // Generate report file
+      if (!result.success) {
+        if (result.error) devTask.output += `\nError: ${result.error}`;
+        if (!result.resultText) resultText = devTask.output;
+        if (!result.stdout) code = -1;
+      }
       const duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
       generateReport(devTask, code, duration);
     } catch (reportError) {
       // Reporting must not decide whether the task is finalized.
-      console.error(`[Dev] close-handler reporting failed for ${taskId}:`, reportError);
+      console.error(`[Dev] completion reporting failed for ${taskId}:`, reportError);
     } finally {
       finalize(resultText, code);
     }
-  });
-
-  // Handle errors
-  claudeProcess.on('error', (err) => {
-    devTask.output += `\nError: ${err.message}`;
+  }, (error: unknown) => {
+    devTask.output += `\nError: ${error instanceof Error ? error.message : String(error)}`;
     finalize(devTask.output, -1);
   });
 
@@ -283,13 +265,10 @@ export function cancelTask(taskId: string): boolean {
   const task = activeTasks.get(taskId);
   if (!task) return false;
 
-  try {
-    task.process.kill('SIGTERM');
-  } catch {
-    // Already gone; the close handler still finalizes and frees the slot.
-  }
-  // The entry stays until 'close' — getActiveTasks must not advertise the repo
-  // as free while the SIGTERM'd child is still running.
+  // Abort kills the child's process group; the run's completion handler then
+  // finalizes and frees the slot. The entry stays until then — getActiveTasks
+  // must not advertise the repo as free while the child is still running.
+  task.controller.abort(new Error('Dev task cancelled'));
   return true;
 }
 

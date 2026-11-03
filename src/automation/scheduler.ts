@@ -4,12 +4,12 @@
 // ============================================
 
 import { Cron } from 'croner';
-import { spawn } from 'child_process';
 import { resolve } from 'path';
 import { homedir } from 'os';
 import * as fs from 'fs/promises';
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
+import { runClaudeTask } from '../adapters/claudeTask.js';
 import { t, getDateLocale } from '../locale/index.js';
 import { randomUUID } from 'crypto';
 import { withFileLock } from '../support/fileLock.js';
@@ -65,7 +65,7 @@ export interface JobResult {
 const activeJobs: Map<string, Cron> = new Map();
 
 // Running processes (to prevent concurrent execution)
-const runningProcesses: Map<string, ReturnType<typeof spawn>> = new Map();
+const runningProcesses: Map<string, AbortController> = new Map();
 
 /** Wall-clock ceiling for a scheduled claude job — a hang here would silently
  *  wedge the schedule (every later fire skipped "already running"). (INT-2521) */
@@ -74,18 +74,10 @@ const CRON_JOB_TIMEOUT_MS = 20 * 60_000;
 // Recent results (for reporting)
 const recentResults: JobResult[] = [];
 const MAX_RESULTS = 50;
-const MAX_CLI_BUFFER_CHARS = 128 * 1024;
 
 // Result listener (Discord reporting, etc.)
 type ResultListener = (result: JobResult) => void;
 let resultListener: ResultListener | null = null;
-
-function appendBounded(current: string, chunk: string): string {
-  const next = current + chunk;
-  return next.length > MAX_CLI_BUFFER_CHARS
-    ? next.slice(next.length - MAX_CLI_BUFFER_CHARS)
-    : next;
-}
 
 /**
  * Register result listener
@@ -194,106 +186,45 @@ function validateScheduleExpression(schedule: string): string {
 }
 
 /**
- * Run Claude CLI via spawn
+ * Run one scheduled prompt through `claude -p` (spawnCli + the claude adapter:
+ * pinned model, isolated settings, stdin prompt, process-group kill on
+ * timeout or cancel).
  */
 async function runClaudeCli(
   projectPath: string,
   prompt: string,
   jobId: string
 ): Promise<{ success: boolean; output: string; error?: string }> {
-  return new Promise((resolve) => {
-    const expandedPath = projectPath.replace('~', homedir());
-
-    // Invoke claude directly (no shell). `cwd` already handles the directory.
-    console.log(`[Scheduler] Spawning Claude CLI for ${jobId}...`);
-    const proc = spawn(
-      'claude',
-      [
-        '-p',
-        prompt,
-        '--output-format',
-        'stream-json',
-        '--verbose',
-        '--permission-mode',
-        'bypassPermissions',
-        '--max-turns',
-        '15',
-      ],
-      {
-        cwd: expandedPath,
-        env: process.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
-
-    runningProcesses.set(jobId, proc);
-
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const finish = (r: { success: boolean; output: string; error?: string }) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(watchdog);
-      runningProcesses.delete(jobId);
-      resolve(r);
+  const expandedPath = projectPath.replace('~', homedir());
+  console.log(`[Scheduler] Spawning Claude CLI for ${jobId}...`);
+  const controller = new AbortController();
+  runningProcesses.set(jobId, controller);
+  try {
+    // The deadline matters: a hung `claude` would otherwise keep the job in
+    // runningProcesses forever, so every later fire is skipped "already
+    // running" and the schedule is silently dead until restart. (INT-2521)
+    const result = await runClaudeTask({
+      prompt,
+      cwd: expandedPath,
+      timeoutMs: CRON_JOB_TIMEOUT_MS,
+      maxTurns: 15,
+      signal: controller.signal,
+    });
+    const costInfo = extractCostFromStreamJson(result.stdout);
+    if (costInfo) {
+      console.log(`[Scheduler] Job ${jobId} cost: ${formatCost(costInfo)}`);
+    }
+    const output = result.resultText || result.stdout;
+    return {
+      success: result.success,
+      output: output.slice(0, 2000), // max 2000 chars
+      error: result.error,
     };
-    // Without this a hung `claude` never resolves → the job stays in
-    // runningProcesses forever → every later fire is skipped "already running"
-    // and the schedule is silently dead until restart. Kill + resolve as a
-    // failure so the consecutive-failure auto-pause can engage. (INT-2521)
-    const watchdog = setTimeout(() => {
-      if (settled) return;
-      console.warn(`[Scheduler] Job ${jobId} exceeded ${Math.round(CRON_JOB_TIMEOUT_MS / 60_000)}min — killing`);
-      proc.kill('SIGKILL');
-      finish({ success: false, output: '', error: `Job timed out after ${CRON_JOB_TIMEOUT_MS}ms` });
-    }, CRON_JOB_TIMEOUT_MS);
-
-    proc.stdout?.on('data', (data) => {
-      stdout = appendBounded(stdout, data.toString());
-    });
-
-    proc.stderr?.on('data', (data) => {
-      stderr = appendBounded(stderr, data.toString());
-    });
-
-    proc.on('close', (code) => {
-      runningProcesses.delete(jobId);
-
-      // Extract cost from stream-json output
-      const costInfo = extractCostFromStreamJson(stdout);
-      if (costInfo) {
-        console.log(`[Scheduler] Job ${jobId} cost: ${formatCost(costInfo)}`);
-      }
-
-      // Extract result from stream-json output
-      let resultText = stdout;
-      try {
-        const lines = stdout.split('\n').filter(Boolean);
-        const resultLine = lines.find((l) => l.includes('"type":"result"'));
-        if (resultLine) {
-          const parsed = JSON.parse(resultLine);
-          resultText = parsed.result || stdout;
-        }
-      } catch {
-        // Use original on parse failure
-      }
-
-      finish({
-        success: code === 0,
-        output: resultText.slice(0, 2000), // max 2000 chars
-        error: stderr || undefined,
-      });
-    });
-
-    proc.on('error', (err) => {
-      finish({
-        success: false,
-        output: '',
-        error: err.message,
-      });
-    });
-  });
+  } finally {
+    // Only drop our own entry: a cancel may already have removed it and a
+    // new run for the same job may have registered its own controller.
+    if (runningProcesses.get(jobId) === controller) runningProcesses.delete(jobId);
+  }
 }
 
 /**
@@ -456,9 +387,9 @@ export async function removeSchedule(nameOrId: string): Promise<boolean> {
   }
 
   // Kill running process
-  const proc = runningProcesses.get(job.id);
-  if (proc) {
-    proc.kill('SIGTERM');
+  const running = runningProcesses.get(job.id);
+  if (running) {
+    running.abort(new Error(`Schedule removed: ${job.name}`));
     runningProcesses.delete(job.id);
   }
 
@@ -552,8 +483,8 @@ export function stopAllSchedules(): void {
   activeJobs.clear();
 
   // Also kill running processes
-  for (const [id, proc] of runningProcesses) {
-    proc.kill('SIGTERM');
+  for (const [id, running] of runningProcesses) {
+    running.abort(new Error('Scheduler stopped'));
     console.log(`[Scheduler] Killed process: ${id}`);
   }
   runningProcesses.clear();

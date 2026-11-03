@@ -4,18 +4,19 @@
 //
 // Companion to scheduler.test.ts (the pure `nextFailureState` helper) and
 // scheduler.runNow.test.ts (bypass-execution smoke tests). This file targets
-// the branches those two don't reach: the private runClaudeCli buffer
-// bounding / watchdog timeout / spawn-error handling, removeSchedule /
+// the branches those two don't reach: the private runClaudeCli result
+// mapping / deadline / failure handling, removeSchedule /
 // toggleSchedule / startAllSchedules / stopAllSchedules, the auto-pause
 // path, the time-window-blocked path, invalid cron expressions, the
 // intervalToCron shorthand conversion, and the two pure formatting helpers
 // (formatScheduleList, parseScheduleFromNaturalLanguage).
 //
 // Same mocking convention as scheduler.runNow.test.ts: `os.homedir` and
-// `child_process.spawn` are mocked so nothing here touches the real
-// `~/.openswarm/schedules.json` or spawns a real `claude` process.
+// `runClaudeTask` are mocked so nothing here touches the real
+// `~/.openswarm/schedules.json` or spawns a real `claude` process. Process
+// teardown and the wall-clock deadline themselves belong to spawnCli and are
+// covered in src/adapters/base.spawn.test.ts.
 
-import { EventEmitter } from 'node:events';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getDateLocale, t } from '../locale/index.js';
@@ -25,24 +26,23 @@ const testHome = vi.hoisted(() => ({
   path: `/tmp/openswarm-scheduler-coverage-${process.pid}`,
 }));
 
-const spawned = vi.hoisted(() => ({
-  processes: [] as Array<
-    EventEmitter & {
-      stdout: EventEmitter;
-      stderr: EventEmitter;
-      kill: ReturnType<typeof vi.fn>;
-    }
-  >,
-}));
+const fake = vi.hoisted(() => {
+  type Result = { success: boolean; stdout: string; resultText: string; error?: string };
+  type Run = {
+    options: { prompt: string; cwd: string; timeoutMs: number; maxTurns?: number; signal?: AbortSignal };
+    close: (code: number, extra?: Partial<Result>) => void;
+  };
+  return { runs: [] as Run[] };
+});
 
-const spawnMock = vi.hoisted(() => vi.fn());
+const runClaudeTaskMock = vi.hoisted(() => vi.fn());
 
 vi.mock('os', () => ({
   homedir: () => testHome.path,
 }));
 
-vi.mock('child_process', () => ({
-  spawn: spawnMock,
+vi.mock('../adapters/claudeTask.js', () => ({
+  runClaudeTask: runClaudeTaskMock,
 }));
 
 import {
@@ -62,28 +62,23 @@ import {
   type ScheduledJob,
 } from './scheduler.js';
 
-type MockProc = EventEmitter & {
-  stdout: EventEmitter;
-  stderr: EventEmitter;
-  kill: ReturnType<typeof vi.fn>;
-};
+type FakeRun = (typeof fake.runs)[number];
 
-function createMockProc(): MockProc {
-  const proc = Object.assign(new EventEmitter(), {
-    stdout: new EventEmitter(),
-    stderr: new EventEmitter(),
-    kill: vi.fn(),
-  }) as MockProc;
-  spawned.processes.push(proc);
-  return proc;
+/** A run that stays in flight until the test closes it. */
+function queuePendingRun(): void {
+  runClaudeTaskMock.mockImplementationOnce((options: FakeRun['options']) => new Promise((resolve) => {
+    fake.runs.push({
+      options,
+      close: (code, extra = {}) => resolve({ success: code === 0, stdout: '', resultText: '', ...extra }),
+    });
+  }));
 }
 
-/** Queue a spawn that closes with the given exit code on the next microtask. */
-function queueSpawnClosingWith(code: number): void {
-  spawnMock.mockImplementationOnce(() => {
-    const proc = createMockProc();
-    queueMicrotask(() => proc.emit('close', code));
-    return proc;
+/** Queue a run that finishes with the given exit status on the next microtask. */
+function queueSpawnClosingWith(code: number, extra: Record<string, unknown> = {}): void {
+  runClaudeTaskMock.mockImplementationOnce(async (options: FakeRun['options']) => {
+    fake.runs.push({ options, close: () => {} });
+    return { success: code === 0, stdout: '', resultText: '', ...extra };
   });
 }
 
@@ -92,8 +87,8 @@ describe('scheduler coverage', () => {
 
   beforeEach(async () => {
     stopAllSchedules();
-    spawned.processes = [];
-    spawnMock.mockReset();
+    fake.runs = [];
+    runClaudeTaskMock.mockReset();
     await rm(testHome.path, { recursive: true, force: true });
     savedTimeWindowConfig = getTimeWindowConfig();
     setResultListener(() => {});
@@ -248,24 +243,15 @@ describe('scheduler coverage', () => {
   // ==========================================================
 
   describe('claude CLI process handling', () => {
-    it('extracts the cost log and the parsed result text from a stream-json result event', async () => {
-      spawnMock.mockImplementationOnce(() => {
-        const proc = createMockProc();
-        queueMicrotask(() => {
-          proc.stdout.emit(
-            'data',
-            Buffer.from(
-              `${JSON.stringify({
-                type: 'result',
-                result: 'Build succeeded.',
-                total_cost_usd: 0.031,
-                usage: { input_tokens: 120, output_tokens: 40 },
-              })}\n`,
-            ),
-          );
-          proc.emit('close', 0);
-        });
-        return proc;
+    it('logs the cost and keeps the parsed result text from the stream-json result event', async () => {
+      queueSpawnClosingWith(0, {
+        stdout: `${JSON.stringify({
+          type: 'result',
+          result: 'Build succeeded.',
+          total_cost_usd: 0.031,
+          usage: { input_tokens: 120, output_tokens: 40 },
+        })}\n`,
+        resultText: 'Build succeeded.',
       });
 
       await addSchedule('cost-job', testHome.path, 'do work', '0 3 * * *');
@@ -278,84 +264,46 @@ describe('scheduler coverage', () => {
       ).toBe(true);
     });
 
-    it('resolves as a failure when the spawned process emits an error event', async () => {
-      spawnMock.mockImplementationOnce(() => {
-        const proc = createMockProc();
-        queueMicrotask(() => proc.emit('error', new Error('ENOENT: claude not found')));
-        return proc;
-      });
+    it('runs through runClaudeTask with the job deadline, a turn cap, and an abort signal', async () => {
+      queueSpawnClosingWith(0);
+      await addSchedule('opts-job', testHome.path, 'do work', '0 3 * * *');
+      await runNow('opts-job', true);
+
+      const { options } = fake.runs[0];
+      expect(options.prompt).toBe('do work');
+      expect(options.cwd).toBe(testHome.path);
+      expect(options.timeoutMs).toBe(20 * 60_000); // mirrors CRON_JOB_TIMEOUT_MS
+      expect(options.maxTurns).toBe(15);
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it('resolves as a failure and surfaces the error when the run fails', async () => {
+      queueSpawnClosingWith(1, { error: 'claude CLI failed with code 1: ENOENT' });
 
       await addSchedule('spawn-error-job', testHome.path, 'do work', '0 3 * * *');
       await expect(runNow('spawn-error-job', true)).resolves.toBe(false);
 
       const result = getRecentResults(1)[0];
       expect(result.success).toBe(false);
-      expect(result.error).toBe('ENOENT: claude not found');
+      expect(result.error).toBe('claude CLI failed with code 1: ENOENT');
       expect(result.output).toBe('');
     });
 
-    it('bounds the stderr buffer instead of growing it unbounded', async () => {
-      const MAX_CLI_BUFFER_CHARS = 128 * 1024; // mirrors the private constant in scheduler.ts
-
-      spawnMock.mockImplementationOnce(() => {
-        const proc = createMockProc();
-        queueMicrotask(() => {
-          proc.stderr.emit('data', Buffer.from('a'.repeat(140_000)));
-          proc.stderr.emit('data', Buffer.from('MARKERZZZ'));
-          proc.emit('close', 1);
-        });
-        return proc;
-      });
-
-      await addSchedule('big-stderr-job', testHome.path, 'do work', '0 3 * * *');
-      await expect(runNow('big-stderr-job', true)).resolves.toBe(false);
-
-      const result = getRecentResults(1)[0];
-      const err = result.error as string;
-      expect(err).toBeDefined();
-      expect(err).toHaveLength(MAX_CLI_BUFFER_CHARS);
-      expect(err.endsWith('MARKERZZZ')).toBe(true);
-      expect(err.startsWith('a')).toBe(true);
-    });
-
-    it('kills a hung process and fails the job once the watchdog timeout elapses', async () => {
-      // Scope fake timers to setTimeout/clearTimeout only — faking Date/setImmediate
-      // as well interferes with Croner's real internal scheduling and Node's fs
-      // promise resolution, which previously hung this test indefinitely.
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-      let proc!: MockProc;
-      spawnMock.mockImplementationOnce(() => {
-        proc = createMockProc(); // never closes on its own — simulates a hang
-        return proc;
-      });
+    it('fails the job and frees the slot when the run hits its deadline', async () => {
+      queueSpawnClosingWith(1, { error: 'claude timeout after 1200000ms' });
 
       await addSchedule('hung-job', testHome.path, 'do work', '0 3 * * *');
-      const pending = runNow('hung-job', true);
+      await expect(runNow('hung-job', true)).resolves.toBe(false);
 
-      // Wait (via real timers — not faked) for the spawn + watchdog
-      // registration to actually happen before advancing the fake clock.
-      // Both are synchronous back-to-back statements in runClaudeCli, so
-      // once the process shows up as running the watchdog is armed too.
-      // Advancing before this point races the still-in-flight real fs I/O
-      // (loadSchedules/saveSchedules) and can register the timer relative to
-      // an already-advanced clock, so it never fires within this call.
-      // `vi.waitFor` (not a fixed-count setImmediate loop) so this doesn't
-      // flake under CI/parallel-worker CPU contention that slows the real
-      // fs I/O below whatever iteration budget a hard-coded loop assumed.
-      await vi.waitFor(
-        () => {
-          expect(getRunningJobs()).toHaveLength(1);
-        },
-        { timeout: 5000, interval: 10 },
-      );
+      expect(getRecentResults(1)[0].error).toContain('timeout');
+      expect(getRunningJobs()).toHaveLength(0);
+    });
 
-      await vi.advanceTimersByTimeAsync(20 * 60_000); // mirrors CRON_JOB_TIMEOUT_MS
-
-      await expect(pending).resolves.toBe(false);
-      expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
-
-      const result = getRecentResults(1)[0];
-      expect(result.error).toContain('timed out');
+    it('caps the output it stores at 2000 characters', async () => {
+      queueSpawnClosingWith(0, { resultText: 'x'.repeat(5000) });
+      await addSchedule('long-output-job', testHome.path, 'do work', '0 3 * * *');
+      await runNow('long-output-job', true);
+      expect(getRecentResults(1)[0].output).toHaveLength(2000);
     });
   });
 
@@ -376,7 +324,7 @@ describe('scheduler coverage', () => {
       // No bypass argument here — exercises runNow's default (non-bypass) path.
       await expect(runNow('blocked-job')).resolves.toBe(false);
 
-      expect(spawnMock).not.toHaveBeenCalled();
+      expect(runClaudeTaskMock).not.toHaveBeenCalled();
     });
 
     it('notifies the registered result listener on completion', async () => {
@@ -425,15 +373,15 @@ describe('scheduler coverage', () => {
 
     it('merges a completed run with the latest persisted failure counter', async () => {
       const job = await addSchedule('concurrent-state-job', testHome.path, 'do work', '0 3 * * *');
-      spawnMock.mockImplementationOnce(() => createMockProc());
+      queuePendingRun();
       const pending = runNow(job.id, true);
-      await vi.waitFor(() => expect(spawned.processes).toHaveLength(1));
+      await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
 
       const scheduleFile = `${testHome.path}/.openswarm/schedules.json`;
       const latest = await listSchedules();
       latest[0].consecutiveFailures = 1;
       await writeFile(scheduleFile, JSON.stringify(latest));
-      spawned.processes[0].emit('close', 1);
+      fake.runs[0].close(1);
       await pending;
 
       expect((await listSchedules())[0].consecutiveFailures).toBe(2);
@@ -469,7 +417,7 @@ describe('scheduler coverage', () => {
     });
 
     it('kills a still-running process when the schedule is removed mid-run', async () => {
-      spawnMock.mockImplementationOnce(() => createMockProc()); // never closes — an in-flight run
+      queuePendingRun(); // an in-flight run
       await addSchedule('mid-run-job', testHome.path, 'do work', '0 3 * * *');
 
       const pending = runNow('mid-run-job', true);
@@ -479,11 +427,11 @@ describe('scheduler coverage', () => {
       expect(getRunningJobs()).toHaveLength(1);
 
       await expect(removeSchedule('mid-run-job')).resolves.toBe(true);
-      const proc = spawned.processes[0];
-      expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+      const run = fake.runs[0];
+      expect(run.options.signal?.aborted).toBe(true);
 
       // Let the in-flight run settle so no dangling promise leaks into later tests.
-      proc.emit('close', 0);
+      run.close(0);
       await pending;
     });
   });
@@ -546,7 +494,7 @@ describe('scheduler coverage', () => {
   });
 
   it('kills a running process when stopping all schedules', async () => {
-    spawnMock.mockImplementationOnce(() => createMockProc()); // never closes
+    queuePendingRun(); // never closes on its own
     await addSchedule('stopall-job', testHome.path, 'do work', '0 3 * * *');
 
     const pending = runNow('stopall-job', true);
@@ -558,10 +506,10 @@ describe('scheduler coverage', () => {
     stopAllSchedules();
 
     expect(getRunningJobs()).toHaveLength(0);
-    const proc = spawned.processes[spawned.processes.length - 1];
-    expect(proc.kill).toHaveBeenCalledWith('SIGTERM');
+    const run = fake.runs[fake.runs.length - 1];
+    expect(run.options.signal?.aborted).toBe(true);
 
-    proc.emit('close', 0);
+    run.close(0);
     await pending;
   });
 });

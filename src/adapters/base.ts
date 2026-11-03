@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { CliAdapter, CliRunOptions, CliRunResult } from './types.js';
 import { parseCliStreamChunk } from '../agents/cliStreamParser.js';
 import { registerProcess } from './processRegistry.js';
@@ -18,6 +19,7 @@ import {
   prepareCliProcessTreeSpawn,
   terminateCliProcessTree,
   trackCliProcessTree,
+  terminateProcessesWithEnvMarker,
   untrackCliProcessTree,
 } from './processTree.js';
 import { raceWithAbort } from './abortRace.js';
@@ -147,6 +149,12 @@ export async function spawnCli(
   // preserves the prompt, raw result, timing, and exit result an operator
   // needs to audit the boundary OpenSwarm actually controls. (AGT-4456)
   let session: SessionRecorder | undefined;
+  // Inherited by every descendant through ordinary forks. Claude Code's Bash
+  // tool starts each command in a new session (setsid), which escapes the
+  // detached process group terminateCliProcessTree kills: a cancelled or
+  // timed-out run left the command running, reparented to init (observed on
+  // CLI 2.1.317). The marker lets the finally block reap those too.
+  let processMarker: string | undefined;
 
   try {
     session = createSessionRecorder({
@@ -191,7 +199,14 @@ export async function spawnCli(
       throw reason instanceof Error ? reason : new Error(`${adapter.name} aborted`);
     }
     return await new Promise<CliRunResult>((resolve, reject) => {
-      const cliSpawn = prepareCliProcessTreeSpawn(command, args, buildWorkerEnv(process.env));
+      const cliSpawn = prepareCliProcessTreeSpawn(
+        command,
+        args,
+        {
+          ...applyEnvOverlay(buildWorkerEnv(runOptions.baseEnv ?? process.env), commandSpec.env),
+          [CLI_PROCESS_MARKER_ENV]: (processMarker = `osw-cli-${randomUUID()}`),
+        },
+      );
       const proc = spawn(cliSpawn.command, cliSpawn.args, {
         shell: false,
         detached: process.platform !== 'win32',
@@ -374,6 +389,13 @@ export async function spawnCli(
   } finally {
     session?.close({ outcome: 'threw', durationMs: Date.now() - startTime });
     cleanupDeadline();
+    if (processMarker) {
+      try {
+        await terminateProcessesWithEnvMarker(`${CLI_PROCESS_MARKER_ENV}=${processMarker}`);
+      } catch {
+        // Best effort: failing to enumerate leaks a process, never kills a stranger.
+      }
+    }
     try {
       // Remove the whole private directory, not just the file inside it.
       if (promptDir) await fs.rm(promptDir, { recursive: true, force: true });
@@ -384,6 +406,26 @@ export async function spawnCli(
       await fs.rm(cleanupPath, { recursive: true, force: true }).catch(() => {});
     }
   }
+}
+
+/** Env var carrying the per-run marker used to reap session-escaped descendants. */
+export const CLI_PROCESS_MARKER_ENV = 'OPENSWARM_CLI_PROCESS_MARKER';
+
+/**
+ * Copy `env` and apply an adapter overlay: a string sets the key, `undefined`
+ * removes it. The input is never mutated (it may be `process.env`).
+ */
+export function applyEnvOverlay(
+  env: NodeJS.ProcessEnv,
+  overlay: Record<string, string | undefined> | undefined,
+): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  if (!overlay) return out;
+  for (const [key, value] of Object.entries(overlay)) {
+    if (value === undefined) delete out[key];
+    else out[key] = value;
+  }
+  return out;
 }
 
 /**
