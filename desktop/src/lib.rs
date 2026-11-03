@@ -31,6 +31,7 @@ use tauri::{
 /// launchd label of the daemon service (`scripts/com.intrect.openswarm.plist`,
 /// installed via `npm run service:install`). Distinct from this app's bundle
 /// identifier `com.intrect.openswarm-desktop` on purpose.
+#[cfg(target_os = "macos")]
 const DAEMON_LAUNCHD_LABEL: &str = "com.intrect.openswarm";
 
 // ── Shell logging ─────────────────────────────────────────────────────────────
