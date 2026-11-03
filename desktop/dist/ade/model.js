@@ -23,6 +23,7 @@ export function sessionRows(response) {
     model: s.model ?? '',
     branch: s.branch ?? '',
     project: projectName(s.projectPath),
+    projectPath: s.projectPath ?? '',
     at: s.startedAt ?? 0,
     live: true,
   }));
@@ -37,6 +38,7 @@ export function sessionRows(response) {
     model: '',
     branch: '',
     project: projectName(r.projectPath),
+    projectPath: r.projectPath ?? '',
     at: r.completedAt ?? 0,
     costUsd: typeof r.costUsd === 'number' ? r.costUsd : undefined,
     failureCause: r.failureCause ?? '',

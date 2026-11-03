@@ -6,6 +6,7 @@
 // and diffs are repository- and agent-controlled text.
 
 import * as model from './model.js';
+import { availableActions, performAction } from './actions.js';
 
 const tauri = window.__TAURI__;
 const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
@@ -80,6 +81,7 @@ function renderSessions() {
 async function select(taskId) {
   state.selected = taskId;
   state.log = [];
+  $('action-message').hidden = true;
   renderSessions();
   const row = state.rows.find((r) => r.taskId === taskId);
   $('crumb').textContent = row ? (row.issue || row.title) : taskId;
@@ -143,9 +145,31 @@ async function loadRun(taskId) {
   $('run-state').dataset.tone = summary.tone;
   $('run-attempt').textContent = summary.attempt ? `attempt ${summary.attempt}` : '';
   $('run-detail').textContent = summary.detail;
-  const pr = $('run-pr');
-  pr.hidden = !summary.prUrl;
-  pr.dataset.url = summary.prUrl ?? '';
+  renderActions(taskId, run);
+}
+
+function renderActions(taskId, run) {
+  const row = state.rows.find((r) => r.taskId === taskId);
+  const bar = $('run-actions');
+  bar.replaceChildren(...availableActions(row, run).map((action) => {
+    const button = el('button', '', action.label);
+    button.type = 'button';
+    button.dataset.action = action.id;
+    button.addEventListener('click', async () => {
+      for (const b of bar.querySelectorAll('button')) b.disabled = true;
+      const result = await performAction(invoke, action, row);
+      const message = $('action-message');
+      message.hidden = !result.message;
+      message.dataset.kind = result.kind;
+      message.textContent = result.message;
+      for (const b of bar.querySelectorAll('button')) b.disabled = false;
+      if (result.kind === 'done' && action.id !== 'openPr') {
+        scheduleSessions();
+        scheduleDetails();
+      }
+    });
+    return button;
+  }));
 }
 
 async function loadDiff(taskId) {
@@ -215,12 +239,6 @@ async function startEvents() {
   });
   await invoke('ade_subscribe_events');
 }
-
-$('run-pr').addEventListener('click', (event) => {
-  event.preventDefault();
-  const url = model.safeExternalUrl(event.currentTarget.dataset.url);
-  if (url) invoke('open_url', { url });
-});
 
 refreshSessions();
 startEvents().catch((error) => {

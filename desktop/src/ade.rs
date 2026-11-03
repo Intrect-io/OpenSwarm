@@ -38,7 +38,7 @@ const FORWARDED_EVENT_TYPES: &[&str] = &[
 /// A task id as the daemon prints it: issue UUIDs, `INT-123`, `t_abc`, `swarm:x`.
 /// Anything else (slashes, dots-only, `%`, whitespace) is refused before it can
 /// shape the request path.
-fn valid_task_id(id: &str) -> bool {
+pub(crate) fn valid_task_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 160
         && id != "."
@@ -162,7 +162,7 @@ fn get_json(url: &url::Url) -> Result<serde_json::Value, String> {
 
 /// The ADE commands answer only the ADE window, and only while it shows the
 /// bundled page (never a navigated-away or remote document).
-fn trusted_ade_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> bool {
+pub(crate) fn trusted_ade_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) -> bool {
     window.label() == ADE_WINDOW
         && window
             .url()
