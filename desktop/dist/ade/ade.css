@@ -45,7 +45,8 @@ body { background: var(--bg); color: var(--text); font: 13px/1.45 var(--sans); d
 .dot[data-status="queued"] { background: var(--warn); }
 .dot[data-status="completed"] { background: var(--ok); }
 .dot[data-status="failed"] { background: var(--bad); }
-.log-body { flex: 1; font: 12px/1.5 var(--mono); padding: 4px 14px 16px; white-space: pre-wrap; word-break: break-word; }
+.pane.log { overflow: hidden; }
+.log-body { flex: 1; min-height: 0; overflow: auto; font: 12px/1.5 var(--mono); padding: 4px 14px 16px; white-space: pre-wrap; word-break: break-word; }
 .log-line { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 10px; }
 .log-line .stage { color: var(--faint); overflow: hidden; text-overflow: ellipsis; }
 .log-line.fail .text { color: var(--bad); }
@@ -59,7 +60,14 @@ body { background: var(--bg); color: var(--text); font: 13px/1.45 var(--sans); d
 .pill[data-tone="idle"] { color: var(--muted); }
 .attempt { font-size: 12px; color: var(--muted); }
 .run-detail { margin: 8px 0 0; color: var(--muted); word-break: break-word; }
-.pr-link { display: inline-block; margin-top: 8px; color: var(--live); }
+.run-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.run-actions button { font: 12px var(--sans); color: var(--text); background: #21262d; border: 1px solid #30363d; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.run-actions button:hover { background: #30363d; }
+.run-actions button[data-action="stop"] { color: var(--bad); }
+.run-actions button:disabled { opacity: .5; cursor: progress; }
+.action-message { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+.action-message[data-kind="error"] { color: var(--bad); }
+.action-message[data-kind="done"] { color: var(--ok); }
 .verify-lines { list-style: none; margin: 0; padding: 0 14px; font: 12px/1.5 var(--mono); }
 .verify-lines li { white-space: pre-wrap; word-break: break-word; color: var(--muted); }
 .verify-lines li.fail { color: var(--bad); }

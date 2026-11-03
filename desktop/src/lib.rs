@@ -10,6 +10,7 @@
 // Common: tray icon + window toggle + settings window + close-to-tray.
 
 mod ade;
+mod ade_actions;
 pub mod client_config;
 mod daemon_health;
 mod flavor;
@@ -835,6 +836,7 @@ pub fn run() {
         test_daemon_connection,
         ade::ade_get,
         ade::ade_subscribe_events,
+        ade_actions::ade_action,
     ]);
 
     let app = builder

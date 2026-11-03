@@ -42,3 +42,8 @@ commands.allow = ["ade_get"]
 identifier = "allow-ade-subscribe-events"
 description = "Allows the bundled ADE workspace page to receive the daemon's run events, relayed by the shell."
 commands.allow = ["ade_subscribe_events"]
+
+[[permission]]
+identifier = "allow-ade-action"
+description = "Allows the bundled ADE workspace page to request stop/retry of a run. The shell asks for a native confirmation and attaches the daemon token itself; the page never sees it."
+commands.allow = ["ade_action"]

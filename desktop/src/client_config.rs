@@ -19,6 +19,44 @@ pub struct ClientConfig {
     /// "app" once the desktop-dedicated SPA ships — without a shell rebuild.
     #[serde(default)]
     pub entry_path: String,
+    /// The daemon's `OPENSWARM_WEB_TOKEN`, for the ADE's stop/retry actions.
+    /// Read only by the shell (`private_web_token`), never sent to a page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_token: Option<String>,
+}
+
+/// The configured daemon token, if any — only when config.json is private.
+///
+/// A token in a file other local users can read is a token they hold too, so a
+/// group- or world-readable config is refused with the fix in the message
+/// rather than used.
+pub(crate) fn private_web_token() -> Result<Option<String>, String> {
+    private_web_token_at(&config_path())
+}
+
+fn private_web_token_at(path: &std::path::Path) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("Failed to read config: {e}"))?;
+    let cfg: ClientConfig = serde_json::from_str(&raw).map_err(|e| format!("Invalid config: {e}"))?;
+    let token = cfg.web_token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    if token.is_none() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "{} holds the daemon token but is readable by others (mode {:o}); run chmod 600 on it",
+                path.display(),
+                mode & 0o777
+            ));
+        }
+    }
+    Ok(token)
 }
 
 fn default_server_url() -> String {
@@ -30,6 +68,7 @@ impl Default for ClientConfig {
         Self {
             server_url: default_server_url(),
             entry_path: String::new(),
+            web_token: None,
         }
     }
 }
@@ -66,12 +105,40 @@ fn save_config(cfg: &ClientConfig) -> Result<(), String> {
     AtomicFile::new(&p, OverwriteBehavior::AllowOverwrite)
         .write(|file| file.write_all(&json).and_then(|_| file.sync_all()))
         .map_err(|e| e.to_string())?;
+    // The file can carry the daemon token (`web_token`): keep it private.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::parse_server_base_url;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_daemon_token_is_used_only_from_a_private_config() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("openswarm-token-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"server_url":"http://127.0.0.1:3847","web_token":" tok "}"#).unwrap();
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = super::private_web_token_at(&path).unwrap_err();
+        assert!(err.contains("chmod 600") && !err.contains("tok\""), "{err}");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(super::private_web_token_at(&path).unwrap().as_deref(), Some("tok"));
+
+        std::fs::write(&path, r#"{"server_url":"http://127.0.0.1:3847"}"#).unwrap();
+        assert_eq!(super::private_web_token_at(&path).unwrap(), None);
+        assert_eq!(super::private_web_token_at(&dir.join("missing.json")).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn accepts_http_base_urls() {
