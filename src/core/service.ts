@@ -34,6 +34,7 @@ import {
   isHumanSurfaceReadOnlyEnabled,
 } from '../mcp/humanSurfacePolicy.js';
 import { wireSandboxExecutorIfEnabled } from '../sandboxExecutor/runtime.js';
+import { describeWorkScope, setWorkScope } from './workScope.js';
 
 let state: ServiceState = {
   running: false,
@@ -292,6 +293,8 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     // verbatim — slim mode (1 resolver call/issue vs 3) + comment hydration +
     // task-state enrichment — and only used by LinearTaskSource.
     const linearConfigured = !!(config.linearApiKey && config.linearTeamId);
+    // The dashboard and TUI show this so a person can see what the work queue is (AGT-3188).
+    console.log(`[Service] Autonomous work scope: ${describeWorkScope(setWorkScope(config.autonomous?.scope))}`);
     const selectedTaskSource = selectTaskSource(linearConfigured, async () => {
       await linear.ensureLinearAuthFresh(); // refresh OAuth token (no-op for API key) each heartbeat
       const issues = await linear.getMyIssues({ slim: true, timeoutMs: 300000, milestone: config.autonomous?.scope?.milestone });

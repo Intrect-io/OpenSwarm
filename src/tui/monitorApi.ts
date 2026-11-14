@@ -4,7 +4,7 @@
 // mappers (monitorRows.ts) turn these into tables. Default daemon port 3847.
 // ============================================
 
-import { projectsToTable, pipelineToTable, stuckToTable, issuesToTable, type Table } from './monitorRows.js';
+import { projectsToTable, pipelineToTable, stuckToTable, issuesToTable, workScopeCaption, type Table } from './monitorRows.js';
 
 const base = (port: number) => `http://127.0.0.1:${port}`;
 const MONITOR_FETCH_TIMEOUT_MS = 15_000;
@@ -29,9 +29,23 @@ async function assertOk(res: Response, label: string): Promise<void> {
 }
 
 export async function fetchProjects(port: number, signal?: AbortSignal): Promise<Table> {
-  const res = await fetch(`${base(port)}/api/projects`, { signal: timeoutSignal(signal) });
+  const [res, scope] = await Promise.all([
+    fetch(`${base(port)}/api/projects`, { signal: timeoutSignal(signal) }),
+    fetchWorkScope(port, signal),
+  ]);
   await assertOk(res, 'GET /api/projects');
-  return projectsToTable(await res.json());
+  return { ...projectsToTable(await res.json()), caption: workScopeCaption(scope) };
+}
+
+/** Best effort: an older daemon has no `workScope` in /api/stats, and the table must still load. */
+async function fetchWorkScope(port: number, signal?: AbortSignal): Promise<{ milestone?: string | null } | undefined> {
+  try {
+    const res = await fetch(`${base(port)}/api/stats`, { signal: timeoutSignal(signal) });
+    if (!res.ok) return undefined;
+    return ((await res.json()) as { workScope?: { milestone?: string | null } }).workScope;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function fetchTasks(port: number, signal?: AbortSignal): Promise<Table> {

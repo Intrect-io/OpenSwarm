@@ -1,7 +1,7 @@
 // MonitorPanel — generic daemon-data tab (EPIC INT-1813 S6 / INT-1939).
 // Polls a fetcher and renders the resulting table; used by Projects/Tasks/
 // Stuck/Issues. Boundary (useMonitor); DataTable + mappers carry tested logic.
-import { Text } from 'ink';
+import { Box, Text } from 'ink';
 import { DataTable } from '../components/DataTable.js';
 import { useMonitor } from '../hooks/useMonitor.js';
 import { theme } from '../theme.js';
@@ -22,5 +22,12 @@ export function MonitorPanel({ port, fetcher, empty, terminalWidth }: MonitorPan
     return <Text color={theme.err}>{`load failed: ${formatMonitorError(error)}`}</Text>;
   }
   if (!table) return <Text dimColor>{loading ? 'loading…' : '(no data)'}</Text>;
-  return <DataTable columns={table.columns} rows={table.rows} empty={empty} terminalWidth={terminalWidth} />;
+  const grid = <DataTable columns={table.columns} rows={table.rows} empty={empty} terminalWidth={terminalWidth} />;
+  if (!table.caption) return grid;
+  return (
+    <Box flexDirection="column">
+      <Text dimColor>{table.caption}</Text>
+      {grid}
+    </Box>
+  );
 }

@@ -40,7 +40,7 @@ import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
 import { refuseForChildCap } from '../automation/decompositionLimits.js';
 import { projectInfoForRepository } from '../automation/runnerState.js';
-import { loadConfig } from '../core/config.js';
+import { loadConfig } from '../core/config.js'; import { getWorkScope } from '../core/workScope.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import type { SubTask } from './planner.js';
 import { getCachedHealthPayload, startHealthCache, stopHealthCache } from './healthEndpoint.js';
@@ -407,7 +407,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           schedulerFairness: stats?.schedulerStats?.fairness ?? { projects: [] },
           uptime: state?.startedAt ? Date.now() - state.startedAt : 0,
           isRunning: stats?.isRunning ?? false,
-          sseClients: getActiveSSECount(),
+          sseClients: getActiveSSECount(), workScope: getWorkScope(), // AGT-3188
           adapters,
           dailyPace: stats?.dailyPace ?? null,
           failureCauses: { window: 50, counts: runnerRef?.getFailureCauseSummary(50) ?? {} },
