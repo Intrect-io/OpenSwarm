@@ -54,9 +54,11 @@ export const MAX_CHAT_HISTORY = 200;
 export function boundChatHistory<T extends { role: string }>(history: T[], max = MAX_CHAT_HISTORY): T[] {
   if (history.length <= max) return history;
   let excess = history.length - max;
-  // 1. Oldest system lines first.
-  const kept = history.filter((line) => {
-    if (excess > 0 && line.role === 'system') {
+  const newest = history.length - 1;
+  // 1. Oldest system lines first — never the newest line, or a notice that
+  //    arrives at the cap would be dropped the moment it is added.
+  const kept = history.filter((line, i) => {
+    if (excess > 0 && line.role === 'system' && i !== newest) {
       excess -= 1;
       return false;
     }

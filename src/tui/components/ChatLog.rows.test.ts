@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderedMessageRows, selectVisibleMessages } from './ChatLog.js';
+import { liveAreaRows, renderedMessageRows, selectVisibleMessages } from './ChatLog.js';
 import type { ChatLine } from '../chatModel.js';
 
 // AGT-3494: the on-screen window is bounded by rendered rows, not source lines.
@@ -28,5 +28,13 @@ describe('selectVisibleMessages', () => {
   it('always shows the newest message even when it alone exceeds the budget', () => {
     const tall = user(Array.from({ length: 50 }, () => 'x').join('\n'));
     expect(selectVisibleMessages([user('old'), tall], 40, 5)).toHaveLength(1);
+  });
+});
+
+describe('liveAreaRows', () => {
+  it('reserves only what the live area shows', () => {
+    expect(liveAreaRows(null, 0, true)).toBe(2); // label + spinner
+    expect(liveAreaRows('one line', 2, true)).toBe(1 + 2 + 1 + 1);
+    expect(liveAreaRows(Array.from({ length: 30 }, () => 'x').join('\n'), 9, false)).toBe(1 + 5 + 15);
   });
 });

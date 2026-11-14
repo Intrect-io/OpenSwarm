@@ -34,8 +34,17 @@ const ROLE_ICON: Record<ChatLine['role'], string> = {
 // fill the full-screen frame and push the input box off-screen. The finalized
 // message renders in full once committed to history. (INT-2014 / INT-2013)
 const STREAM_TAIL_LINES = 14;
-/** Most rows the live area can take: label + 5 activity lines + streaming tail (+1 for its ellipsis) + spinner. */
-const LIVE_AREA_ROWS = 1 + 5 + STREAM_TAIL_LINES + 1 + 1;
+
+/**
+ * Rows the live area takes right now: label, the activity lines shown, the
+ * streaming tail (with its ellipsis line when cut) and the spinner. Measured,
+ * not the worst case, so a short reply does not hide the whole history.
+ */
+export function liveAreaRows(streaming: string | null, activityCount: number, busy: boolean): number {
+  const streamLines = streaming ? streaming.split('\n').length : 0;
+  const tail = streamLines > STREAM_TAIL_LINES ? STREAM_TAIL_LINES + 1 : streamLines;
+  return 1 + Math.min(activityCount, 5) + tail + (busy ? 1 : 0);
+}
 
 export const MAX_LINE_WIDTH = 120;
 
@@ -116,7 +125,7 @@ export function ChatLog({ history, streaming, activity = [], busy, maxMessages =
   const live = streaming !== null || busy;
   // While a reply streams, its live area (label, up to 5 activity lines, the
   // streaming tail, spinner) shares the same frame.
-  const budget = maxRows === undefined ? undefined : maxRows - (live ? LIVE_AREA_ROWS : 0);
+  const budget = maxRows === undefined ? undefined : maxRows - (live ? liveAreaRows(streaming, activity.length, !!busy) : 0);
   const shown = selectVisibleMessages(history, maxMessages, budget);
   return (
     <Box flexDirection="column">

@@ -244,3 +244,18 @@ describe('boundChatHistory keeps whole conversations (AGT-3494)', () => {
     expect(historyToMessages(s.history)).toHaveLength(100);
   });
 });
+
+describe('boundChatHistory at the cap (AGT-3494)', () => {
+  it('keeps a system notice that arrives when the history is full of conversation', () => {
+    let s = initialChatState;
+    for (let i = 0; i < MAX_CHAT_HISTORY / 2; i++) {
+      s = chatReducer(s, { type: 'user', content: `u${i}` });
+      s = chatReducer(s, { type: 'stream', chunk: `a${i}` });
+      s = chatReducer(s, { type: 'commit' });
+    }
+    s = chatReducer(s, { type: 'system', content: '✖ failed to save session: disk full' });
+    expect(s.history.at(-1)).toEqual({ role: 'system', content: '✖ failed to save session: disk full' });
+    expect(s.history.length).toBeLessThanOrEqual(MAX_CHAT_HISTORY);
+    expect(s.history[0]?.role).toBe('user');
+  });
+});
