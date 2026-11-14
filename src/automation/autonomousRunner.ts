@@ -155,52 +155,24 @@ import { globalRateLimit } from './rateLimitBackoff.js';
 export { setNotifier, setTaskSource } from './runnerExecution.js';
 export type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 export type { ProjectInfo } from './runnerState.js';
+export {
+  decisionSelectionBudget,
+  effectiveProjectConcurrency,
+  failClosedConflictFallback,
+  worktreeFanoutEnabled,
+  type RunnableCandidate,
+} from './runnerAdmissionPolicy.js';
+import {
+  decisionSelectionBudget,
+  describeConflictCause,
+  effectiveProjectConcurrency,
+  failClosedConflictFallback,
+  taskLabel,
+  worktreeFanoutEnabled,
+  type RunnableCandidate,
+} from './runnerAdmissionPolicy.js';
 
 let runnerInstance: AutonomousRunner | null = null;
-const DECISION_SELECTION_OVERSAMPLE = 3;
-
-/** One source of truth for scheduler, heartbeat, and durable admission. */
-export function effectiveProjectConcurrency(config: Pick<AutonomousConfig,
-  'allowSameProjectConcurrent' | 'worktreeMode' | 'maxConcurrentPerProject' | 'maxConcurrentTasks'
->): number {
-  const globalCap = Math.max(1, Math.floor(config.maxConcurrentTasks ?? 1));
-  const parallel = worktreeFanoutEnabled(config);
-  if (!parallel) return 1;
-  // Match `openswarm review`: fill the available global pool. File-scope
-  // conflict analysis and durable admission remain the safety boundary; an
-  // omitted per-project setting must not impose a hidden throughput cap.
-  const requested = Math.floor(config.maxConcurrentPerProject ?? globalCap);
-  return Math.max(1, Math.min(requested, globalCap));
-}
-
-/** Worktrees isolate filesystem writes; file-scope admission still protects integration. */
-export function worktreeFanoutEnabled(config: Pick<AutonomousConfig,
-  'allowSameProjectConcurrent' | 'worktreeMode'
->): boolean {
-  return (config.allowSameProjectConcurrent ?? true) && (config.worktreeMode ?? false);
-}
-
-/** Short, stable label for a task in operator-facing logs. */
-function taskLabel(task: TaskItem): string {
-  return task.issueIdentifier || task.id.slice(0, 8);
-}
-
-/**
- * One-line cause for a deferral log. Without this the operator only sees that a
- * candidate was deferred, not whether a scope was unknown or which files
- * actually collided — the gap that made AGT-4233 need a ledger dig to diagnose.
- * The file list is capped so one blocked heartbeat cannot flood the log.
- */
-function describeConflictCause(reason: ScopeConflictReason, activeLabel: string): string {
-  if (reason.kind === 'unknown-candidate') return 'candidate write scope unknown';
-  if (reason.kind === 'unknown-active') return `${activeLabel} write scope unknown`;
-  if (reason.shared.length === 0) return `overlaps ${activeLabel}`;
-  const shown = reason.shared.slice(0, 3);
-  const rest = reason.shared.length - shown.length;
-  return `overlaps ${activeLabel} on ${shown.join(', ')}${rest > 0 ? ` +${rest} more` : ''}`;
-}
-
-export type RunnableCandidate = { task: TaskItem; projectPath: string };
 
 type CachedDraftScope = {
   fingerprint: string;
@@ -213,22 +185,6 @@ type CachedDraftScope = {
 // The completion/cancellation effect payload contract (and its delivery) lives
 // in trackerEffects.ts, shared with the `openswarm work` CLI so the marker
 // format cannot drift between the two outbox writers. (INT-3387)
-
-/**
- * Conflict analysis is an admission safety check. If it is unavailable, allow
- * only one candidate from that repository so uncertainty cannot turn into
- * concurrent overlapping edits. Input order already reflects decision priority.
- */
-export function failClosedConflictFallback(candidates: readonly RunnableCandidate[]): Set<string> {
-  return new Set(candidates.length > 0 ? [candidates[0].task.id] : []);
-}
-
-export function decisionSelectionBudget(availableSlots: number, candidateCount: number): number {
-  const slots = Math.max(0, Math.floor(availableSlots));
-  const candidates = Math.max(0, Math.floor(candidateCount));
-  if (slots === 0 || candidates === 0) return 0;
-  return Math.min(candidates, Math.max(slots, slots * DECISION_SELECTION_OVERSAMPLE));
-}
 
 /**
  * Record, or retire, the stand-in park signal for a task whose park cannot be
