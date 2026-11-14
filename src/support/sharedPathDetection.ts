@@ -44,32 +44,66 @@ export interface SandboxConfig {
   sandbox?: { sharedPaths?: string[] } | null;
 }
 
-/** Top-level ignored paths that are not shared or readable from the worktree. */
+/**
+ * Gitignored paths in the source checkout that a worktree will not see: ignored and not covered by
+ * `sharedPaths` (a shared ancestor covers it; sharing only a child leaves the rest missing), or
+ * shared but unreadable. Each ignored directory is reported once at its topmost ignored level, so
+ * `docs/CGF_data` under a tracked `docs/` is found, and a large `node_modules` is not walked.
+ */
 export function unsharedGitignoredPaths(repoPath: string, sharedPaths: string[] = []): string[] {
-  let entries: string[];
-  try { entries = readdirSync(repoPath).sort(); } catch { return []; }
+  let listing: string;
+  try {
+    listing = execFileSync(
+      'git', ['-C', repoPath, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 16 * 1024 * 1024 },
+    );
+  } catch { return []; }
+  const shared = sharedPaths.map((entry) => entry.replace(/\/+$/, '')).filter(Boolean);
   const missing: string[] = [];
-  for (const name of entries) {
-    if (name === '.git') continue;
+  const directories = new Set<string>();
+  const nestedRepo = new Map<string, boolean>();
+  // A nested checkout (another worktree parked inside this one) is not this repository's data.
+  const insideNestedRepo = (name: string): boolean => {
+    const parts = name.split('/');
+    for (let depth = 1; depth < parts.length; depth++) {
+      const dir = parts.slice(0, depth).join('/');
+      let nested = nestedRepo.get(dir);
+      if (nested === undefined) {
+        nested = existsSync(join(repoPath, dir, '.git'));
+        nestedRepo.set(dir, nested);
+      }
+      if (nested) return true;
+    }
+    return false;
+  };
+  for (const raw of listing.split('\0')) {
+    const name = raw.replace(/\/+$/, '');
+    if (raw.endsWith('/')) directories.add(name);
+    if (!name || name === '.git' || name.startsWith('.git/') || insideNestedRepo(name)) continue;
+    const covered = shared.some((entry) => name === entry || name.startsWith(`${entry}/`));
+    if (!covered) { missing.push(name); continue; }
     try {
-      execFileSync('git', ['-C', repoPath, 'check-ignore', '-q', '--', name], { stdio: 'ignore' });
       const path = join(repoPath, name);
       const stat = statSync(path);
-      const covered = sharedPaths.some((shared) => shared === name || shared.startsWith(`${name}/`));
+      accessSync(path, constants.R_OK);
+      // Root bypasses Unix mode checks, so also read the mode for the worker identity.
       const uid = process.getuid?.();
       const groups = new Set([process.getgid?.(), ...(process.getgroups?.() ?? [])]);
       const readBit = uid === stat.uid ? 0o400 : groups.has(stat.gid) ? 0o040 : 0o004;
-      try { accessSync(path, constants.R_OK); } catch { missing.push(name); continue; }
-      // Root can bypass Unix mode checks, so evaluate access for the worker identity.
-      if ((stat.mode & readBit) === 0 || !covered) missing.push(name);
-    } catch { /* tracked or not ignored */ }
+      if ((stat.mode & readBit) === 0) missing.push(name);
+    } catch { missing.push(name); }
   }
-  return missing;
+  // Directories first: they hold data; loose ignored files (.env, notes) rarely change a conclusion.
+  return missing.sort((a, b) => Number(directories.has(b)) - Number(directories.has(a)) || a.localeCompare(b));
 }
+
+const WARNING_LISTED = 20;
 
 export function gitignoredPathsWarning(paths: string[]): string | null {
   if (!paths.length) return null;
-  return `[Worktree] ${paths.length} gitignored path(s) from the source are absent from this worktree (${paths.join(', ')}); expose them through sandbox.sharedPaths or do not use their absence as a conclusion.`;
+  const shown = paths.slice(0, WARNING_LISTED).join(', ');
+  const more = paths.length > WARNING_LISTED ? ` +${paths.length - WARNING_LISTED} more` : '';
+  return `[Worktree] ${paths.length} gitignored path(s) from the source are absent from this worktree (${shown}${more}); expose them through sandbox.sharedPaths or do not use their absence as a conclusion.`;
 }
 
 export interface SharedPathDetection {

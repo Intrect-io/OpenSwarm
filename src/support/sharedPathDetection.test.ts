@@ -124,16 +124,49 @@ describe('unsharedGitignoredPaths (AGT-4041)', () => {
     writeFileSync(join(repo, 'partial'), 'x');
     expect(unsharedGitignoredPaths(repo, ['partial'])).toEqual(['ignored-data']);
   });
-  it('reports partially shared ignored paths', () => {
+  it('reports a partially shared ignored path: sharing a child leaves the rest missing', () => {
+    mkdirSync(join(repo, 'ignored-dir', 'a'), { recursive: true });
+    mkdirSync(join(repo, 'ignored-dir', 'b'), { recursive: true });
+    writeFileSync(join(repo, 'ignored-dir', 'b', 'x.csv'), 'x');
+    expect(unsharedGitignoredPaths(repo, ['ignored-dir/a'])).toEqual(['ignored-dir']);
+    expect(unsharedGitignoredPaths(repo, ['ignored-dir'])).toEqual([]);
+    expect(gitignoredPathsWarning(['ignored-dir'])).toContain('1 gitignored path(s)');
+  });
+
+  it('finds an ignored data dir nested under a tracked directory (docs/CGF_data)', () => {
+    writeFileSync(join(repo, '.gitignore'), 'docs/CGF_data/\n');
+    mkdirSync(join(repo, 'docs', 'CGF_data'), { recursive: true });
+    writeFileSync(join(repo, 'docs', 'README.md'), 'tracked');
+    for (let i = 0; i < 3; i++) writeFileSync(join(repo, 'docs', 'CGF_data', `f${i}.pdf`), 'x');
+    execFileSync('git', ['-C', repo, 'add', '.gitignore', 'docs/README.md']);
+    expect(unsharedGitignoredPaths(repo)).toEqual(['docs/CGF_data']);
+    expect(unsharedGitignoredPaths(repo, ['docs/CGF_data'])).toEqual([]);
+  });
+
+  it('skips a nested checkout parked inside the repository', () => {
+    mkdirSync(join(repo, '.worktrees', 't1', 'data'), { recursive: true });
+    writeFileSync(join(repo, '.worktrees', 't1', '.git'), 'gitdir: elsewhere');
+    writeFileSync(join(repo, '.worktrees', 't1', '.gitignore'), 'data/\n');
+    writeFileSync(join(repo, '.gitignore'), 'ignored-data\n');
     mkdirSync(join(repo, 'ignored-data'));
-    mkdirSync(join(repo, 'partial'));
-    expect(unsharedGitignoredPaths(repo, ['partial'])).toEqual(['ignored-data']);
-    expect(gitignoredPathsWarning(['ignored-data'])).toContain('1 gitignored path(s)');
+    expect(unsharedGitignoredPaths(repo)).toEqual(['ignored-data']);
+  });
+
+  it('caps the listed names in the warning but counts them all', () => {
+    const many = Array.from({ length: 25 }, (_, i) => `p${i}`);
+    const warning = gitignoredPathsWarning(many)!;
+    expect(warning).toContain('25 gitignored path(s)');
+    expect(warning).toContain('+5 more');
   });
   it('counts ignored paths with no read permission even when running as root', () => {
     mkdirSync(join(repo, 'locked'));
     chmodSync(join(repo, 'locked'), 0);
-    expect(unsharedGitignoredPaths(repo)).toEqual(['locked']);
+    try {
+      // Shared (linked) but unreadable still counts: the worktree sees a name and no content.
+      expect(unsharedGitignoredPaths(repo, ['locked'])).toEqual(['locked']);
+    } finally {
+      chmodSync(join(repo, 'locked'), 0o755);
+    }
   });
 });
 
