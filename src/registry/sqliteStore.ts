@@ -17,6 +17,13 @@ import type {
   WarningSeverity, WarningCategory, RelationType,
   FileBrief, RegistryStats,
 } from './schema.js';
+import {
+  ENTITY_SYNC_COLUMNS, toEntitySyncRow,
+  type CountRow, type EntityRow, type EntitySyncDbRow, type EntitySyncRow, type EventRow,
+  type IssueLinkRow, type MemoryLinkRow, type RelationRow, type TagRow, type WarningRow,
+} from './sqliteRows.js';
+
+export type { EntitySyncRow } from './sqliteRows.js';
 
 const DEFAULT_DB_PATH = resolve(homedir(), '.openswarm', 'registry.db');
 const SQLITE_IN_CHUNK_SIZE = 500;
@@ -24,6 +31,8 @@ const SQLITE_IN_CHUNK_SIZE = 500;
 /** Store-level page cap for listEntities — callers must paginate with this size. */
 export const LIST_ENTITIES_MAX_LIMIT = 5_000;
 export const LIST_ENTITIES_DEFAULT_LIMIT = 50;
+/** Default cap on entities returned for one issue (explicit links + relevant files). */
+export const ISSUE_ENTITIES_DEFAULT_LIMIT = 500;
 
 function clampInteger(value: number, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
   if (!Number.isFinite(value)) return fallback;
@@ -81,81 +90,6 @@ export interface EventData {
   newValue?: string;
   content?: string;
   actor?: string;
-}
-
-// ============ DB Row 타입 (better-sqlite3 반환값) ============
-
-interface EntityRow {
-  id: string;
-  project_id: string;
-  kind: string;
-  name: string;
-  qualified_name: string;
-  file_path: string;
-  line_start: number | null;
-  line_end: number | null;
-  signature: string | null;
-  status: string;
-  deprecated_at: string | null;
-  deprecated_reason: string | null;
-  has_tests: number;
-  test_file: string | null;
-  author: string | null;
-  maintainer: string | null;
-  complexity_score: number | null;
-  risk_level: string;
-  description: string | null;
-  notes: string | null;
-  knowledge_node_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface WarningRow {
-  id: string;
-  entity_id: string;
-  severity: string;
-  category: string;
-  message: string;
-  resolved: number;
-  resolved_at: string | null;
-  created_at: string;
-}
-
-interface EventRow {
-  id: string;
-  entity_id: string;
-  type: string;
-  old_value: string | null;
-  new_value: string | null;
-  content: string | null;
-  actor: string;
-  created_at: string;
-}
-
-interface TagRow {
-  tag: string;
-  value: string | null;
-}
-
-interface RelationRow {
-  target_id: string;
-  target_name: string;
-  relation_type: string;
-}
-
-interface CountRow {
-  cnt: number;
-}
-
-interface IssueLinkRow {
-  entity_id: string;
-  issue_id: string;
-}
-
-interface MemoryLinkRow {
-  entity_id: string;
-  memory_id: string;
 }
 
 // ============ Store 구현 ============
@@ -529,6 +463,21 @@ export class SqliteRegistryStore {
     };
   }
 
+  /**
+   * One keyset page of a project's entities in the light shape scanner
+   * reconciliation needs, ordered by id. Pass the last id of the previous page
+   * as `afterId`; an empty or short page ends the walk. Keyset rather than
+   * OFFSET so a page never skips or repeats a row.
+   */
+  listEntitySyncPage(projectId: string, afterId?: string, limit = LIST_ENTITIES_MAX_LIMIT): EntitySyncRow[] {
+    const size = Math.min(LIST_ENTITIES_MAX_LIMIT, Math.max(1, Number.isFinite(limit) ? Math.trunc(limit) : LIST_ENTITIES_MAX_LIMIT));
+    const after = afterId === undefined ? '' : 'AND id > ?';
+    const rows = this.db.prepare(
+      `SELECT ${ENTITY_SYNC_COLUMNS} FROM code_entities WHERE project_id = ? ${after} ORDER BY id LIMIT ?`,
+    ).all(...(afterId === undefined ? [projectId, size] : [projectId, afterId, size])) as EntitySyncDbRow[];
+    return rows.map(toEntitySyncRow);
+  }
+
   // ============ 상태 관리 ============
 
   deprecateEntity(id: string, reason?: string, actor = 'system'): CodeEntity | null {
@@ -731,20 +680,23 @@ export class SqliteRegistryStore {
     ).all(entityId) as IssueLinkRow[]).map(r => r.issue_id);
   }
 
-  /** 이슈 ID로 연결된 엔티티 ID 목록 반환 (역방향 조회) */
-  getEntitiesByIssueId(issueId: string, projectId?: string): CodeEntity[] {
+  /**
+   * Entities linked to an issue (reverse lookup), at most `limit` of them in
+   * link order. One JOIN plus batch hydration instead of one getEntity per link,
+   * and the bound is applied in SQL so a heavily linked issue never loads every
+   * row.
+   */
+  getEntitiesByIssueId(issueId: string, projectId?: string, limit = ISSUE_ENTITIES_DEFAULT_LIMIT): CodeEntity[] {
+    const size = Math.max(0, Number.isFinite(limit) ? Math.trunc(limit) : ISSUE_ENTITIES_DEFAULT_LIMIT);
+    if (size === 0) return [];
     const rows = this.db.prepare(
-      `SELECT l.entity_id, l.issue_id FROM code_entity_issue_links l
+      `SELECT e.* FROM code_entity_issue_links l
        JOIN code_entities e ON e.id = l.entity_id
-       WHERE l.issue_id = ? ${projectId ? 'AND e.project_id = ?' : ''}`
-    ).all(...(projectId ? [issueId, projectId] : [issueId])) as IssueLinkRow[];
-
-    const entities: CodeEntity[] = [];
-    for (const row of rows) {
-      const entity = this.getEntity(row.entity_id);
-      if (entity) entities.push(entity);
-    }
-    return entities;
+       WHERE l.issue_id = ? ${projectId ? 'AND e.project_id = ?' : ''}
+       ORDER BY l.linked_at, e.id
+       LIMIT ?`
+    ).all(...(projectId ? [issueId, projectId] : [issueId]), size) as EntityRow[];
+    return this.rowsToEntities(rows);
   }
 
   linkMemory(entityId: string, memoryId: string): void {

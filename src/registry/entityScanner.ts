@@ -11,8 +11,8 @@ import { readdir, open, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, extname, dirname, resolve } from 'node:path';
-import { getRegistryStore, LIST_ENTITIES_MAX_LIMIT } from './sqliteStore.js';
-import type { CodeEntity, EntityKind, RiskLevel } from './schema.js';
+import { getRegistryStore, LIST_ENTITIES_MAX_LIMIT, type EntitySyncRow } from './sqliteStore.js';
+import type { EntityKind, RiskLevel } from './schema.js';
 import { yieldToEventLoop } from '../support/yieldToEventLoop.js';
 
 // ============ 상수 ============
@@ -783,23 +783,22 @@ export async function scanRepository(
     console.log(`  [test-map] ${testMap.size} entities mapped to tests`);
   }
 
-  // 레지스트리 동기화 — page size must match the store query cap so OFFSET
-  // advances by the number of rows actually returned (never skips a page).
-  const existingEntities: CodeEntity[] = [];
+  // 레지스트리 동기화 — read existing rows as keyset pages of the light sync
+  // projection (only the compared columns, no tags/warnings/links), capped at the
+  // store's page limit, and index them straight into the lookup map instead of
+  // first materialising every full CodeEntity.
+  const existingByQName = new Map<string, EntitySyncRow>();
   const existingPageSize = LIST_ENTITIES_MAX_LIMIT;
-  for (let offset = 0; ; offset += existingPageSize) {
-    const page = store.listEntities({ projectId, limit: existingPageSize, offset });
-    existingEntities.push(...page.entities);
-    // Stop when the store reports completion, returns a short page, or yields nothing.
-    // Short-page stop prevents an infinite loop if `total` is misreported.
-    if (
-      page.entities.length === 0
-      || page.entities.length < existingPageSize
-      || existingEntities.length >= page.total
-    ) break;
+  let afterId: string | undefined;
+  for (;;) {
+    const page = store.listEntitySyncPage(projectId, afterId, existingPageSize);
+    for (const row of page) existingByQName.set(row.qualifiedName, row);
+    const lastId = page.at(-1)?.id;
+    // A short page ends the walk; a cursor that does not advance would loop forever.
+    if (page.length < existingPageSize || lastId === undefined || lastId === afterId) break;
+    afterId = lastId;
     await yieldToEventLoop();
   }
-  const existingByQName = new Map(existingEntities.map(e => [e.qualifiedName, e]));
   const extractedQNames = new Set<string>();
 
   let registered = 0;

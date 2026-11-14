@@ -10,7 +10,7 @@ vi.mock('./sqliteStore.js', () => ({
   LIST_ENTITIES_MAX_LIMIT: 5_000,
   getRegistryStore: () => ({
     inTransaction: (fn: () => unknown) => fn(),
-    listEntities: () => ({ entities: [], total: 0 }),
+    listEntitySyncPage: () => [],
     registerEntity: (input: RegisterEntityInput) => {
       registered.push(input);
       return { id: input.name };
