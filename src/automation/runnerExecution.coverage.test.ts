@@ -984,7 +984,7 @@ describe('runnerExecution.ts coverage extension', () => {
       const result = await execution;
 
       expect(result).toMatchObject({ success: false, finalStatus: 'infra_error', failureDetail: 'Durable stage transition (worker): durable lease fence rejected the event' });
-      expect(commitAndCreatePR).not.toHaveBeenCalled();
+      expect(commitAndCreatePR).not.toHaveBeenCalled(); expect(keepUnfinishedWorkOnRemote).not.toHaveBeenCalled(); // AGT-4786: a run that lost ownership pushes nothing
       expect(preserveWorktree).toHaveBeenCalledTimes(1);
       expect(removeWorktree).not.toHaveBeenCalled();
       const runOptions = fp.run.mock.calls[0][2] as { signal: AbortSignal };

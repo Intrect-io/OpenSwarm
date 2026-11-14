@@ -54,6 +54,11 @@ describe('shouldKeepUnfinishedOnRemote', () => {
     expect(shouldKeepUnfinishedOnRemote({ ...infra, workerResult: { executionOutcomeUnknown: true } })).toBe(false);
     expect(shouldKeepUnfinishedOnRemote(undefined)).toBe(false);
   });
+
+  it('leaves a run that lost ownership: a newer generation owns its branch', () => {
+    expect(shouldKeepUnfinishedOnRemote({ ...infra, failureDetail: 'publication: lease fence rejected the approved publish (a newer generation now owns this run, or the lease expired)' })).toBe(false);
+    expect(shouldKeepUnfinishedOnRemote({ ...infra, failureDetail: 'durable completion: lease fence rejected result from an expired or replaced owner' })).toBe(false);
+  });
 });
 
 describe('keepUnfinishedWorkOnRemote', () => {

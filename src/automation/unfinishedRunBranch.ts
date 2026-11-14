@@ -41,6 +41,9 @@ export function shouldKeepUnfinishedOnRemote(result: UnfinishedResult | undefine
   if (!result || result.success || !UNFINISHED_STATUSES.has(String(result.finalStatus))) return false;
   if (result.prUrl) return false; // already has a remote home
   if (result.operatorPark) return false; // the park path publishes it
+  // A run that lost its lease is not this executor's to publish: a newer
+  // generation owns the branch (the pre-#844 path refused these too).
+  if (/lease fence|lease lost|lease expired/i.test(result.failureDetail ?? '')) return false;
   // A sandbox whose outcome is unknown may have written anything; do not push it.
   if (result.workerResult?.executionOutcomeUnknown || result.reviewResult?.executionOutcomeUnknown || result.testerResult?.executionOutcomeUnknown) return false;
   return true;

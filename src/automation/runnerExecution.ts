@@ -1238,7 +1238,7 @@ export async function executePipeline(
     // A stage ownership fence is part of execution correctness, not telemetry.
     // Even if an adapter reports approval after ignoring the abort signal, a
     // failed fence must prevent publication and preserve the worktree.
-    if (lifecycleFailure) {
+    if (lifecycleFailure) { finished = undefined; // AGT-4786: a run that lost ownership pushes nothing
       result.success = false;
       result.finalStatus = 'infra_error';
       result.failureDetail = lifecycleFailure.message;
@@ -1270,7 +1270,7 @@ export async function executePipeline(
     // (keepWorktree=false) clean up as before.
     if (worktreeInfo) {
       const cleanup = keepWorktree
-        ? preserveWorktree(worktreeInfo, 'session did not succeed').then(() => finished && keepUnfinishedWorkOnRemote(worktreeInfo, task, finished, { source: taskSource })) // AGT-4786: branch + one comment, no PR
+        ? preserveWorktree(worktreeInfo, 'session did not succeed').then(() => finished && keepUnfinishedWorkOnRemote(worktreeInfo, task, finished, { source: taskSource })) // AGT-4786: branch + one comment, no PR; never for a run that lost ownership
         : removeWorktree(worktreeInfo);
       await cleanup.catch((err) => console.warn('[Worktree] Cleanup failed:', err));
     }
