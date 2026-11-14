@@ -62,6 +62,8 @@ coverage-analysis.json
 
 # Performance results
 performance-results/
+# Pipeline evaluation results: they name every case, so they must never be on main (AGT-4811)
+benchmarks/results/pipelineEval-*.json
 
 # Python cache
 __pycache__/
