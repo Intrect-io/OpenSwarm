@@ -2,11 +2,11 @@
 // KnowledgeGraph → .openswarm/repo.graphql + repo-snapshot.json
 // 에이전트가 컨텍스트 윈도우 없이도 저장소를 완전히 이해할 수 있는 정적 파일 생성
 
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { KnowledgeGraph } from './graph.js';
 import type { GraphNode, GraphEdge } from './types.js';
-import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { pinChildDirectory, writeFileInPinnedDirectory } from '../support/containedWrite.js';
 import { safeConsole as console } from '../support/safeLog.js';
 
 // GraphQL 스키마 (고정 — 데이터 구조 정의)
@@ -412,18 +412,14 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
   schemaPath: string;
   snapshotPath: string;
 } {
-  const dir = join(projectPath, '.openswarm');
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-
-  const schemaPath = join(dir, 'repo.graphql');
-  const snapshotPath = join(dir, 'repo-snapshot.json');
-
-  atomicWriteFileSync(schemaPath, REPO_SCHEMA);
+  // `.openswarm` is pinned as a real directory inside the canonical project
+  // root and every write re-checks that identity, so replacing it with a
+  // symlink cannot redirect the export outside the repository. (AGT-3447)
+  const dir = pinChildDirectory(projectPath, '.openswarm');
+  const schemaPath = writeFileInPinnedDirectory(dir, 'repo.graphql', REPO_SCHEMA);
 
   const snapshot = buildSnapshot(graph, projectPath);
-  atomicWriteFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
+  const snapshotPath = writeFileInPinnedDirectory(dir, 'repo-snapshot.json', JSON.stringify(snapshot, null, 2));
 
   console.log(`[Knowledge] Exported repo graph: ${schemaPath} (schema) + ${snapshotPath} (${snapshot.modules.length} modules, ${snapshot.circularDeps.length} cycles)`);
 
