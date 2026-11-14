@@ -22,6 +22,7 @@
 //
 // Split out of runnerExecution.ts, which sits on the 1500-line pre-commit cap.
 
+import type { ChangeRisk } from '../support/changeRisk.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeScope.js';
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
@@ -57,6 +58,8 @@ export interface PublishableResult extends StageBoundaryResults {
   success?: boolean;
   finalStatus?: string;
   prUrl?: string;
+  /** Risk class of the published diff (AGT-4804), recorded with the attempt. */
+  changeRisk?: ChangeRisk;
   workerResult?: { executionOutcomeUnknown?: boolean; noChangesReason?: string };
   operatorPark?: { code: string; reason: string };
 }
@@ -351,6 +354,7 @@ export async function publishApprovedWork(
         );
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;
+        if (publication.risk) result.changeRisk = publication.risk;
         const publicationRecorded = await durability?.onPublication(prUrl, headSha) ?? true;
         if (!publicationRecorded) {
           throw new Error('Durable lease fence rejected publication attachment');

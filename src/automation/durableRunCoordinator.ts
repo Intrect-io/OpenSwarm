@@ -794,7 +794,7 @@ export class DurableRunCoordinator {
         // to is disabled by default and the `log` event has no subscriber in
         // the daemon. Without this the row could not say what `bsDetector`
         // objected to on three cgf-portal tasks (AGT-4439).
-        guardWarnings: result.guardWarnings,
+        guardWarnings: result.guardWarnings, changeRisk: result.changeRisk, // risk class: AGT-4804
       },
       maxFailuresPerHour: options.admission?.maxFailuresPerHour,
       circuitCooldownMs: options.admission?.circuitCooldownMs,

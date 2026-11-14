@@ -150,6 +150,45 @@ That draft flag is load-bearing downstream: the reconciler treats a draft PR on
 a run's branch as work still in progress and returns the run to the queue,
 rather than reading an open PR as delivery and completing the issue.
 
+### Change risk class
+
+Every publication classifies the diff it commits as `low`, `medium` or `high`
+(AGT-4804, `src/support/changeRisk.ts`). It prints the class on the PR under
+`## Risk: <level>` and stores it in the attempt's `result_json` as
+`changeRisk`. The classifier is deterministic. It reads only the
+`git diff --numstat` of the branch against its base, never the issue text or
+a model.
+
+- **high:** any of these:
+  - deploy or infra paths (`Dockerfile`, compose, `infra/`, `*.tf`, `wrangler.toml`, release scripts);
+  - CI (`.github/workflows/`, `.githooks/`);
+  - migrations (`migrations/`, `*.sql`);
+  - auth and secret paths (`auth`, `secret`, `credential`, `key`, `token`, `.env*`, `*.pem`);
+  - a protected path;
+  - more than 20 files or 600 changed lines.
+- **medium:** dependency manifests or lockfiles, binary files, more than 5 files or 150 lines, or a diff that cannot be read (unknown is never `low`).
+- **low:** everything else.
+
+Documentation files do not trip the deploy/infra and CI rules. A large docs-only change is capped at `medium`.
+
+A repository adds its own rules. The rules are read from the operator's checkout, not from the worktree the worker edited:
+
+```json
+{
+  "publication": {
+    "risk": {
+      "highPaths": ["src/billing/**"],
+      "mediumPaths": ["src/ui/**"],
+      "protectedPaths": ["src/orders/**"],
+      "lowMaxFiles": 5, "lowMaxLines": 150,
+      "mediumMaxFiles": 20, "mediumMaxLines": 600
+    }
+  }
+}
+```
+
+Rules only add to the defaults. A project cannot mark a default high-risk path as low.
+
 ## Operations
 
 Relevant service settings are:

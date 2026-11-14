@@ -7,6 +7,9 @@
 // this section is the diff's answer, computed from the file list so it cannot
 // be argued with.
 
+// The risk class sits beside the shape on the PR body (AGT-4804).
+export { changeRiskSection, publicationRisk, type ChangeRisk } from './changeRisk.js';
+
 const DOC_FILE_RE = /(?:^|\/)(?:docs?|documentation)\/|\.(?:md|mdx|rst|txt|adoc)$/i;
 const TEST_FILE_RE = /(?:^|\/)(?:__tests__|tests?|spec)\/|(?:^|\/)test_[^/]+\.py$|[._-](?:test|spec)\.[cm]?[jt]sx?$|_test\.(?:go|py|rb)$/i;
 const SOURCE_FILE_RE = /\.(?:[cm]?[jt]sx?|py|go|rb|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|php|scala|sh)$/i;

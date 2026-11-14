@@ -514,3 +514,18 @@ describe('an unfinished run opens no pull request (AGT-4786)', () => {
     });
   });
 });
+
+describe('the approved publication records its risk class on the run (AGT-4804)', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-2', issueId: 'AGT-2' };
+  const publishable = { id: 'task-2', issueIdentifier: 'AGT-2', title: 'Risky' };
+
+  it('copies the publisher\'s class onto the result the ledger stores', async () => {
+    const risk = { level: 'high', reasons: ['CI: `.github/workflows/ci.yml`'], files: 1, lines: 3 };
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/10', headSha: 'head-10', risk });
+    const result: { success: boolean; finalStatus: string; prUrl?: string; changeRisk?: unknown } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result.changeRisk).toEqual(risk);
+  });
+});
