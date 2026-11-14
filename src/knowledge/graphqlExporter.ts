@@ -413,8 +413,14 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
   snapshotPath: string;
 } {
   const dir = join(projectPath, '.openswarm');
-  if (!existsSync(dir)) {
+  if (!existsSync(dir) && !isSymlink(dir)) {
     mkdirSync(dir, { recursive: true });
+  }
+  // A symlinked `.openswarm/` would send both writes outside the repository
+  // (AGT-3467). It is the repository owner's link, so it is refused, not
+  // replaced; the reader treats it as "no snapshot" for the same reason.
+  if (!isRegularEntry(dir, 'directory')) {
+    throw new Error(`${dir} is not a plain directory (symlink?) — refusing to export the repo graph into it`);
   }
 
   const schemaPath = join(dir, 'repo.graphql');
@@ -436,6 +442,14 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
  * real snapshot is a few MB, and anything past this is refused, not parsed.
  */
 export const MAX_REPO_SNAPSHOT_BYTES = 32 * 1024 * 1024;
+
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Is `path` a real directory or file entry rather than a symbolic link?

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MAX_REPO_SNAPSHOT_BYTES, hasRepoSnapshot, loadRepoSnapshot } from './graphqlExporter.js';
+import { MAX_REPO_SNAPSHOT_BYTES, exportRepoGraph, hasRepoSnapshot, loadRepoSnapshot } from './graphqlExporter.js';
+import { KnowledgeGraph } from './graph.js';
 
 /**
  * `.openswarm/repo-snapshot.json` sits inside the repository a worker edits,
@@ -76,5 +77,36 @@ describe('repo snapshot read is symlink-safe and size-bounded (AGT-3467)', () =>
     mkdirSync(join(project, '.openswarm'));
     writeFileSync(join(project, '.openswarm', 'repo-snapshot.json'), JSON.stringify(snapshot) + ' '.repeat(1024));
     expect(loadRepoSnapshot(project)).toEqual(snapshot);
+  });
+
+  // The writer side of the same boundary: a rescan must heal a symlinked
+  // snapshot file, and must not write through a symlinked `.openswarm/`.
+  it('export replaces a symlinked snapshot file with a real one and leaves the target alone', () => {
+    const target = join(outside, 'secret.json');
+    writeFileSync(target, 'do not touch');
+    mkdirSync(join(project, '.openswarm'));
+    const path = join(project, '.openswarm', 'repo-snapshot.json');
+    symlinkSync(target, path);
+
+    exportRepoGraph(new KnowledgeGraph('p', project), project);
+
+    expect(lstatSync(path).isSymbolicLink()).toBe(false);
+    expect(readFileSync(target, 'utf8')).toBe('do not touch');
+    expect(hasRepoSnapshot(project)).toBe(true);
+    expect(loadRepoSnapshot(project)).not.toBeNull();
+  });
+
+  it('export refuses to write through a symlinked .openswarm directory', () => {
+    symlinkSync(outside, join(project, '.openswarm'));
+    expect(() => exportRepoGraph(new KnowledgeGraph('p', project), project)).toThrow(/not a plain directory/);
+    expect(existsSync(join(outside, 'repo-snapshot.json'))).toBe(false);
+    expect(existsSync(join(outside, 'repo.graphql'))).toBe(false);
+  });
+
+  it('export into a dangling .openswarm symlink does not create its target', () => {
+    const missing = join(outside, 'missing');
+    symlinkSync(missing, join(project, '.openswarm'));
+    expect(() => exportRepoGraph(new KnowledgeGraph('p', project), project)).toThrow(/not a plain directory/);
+    expect(existsSync(missing)).toBe(false);
   });
 });
