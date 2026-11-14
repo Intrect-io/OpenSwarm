@@ -48,8 +48,10 @@ function resolveDbPath(deps: PauseCommandDeps): string {
   try {
     const config = (deps.loadConfig ?? loadConfig)();
     setAutomationDbPath(config.autonomous?.automationDbPath);
-  } catch {
-    /* default path */
+  } catch (error) {
+    // Say so: a pause written to the default database is invisible to a daemon
+    // whose config points elsewhere.
+    console.error(`Warning: could not load config (${error instanceof Error ? error.message : String(error)}); using ${defaultAutomationDbPath()}`);
   }
   return defaultAutomationDbPath();
 }
