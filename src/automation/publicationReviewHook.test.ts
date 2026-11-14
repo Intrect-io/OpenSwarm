@@ -84,6 +84,17 @@ describe('publication review hook (AGT-4278)', () => {
     expect(rollBackReviewedPublication).not.toHaveBeenCalled();
   });
 
+  it('does not add a "did not run" notice when the no-decision notes were already posted (AGT-4413)', async () => {
+    reviewPublishedPullRequest.mockResolvedValue({
+      success: false, gateRan: false, error: 'no parseable verdict', partialFindingsPosted: true,
+    });
+
+    await hook(true)(ctx);
+
+    expect(commentOnPR).not.toHaveBeenCalled();
+    expect(rollBackReviewedPublication).not.toHaveBeenCalled();
+  });
+
   it('does not roll back a draft, but still gets it reviewed', async () => {
     // The verdict cannot undo a draft — it is already a draft, and the run
     // already parked. It is the starting point for whoever picks it up.

@@ -44,6 +44,8 @@ export interface PublicationReviewOutcome {
   error?: string;
   gateRan?: boolean;
   changesRequested?: boolean;
+  /** No verdict, but the reviewer's partial notes were posted on the PR as "no decision" (AGT-4413). */
+  partialFindingsPosted?: boolean;
 }
 
 /**

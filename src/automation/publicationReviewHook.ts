@@ -189,7 +189,10 @@ export function buildPublicationReviewHook(
     // reviewer's feedback on a clean rejection too (prProcessor.ts:555), so
     // this layer cannot tell the two apart. Distinguishing them needs a
     // `verdictPosted` flag from the processor — filed rather than guessed.
-    if (!review.gateRan) {
+    // The processor already posted a "no decision" comment with the reason and
+    // the reviewer's partial notes; a second "did not run" notice would repeat
+    // it. (AGT-4413)
+    if (!review.gateRan && !review.partialFindingsPosted) {
       const pr = parsePublishedPullRequest(prUrl);
       // Best-effort, and defensively so. `commentOnPR` swallows today, but a
       // caller whose whole job is a courtesy note must not be the reason a run

@@ -26,4 +26,11 @@ describe('PR-time publication review', () => {
       '/work/repo',
     );
   });
+
+  it('passes on that no-decision notes were posted (AGT-4413)', async () => {
+    freshReview.mockResolvedValue({ success: false, iterations: 0, gateRan: false, error: 'x', partialFindingsPosted: true });
+    await expect(reviewPublishedPullRequest({
+      prUrl: 'https://github.com/acme/repo/pull/42', projectPath: '/work/repo',
+    })).resolves.toMatchObject({ gateRan: false, partialFindingsPosted: true });
+  });
 });
