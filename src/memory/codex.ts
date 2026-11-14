@@ -12,7 +12,7 @@
  */
 
 import { promises as fs } from 'fs';
-import { resolve, basename, join } from 'path';
+import { resolve, basename, join, posix, relative, sep, type PlatformPath } from 'path';
 import { getDateLocale } from '../locale/index.js';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
@@ -169,7 +169,8 @@ function generateSummary(session: CodexSession, detailPath: string): string {
     ? formatDuration(session.startedAt, session.endedAt)
     : 'ongoing';
 
-  const relativeDetailPath = join('..', '.sessions', basename(detailPath));
+  // Markdown links always use '/', whatever the platform separator is.
+  const relativeDetailPath = posix.join('..', '.sessions', basename(detailPath));
 
   let md = `# ${session.title}
 > ${dateStr} | Duration: ~${duration} | [Detail Record](${relativeDetailPath})
@@ -308,6 +309,20 @@ export async function saveSession(
 }
 
 /**
+ * The index.md link to a session summary: relative to the codex dir, with '/'
+ * separators. String-stripping `CODEX_DIR + '/'` left the absolute path in the
+ * link whenever the separator was '\' (Windows) or the dir had a trailing slash.
+ * `pathImpl` is injectable so the Windows shape can be tested on any platform.
+ */
+export function indexLinkPath(
+  codexDir: string,
+  summaryPath: string,
+  pathImpl: Pick<PlatformPath, 'relative' | 'sep'> = { relative, sep },
+): string {
+  return pathImpl.relative(codexDir, summaryPath).split(pathImpl.sep).join('/');
+}
+
+/**
  * Update index.md
  *
  * Cross-process read-modify-write: a second runner saving a session while this
@@ -320,7 +335,7 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
   await withFileLock(indexPath + '.lock', async () => {
   let content = await fs.readFile(indexPath, 'utf-8');
 
-  const relativePath = summaryPath.replace(CODEX_DIR + '/', '');
+  const relativePath = indexLinkPath(CODEX_DIR, summaryPath);
   const date = new Date(session.startedAt);
   const dateStr = date.toLocaleDateString('en-US', {
     month: '2-digit',
