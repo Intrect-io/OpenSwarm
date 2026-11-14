@@ -140,8 +140,8 @@ autonomous:
   several daemons sharing one ledger still alert once. A repository's own
   `automation.maxCostUsdPerDay` takes precedence. The daemon-wide
   `autonomous.spend.maxCostUsdPerDay` also alerts once a day.
-- **Issue budget:** counts what one issue has spent since an operator last
-  resumed it. When the issue is at or over the budget, its next claim parks
+- **Issue budget:** counts what one issue has spent since its budget park was
+  last lifted (other resumes do not reset it). When the issue is at or over the budget, its next claim parks
   it as `NEEDS_HUMAN` (`issue_budget_exhausted`) without running anything.
   The park adds no spend of its own. The tracker gets the one operator-park
   comment, which shows the spend. Moving the issue back to Todo resumes it
