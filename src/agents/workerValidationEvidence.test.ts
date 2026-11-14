@@ -135,3 +135,39 @@ describe('missingWorkerValidationIssues with observed execution (AGT-4534)', () 
     }))).toEqual([]);
   });
 });
+
+describe('non-executing command forms are not validation evidence (AGT-3441)', () => {
+  const changed = ['src/example.ts'];
+  const issuesFor = (command: string) => missingWorkerValidationIssues(worker({ filesChanged: changed, commands: [command] }));
+
+  it.each([
+    '# npm test',
+    ': npm test',
+    'true npm test',
+    'command -v vitest',
+    'type pytest',
+    'man pytest',
+    'npx vitest --help',
+    'npx tsc --version',
+    'pytest --collect-only',
+    'pytest --co -q',
+    'npx jest --listTests',
+    'npx tsc --showConfig',
+    'make -n',
+    'make --dry-run test',
+  ])('rejects %s', (command) => {
+    expect(issuesFor(command).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    'npm test',
+    'pytest -v',
+    'pytest -n 4',
+    'npx vitest run src/a.test.ts',
+    'make test',
+    'git diff && npm test',
+    'python3 scripts/check.py --help',
+  ])('still accepts %s', (command) => {
+    expect(issuesFor(command)).toEqual([]);
+  });
+});

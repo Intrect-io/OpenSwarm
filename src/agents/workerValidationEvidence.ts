@@ -21,6 +21,15 @@ const VALIDATION_COMMAND_RE = /\b(npm\s+(?:test|run\s+(?:test|build|lint|typeche
 // run it), so the segment is skipped rather than the whole command rejected.
 const INSPECTION_ONLY_COMMAND_RE = /^\s*(?:rg|grep|sed|cat|ls|find|pwd|git\s+(?:status|diff|show|log|grep)|jq|head|tail|wc|tree|du|file|which|echo|printf)\b/i;
 const SCRIPT_SMOKE_COMMAND_RE = /^\s*(?:python3?|node|tsx|ts-node|uv\s+run|npx|bunx|bash|sh)\b.*\b(?:scripts?\/|tests?\/|\.py|\.js|\.ts|\.sh|--help|--dry-run|smoke|verify|validate|check|test|build|compile)\b/i;
+// A segment that names a validation tool but does not run it: a shell comment,
+// a no-op builtin (`:`, `true`, `false`), `command -v`/`type`/`man`/`help`
+// lookups, or help/version/list/dry-run flags. These print text, they do
+// not build or test anything, so they are not validation evidence.
+const NON_EXECUTING_PREFIX_RE = /^\s*(?:#|:(?:\s|$)|true\b|false\b|command\s+-[vV]\b|type\b|man\b|help\b|whatis\b|whereis\b)/i;
+// Only flags that mean "do not run" for every tool here; `-v`/`-n` stay out
+// because pytest uses them for verbose output and parallel workers.
+const NON_EXECUTING_FLAG_RE = /(?:^|\s)(?:--help|-h|--version|--listTests|--collect-only|--co|--showConfig|--print-config)(?=\s|=|$)/;
+const MAKE_DRY_RUN_RE = /^\s*(?:make|gmake)\b.*\s(?:-n|--dry-run|--just-print|--recon)(?=\s|$)/;
 const TESTER_CODE_FILE_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|rs|go|java|rb|c|cpp|h|hpp)$/;
 
 export function isValidationRelevantFile(file: string): boolean {
@@ -48,8 +57,9 @@ function commandLooksLikeValidation(command: string): boolean {
   const segments = command.split(/&&|\|\||;|\|/).map(s => s.trim()).filter(Boolean);
   const candidates = segments.length > 0 ? segments : [command];
   return candidates.some(seg => {
-    if (INSPECTION_ONLY_COMMAND_RE.test(seg)) return false;
-    return VALIDATION_COMMAND_RE.test(seg) || SCRIPT_SMOKE_COMMAND_RE.test(seg);
+    if (INSPECTION_ONLY_COMMAND_RE.test(seg) || NON_EXECUTING_PREFIX_RE.test(seg)) return false;
+    if (VALIDATION_COMMAND_RE.test(seg)) return !NON_EXECUTING_FLAG_RE.test(seg) && !MAKE_DRY_RUN_RE.test(seg);
+    return SCRIPT_SMOKE_COMMAND_RE.test(seg);
   });
 }
 

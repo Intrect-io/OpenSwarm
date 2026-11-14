@@ -828,3 +828,41 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
     });
   });
 });
+
+describe('pipelineGuards — changed paths that escape the project (AGT-3441)', () => {
+  let root: string;
+  let repo: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'openswarm-guards-escape-'));
+    repo = join(root, 'repo');
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(join(root, 'outside'), { recursive: true });
+    writeFileSync(join(root, 'outside', 'evil.ts'), 'const password = "hunter2"; // TODO fake\n');
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+  });
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it('blocks and never hands escaping paths to file-reading guards', async () => {
+    const { symlinkSync } = await import('node:fs');
+    symlinkSync(join(root, 'outside'), join(repo, 'link'));
+    writeFileSync(join(repo, 'ok.ts'), 'export const ok = 1;\n');
+    const result = await runGuards(
+      mockWorker(['ok.ts', '../outside/evil.ts', join(root, 'outside', 'evil.ts'), 'link/evil.ts']),
+      repo,
+      { bsDetector: true },
+    );
+    const containment = result.results.find(r => r.guard === 'pathContainment');
+    expect(containment?.blocking).toBe(true);
+    expect(containment?.issues).toHaveLength(3);
+    // bsDetector only ever saw ok.ts
+    expect(guardIssues(result, 'bsDetector').every(issue => issue.includes('ok.ts'))).toBe(true);
+  });
+
+  it('adds no containment result when every path is inside the project', async () => {
+    writeFileSync(join(repo, 'ok.ts'), 'export const ok = 1;\n');
+    const result = await runGuards(mockWorker(['ok.ts']), repo, { bsDetector: true });
+    expect(result.results.find(r => r.guard === 'pathContainment')).toBeUndefined();
+  });
+});

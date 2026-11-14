@@ -16,13 +16,16 @@ describe('buildTestFixPrompt survives a malformed tester result', () => {
     // `truncate` reads `.length`, which a number or a plain object does not
     // have: before the guard the whole repair prompt threw a TypeError and the
     // self-repair iteration lost its feedback entirely.
+    // The parser now drops non-string entries (AGT-3441); a result built
+    // elsewhere can still carry them, so the prompt builder stays tolerant.
     const parsed = parseTesterOutput(JSON.stringify({
       type: 'result',
       result: JSON.stringify({ success: false, testsPassed: 0, testsFailed: 3, failedTests: [42, { a: 1 }, null] }),
     }));
-    expect(parsed.failedTests).toEqual([42, { a: 1 }, null]);
+    expect(parsed.failedTests).toBeUndefined();
+    expect(parsed.testsFailed).toBe(3);
 
-    const prompt = buildTestFixPrompt(parsed);
+    const prompt = buildTestFixPrompt(baseResult({ failedTests: [42, { a: 1 }, null] as unknown as string[] }));
     expect(prompt).toContain('## Test Failures');
     expect(prompt).toContain('42');
     expect(prompt).toContain('(malformed entry: 1 keys)');
