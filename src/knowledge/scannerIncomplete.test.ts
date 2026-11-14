@@ -111,4 +111,45 @@ describe('knowledge scan incompleteness', () => {
     expect(snapshot.incomplete).toBe(false);
     expect(snapshot.incompleteReasons).toEqual([]);
   });
+
+  // AGT-4871 — total-size budgets so a huge repository cannot grow the graph
+  // without bound until the timeout fires.
+  it('stops at the file budget and records it as an incomplete reason', async () => {
+    for (let i = 0; i < 12; i++) {
+      await writeProjectFile(`src/m${i}.ts`, `export const m${i} = ${i};\n`);
+    }
+
+    const graph = await scanProject(tmp, 'test-project', { maxFiles: 5 });
+    const sourceNodes = [...graph.getNodesByType('module'), ...graph.getNodesByType('test_file')];
+
+    expect(sourceNodes.length).toBe(5);
+    expect(graph.incomplete).toBe(true);
+    expect(graph.incompleteReasons.some(reason => reason.includes('file budget 5'))).toBe(true);
+  });
+
+  it('keeps the node count at or below the node budget', async () => {
+    for (let d = 0; d < 6; d++) {
+      for (let i = 0; i < 4; i++) {
+        await writeProjectFile(`pkg${d}/m${i}.ts`, `export const m${i} = ${i};\n`);
+      }
+    }
+
+    const graph = await scanProject(tmp, 'test-project', { maxNodes: 10 });
+
+    expect(graph.nodeCount).toBeLessThanOrEqual(10);
+    expect(graph.incomplete).toBe(true);
+    expect(graph.incompleteReasons.some(reason => reason.includes('node budget 10'))).toBe(true);
+  });
+
+  it('does not report a budget when the project fits inside it', async () => {
+    for (let i = 0; i < 3; i++) {
+      await writeProjectFile(`src/m${i}.ts`, `export const m${i} = ${i};\n`);
+    }
+
+    const graph = await scanProject(tmp, 'test-project', { maxFiles: 3, maxNodes: 5 });
+
+    // root + src + 3 modules = 5 nodes, exactly at both budgets.
+    expect(graph.nodeCount).toBe(5);
+    expect(graph.incomplete).toBe(false);
+  });
 });
