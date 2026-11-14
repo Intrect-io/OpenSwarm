@@ -178,3 +178,35 @@ describe('findingLedger', () => {
     });
   });
 });
+
+describe('worker answers through the real summary parser (AGT-4535)', () => {
+  it('reads every answer from the full output even though the parsed summary is capped and flattened', async () => {
+    const { extractSummary } = await import('../adapters/resultParsing.js');
+    const output = [
+      'Codename: Atlas',
+      'Fixed the bound check and left the README alone.',
+      'F1: fixed — src/range.ts:14 now uses <= and test/range.test.ts:22 covers the end value',
+      'F2: disputed — README.md:4 documents the exclusive end, and the task asks to keep the README',
+      'F3: fixed — src/range.ts:30 returns [] for an empty input',
+    ].join('\n');
+    const summary = extractSummary(output);
+    expect(summary.length).toBeLessThanOrEqual(203);
+
+    let l = revise(createFindingLedger(), 1, ['bound', 'readme', 'empty']);
+    l = recordWorkerResponses(l, { round: 2, summary, output });
+    expect(l.findings.map((f) => f.lastWorkerResponse?.kind)).toEqual(['fixed', 'disputed', 'fixed']);
+    expect(l.findings[1].lastWorkerResponse?.evidence).toContain('README.md:4');
+  });
+
+  it('splits answers that a parser flattened onto one line', () => {
+    const r = parseWorkerResponses('Done. F1: fixed — a.ts:1 F2: disputed — b.ts:2 is right', new Set(['F1', 'F2']));
+    expect(r.get('F1')).toEqual({ kind: 'fixed', evidence: 'a.ts:1' });
+    expect(r.get('F2')).toEqual({ kind: 'disputed', evidence: 'b.ts:2 is right' });
+  });
+
+  it('falls back to the summary when the output has no readable answer', () => {
+    let l = revise(createFindingLedger(), 1, ['x']);
+    l = recordWorkerResponses(l, { round: 2, summary: 'F1: fixed — a.ts:9', output: '{"type":"event"}' });
+    expect(l.findings[0].lastWorkerResponse?.kind).toBe('fixed');
+  });
+});

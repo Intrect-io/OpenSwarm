@@ -118,6 +118,18 @@ describe('PairPipeline finding ledger', () => {
     expect(second.previousFeedback).toContain('F<n>: disputed');
     const reviewerSecond = runReviewer.mock.calls[1][0] as ReviewerOptions;
     expect(reviewerSecond.findingLedger).toContain('worker said fixed (round 2): src/a.ts:12 checks the bound');
+
+    // The ruling instruction is trusted prompt text, outside every data block;
+    // the worker's answer stays inside one.
+    const { buildReviewerPrompt } = await vi.importActual<typeof import('./reviewer.js')>('./reviewer.js');
+    const prompt = buildReviewerPrompt(reviewerSecond);
+    // At the start of a line: the diff under review (this repository's own working tree here) quotes it with '> '.
+    const heading = prompt.search(/^## Open findings from earlier review rounds/m);
+    const before = prompt.slice(0, heading);
+    expect(heading).toBeGreaterThan(0);
+    // Every data block opened before the heading is closed before it.
+    expect(before.split('<openswarm-untrusted-data>').length).toBe(before.split('</openswarm-untrusted-data>').length);
+    expect(prompt.slice(heading)).toMatch(/<openswarm-untrusted-data>\n> - F1: range\(\) stops one short\n>.*worker said fixed/);
   });
 
   it('stops — never approves — when worker and reviewer deadlock on one id', async () => {

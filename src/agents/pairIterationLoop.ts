@@ -168,6 +168,7 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
         context.findingLedger = recordWorkerResponses(context.findingLedger!, {
           round: context.currentIteration,
           summary: (workerResult.result as WorkerResult).summary ?? '',
+          output: (workerResult.result as WorkerResult).output,
         });
       }
 

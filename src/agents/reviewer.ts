@@ -50,7 +50,7 @@ export interface ReviewerOptions {
    * line. (INT-2388)
    */
   guardWarnings?: string[];
-  /** Open finding ids from earlier revise rounds, with the worker's answers, for per-id rulings (AGT-4535). */
+  /** Trusted ruling instruction plus the data-wrapped open findings from earlier rounds (AGT-4535). */
   findingLedger?: string;
   /** Deterministic command evidence produced by the harness tester. */
   verificationEvidence?: VerifyEvidence[];
@@ -269,9 +269,9 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
 - **Files Changed (${files.length}):** ${filesSummary}
 ${commandLines}
 ${options.workerResult.error ? `- **Error:** ${options.workerResult.error}` : ''}
-${guardSection}${options.findingLedger ? `${options.findingLedger}\n` : ''}${diffSection}`;
+${guardSection}${diffSection}`;
 
-  return getPrompts().buildReviewerPrompt({
+  const base = getPrompts().buildReviewerPrompt({
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
     authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
@@ -280,6 +280,9 @@ ${guardSection}${options.findingLedger ? `${options.findingLedger}\n` : ''}${dif
     verificationEvidence: renderVerifyEvidence(options.verificationEvidence ?? []),
     priorReviewContext: options.priorReviewContext,
   });
+  // Outside the worker-report data block: the ruling instruction must read as
+  // an instruction, while the findings themselves stay wrapped as data. (AGT-4535)
+  return options.findingLedger ? `${base}\n\n${options.findingLedger}` : base;
 }
 
 // Pre-Check Execution (Fast Validation with Haiku)
