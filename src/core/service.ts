@@ -536,6 +536,21 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     }
   })();
 
+  // Verify sandboxes a killed daemon left in $TMPDIR are ~1 GB clones each, and
+  // ENOSPC while copying into them is how the host filled on 2026-10-20
+  // (AGT-4785). Sweep stale ones on the way up; not awaited, like the above.
+  void (async () => {
+    try {
+      const { sweepStaleVerifySandboxes } = await import('../verify/sandboxSweep.js');
+      const swept = await sweepStaleVerifySandboxes();
+      if (swept.removed.length > 0 || swept.failed.length > 0) {
+        console.log(`[Service] Verify sandbox sweep: removed ${swept.removed.length}, kept ${swept.keptFresh} fresh, failed ${swept.failed.length}`);
+      }
+    } catch (error) { // cxt-ignore: error_swallow — housekeeping must not block startup
+      console.warn('[Service] Verify sandbox sweep failed:', error instanceof Error ? error.message : error);
+    }
+  })();
+
   // Memory compaction scheduler (daily at 2 AM)
   console.log('[Service] Scheduling memory compaction (daily at 2 AM)...');
   memoryCompactionJob = Cron('0 2 * * *', async () => {
