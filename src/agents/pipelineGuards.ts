@@ -16,6 +16,7 @@ import { isEphemeralWorktreeArtifact } from '../support/worktreeEphemeral.js';
 import { inspectRewrites, describeRewrite } from './rewriteGuard.js';
 import { figuresChangedInPlace, unsourcedFigures, uncitedApprovalClaims } from './claimEvidenceGuard.js';
 import { claimsGate, unassertedReportedKeys, gateClaimIssue } from './gateClaimGuard.js';
+import { isMixedReformatIssue, mixedReformatIssues } from './reformatMix.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -781,18 +782,17 @@ async function runVerifiedMetricEvidenceGuard(
 }
 
 /**
- * Reformat/scope guard (INT-2388 defect #6): flag reformat-only files (whose
- * diff vanishes under `git diff -w`) and unusually large diffs. Both inflate
- * cross-PR conflict surface and hide the real change. Non-blocking — advisory.
+ * Reformat/scope guard (INT-2388 defect #6): flag reformat-only files (gone under
+ * `git diff -w`) and large diffs, which hide the real change. Advisory, except a
+ * reformat mixed with substantive changes blocks publication (AGT-4899).
  */
 async function runReformatScopeGuard(projectPath: string): Promise<GuardResult> {
   const guard = 'reformatScope';
   const issues: string[] = [];
   const LARGE_DIFF_LINES = 1200;
-
   try {
     const details = await getWorkingDiffDetail(projectPath);
-
+    issues.push(...mixedReformatIssues(details));
     for (const d of details.filter(d => d.whitespaceOnly)) {
       issues.push(
         `[${d.file}] reformat-only change (no semantic diff under -w) — move formatting to a separate commit to keep the PR scoped.`,
@@ -813,7 +813,7 @@ async function runReformatScopeGuard(projectPath: string): Promise<GuardResult> 
     console.warn('[Guard:reformatScope] Error:', err);
   }
 
-  return { passed: issues.length === 0, guard, issues, blocking: false };
+  return { passed: issues.length === 0, guard, issues, blocking: issues.some(isMixedReformatIssue) };
 }
 
 /**
