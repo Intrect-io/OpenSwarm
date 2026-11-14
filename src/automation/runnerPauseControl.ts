@@ -35,7 +35,7 @@ export interface AnomalyHook {
 /** `automation.anomaly` in the repository's openswarm.json, over the defaults. */
 export async function defaultThresholdsFor(projectPath: string): Promise<AnomalyThresholds> {
   const metadata = await loadRepoMetadata(projectPath).catch(() => null);
-  return { ...DEFAULT_ANOMALY_THRESHOLDS, ...(metadata?.automation?.anomaly ?? {}) };
+  return { ...DEFAULT_ANOMALY_THRESHOLDS, ...metadata?.automation?.anomaly };
 }
 
 interface PausableScheduler {
