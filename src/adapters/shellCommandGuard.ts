@@ -46,7 +46,26 @@ interface ResolvedCommand {
   redirects: string[];
   /** Bodies of `$(...)`/backtick substitutions — each runs a command of its own. */
   nested: string[];
+  /** Per word (parallel to `words`): what of it the shell fills in at run time. */
+  dynamics: WordDynamics[];
 }
+
+/**
+ * What part of a word only exists at run time. `$X`, `${X}`, `$(...)` and
+ * backticks produce text the guard cannot see, so a word that carries one is
+ * an unknown: in program position it can be any program (`X=rm; $X -rf /`),
+ * and where it can start with `-` it can be any flag (`rm $(echo -rf) /x`).
+ */
+interface WordDynamics {
+  /** The word contains at least one unresolved expansion. */
+  any: boolean;
+  /** An expansion comes before any literal character, so it decides how the word starts. */
+  leading: boolean;
+  /** An expansion sits outside double quotes, so word splitting can turn it into several words. */
+  unquoted: boolean;
+}
+
+const STATIC_WORD: WordDynamics = { any: false, leading: false, unquoted: false };
 
 /** Programs that only launch another command: the real one is in the arguments. */
 const COMMAND_LAUNCHERS: Record<string, true> = {
@@ -55,6 +74,15 @@ const COMMAND_LAUNCHERS: Record<string, true> = {
   timeout: true, watch: true, flock: true, chroot: true, exec: true, xargs: true,
   find: true,
 };
+
+/**
+ * Reserved words that precede a command inside a compound statement:
+ * `for f in a; do rm -rf /x; done` runs `rm` from the word after `do`.
+ */
+const COMPOUND_PREFIXES: ReadonlySet<string> = new Set(['do', 'then', 'else', 'if', 'elif', 'while', 'until', '!']);
+
+/** Characters after `$` that make it a parameter expansion bash fills in (`$X`, `$1`, `$@`, `$$`). */
+const PARAMETER_START = /[A-Za-z_0-9@*#?!$-]/;
 
 /** Programs whose `-c` argument is a script the shell runs. */
 const SCRIPT_HOSTS: Record<string, true> = { sh: true, bash: true, zsh: true, dash: true, ksh: true, su: true };
@@ -205,7 +233,9 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
   let words: string[] = [];
   let redirects: string[] = [];
   let nested: string[] = [];
+  let dynamics: WordDynamics[] = [];
   let word = '';
+  let wordDynamics: WordDynamics = { ...STATIC_WORD };
   let wordStarted = false;
   let atWordStart = true;
   let redirectTarget = false;
@@ -218,19 +248,32 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
     else {
       const expanded = expandBraces(word);
       if (expanded === null) unresolvable = true;
-      else words.push(...expanded);
+      else {
+        words.push(...expanded);
+        for (let n = 0; n < expanded.length; n++) dynamics.push(wordDynamics);
+      }
     }
     word = '';
+    wordDynamics = { ...STATIC_WORD };
     wordStarted = false;
     redirectTarget = false;
   };
   const endCommand = (): void => {
     endWord();
-    if (words.length || redirects.length || nested.length) commands.push({ words, redirects, nested });
+    if (words.length || redirects.length || nested.length) commands.push({ words, redirects, nested, dynamics });
     words = [];
     redirects = [];
     nested = [];
+    dynamics = [];
     atWordStart = true;
+  };
+  /** Record that the shell fills in part of the current word at run time. */
+  const markDynamic = (quoted: boolean): void => {
+    wordDynamics = {
+      any: true,
+      leading: wordDynamics.leading || (word === '' && !wordDynamics.any),
+      unquoted: wordDynamics.unquoted || !quoted,
+    };
   };
 
   for (let i = 0; i < command.length; i++) {
@@ -258,11 +301,13 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
         // `r"$(true)"m` is `rm` once the quotes come off: a splice is refused
         // because the guard cannot know what the substitution yields.
         if (isWordChar(word[word.length - 1]) || isWordChar(command[span.end])) return null;
+        markDynamic(true);
         word += span.text;
         if (span.runsCommand) nested.push(span.body);
         i = span.end - 1;
         continue;
       }
+      if (char === '$' && PARAMETER_START.test(command[i + 1] ?? '')) markDynamic(true);
       word += char;
       continue;
     }
@@ -318,6 +363,7 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
     if (span === 'unclosed') return null;
     if (span !== 'none') {
       if (isWordChar(word[word.length - 1]) || isWordChar(command[span.end])) return null;
+      markDynamic(false);
       word += span.text;
       wordStarted = true;
       atWordStart = false;
@@ -325,6 +371,7 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
       i = span.end - 1;
       continue;
     }
+    if (char === '$' && PARAMETER_START.test(command[i + 1] ?? '')) markDynamic(false);
     word += char;
     wordStarted = true;
     atWordStart = false;
@@ -349,7 +396,8 @@ const DESTRUCTIVE_RULES: ReadonlyArray<(name: string, args: string[]) => boolean
   (name, args) => name === 'git' && args.includes('clean')
     && args.some((arg) => arg === '--force' || /^-[A-Za-z]*f[A-Za-z]*$/.test(arg))
     && args.some((arg) => /^-[A-Za-z]*d[A-Za-z]*$/.test(arg)),
-  (name, args) => name === 'chmod' && args.some((arg) => /^[0-7]*777[0-7]*$/.test(arg)),
+  // The mode is chmod's first non-flag argument; a FILE named `777` is not a mode.
+  (name, args) => name === 'chmod' && /^[0-7]*777[0-7]*$/.test(args.find((arg) => !arg.startsWith('-')) ?? ''),
   (name, args) => name === 'chown'
     && args.some((arg) => arg === '--recursive' || /^-[A-Za-z]*R[A-Za-z]*$/.test(arg)),
   (name, args) => name === 'dd' && args.some((arg) => arg.startsWith('if=')),
@@ -357,8 +405,65 @@ const DESTRUCTIVE_RULES: ReadonlyArray<(name: string, args: string[]) => boolean
     && args.some((arg) => /^-[A-Za-z]*9$/.test(arg) || /^-(SIG)?KILL$/i.test(arg)),
 ];
 
-/** Is one resolved simple command destructive? */
-function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number): boolean {
+/** Programs a rule above can match — the only ones whose unknown flags matter. */
+const DESTRUCTIVE_PROGRAMS: readonly string[] = ['rm', 'git', 'chmod', 'chown', 'dd', 'kill', 'pkill'];
+
+/**
+ * Values an unknown word may stand for when it can start a flag. Each one
+ * completes some rule above, so trying them answers "can the shell's value for
+ * this word make the command destructive?".
+ */
+const FLAG_STAND_INS: readonly string[] = ['-r', '--hard', '-fd', '-R', '777', 'if=/dev/zero', '-9', 'reset', 'clean'];
+
+function rulesMatch(name: string, args: string[]): boolean {
+  return DESTRUCTIVE_RULES.some((rule) => rule(name, args));
+}
+
+/** Is there an argument that is not a flag — something the command acts on? */
+function hasOperand(args: string[]): boolean {
+  return args.some((arg) => arg !== '--' && !arg.startsWith('-'));
+}
+
+/**
+ * Could the run-time value of an unknown argument make `name args` destructive?
+ *
+ * An argument is a flag candidate only when its unknown part decides how it
+ * starts (`$F`, `"$(echo -rf)"`) or it already starts with `-` (`-$F`), and it
+ * comes before `--`. A double-quoted one stays a single word, so it must still
+ * leave an operand to act on: `rm -f "$tmp"` stays allowed, since at worst it
+ * is `rm -f -r` with nothing to remove. An unquoted one can split into a flag
+ * AND a target (`F="-rf /x"; rm $F`), so on a destructive program it is
+ * refused on its own.
+ */
+function unknownFlagIsDestructive(name: string, args: string[], argDynamics: WordDynamics[]): boolean {
+  const endOfFlags = args.indexOf('--');
+  for (let i = 0; i < args.length; i++) {
+    if (endOfFlags >= 0 && i > endOfFlags) break;
+    const dynamics = argDynamics[i] ?? STATIC_WORD;
+    if (!dynamics.any || !(dynamics.leading || args[i].startsWith('-'))) continue;
+    if (dynamics.unquoted && DESTRUCTIVE_PROGRAMS.includes(name)) return true;
+    for (const standIn of FLAG_STAND_INS) {
+      const candidate = [...args.slice(0, i), standIn, ...args.slice(i + 1)];
+      if (rulesMatch(name, candidate) && hasOperand(candidate)) return true;
+    }
+  }
+  return false;
+}
+
+/** Could an unknown program, run with these arguments, be a destructive one? */
+function unknownProgramIsDestructive(args: string[], argDynamics: WordDynamics[]): boolean {
+  return DESTRUCTIVE_PROGRAMS.some((name) => rulesMatch(name, args) || unknownFlagIsDestructive(name, args, argDynamics));
+}
+
+/**
+ * Is one resolved simple command destructive?
+ *
+ * `asLauncherSuffix` marks a candidate the launcher scan built by dropping the
+ * launcher's leading words. There the first word is only POSSIBLY the program
+ * (`timeout $T npm test` — `$T` is a duration), so an unknown first word is
+ * judged by what follows it instead of being refused outright.
+ */
+function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number, asLauncherSuffix = false): boolean {
   if (command.redirects.some((target) => target.startsWith('/dev/sd'))) return true;
   // SQL verbs are destructive wherever they sit in the line: a client reads
   // them as a statement, so position cannot separate `psql -c "drop database
@@ -376,24 +481,39 @@ function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number): bool
   while (command.words[start] !== undefined && /^[A-Za-z_][A-Za-z0-9_]*=/.test(command.words[start])) start++;  // `FOO=bar rm -rf /`
   const name = path.basename(command.words[start] ?? '');
   const args = command.words.slice(start + 1);
+  const argDynamics = command.dynamics.slice(start + 1);
+
+  if (command.dynamics[start]?.any) {
+    // The program is whatever `$X`/`$(...)` yields at run time:
+    // `X=rm; $X -rf /`, `$(echo rm) -rf /`. The guard cannot know it, so it
+    // refuses rather than guess — except in a launcher suffix, where the word
+    // may be the launcher's own argument and the rest of the line decides.
+    if (!asLauncherSuffix) return true;
+    if (unknownProgramIsDestructive(args, argDynamics)) return true;
+  }
 
   if (depth < GUARD_MAX_DEPTH) {
     // `sh -c '<script>'`, `su -xc '<script>'`: the script is a command line of its own.
     const scriptFlag = SCRIPT_HOSTS[name] ? args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg)) : -1;
     if (scriptFlag >= 0 && isCommandBlocked(args.slice(scriptFlag + 1).join(' '), depth + 1)) return true;
     if (name === 'eval' && isCommandBlocked(args.join(' '), depth + 1)) return true;
-    if (COMMAND_LAUNCHERS[name]) {
+    if (COMMAND_LAUNCHERS[name] || COMPOUND_PREFIXES.has(name)) {
       // The launcher's own arguments may still be flags with values
       // (`sudo -u root rm -rf /`), so every suffix is a candidate command.
       const limit = Math.min(command.words.length, start + GUARD_MAX_WORDS);
       for (let i = start + 1; i < limit; i++) {
-        const suffix = { words: command.words.slice(i), redirects: command.redirects, nested: command.nested };
-        if (resolvedCommandIsBlocked(suffix, depth + 1)) return true;
+        const suffix: ResolvedCommand = {
+          words: command.words.slice(i),
+          redirects: command.redirects,
+          nested: command.nested,
+          dynamics: command.dynamics.slice(i),
+        };
+        if (resolvedCommandIsBlocked(suffix, depth + 1, true)) return true;
       }
     }
   }
 
-  return DESTRUCTIVE_RULES.some((rule) => rule(name, args));
+  return rulesMatch(name, args) || unknownFlagIsDestructive(name, args, argDynamics);
 }
 
 /**

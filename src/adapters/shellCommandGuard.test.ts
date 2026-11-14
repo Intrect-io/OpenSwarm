@@ -158,3 +158,88 @@ describe('destructive-command guard sees what the shell will run (AGT-3436)', ()
     expect(isCommandBlocked(command)).toBe(false);
   });
 });
+
+// ──────────────────────────────────────────────
+// AGT-3436 (remainder) — words the shell fills in at run time
+// ──────────────────────────────────────────────
+
+/**
+ * `$X`, `${X}`, `$(...)` and backticks produce text the guard cannot see. In
+ * program position that text can be any program; where it decides how an
+ * argument starts it can be any flag. Each of these ran `rm -rf` (or another
+ * destructive form) past the resolver on 2026-10-21.
+ */
+describe('destructive-command guard refuses run-time words it cannot see (AGT-3436)', () => {
+  it.each([
+    // program position — variable
+    'X=rm; $X -rf /foo',
+    '$X -rf /foo',
+    '${X} -rf /foo',
+    '"$X" -rf /foo',
+    '$1 -rf /foo',
+    '/bin/$X -rf /foo',
+    // program position — command substitution
+    '$(echo rm) -rf /x',
+    '`echo rm` -rf /x',
+    '"$(printf rm)" -rf /x',
+    '$(echo rm -rf /x)',
+    // flag position — command substitution and variables
+    'rm $(echo -rf) /foo',
+    'rm "$(echo -rf)" /foo',
+    'rm `echo -rf` /foo',
+    'F="-rf /x"; rm $F',
+    'rm -$F /foo',
+    'rm "$A" "$B"',
+    'git reset "$MODE"',
+    'git $(echo reset) --hard',
+    'chmod "$PERM" file.txt',
+    'kill $SIG 1234',
+    // reached through a launcher or a compound statement
+    'sudo $X -rf /foo',
+    'timeout 5 $X -rf /foo',
+    'for f in a; do rm -rf /foo; done',
+    'if true; then rm -rf /foo; fi',
+  ])('blocks: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(true);
+  });
+
+  it.each(['X=rm; $X -rf /foo', '$(echo rm) -rf /x', 'rm $(echo -rf) /foo'])(
+    'refuses it through the bash tool too: %s',
+    async (command) => {
+      const result = await executeTool(makeCall('bash', { command }), TMP_DIR);
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('BLOCKED');
+      expect(result.executed).toBeUndefined();
+    },
+  );
+
+  // Variables in argument position are everyday shell. Only an unknown that
+  // can become a flag of a destructive program is refused.
+  it.each([
+    'echo "$HOME"',
+    'echo $PATH',
+    'ls $HOME',
+    'cd "$DIR" && npm test',
+    'cat "$(git rev-parse --show-toplevel)/package.json"',
+    'rm -f "$tmp"',
+    'rm -f -- $tmp',
+    'rm "$OUT_DIR/bundle.js"',
+    'rm -f ./dist/$NAME.js',
+    'git commit -m "$MSG"',
+    'git checkout "$BRANCH"',
+    'git log --since="$SINCE"',
+    'mkdir -p "$OUT"',
+    'timeout $T npm test',
+    'nice -n $N npm test',
+    'sudo -u $USER ls',
+    'env NODE_ENV=$MODE npm test',
+    'kill -0 "$PID"',
+    'chmod 755 "$SCRIPT"',
+    "echo '$X -rf /foo'",
+    "awk '{print $2}' f.txt",
+    'for f in $(ls); do echo "$f"; done',
+    'echo $$',
+  ])('allows: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(false);
+  });
+});
