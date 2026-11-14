@@ -57,6 +57,7 @@ import {
 import type { DefaultRolesConfig } from '../core/types.js';
 import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
+import { dispatchBudget } from './dispatchRamp.js';
 import { pipelineExecutionBoundary } from '../agents/stageExecutionBoundary.js';
 import * as execution from './runnerExecution.js';
 import { draftFingerprint, pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
@@ -3011,8 +3012,7 @@ export class AutonomousRunner {
       return;
     }
 
-    // Fill all available slots (worktree mode isolates each task)
-    const maxSlots = availableSlots;
+    const maxSlots = dispatchBudget(this, this.config.dispatchRampClaims, availableSlots); // free slots, capped by the cold-start ramp
 
     // Pre-filter tasks to enabled projects only (before DecisionEngine selection)
     // This prevents DecisionEngine from wasting its max-slot budget on non-enabled projects.

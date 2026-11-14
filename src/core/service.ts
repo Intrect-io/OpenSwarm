@@ -350,6 +350,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       autonomousHeartbeat: heartbeatEnabled,
       triggerNow: heartbeatEnabled,  // Execute immediately on start (heartbeat mode only)
       maxConcurrentTasks: config.autonomous.maxConcurrentTasks,
+      dispatchRampClaims: config.autonomous.dispatchRampClaims,
       stalledInProgressHours: config.autonomous.stalledInProgressHours,
       skip: config.autonomous.skip,
       maxConcurrentPerProject: config.autonomous.maxConcurrentPerProject,

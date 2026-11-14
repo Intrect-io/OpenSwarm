@@ -33,6 +33,7 @@ export interface AutonomousConfig {
    */
   autonomousHeartbeat?: boolean;
   maxConcurrentTasks?: number;
+  dispatchRampClaims?: number;
   /** Move unowned In Progress issues back to Backlog after this many idle hours. */
   stalledInProgressHours?: number;
   /** Issues the heartbeat must not pick because a person owns them (AGT-4682). */
