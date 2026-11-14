@@ -56,6 +56,9 @@ export interface WorkerResult {
   /** Claimed success, changed nothing, and gave no noChangesReason — a contract
    *  violation the caller cannot tell apart from "nothing to do" (AX-868). */
   zeroDiffWithoutReason?: boolean;
+  /** Claimed a check passed without execution evidence (command, exit code,
+   *  counts), or cited a document from the same diff as the proof (AGT-4900). */
+  unverifiedCompletionClaim?: boolean;
   uncertaintySignals?: string[]; // Detected uncertainty phrases
   costInfo?: CostInfo;
 }

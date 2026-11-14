@@ -23,6 +23,11 @@ const INSPECTION_ONLY_COMMAND_RE = /^\s*(?:rg|grep|sed|cat|ls|find|pwd|git\s+(?:
 const SCRIPT_SMOKE_COMMAND_RE = /^\s*(?:python3?|node|tsx|ts-node|uv\s+run|npx|bunx|bash|sh)\b.*\b(?:scripts?\/|tests?\/|\.py|\.js|\.ts|\.sh|--help|--dry-run|smoke|verify|validate|check|test|build|compile)\b/i;
 const TESTER_CODE_FILE_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|rs|go|java|rb|c|cpp|h|hpp)$/;
 
+/** README/CHANGELOG/LICENSE/NOTICE, anything under docs/, and prose formats. */
+export function isDocOnlyFile(file: string): boolean {
+  return DOC_ONLY_FILE_RE.test(file);
+}
+
 export function isValidationRelevantFile(file: string): boolean {
   if (/(^|\/)docs?\//i.test(file)) return false;
   if (VALIDATION_RELEVANT_BASENAME_RE.test(file)) return true;

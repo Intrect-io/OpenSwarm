@@ -386,6 +386,17 @@ That name is how you appear on the team board and in conversation with your
 reviewer; keep the same one across iterations. Then write the summary itself as
 if you were telling your reviewer what you did and what they should look at.
 
+Report what you ran, not whether a gate passed. For every check you ran, write
+one line in this exact form (test runners give counts; lint/typecheck/build
+give the exit code):
+
+Ran: npm test -> exit 0, 412 passed, 0 failed
+Ran: npm run lint -> exit 0
+
+A report that says tests or lint pass without such a line is not accepted as a
+success. A document you wrote or edited in this change is not evidence. If you
+could not run a check, say so instead of claiming it passed.
+
 If (and only if) you want to flag low confidence or a blocker, end with this JSON:
 \`\`\`json
 { "success": false, "confidencePercent": 40, "haltReason": "why you're stuck" }
