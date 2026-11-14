@@ -82,6 +82,9 @@ export function definitionOfReadyProposal(missing: readonly DefinitionOfReadySec
     ...missing.map(key => `- ${SECTION_PROMPTS[key]}`),
     '',
     'Add them to the description and the next heartbeat picks the issue up. OpenSwarm does not edit the description itself.',
+    '',
+    // The sign-off isDaemonComment recognises, so this comment never changes the issue's input fingerprint.
+    '_via OpenSwarm · Definition of Ready_',
   ].join('\n');
 }
 

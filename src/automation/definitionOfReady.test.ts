@@ -9,6 +9,7 @@ import {
   resetDefinitionOfReadyMemo,
   type DefinitionOfReadyTask,
 } from './definitionOfReady.js';
+import { isDaemonComment } from './dispatchFingerprint.js';
 
 const READY_BODY = [
   '## Why', 'Because.', '',
@@ -60,6 +61,7 @@ describe('definitionOfReadyProposal', () => {
   it('starts with [OpenSwarm] and names only the missing sections', () => {
     const body = definitionOfReadyProposal(['out_of_scope']);
     expect(body.startsWith('[OpenSwarm]')).toBe(true);
+    expect(isDaemonComment(body)).toBe(true);
     expect(body).toContain('Out of scope');
     expect(body).not.toContain('Acceptance criteria');
     expect(body).not.toContain('## Verification');
