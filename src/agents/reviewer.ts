@@ -50,6 +50,8 @@ export interface ReviewerOptions {
    * line. (INT-2388)
    */
   guardWarnings?: string[];
+  /** Open finding ids from earlier revise rounds, with the worker's answers, for per-id rulings (AGT-4535). */
+  findingLedger?: string;
   /** Deterministic command evidence produced by the harness tester. */
   verificationEvidence?: VerifyEvidence[];
   /** Relevant repository-local logs from earlier review commands. */
@@ -267,7 +269,7 @@ export function buildReviewerPrompt(options: ReviewerOptions): string {
 - **Files Changed (${files.length}):** ${filesSummary}
 ${commandLines}
 ${options.workerResult.error ? `- **Error:** ${options.workerResult.error}` : ''}
-${guardSection}${diffSection}`;
+${guardSection}${options.findingLedger ? `${options.findingLedger}\n` : ''}${diffSection}`;
 
   return getPrompts().buildReviewerPrompt({
     taskTitle: options.taskTitle,
