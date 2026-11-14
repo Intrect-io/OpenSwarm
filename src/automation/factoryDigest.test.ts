@@ -49,7 +49,7 @@ function fixtureDb(): string {
   event.run('r5', 'operator_question_parked', T + 8 * H);  // in window
   event.run('r5', 'claimed', T + 8 * H);                   // not a park
   db.exec(`
-    CREATE TABLE coordination_trace (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, correlation_id TEXT NOT NULL);
+    CREATE TABLE coordination_trace (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, correlation_id TEXT NOT NULL, task_id TEXT NOT NULL DEFAULT '', task_label TEXT);
     CREATE TABLE automation_pauses (scope TEXT PRIMARY KEY, mode TEXT NOT NULL, reason TEXT NOT NULL, actor TEXT NOT NULL, created_at INTEGER NOT NULL);
   `);
   const q = db.prepare('INSERT INTO coordination_trace(timestamp, kind, status, correlation_id) VALUES (?, ?, ?, ?)');
@@ -59,6 +59,8 @@ function fixtureDb(): string {
   q.run(T + 10 * H, 'human-question', 'open', 'q3');
   q.run(T + 11 * H, 'human-question', 'running', 'q3');    // open
   q.run(T + 12 * H, 'status', 'open', 'x1');               // not a question
+  q.run(T - 20 * 24 * H, 'human-question', 'waiting', 'q4'); // stale: opened 20 days ago, never closed
+  db.prepare("INSERT INTO coordination_trace(timestamp, kind, status, correlation_id, task_id) VALUES (?, 'human-question', 'open', 'q5', 'r1')").run(T + 4 * H); // stale: its run is DONE
   db.prepare("INSERT INTO automation_pauses VALUES ('/b', 'drain', 'redispatch', 'auto:redispatch', ?)").run(T + 9 * H);
   const circuit = db.prepare('INSERT INTO automation_repo_circuits(project_path, reason, opened_at, open_until, updated_at) VALUES (?, ?, ?, ?, ?)');
   circuit.run('/a', 'failure circuit open: 6/6 in 1h', T + 23 * H, T + 25 * H, T + 23 * H); // open at T+24h
@@ -74,20 +76,20 @@ describe('computeFactoryDigest against hand counts', () => {
     db.close();
 
     expect(d.runs).toEqual({
-      merged: 2,
-      publishedUnconfirmed: 1,
+      doneWithPr: 2,
+      publishedNotDone: 1,
       parkedNow: 1,
       parkedInWindow: 2,
       finishedByStatus: { approved: 2, failed: 1, infra_error: 1 },
     });
-    expect(d.questions).toEqual({ open: 2, oldestAgeMs: 21 * H });
+    expect(d.questions).toEqual({ open: 2, oldestAgeMs: 21 * H, stale: 2 });
     expect(d.spend).toEqual([
       { projectPath: '/b', costUsd: 4.0, attempts: 3, attemptsWithoutCost: 1 },
       { projectPath: '/a', costUsd: 2.0, attempts: 2, attemptsWithoutCost: 1 },
     ]);
     expect(d.pauses).toEqual([{ scope: '/b', mode: 'drain', reason: 'redispatch', actor: 'auto:redispatch', since: T + 9 * H }]);
     expect(d.circuits).toEqual([{ projectPath: '/a', reason: 'failure circuit open: 6/6 in 1h', openUntil: T + 25 * H }]);
-    expect(d.kpis.costPerMergedIssueUsd).toBe(3.25); // (1.00 + 2.00 + 3.50) / 2
+    expect(d.kpis.costPerDoneIssueUsd).toBe(3.25); // (1.00 + 2.00 + 3.50) / 2
     expect(d.kpis.medianCycleTimeMs).toBe(3.5 * H); // median(3 h, 4 h)
     expect(d.kpis.mergedPerHumanMinute.measured).toBe(false);
     expect(d.kpis.postMergeDefectRate.measured).toBe(false);
@@ -96,11 +98,11 @@ describe('computeFactoryDigest against hand counts', () => {
 
   it('renders not-measured KPIs as such, never as a number', () => {
     const text = formatFactoryDigest(readFactoryDigest(fixtureDb(), T + 24 * H));
-    expect(text).toContain('merged 2, published (merge unconfirmed) 1, parked 2 in window / 1 now');
-    expect(text).toContain('Questions waiting on you**: 2, oldest 21.0h');
+    expect(text).toContain('Done with a PR 2 (tracker; merge not verified), published not Done 1, parked 2 in window / 1 now');
+    expect(text).toContain('Questions waiting on you**: 2, oldest 21.0h (2 stale threads never closed, not counted)');
     expect(text).toContain('b $4.00 (3 attempts, 1 unpriced); a $2.00 (2 attempts, 1 unpriced)');
-    expect(text).toContain('cost per merged issue: $3.25');
-    expect(text).toContain('median cycle time (discovered → merged): 3.5h');
+    expect(text).toContain('cost per Done issue: $3.25');
+    expect(text).toContain('median cycle time (discovered → Done recorded): 3.5h');
     expect(text).toMatch(/merged changes per human minute: not measured \(/);
     expect(text).toMatch(/wrong-dispatch rate: not measured \(/);
     expect(text).not.toMatch(/human minute: 0/);
@@ -108,8 +110,8 @@ describe('computeFactoryDigest against hand counts', () => {
 
   it('a missing database is an empty digest, not an error', () => {
     const d = readFactoryDigest(join(tmpdir(), 'openswarm-digest-missing', 'none.db'), T);
-    expect(d.runs.merged).toBe(0);
-    expect(formatFactoryDigest(d)).toContain('cost per merged issue: n/a (nothing merged)');
+    expect(d.runs.doneWithPr).toBe(0);
+    expect(formatFactoryDigest(d)).toContain('cost per Done issue: n/a (nothing Done)');
   });
 
   it('serves the digest on the dashboard route', () => {
@@ -124,7 +126,7 @@ describe('computeFactoryDigest against hand counts', () => {
       vi.useRealTimers();
     }
     expect(captured.status).toBe(200);
-    expect(JSON.parse(captured.body!).digest.runs.merged).toBe(2);
+    expect(JSON.parse(captured.body!).digest.runs.doneWithPr).toBe(2);
     expect(handleFactoryDigest('/api/factory/other', 'GET', res, dbPath)).toBe(false);
   });
 });

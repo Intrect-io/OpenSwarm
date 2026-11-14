@@ -15,17 +15,23 @@
 // - nobody can mark a run "should not have run" yet.
 //
 // Definitions (the window is [from, to)):
-// - merged: a run with a PR whose tracker state is Done (AGT-4409 moves an
-//   issue to Done only once its PR merged), completed in the window;
-// - published, merge unconfirmed: a DONE run with a PR whose tracker state has
-//   not been read back as Done;
+// - done with a PR: a DONE run with a PR whose tracker state is Done, by the
+//   time the ledger recorded it (completed_at). This is NOT a merge count:
+//   checked against GitHub on the 2026-10 ledger, 3 of the 5 newest such rows
+//   had PRs that were closed unmerged (the issue was moved to Done by hand)
+//   and completed_at is when the tracker was read, weeks after the merge for
+//   the other two. A merge count needs the PR state read back (follow-up);
+// - published, not Done: a DONE run with a PR whose tracker state is not Done;
 // - parked: NEEDS_HUMAN runs now, and `parked`/`operator_parked`/
 //   `operator_question_parked` events in the window;
 // - failed by class: attempts finished in the window, by result status;
 // - spend: attempt cost_usd started in the window, per repository; attempts
 //   with no recorded cost are counted, not priced;
 // - open questions: human-question threads on the coordination trace whose
-//   latest status is open, waiting or running;
+//   latest status is open, waiting or running, opened in the last 14 days and
+//   not attached to a finished run. The trace keeps every thread ever opened
+//   and many are never closed (on the 2026-10-20 ledger: 372 "open", 359 with
+//   no run at all, the oldest 54 days); those are reported as stale, apart;
 // - pauses and anomalies: kill-switch rows (AGT-4808/4809, when that table
 //   exists) and repository circuits open now.
 
@@ -37,13 +43,13 @@ export interface FactoryDigest {
   from: number;
   to: number;
   runs: {
-    merged: number;
-    publishedUnconfirmed: number;
+    doneWithPr: number;
+    publishedNotDone: number;
     parkedNow: number;
     parkedInWindow: number;
     finishedByStatus: Record<string, number>;
   };
-  questions: { open: number; oldestAgeMs?: number };
+  questions: { open: number; oldestAgeMs?: number; stale: number };
   spend: Array<{ projectPath: string; costUsd: number; attempts: number; attemptsWithoutCost: number }>;
   pauses: Array<{ scope: string; mode: string; reason: string; actor: string; since: number }>;
   circuits: Array<{ projectPath: string; reason: string; openUntil: number }>;
@@ -51,7 +57,7 @@ export interface FactoryDigest {
     mergedPerHumanMinute: NotMeasured;
     postMergeDefectRate: NotMeasured;
     wrongDispatchRate: NotMeasured;
-    costPerMergedIssueUsd?: number;
+    costPerDoneIssueUsd?: number;
     medianCycleTimeMs?: number;
   };
 }
@@ -66,6 +72,9 @@ const NOT_MEASURED = {
   postMergeDefectRate: { measured: false, reason: 'reverts and hotfixes are not linked back to the run that merged' },
   wrongDispatchRate: { measured: false, reason: 'there is no way yet to mark a run "should not have run"' },
 } as const satisfies Record<string, NotMeasured>;
+
+/** An unanswered question older than this, or on a finished run, is reported as stale, not as waiting. */
+const QUESTION_HORIZON_MS = 14 * 24 * 60 * 60_000;
 
 function hasTable(db: Database.Database, name: string): boolean {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
@@ -84,8 +93,8 @@ export function computeFactoryDigest(db: Database.Database, window: { from: numb
   const digest: FactoryDigest = {
     from,
     to,
-    runs: { merged: 0, publishedUnconfirmed: 0, parkedNow: 0, parkedInWindow: 0, finishedByStatus: {} },
-    questions: { open: 0 },
+    runs: { doneWithPr: 0, publishedNotDone: 0, parkedNow: 0, parkedInWindow: 0, finishedByStatus: {} },
+    questions: { open: 0, stale: 0 },
     spend: [],
     pauses: [],
     circuits: [],
@@ -98,8 +107,8 @@ export function computeFactoryDigest(db: Database.Database, window: { from: numb
       WHERE state = 'DONE' AND pr_url IS NOT NULL AND tracker_state_type = 'completed'
         AND completed_at >= ? AND completed_at < ?
     `).all(from, to) as Array<{ issue_id: string; discovered_at: number; completed_at: number }>;
-    digest.runs.merged = merged.length;
-    digest.runs.publishedUnconfirmed = (db.prepare(`
+    digest.runs.doneWithPr = merged.length;
+    digest.runs.publishedNotDone = (db.prepare(`
       SELECT COUNT(*) AS n FROM automation_runs
       WHERE state = 'DONE' AND pr_url IS NOT NULL AND COALESCE(tracker_state_type, '') <> 'completed'
         AND completed_at >= ? AND completed_at < ?
@@ -133,23 +142,29 @@ export function computeFactoryDigest(db: Database.Database, window: { from: numb
       if (merged.length > 0) {
         const cost = db.prepare(`SELECT COALESCE(SUM(cost_usd), 0) AS c FROM automation_attempts WHERE issue_id = ?`);
         const total = merged.reduce((sum, run) => sum + (cost.get(run.issue_id) as { c: number }).c, 0);
-        digest.kpis.costPerMergedIssueUsd = total / merged.length;
+        digest.kpis.costPerDoneIssueUsd = total / merged.length;
       }
     }
     digest.kpis.medianCycleTimeMs = median(merged.map((run) => run.completed_at - run.discovered_at));
   }
 
   if (hasTable(db, 'coordination_trace')) {
+    const runState = hasTable(db, 'automation_runs')
+      ? '(SELECT r.state FROM automation_runs r WHERE r.issue_id = t.task_id OR r.identifier = t.task_label LIMIT 1)'
+      : 'NULL';
     const threads = db.prepare(`
-      SELECT t.correlation_id AS id, t.status AS status,
+      SELECT t.correlation_id AS id, t.status AS status, ${runState} AS runState,
              (SELECT MIN(timestamp) FROM coordination_trace f WHERE f.correlation_id = t.correlation_id) AS openedAt
       FROM coordination_trace t
       WHERE t.kind = 'human-question'
         AND t.id = (SELECT MAX(id) FROM coordination_trace l WHERE l.correlation_id = t.correlation_id)
-    `).all() as Array<{ id: string; status: string; openedAt: number }>;
-    const open = threads.filter((t) => ['open', 'waiting', 'running'].includes(t.status));
-    digest.questions.open = open.length;
-    if (open.length > 0) digest.questions.oldestAgeMs = now - Math.min(...open.map((t) => t.openedAt));
+    `).all() as Array<{ id: string; status: string; runState: string | null; openedAt: number }>;
+    const unanswered = threads.filter((t) => ['open', 'waiting', 'running'].includes(t.status));
+    const live = unanswered.filter((t) => now - t.openedAt <= QUESTION_HORIZON_MS
+      && !['DONE', 'CANCELLED', 'DECOMPOSED'].includes(t.runState ?? ''));
+    digest.questions.open = live.length;
+    digest.questions.stale = unanswered.length - live.length;
+    if (live.length > 0) digest.questions.oldestAgeMs = now - Math.min(...live.map((t) => t.openedAt));
   }
 
   if (hasTable(db, 'automation_pauses')) {
@@ -189,9 +204,9 @@ export function formatFactoryDigest(d: FactoryDigest): string {
   const lines: string[] = [];
   lines.push(`📋 **Factory digest** ${new Date(d.from).toISOString().slice(0, 16)}Z → ${new Date(d.to).toISOString().slice(0, 16)}Z`);
   const finished = Object.entries(d.runs.finishedByStatus).map(([s, n]) => `${s} ${n}`).join(', ') || 'none';
-  lines.push(`**Runs**: merged ${d.runs.merged}, published (merge unconfirmed) ${d.runs.publishedUnconfirmed}, parked ${d.runs.parkedInWindow} in window / ${d.runs.parkedNow} now`);
+  lines.push(`**Runs**: Done with a PR ${d.runs.doneWithPr} (tracker; merge not verified), published not Done ${d.runs.publishedNotDone}, parked ${d.runs.parkedInWindow} in window / ${d.runs.parkedNow} now`);
   lines.push(`**Attempts finished**: ${finished}`);
-  lines.push(`**Questions waiting on you**: ${d.questions.open}${d.questions.oldestAgeMs !== undefined ? `, oldest ${hours(d.questions.oldestAgeMs)}` : ''}`);
+  lines.push(`**Questions waiting on you**: ${d.questions.open}${d.questions.oldestAgeMs !== undefined ? `, oldest ${hours(d.questions.oldestAgeMs)}` : ''}${d.questions.stale ? ` (${d.questions.stale} stale threads never closed, not counted)` : ''}`);
   const spend = d.spend.map((s) => `${repoName(s.projectPath)} $${s.costUsd.toFixed(2)} (${s.attempts} attempts${s.attemptsWithoutCost ? `, ${s.attemptsWithoutCost} unpriced` : ''})`);
   lines.push(`**Spend**: ${spend.length ? spend.join('; ') : 'none'}`);
   const stops = [
@@ -202,8 +217,8 @@ export function formatFactoryDigest(d: FactoryDigest): string {
   for (const stop of stops) lines.push(`  ${stop}`);
   const k = d.kpis;
   lines.push('**KPIs**');
-  lines.push(`  cost per merged issue: ${k.costPerMergedIssueUsd !== undefined ? `$${k.costPerMergedIssueUsd.toFixed(2)}` : 'n/a (nothing merged)'}`);
-  lines.push(`  median cycle time (discovered → merged): ${k.medianCycleTimeMs !== undefined ? hours(k.medianCycleTimeMs) : 'n/a (nothing merged)'}`);
+  lines.push(`  cost per Done issue: ${k.costPerDoneIssueUsd !== undefined ? `$${k.costPerDoneIssueUsd.toFixed(2)}` : 'n/a (nothing Done)'}`);
+  lines.push(`  median cycle time (discovered → Done recorded): ${k.medianCycleTimeMs !== undefined ? hours(k.medianCycleTimeMs) : 'n/a (nothing Done)'}`);
   for (const [name, value] of [
     ['merged changes per human minute', k.mergedPerHumanMinute],
     ['post-merge defect rate (7 d)', k.postMergeDefectRate],
