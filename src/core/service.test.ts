@@ -117,9 +117,9 @@ vi.mock('../automation/longRunningMonitor.js', () => ({
   initMonitors: vi.fn(),
 }));
 
+vi.mock('../automation/factoryDigest.js', () => ({ startFactoryDigest: vi.fn() })); // AGT-4810: croner is mocked as a plain function below
 vi.mock('../automation/dailyReporter.js', () => ({
-  setLinearClient: vi.fn(),
-  setTeamId: vi.fn(),
+  setLinearClient: vi.fn(), setTeamId: vi.fn(),
   setDailyReporterDiscord: vi.fn(),
   startDailyReporter: vi.fn(),
 }));
