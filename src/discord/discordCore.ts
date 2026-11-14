@@ -70,6 +70,7 @@ export interface HistoryEntry {
 // Context markers (OpenClaw style)
 const HISTORY_CONTEXT_MARKER = '[Chat messages since your last reply - for context]';
 const CURRENT_MESSAGE_MARKER = '[Current message]';
+import { fitHistoryToBudget, HISTORY_CONTEXT_CHAR_BUDGET } from './historyBudget.js';
 
 /**
  * Evict old channel history entries using LRU
@@ -149,10 +150,8 @@ function formatHistoryEntry(entry: HistoryEntry): string {
 
   let formatted = `[${time}] ${entry.sender}: ${entry.body}`;
 
-  if (entry.response) {
-    // Include full response (no truncation)
-    formatted += `\n[${time}] OpenSwarm: ${entry.response}`;
-  }
+  // Full response here; buildHistoryContext enforces the prompt budget.
+  if (entry.response) formatted += `\n[${time}] OpenSwarm: ${entry.response}`;
 
   return formatted;
 }
@@ -174,7 +173,8 @@ export function buildHistoryContext(channelId: string, currentMessage: string): 
     return currentMessage;
   }
 
-  const historyText = pastEntries.map(formatHistoryEntry).join('\n\n');
+  const historyText = fitHistoryToBudget(pastEntries.map(formatHistoryEntry), HISTORY_CONTEXT_CHAR_BUDGET);
+  if (!historyText) return currentMessage;
 
   return `${HISTORY_CONTEXT_MARKER}\n${historyText}\n\n${CURRENT_MESSAGE_MARKER}\n${currentMessage}`;
 }

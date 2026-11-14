@@ -25,6 +25,16 @@ export function deleteLastGrapheme(value: string): string {
   return value.slice(0, lastIndex);
 }
 
+/**
+ * The input box is one row and a submit is one message, so a pasted chunk's
+ * line breaks become single spaces instead of reaching the value. A terminal
+ * that delivers a paste as one chunk would otherwise put raw newlines into the
+ * controlled value and the submitted prompt.
+ */
+export function toSingleLineChatInput(value: string): string {
+  return value.replace(/[\r\n\u2028\u2029]+/g, ' ');
+}
+
 export interface ChatInputProps {
   value: string;
   active: boolean;
@@ -61,7 +71,7 @@ export function ChatInput({
         if (key.escape) return onPaletteClose?.();
       }
       if (key.return) {
-        onSubmit(value);
+        onSubmit(toSingleLineChatInput(value));
         return;
       }
       if (key.backspace || key.delete) {
@@ -70,7 +80,7 @@ export function ChatInput({
       }
       if (key.tab || key.leftArrow || key.rightArrow || key.upArrow || key.downArrow || key.escape) return;
       // dedupeDoubledGrapheme: mobile-SSH multibyte doubling mitigation (INT-1964).
-      if (input && !key.ctrl && !key.meta) onChange(value + dedupeDoubledGrapheme(input));
+      if (input && !key.ctrl && !key.meta) onChange(value + toSingleLineChatInput(dedupeDoubledGrapheme(input)));
     },
     { isActive: active && !busy },
   );

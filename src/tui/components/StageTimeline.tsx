@@ -6,7 +6,10 @@ import { memo } from 'react';
 import { STATUS } from '../theme.js';
 import type { StatusKind } from '../../support/glyphs.js';
 import type { StageEntry } from '../pipelineEvents.js';
-import { sanitizeTerminalText } from '../sanitize.js';
+import { toSingleLineText } from '../sanitize.js';
+
+/** Per-field cap so one stage row never wraps into several. */
+export const STAGE_FIELD_MAX = 80;
 
 // Single-sourced glyphs + colors (INT-2260): running → ◐, complete → ✓, fail → ✗.
 const KIND: Record<StageEntry['status'], StatusKind> = { start: 'running', complete: 'ok', fail: 'err' };
@@ -28,12 +31,12 @@ export const StageTimeline = memo(function StageTimeline({ stages, max = 12 }: S
       ) : (
         shown.map((s, i) => {
           const dur = s.durationMs ? ` ${Math.round(s.durationMs / 1000)}s` : '';
-          const model = s.model ? ` (${sanitizeTerminalText(s.model)})` : '';
-          const decision = s.decision ? ` → ${sanitizeTerminalText(s.decision)}` : '';
+          const model = s.model ? ` (${toSingleLineText(s.model, STAGE_FIELD_MAX)})` : '';
+          const decision = s.decision ? ` → ${toSingleLineText(s.decision, STAGE_FIELD_MAX)}` : '';
           const st = STATUS[KIND[s.status]];
           return (
-            <Text key={i} color={st.color}>
-              {`${st.icon} ${sanitizeTerminalText(s.stage)}${model}${dur}${decision}`}
+            <Text key={i} color={st.color} wrap="truncate-end">
+              {`${st.icon} ${toSingleLineText(s.stage, STAGE_FIELD_MAX)}${model}${dur}${decision}`}
             </Text>
           );
         })
