@@ -192,3 +192,21 @@ export function defaultWorkerWritableRoots(
 export function looksLikeSandboxDenial(output: string): boolean {
   return /operation not permitted|read-only file system|EPERM|EROFS/i.test(output);
 }
+
+/**
+ * `looksLikeSandboxDenial`, plus: when the refusal was a network connect to a
+ * non-loopback address, record it for the anomaly monitor (AGT-4809), which
+ * pauses the repository and alerts once. A worker reaching for the network
+ * from inside the fence is the signal; the command is kept so the alert can
+ * name it. Recording is fire-and-forget and never fails the tool call.
+ */
+export function noteSandboxDenial(output: string, command: string, cwd: string): boolean {
+  const denied = looksLikeSandboxDenial(output);
+  if (denied) {
+    void import('../automation/anomalyPause.js').then(({ nonLoopbackConnectDenial, recordFactorySignal }) => {
+      const target = nonLoopbackConnectDenial(output);
+      if (target) recordFactorySignal({ projectPath: cwd, kind: 'sandbox_network', detail: `${target}\n${command.slice(0, 500)}` });
+    }).catch(() => { /* bookkeeping only */ });
+  }
+  return denied;
+}

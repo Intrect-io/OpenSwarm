@@ -131,6 +131,20 @@ describe('heartbeat honours the factory pause (AGT-4808)', () => {
     internal.durableRuns.close();
   }, 60_000);
 
+  it('the heartbeat runs the anomaly monitor and pauses a repository that crossed a threshold (AGT-4809)', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.useRealTimers();
+    const { recordFactorySignal } = await import('./anomalyPause.js');
+    const { pauseScopeKey } = await import('./factoryPause.js');
+    recordFactorySignal({ projectPath: pauseScopeKey(root), kind: 'sandbox_network', detail: '1.2.3.4:443\ncurl http://1.2.3.4' }, dbPath);
+    const { runner, internal } = await setup();
+    await runner.heartbeat();
+    const store = new FactoryPauseStore(dbPath);
+    expect(store.list()).toEqual([expect.objectContaining({ scope: pauseScopeKey(root), actor: 'auto:sandbox_network' })]);
+    store.close();
+    internal.durableRuns.close();
+  }, 60_000);
+
   it('a queued task that starts after the pause is not executed', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const { internal } = await setup();

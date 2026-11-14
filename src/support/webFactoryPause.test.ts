@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { RunnerPauseControl } from '../automation/factoryPause.js';
+import { RunnerPauseControl } from '../automation/runnerPauseControl.js';
 import { handleFactoryPause } from './webFactoryPause.js';
 
 // AGT-4808: the dashboard's pause button writes the same durable row as the CLI.
