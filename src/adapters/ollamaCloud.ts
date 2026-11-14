@@ -401,6 +401,7 @@ export class OllamaCloudAdapter extends LocalModelAdapter implements CliAdapter 
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       finishValidator: options.finishValidator,
       finishValidatorMaxRetries: options.finishValidatorMaxRetries,
+      finalAnswerRepair: options.finalAnswerRepair,
       protectedFiles: options.protectedFiles,
       // The fences OpenSwarm's own loop enforces for an unattended stage. The local transport
       // forwards all of them (local.ts) and so does every other native adapter; this literal kept

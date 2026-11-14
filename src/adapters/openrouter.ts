@@ -189,6 +189,7 @@ export class OpenRouterCliAdapter implements CliAdapter {
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       finishValidator: options.finishValidator,
       finishValidatorMaxRetries: options.finishValidatorMaxRetries,
+      finalAnswerRepair: options.finalAnswerRepair,
       protectedFiles: options.protectedFiles,
       scratchpadRunId: options.scratchpadRunId,
       memoryContext: options.memoryContext,

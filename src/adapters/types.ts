@@ -18,6 +18,22 @@ export type AdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstu
  * Result of validating a would-be final answer from the agentic loop
  * (see `CliRunOptions.finishValidator`).
  */
+/**
+ * A final answer whose content may be fine but whose FORMAT the caller cannot
+ * read (a reviewer that ends in prose with no verdict JSON and no `Decision:`
+ * line). Unlike `finishValidator`, which sends the model back into the tool
+ * loop, this asks exactly once, in the same conversation and with no tools,
+ * for the answer restated in the required format. The repaired answer is used
+ * only when `needsRepair` accepts it; otherwise the original answer is
+ * returned unchanged and the caller fails exactly as it would have. (AGT-4313)
+ */
+export interface FinalAnswerRepair {
+  /** True when `finalText` cannot be read by the caller and a repair turn should run. */
+  needsRepair: (finalText: string) => boolean;
+  /** The user turn appended after the unreadable answer. */
+  prompt: string;
+}
+
 export interface FinishValidation {
   /** Accept the answer and let the loop return it. */
   ok: boolean;
@@ -199,6 +215,12 @@ export interface CliRunOptions {
   finishValidator?: (finalText: string, attempt: number) => FinishValidation | Promise<FinishValidation>;
   /** Max times `finishValidator` may reject an answer before the loop gives up and returns it anyway. Default 0. */
   finishValidatorMaxRetries?: number;
+  /**
+   * One bounded, tool-less format repair of the loop's final answer — see
+   * `FinalAnswerRepair`. Only the in-process agentic-loop adapters honour it;
+   * CLI adapters have no conversation to continue. (AGT-4313)
+   */
+  finalAnswerRepair?: FinalAnswerRepair;
 }
 
 /**

@@ -376,15 +376,51 @@ export function parseReviewerResult(text: string, opts: { jsonOnly?: boolean } =
     // Distinguish the two failures, because they point at different fixes: the
     // reviewer declared a verdict but gave nothing to act on, versus the stream
     // never carried a verdict at all and this text is some other utterance.
+    if (explicit) {
+      throw new ReviewerVerdictWithoutFindingsError(
+        `Reviewer returned "${result.decision}" with no findings, feedback or suggestions — treating as a failed review`,
+      );
+    }
     throw new Error(
-      explicit
-        ? `Reviewer returned "${result.decision}" with no findings, feedback or suggestions — treating as a failed review`
-        : 'Reviewer output carried no verdict: no JSON result and no explicit decision — '
-          + 'the final message was not a review conclusion',
+      'Reviewer output carried no verdict: no JSON result and no explicit decision — '
+        + 'the final message was not a review conclusion',
     );
   }
 
   return result;
+}
+
+/**
+ * The reviewer DID declare a non-approving verdict, but gave nothing to act on.
+ * A distinct type so a format repair can tell "no verdict at all" (repairable:
+ * ask for the verdict) from "a real reject/revise with no findings" (not
+ * repairable: asking again could turn that verdict into an approval). (AGT-4313)
+ */
+export class ReviewerVerdictWithoutFindingsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReviewerVerdictWithoutFindingsError';
+  }
+}
+
+/**
+ * Should a reviewer's final answer get one tool-less format-repair turn?
+ *
+ * Only when the text is non-empty and `parseReviewerResult` rejects it for
+ * carrying no verdict at all — prose with no JSON block and no `Decision:`
+ * line, or provider control tokens. A readable verdict needs no repair, and a
+ * declared reject/revise with no findings is NOT repaired: that reviewer
+ * reached a conclusion, and a second ask must not be able to flip it into an
+ * approval. Empty text is the salvage turn's job, not this one's. (AGT-4313)
+ */
+export function reviewerOutputNeedsFormatRepair(text: string): boolean {
+  if (!text.trim()) return false;
+  try {
+    parseReviewerResult(text);
+    return false;
+  } catch (err) {
+    return !(err instanceof ReviewerVerdictWithoutFindingsError);
+  }
 }
 
 /** The decision declaration itself, which carries no information beyond the verdict. */

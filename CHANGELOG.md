@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`review --max` reviewers get the scaled budget, and a verdict-less answer gets one format repair (AGT-4313, AGT-4413).** `review --max` forwarded an undefined timeout, so every area fell back to the reviewer's flat 300 s; on a 2026-09-15 OpenRouter audit at concurrency 16, 2 of 17 areas died at `openrouter timeout after 300000ms` and 3 more spent 18–20 API calls and 114k–144k tokens before failing as "carried no verdict". The size-scaled budget moved to `src/cli/reviewBudget.ts` and is now adapter-aware: OpenRouter gets a 15 min floor, 20 s per file past 10 files and a 30 min cap; other adapters keep 5 min / 15 s / 15 min. `buildAuditReviewerOptions` applies it per area, and `openswarm review` passes the resolved adapter. `--timeout` still overrides. The reviewer now asks the agentic loop for **one** tool-less, same-conversation restatement (`finalAnswerRepair`) when its final answer is non-empty but carries no verdict JSON and no `Decision:` line — including an answer that came out of the forced final turn. A declared reject/revise with no findings is never repaired (a second ask could flip it to approve), the repair is used only when it parses, and a rate limit or infra error on that turn still propagates; otherwise the original answer stands and the area fails closed as before. In-process adapters only (openrouter, gpt, atlascloud, local, ollama-cloud, codex-responses).
+
 ## 0.25.0 — 2026-11-04
 
 ### Changed
