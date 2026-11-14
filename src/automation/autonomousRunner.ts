@@ -2935,7 +2935,7 @@ export class AutonomousRunner {
       const skipConfig = this.config.skip ?? DEFAULT_AGENT_SKIP;
       const { ready: readyTasks, held: notReady } = await partitionByDefinitionOfReady(tasks, {
         exclusionLabels: skipConfig.labels, includeBacklog: this.config.includeBacklog ?? false,
-        definitionOfReady: definitionOfReadyHooks(this.config.projectAgents, getTaskSource()), // AGT-4805
+        definitionOfReady: definitionOfReadyHooks(this.config.projectAgents, getTaskSource(), (t) => this.resolveProjectPath(t)), // AGT-4805
       });
       for (const line of formatReadinessSummary(notReady)) this.syslog(line);
       const { eligible: agentTasks, skipped: humanOwned } = partitionHumanOwned(readyTasks, skipConfig);

@@ -30,7 +30,7 @@ const READY_BODY = '## Acceptance criteria\n- works\n## Out of scope\n- none\n##
 const task = (id: string, over: Partial<TaskItem> = {}): TaskItem => ({
   id, issueId: id, issueIdentifier: id.toUpperCase(), source: 'linear', title: `[B1] ${id}`,
   priority: 2, createdAt: Date.now(), linearState: 'Todo', labels: [], description: READY_BODY,
-  projectPath: '/repo', ...over,
+  linearProject: { id: 'lp-repo', name: 'repo' }, ...over,
 });
 
 describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () => {
@@ -57,7 +57,7 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
   async function runHeartbeat(
     fetched: TaskItem[],
     skip?: { labels: string[]; titleTags: string[]; epics: boolean },
-    extra: { includeBacklog?: boolean; projectAgents?: { projectPath: string; requireDefinitionOfReady?: boolean }[] } = {},
+    extra: { includeBacklog?: boolean; projectAgents?: { projectPath: string; linearProjectId?: string; requireDefinitionOfReady?: boolean }[] } = {},
   ) {
     const [{ AutonomousRunner }, execution] = await Promise.all([
       import('./autonomousRunner.js'),
@@ -122,7 +122,7 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
     expect(String(comments[0][1]).startsWith('[OpenSwarm]')).toBe(true);
 
     const optedOut = await runHeartbeat(fetched, undefined, {
-      projectAgents: [{ projectPath: '/repo', requireDefinitionOfReady: false }],
+      projectAgents: [{ projectPath: '/repo', linearProjectId: 'lp-repo', requireDefinitionOfReady: false }],
     });
     expect(optedOut.processed.mock.calls[0][0].map((t) => t.id)).toEqual(['dor-1', 'td-1']);
   }, 60_000);

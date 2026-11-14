@@ -3,6 +3,7 @@ import {
   definitionOfReadyHooks,
   definitionOfReadyMarker,
   definitionOfReadyProposal,
+  isDaemonAuthoredBody,
   missingDefinitionOfReadySections,
   partitionByDefinitionOfReady,
   resetDefinitionOfReadyMemo,
@@ -136,18 +137,57 @@ describe('partitionByDefinitionOfReady', () => {
   });
 });
 
+describe('daemon-authored bodies', () => {
+  beforeEach(() => resetDefinitionOfReadyMemo());
+
+  it('recognises planner splits and reviewer follow-ups, not human prose', () => {
+    expect(isDaemonAuthoredBody('Do x.\n\n_Split out from "Parent" during planning._')).toBe(true);
+    expect(isDaemonAuthoredBody('Follow-up from reviewer.\n\nLocation: a.ts:1')).toBe(true);
+    expect(isDaemonAuthoredBody('Follow-up recommended by the reviewer.')).toBe(true);
+    expect(isDaemonAuthoredBody('결함 15건')).toBe(false);
+  });
+
+  it('never parks the daemon\'s own decomposition children', async () => {
+    const comment = vi.fn();
+    const { ready } = await partitionByDefinitionOfReady(
+      [task({ description: 'Do x.\n\n_Split out from "Parent" during planning._' })],
+      { definitionOfReady: { enabled: () => true, comment } },
+    );
+    expect(ready).toHaveLength(1);
+    expect(comment).not.toHaveBeenCalled();
+  });
+});
+
 describe('definitionOfReadyHooks', () => {
   const linear = { kind: 'linear', addComment: vi.fn().mockResolvedValue(undefined) };
+  const agents = [
+    { projectPath: '/p/a' },
+    { projectPath: '/p/b', requireDefinitionOfReady: false },
+    { projectPath: '/p/c', linearProjectId: 'lp-c', requireDefinitionOfReady: false },
+  ];
 
-  it('is on when the project has no setting, off when it opts out', () => {
-    const hooks = definitionOfReadyHooks(
-      [{ projectPath: '/p/a' }, { projectPath: '/p/b', requireDefinitionOfReady: false }],
-      linear,
-    );
-    expect(hooks.enabled(task({ projectPath: '/p/a' }))).toBe(true);
-    expect(hooks.enabled(task({ projectPath: '/p/b' }))).toBe(false);
-    expect(hooks.enabled(task({ projectPath: '/p/b/worktrees/x' }))).toBe(false);
-    expect(hooks.enabled(task({ projectPath: '/elsewhere' }))).toBe(true);
+  it('is on when the project has no setting, off when it opts out', async () => {
+    const hooks = definitionOfReadyHooks(agents, linear);
+    expect(await hooks.enabled(task({ projectPath: '/p/a' }))).toBe(true);
+    expect(await hooks.enabled(task({ projectPath: '/p/b' }))).toBe(false);
+    expect(await hooks.enabled(task({ projectPath: '/p/b/worktrees/x' }))).toBe(false);
+    expect(await hooks.enabled(task({ projectPath: '/elsewhere' }))).toBe(true);
+  });
+
+  it('finds the owning project of a fetched Linear task, which has no projectPath', async () => {
+    const resolve = vi.fn(async () => '/p/b');
+    const hooks = definitionOfReadyHooks(agents, linear, resolve);
+    expect(await hooks.enabled(task({ projectPath: undefined, linearProject: { id: 'lp-c' } }))).toBe(false);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(await hooks.enabled(task({ projectPath: undefined, linearProject: { id: 'lp-x' } }))).toBe(false);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    const unresolved = definitionOfReadyHooks(agents, linear, vi.fn(async () => null));
+    expect(await unresolved.enabled(task({ projectPath: undefined }))).toBe(true);
+  });
+
+  it('does not gate a local task source', async () => {
+    const hooks = definitionOfReadyHooks(agents, { kind: 'local', addComment: vi.fn() });
+    expect(await hooks.enabled(task({ projectPath: '/p/a' }))).toBe(false);
   });
 
   it('comments only through a Linear source', async () => {

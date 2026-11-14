@@ -94,11 +94,22 @@ export type DefinitionOfReadyTask = ReadinessTask & {
   issueId?: string;
   description?: string;
   projectPath?: string;
+  linearProject?: { id: string };
 };
 
+// Bodies the daemon writes itself (decomposition children, reviewer follow-ups) do not carry the
+// three sections; gating them would park the daemon's own split of work it already accepted.
+const DAEMON_AUTHORED = [/_Split out from ".*" during planning\._/, /^Follow-up (?:from|recommended by) (?:the )?reviewer\./];
+
+/** The daemon wrote this issue body (planner split or reviewer follow-up): not gated. */
+export function isDaemonAuthoredBody(description: string | undefined): boolean {
+  const body = description ?? '';
+  return DAEMON_AUTHORED.some(pattern => pattern.test(body));
+}
+
 export interface DefinitionOfReadyHooks<T extends DefinitionOfReadyTask> {
-  /** Whether the gate applies to this task's project. Absent setting = on. */
-  enabled: (task: T) => boolean;
+  /** Whether the gate applies to this task's project. Absent setting = on. Asked only for a task that would be held. */
+  enabled: (task: T) => boolean | Promise<boolean>;
   /** Post the proposal comment. Omitted (e.g. a local task source) = hold silently. */
   comment?: (issueId: string, body: string, marker: string) => Promise<void>;
 }
@@ -126,12 +137,12 @@ export async function partitionByDefinitionOfReady<T extends DefinitionOfReadyTa
   if (!hooks) return base;
   const ready: T[] = [];
   for (const task of base.ready) {
-    if (task.explicitDispatch || task.linearState !== 'Todo' || !hooks.enabled(task)) {
+    if (task.explicitDispatch || task.linearState !== 'Todo' || isDaemonAuthoredBody(task.description)) {
       ready.push(task);
       continue;
     }
     const missing = missingDefinitionOfReadySections(task.description);
-    if (missing.length === 0) {
+    if (missing.length === 0 || !(await hooks.enabled(task))) {
       ready.push(task);
       continue;
     }
@@ -153,13 +164,29 @@ export async function partitionByDefinitionOfReady<T extends DefinitionOfReadyTa
   return { ready, held: base.held };
 }
 
-/** Hooks for the heartbeat: per-project opt-out via `projectAgents[].requireDefinitionOfReady: false`. */
+type ProjectAgentLike = { projectPath: string; linearProjectId?: string; requireDefinitionOfReady?: boolean };
+
+/**
+ * Hooks for the heartbeat: per-project opt-out via `projectAgents[].requireDefinitionOfReady: false`.
+ * A fetched Linear task carries no `projectPath`, so the owning project is found by the configured
+ * `linearProjectId` first and then by the runner's own path resolution (`resolveProjectPath`).
+ * Only a Linear source is gated: a local task has no tracker body to fix and nowhere to comment.
+ */
 export function definitionOfReadyHooks<T extends DefinitionOfReadyTask>(
-  projectAgents: ReadonlyArray<{ projectPath: string; requireDefinitionOfReady?: boolean }> | undefined,
+  projectAgents: ReadonlyArray<ProjectAgentLike> | undefined,
   source: { kind: string; addComment(issueId: string, body: string, idempotencyKey?: string): Promise<void> } | null | undefined,
+  resolveProjectPath?: (task: T) => Promise<string | null | undefined>,
 ): DefinitionOfReadyHooks<T> {
   return {
-    enabled: task => resolveOwningProject(projectAgents, task.projectPath ?? '')?.requireDefinitionOfReady !== false,
+    enabled: async task => {
+      if (source?.kind !== 'linear') return false;
+      const byLinearId = task.linearProject?.id
+        ? projectAgents?.find(agent => agent.linearProjectId === task.linearProject?.id)
+        : undefined;
+      if (byLinearId) return byLinearId.requireDefinitionOfReady !== false;
+      const path = task.projectPath ?? (await resolveProjectPath?.(task).catch(() => null)) ?? '';
+      return resolveOwningProject(projectAgents, path)?.requireDefinitionOfReady !== false;
+    },
     comment: source?.kind === 'linear' ? (issueId, body, marker) => source.addComment(issueId, body, marker) : undefined,
   };
 }
