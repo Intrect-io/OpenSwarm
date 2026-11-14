@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DARWIN_SANDBOX_EXEC, selectOsSandbox, type OsSandboxDeps } from './osSandbox.js';
+import { DARWIN_SANDBOX_EXEC, selectOsSandbox, type OsSandboxDeps } from './verifySandbox.js';
 
 // Platform is injected, so the macOS branches run on any host. They were not
 // exercised against a real sandbox-exec here.

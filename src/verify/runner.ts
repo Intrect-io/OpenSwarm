@@ -7,7 +7,7 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep 
 import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { describeLinuxSandbox, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
-import { selectOsSandbox } from './osSandbox.js';
+import { selectOsSandbox } from './verifySandbox.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { symlinkTargetEscapes } from '../support/escapingSymlink.js';
 import { isPrivateConfigurationFile, isPrivateWorkspaceFile } from '../support/environmentFiles.js';
