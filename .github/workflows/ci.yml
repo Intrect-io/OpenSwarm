@@ -121,15 +121,9 @@ jobs:
         run: cargo test --locked --manifest-path desktop/Cargo.toml
 
   harness-gate:
-    # AGT-4811: harness changes (prompts, guards, adapters, the worker sandbox)
-    # are judged on fixed scenarios. Deterministic only: no model, no real gh.
-    # - workerReleaseProbe: a repository script that wraps `gh workflow run`
-    #   must start 0 workflow runs (no token in the worker shell, #840; loopback
-    #   only network, #841). bubblewrap is installed so the sandboxed branch
-    #   runs; without it the probe asserts the fail-closed refusal instead.
-    # - pipelineEval.grading: how the live eval grades false completion, false
-    #   approval and out-of-scope edits, and that main never carries its answers.
-    # The model-backed eval stays a manual pre-merge command (benchmarks/pipelineEval.ts).
+    # AGT-4811: fixed, deterministic scenarios for harness changes (prompts,
+    # guards, adapters, the worker sandbox). No model and no real gh.
+    # bubblewrap is installed so the sandboxed branch of the probe runs.
     name: Harness gate (fixed scenarios)
     runs-on: ubuntu-latest
     timeout-minutes: 10
