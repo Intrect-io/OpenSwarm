@@ -34,7 +34,8 @@ function tempRepo(): { root: string; repo: string; dbPath: string } {
 const T0 = Date.parse('2026-10-20T13:00:00Z');
 const MIN = 60_000;
 const none = (): ProjectObservations => ({ prOpenedAt: [], claims: [], finished: [], networkDenials: [] });
-const quiet: AnomalyThresholds = { ...DEFAULT_ANOMALY_THRESHOLDS };
+// Re-dispatch at 3 so the small fixtures below can reach it; the default is higher (see anomalyPause.ts).
+const quiet: AnomalyThresholds = { ...DEFAULT_ANOMALY_THRESHOLDS, maxRedispatchesPer24h: 3 };
 
 describe('evaluateAnomalies — one test per signal', () => {
   it('PR rate trips at the configured count within 60 minutes, not across a wider spread', () => {
@@ -74,6 +75,9 @@ describe('nonLoopbackConnectDenial', () => {
     expect(nonLoopbackConnectDenial('Error: connect EPERM 127.0.0.1:5432')).toBeUndefined();
     expect(nonLoopbackConnectDenial('curl: (7) Failed to connect to localhost port 3000: Operation not permitted')).toBeUndefined();
     expect(nonLoopbackConnectDenial('touch: /etc/x: Operation not permitted')).toBeUndefined();
+    // Linux bwrap, as measured on vela.
+    expect(nonLoopbackConnectDenial('E ENETUNREACH connect ENETUNREACH 192.168.75.50:443 - Local (0.0.0.0:0)')).toBe('192.168.75.50:443');
+    expect(nonLoopbackConnectDenial('curl: (7) Failed to connect to 140.82.112.3 port 443 after 0 ms: Could not connect to server')).toBe('140.82.112.3:443');
   });
 });
 
@@ -188,7 +192,7 @@ describe('replay of the 2026-10-20 run', () => {
   });
 
   it('each other signal also trips on that run, later', () => {
-    const off = { ...DEFAULT_ANOMALY_THRESHOLDS, maxPrsPerHour: 1_000 };
+    const off = { ...DEFAULT_ANOMALY_THRESHOLDS, maxPrsPerHour: 1_000, maxRedispatchesPer24h: 3 };
     expect(firstTrip(off)?.trip.signal).toBe('infra_error_share');
     expect(firstTrip(off)!.minutesAfterFirstClaim).toBeLessThan(90);
     expect(firstTrip({ ...off, maxInfraErrorShare: 1.1 })?.trip.signal).toBe('redispatch');

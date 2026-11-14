@@ -684,7 +684,6 @@ export class AutonomousRunner {
       console.log(`[Scheduler] Task completed: ${taskCtx} ${task.title}`);
       broadcastEvent({ type: 'task:completed', data: { taskId: taskEventKey(task), success: result.success, duration: result.totalDuration } });
       this.recordPipelineHistory(task, result);
-      if (result.prUrl) this.pauses.recordPrOpened(result.taskContext?.projectPath ?? '', result.prUrl, task.issueIdentifier); // AGT-4809 PR-rate signal
       if (result.coordinatorResolution?.action === 'complete' && task.issueId) {
         const marker = `coordinator-complete:${task.issueId}:${result.sessionId}`;
         const source = getTaskSource();

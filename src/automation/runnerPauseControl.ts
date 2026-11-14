@@ -21,7 +21,6 @@ import {
   DEFAULT_ANOMALY_THRESHOLDS,
   checkAnomalies,
   formatAnomalyAlert,
-  recordFactorySignal,
   type AnomalyThresholds,
 } from './anomalyPause.js';
 
@@ -162,11 +161,6 @@ export class RunnerPauseControl {
     } catch (error) {
       return { pauses: [], error: error instanceof Error ? error.message : String(error) };
     }
-  }
-
-  /** Record a PR the runner just opened, for the PR-rate signal. Never throws. */
-  recordPrOpened(projectPath: string, prUrl: string, issueId?: string): void {
-    recordFactorySignal({ projectPath: normalizeProjectPath(projectPath), kind: 'pr_opened', issueId, detail: prUrl }, this.store.path);
   }
 
   close(): void {

@@ -202,7 +202,8 @@ export function looksLikeSandboxDenial(output: string): boolean {
  */
 export function noteSandboxDenial(output: string, command: string, cwd: string): boolean {
   const denied = looksLikeSandboxDenial(output);
-  if (denied) {
+  // Not gated on `denied`: Linux bwrap refuses a connect with ENETUNREACH, which is no EPERM.
+  if (/ENETUNREACH|EPERM|EACCES|Failed to connect to/i.test(output)) {
     void import('../automation/anomalyPause.js').then(({ nonLoopbackConnectDenial, recordFactorySignal }) => {
       const target = nonLoopbackConnectDenial(output);
       if (target) recordFactorySignal({ projectPath: cwd, kind: 'sandbox_network', detail: `${target}\n${command.slice(0, 500)}` });

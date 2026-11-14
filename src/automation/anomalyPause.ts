@@ -43,11 +43,17 @@ export interface AnomalyThresholds {
 /**
  * Defaults. Replaying the 2026-10-20 factory ledger against these trips the
  * PR-rate signal at 14:17:20Z, the third unreviewed PR in 39 minutes
- * (see anomalyPause.replay.test.ts).
+ * (anomalyPause.test.ts).
+ *
+ * Re-dispatch is set high on purpose. Replayed over every project-day in the
+ * same ledger (32 of them, 2026-07-21..10-20), a limit of 3 tripped on 22,
+ * 6 on 20 and 10 on 13: retrying a failed issue a few times a day is normal
+ * there. Which of those days were degenerate is the operator's call; tune per
+ * repository in openswarm.json `automation.anomaly`.
  */
 export const DEFAULT_ANOMALY_THRESHOLDS: AnomalyThresholds = {
   maxPrsPerHour: 3,
-  maxRedispatchesPer24h: 3,
+  maxRedispatchesPer24h: 10,
   infraErrorWindow: 10,
   maxInfraErrorShare: 0.4,
   sandboxNetworkDenial: true,
@@ -273,13 +279,16 @@ const LOOPBACK = /^(?:127\.\d+\.\d+\.\d+|::1|0\.0\.0\.0|localhost|\[::1\])$/i;
 
 /**
  * The non-loopback address a sandboxed command was refused a connect to, if
- * its output says so. Covers Node (`connect EPERM 1.2.3.4:443`) and curl
- * (`Failed to connect to host port 443 ...: Operation not permitted`).
+ * its output says so. The refusal differs by sandbox: macOS sandbox-exec
+ * answers EPERM, Linux bwrap's empty network namespace ENETUNREACH (measured
+ * on vela: Node `connect ENETUNREACH 192.168.x.x:443`, curl exit 7 "Could not
+ * connect to server"). Only called for a fenced shell, where every
+ * non-loopback connect is a worker reaching for the network.
  */
 export function nonLoopbackConnectDenial(output: string): string | undefined {
-  const node = /connect EPERM (\[[^\]]+\]|[0-9A-Fa-f:.]+?)(?::(\d+))?(?=\s|$)/.exec(output);
+  const node = /connect (?:EPERM|ENETUNREACH|EACCES) (\[[^\]]+\]|[0-9A-Fa-f:.]+?)(?::(\d+))?(?=\s|$)/.exec(output);
   if (node && !LOOPBACK.test(node[1])) return node[2] ? `${node[1]}:${node[2]}` : node[1];
-  const curl = /Failed to connect to (\S+) port (\d+)[^\n]*Operation not permitted/i.exec(output);
+  const curl = /Failed to connect to (\S+) port (\d+)[^\n]*(?:Operation not permitted|Network is unreachable|Could not connect to server)/i.exec(output);
   if (curl && !LOOPBACK.test(curl[1])) return `${curl[1]}:${curl[2]}`;
   return undefined;
 }

@@ -444,6 +444,12 @@ describe('an unfinished run opens no pull request (AGT-4786)', () => {
       expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
       expect(commitAndCreatePRWithHead.mock.calls[0][4]).not.toMatchObject({ draft: true });
       expect(result.prUrl).toBe(pr.prUrl);
+      // AGT-4809: the PR feeds the PR-rate anomaly signal.
+      const Database = (await import('better-sqlite3')).default;
+      const { defaultAutomationDbPath } = await import('./automationDbPath.js');
+      const db = new Database(defaultAutomationDbPath(), { readonly: true });
+      expect(db.prepare("SELECT kind, detail FROM automation_factory_signals WHERE detail = ?").all(pr.prUrl)).toEqual([{ kind: 'pr_opened', detail: pr.prUrl }]);
+      db.close();
     });
 
     // A push or `gh` error in the reviewed publish rewrites the status to
