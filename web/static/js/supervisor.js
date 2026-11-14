@@ -1283,6 +1283,19 @@ function filterRepos(q) {
   }).join("");
 }
 
+// Re-read the Repositories panel and the local picker list. githubConnect.js
+// calls this after a clone registers a new repository (AGT-4005).
+async function reloadProjectList() {
+  const res = await fetch("/api/projects");
+  projects = await res.json();
+  renderProjects();
+  if (pickerOpen) {
+    const local = await fetch("/api/local-projects");
+    allLocalProjects = await local.json();
+    filterRepos(document.getElementById("repo-search").value);
+  }
+}
+
 async function pickRepo(el) {
   const path = el.getAttribute("data-path");
   if (!path) return;
