@@ -159,7 +159,11 @@ export async function scanProject(
 
   graph.scannedAt = Date.now();
   graph.incomplete = incompleteReasons.length > 0;
-  graph.incompleteReasons = Array.from(new Set(incompleteReasons)).slice(0, 50);
+  // Budget reasons go first: a repo with many size/depth reasons would
+  // otherwise push them past the 50-entry cut.
+  const unique = Array.from(new Set(incompleteReasons));
+  const isBudget = (reason: string) => / budget \d+ reached$/.test(reason);
+  graph.incompleteReasons = [...unique.filter(isBudget), ...unique.filter(r => !isBudget(r))].slice(0, 50);
   return graph;
 }
 
@@ -275,6 +279,8 @@ async function walkDirectory(
   } catch {
     return; // Inaccessible directory
   }
+  // Name order, so which files a budget cuts off is the same on every scan.
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
   for (const entry of entries) {
     if (ctx.budgetExhausted) return;
