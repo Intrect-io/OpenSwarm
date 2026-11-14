@@ -8,7 +8,7 @@ import { isIP } from 'node:net';
 import { randomBytes, createHash } from 'node:crypto';
 import { AuthProfileStore, type AuthProfile } from './oauthStore.js';
 import { openBrowser } from './openBrowser.js';
-import { PkceSettlement, TOKEN_EXCHANGE_TIMEOUT_MS } from './pkceSettlement.js';
+import { endSupersededCallback, PkceSettlement, TOKEN_EXCHANGE_TIMEOUT_MS } from './pkceSettlement.js';
 import { parseTokenResponse } from './tokenResponse.js';
 
 // Constants
@@ -75,6 +75,8 @@ export interface OAuthFlowOptions {
   clientId?: string;
   port?: number;
   scopes?: string;
+  /** Login timeout; defaults to two minutes. Tests shorten it. */
+  timeoutMs?: number;
 }
 
 /**
@@ -86,6 +88,7 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
     clientId = DEFAULT_OPENAI_CLIENT_ID,
     port = DEFAULT_CALLBACK_PORT,
     scopes = DEFAULT_SCOPES,
+    timeoutMs = LOGIN_TIMEOUT_MS,
   } = options;
   // Must be exactly "http://localhost:1455/auth/callback" — this is the value
   // registered on the public Codex OAuth client. Using 127.0.0.1 instead
@@ -125,7 +128,7 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
         server.close();
         reject(new Error('OAuth login timed out (120s). 다시 시도하세요.'));
       }
-    }, LOGIN_TIMEOUT_MS);
+    }, timeoutMs);
 
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       if (settlement.settled) {
@@ -247,14 +250,20 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
           accountId,
         };
 
-        if (!settlement.finish()) return;
+        if (!settlement.finish()) {
+          endSupersededCallback(res);
+          return;
+        }
         clearTimeout(timeout);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(successHtml());
         server.close();
         resolve(result);
       } catch (err) {
-        if (!settlement.finish()) return;
+        if (!settlement.finish()) {
+          endSupersededCallback(res);
+          return;
+        }
         clearTimeout(timeout);
         res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(errorHtml(String(err)));
