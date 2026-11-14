@@ -7,7 +7,9 @@ import {
   calculateOperationCost,
 } from './costAnalysis.js';
 import {
+  MAX_PENDING_BACKGROUND_AUTO_LINKS,
   getBackgroundAutoLinkActiveForTests,
+  getBackgroundAutoLinkPendingForTests,
   resetAutoLinkSchedulerForTests,
   runAutoLinkWithDeadline,
   scheduleBackgroundAutoLinkForTests,
@@ -128,5 +130,72 @@ describe('runAutoLinkWithDeadline', () => {
     await Promise.all([flightB, flightC]);
     expect(getBackgroundAutoLinkActiveForTests()).toBe(0);
     warnSpy.mockRestore();
+  });
+
+  it('hands the job an abort signal that fires at the deadline', async () => {
+    let seen: AbortSignal | undefined;
+    const linkFn = vi.fn((_s: SqliteIssueStore, _i: Issue, signal?: AbortSignal) => {
+      seen = signal;
+      return new Promise<string[]>(() => { /* never settles */ });
+    });
+    const resultPromise = runAutoLinkWithDeadline(store, issue, 50, linkFn);
+    const expectation = expect(resultPromise).rejects.toThrow(/timed out/);
+    expect(seen?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(50);
+    await expectation;
+    expect(seen?.aborted).toBe(true);
+  });
+
+  it('skips scheduling once the pending background queue is full, and frees it as jobs settle', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const blockers: Array<() => void> = [];
+    const linkFn = vi.fn(() => new Promise<string[]>((resolve) => { blockers.push(() => resolve([])); }));
+    const flights: Array<Promise<string[]> | undefined> = [];
+    for (let i = 0; i < MAX_PENDING_BACKGROUND_AUTO_LINKS + 5; i++) {
+      try {
+        flights.push(scheduleBackgroundAutoLinkForTests(store, { ...issue, id: `burst-${i}` } as Issue, linkFn));
+      } catch {
+        flights.push(undefined); // not scheduled: the test helper finds no flight
+      }
+    }
+    expect(getBackgroundAutoLinkPendingForTests()).toBe(MAX_PENDING_BACKGROUND_AUTO_LINKS);
+    expect(flights.filter((f) => f === undefined)).toHaveLength(5);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('auto-link skipped'));
+
+    // Drain: release whichever jobs are running until every flight settles.
+    for (let round = 0; round < MAX_PENDING_BACKGROUND_AUTO_LINKS + 5; round++) {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      while (blockers.length > 0) blockers.shift()!();
+    }
+    await Promise.all(flights.filter(Boolean));
+    expect(getBackgroundAutoLinkPendingForTests()).toBe(0);
+    expect(getBackgroundAutoLinkActiveForTests()).toBe(0);
+    warnSpy.mockRestore();
+  });
+});
+
+describe('autoLinkMemories honors an aborted supervisor', () => {
+  it('does not write links after the signal fired', async () => {
+    vi.resetModules();
+    vi.doMock('../../memory/memoryCore.js', async (orig) => ({
+      ...(await orig<Record<string, unknown>>()),
+      searchMemorySafe: vi.fn(async () => ({ success: true, memories: [{ id: 'mem-1' }] })),
+    }));
+    try {
+      const { autoLinkMemories } = await import('../memoryBridge.js');
+      const linkMemory = vi.fn();
+      const fakeStore = { linkMemory } as unknown as SqliteIssueStore;
+      const longIssue = { id: 'i', title: 'a title that is long enough', description: '' } as Issue;
+      const controller = new AbortController();
+      controller.abort();
+      await expect(autoLinkMemories(fakeStore, longIssue, controller.signal)).resolves.toEqual([]);
+      expect(linkMemory).not.toHaveBeenCalled();
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      await expect(autoLinkMemories(fakeStore, longIssue)).resolves.toEqual(['mem-1']);
+      expect(linkMemory).toHaveBeenCalledWith('i', 'mem-1');
+    } finally {
+      vi.doUnmock('../../memory/memoryCore.js');
+      vi.resetModules();
+    }
   });
 });
