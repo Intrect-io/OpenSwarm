@@ -43,6 +43,12 @@ const PAGE_SHELLS: Record<string, () => Promise<Buffer | null>> = {
   '/settings': async () => (await import('./staticAssets.js')).readSettingsShell(),
   '/threads': async () => (await import('./staticAssets.js')).readThreadBoardShell(),
   '/app': async () => (await import('./staticAssets.js')).readAppShell(),
+  '/terminal': async () => (await import('./staticAssets.js')).readTerminalShell(),
+};
+
+/** Pages that exist only behind an opt-in flag; unset, the URL is not routed at all. */
+const GATED_PAGES: Record<string, () => boolean> = {
+  '/terminal': () => process.env.OPENSWARM_WEB_TERMINAL === '1',
 };
 
 /**
@@ -56,6 +62,7 @@ export async function tryServePageShell(res: ServerResponse, url: string): Promi
   // hasOwn, not a bare index: `url` is request input, and this must not
   // depend on the caller's `/`-prefix invariant surviving a future change.
   if (!Object.hasOwn(PAGE_SHELLS, url)) return false;
+  if (Object.hasOwn(GATED_PAGES, url) && !GATED_PAGES[url]()) return false;
   const load = PAGE_SHELLS[url];
   const shell = await load();
   if (!shell) {

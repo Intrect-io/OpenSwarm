@@ -21,7 +21,7 @@
     "dev": "node --env-file=.env --import=tsx src/index.ts",
     "prestart": "pkill -f 'dist/index.js' 2>/dev/null || true",
     "build": "tsc",
-    "postbuild": "chmod +x dist/cli.js && node -e \"const fs=require('node:fs');fs.rmSync('dist/web-static',{recursive:true,force:true});fs.cpSync('web/static','dist/web-static',{recursive:true})\"",
+    "postbuild": "chmod +x dist/cli.js && node -e \"const fs=require('node:fs');fs.rmSync('dist/web-static',{recursive:true,force:true});fs.cpSync('web/static','dist/web-static',{recursive:true})\" && node scripts/copy-web-vendor.mjs",
     "start": "node --env-file=.env dist/index.js",
     "stop": "pkill -f 'node --env-file=.env.*openswarm' 2>/dev/null || echo 'No process running'",
     "lint": "oxlint src/ web/static/js/",
@@ -73,13 +73,17 @@
     "nanoid": "^5.1.7",
     "react": "^19.2.7",
     "undici": "^6.28.0",
+    "ws": "^8.23.0",
     "yaml": "^2.8.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.17",
+    "@types/ws": "^8.18.2",
     "@vitest/coverage-v8": "^4.0.18",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "bun-types": "^1.1.0",
     "ink-testing-library": "^4.0.0",
     "jsdom": "^26.1.0",
@@ -97,5 +101,8 @@
     "undici": "^6.28.0",
     "adm-zip": "^0.6.1",
     "sharp": "^0.35.0"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
   }
 }

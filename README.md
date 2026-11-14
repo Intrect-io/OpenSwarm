@@ -728,6 +728,8 @@ rollback. Do not rely on a pre-existing mutable `openswarm:latest` image.
 
 Without `OPENSWARM_WEB_TOKEN` the dashboard binds only inside the container — an unauthenticated all-interfaces bind is refused by design — so the published port answers nothing while the daemon itself keeps running. With the token set, browser/API access from the host sends it as the `X-OpenSwarm-Token` header (`/api/health` stays token-less).
 
+**Web terminal (opt-in).** `OPENSWARM_WEB_TERMINAL=1` adds a `/terminal` page: a `bash -l` shell inside the daemon's container (same uid, cwd `OPENSWARM_WORKSPACE_ROOT`, default `/work`). Unset, neither the page nor its WebSocket exists. The upgrade passes the same gate as API mutations (web token, or loopback / trusted Tailscale with a same-host `Origin`); the browser sends the token as a `Sec-WebSocket-Protocol` entry, never in the URL. At most 4 sessions, each closed after 15 minutes without input; starts and stops are logged with the peer address. **Terminal access is access to the container's environment, including every token the daemon holds** — enable it only where the web gate already limits access to the operator.
+
 The compose file wires the persistent and local-data mounts that matter:
 
 | Mount | Purpose |

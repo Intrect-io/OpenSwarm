@@ -36,6 +36,7 @@ import {
   writeAuthRequired, writeJson,
 } from './webAuth.js';
 import { execTasks, startExecTask } from './webExecTasks.js';
+import { startOptionalWebTerminal, stopOptionalWebTerminal } from './terminalServer.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
 import { refuseForChildCap } from '../automation/decompositionLimits.js';
@@ -1389,6 +1390,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       }
     });
 
+    void startOptionalWebTerminal(server).catch((err) => console.error('[Terminal] failed to start:', err));
     const trustTailscale = process.env.OPENSWARM_TRUST_TAILSCALE === 'true';
     // '::' rather than '0.0.0.0'. The Tailscale ULA is IPv6, and binding
     // IPv4-only left it unreachable — an operator who had allowlisted their
@@ -1462,10 +1464,8 @@ export async function startWebServer(port: number = 3847): Promise<void> {
  * Stop the web server
  */
 export async function stopWebServer(): Promise<void> {
-  if (gitStatusPoller) {
-    stopGitStatusPoller();
-    gitStatusPoller = null;
-  }
+  if (gitStatusPoller) { stopGitStatusPoller(); gitStatusPoller = null; }
+  stopOptionalWebTerminal();
   stopHealthCache();
   stopHealthChecker();
   stopReposWatcher();
