@@ -22,6 +22,7 @@ import { publicationCommitSubject } from './publicationCommitMessage.js';
 import { changeShapeSection } from './publicationChangeShape.js';
 import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFreshness.js';
 import { publicationClaimEvidence } from './publicationClaimEvidence.js';
+import { planVersionLabel, repoVersionLabels } from './publicationVersionLabel.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, type SandboxConfig } from './sharedPathDetection.js';
 import { copyIsolatedPath } from './isolatedPath.js';
@@ -1213,15 +1214,14 @@ export async function commitAndCreatePRWithHead(
   }
 
   const freshnessSection = baseFreshnessSection(freshness, base.branch);
+  // vega-agent-style repos gate every PR on one version:* label (AGT-4269).
+  const versionLabel = planVersionLabel(title, await repoVersionLabels(worktreePath));
 
   // Create PR
   const basePrBody = [
     '## Summary',
     description || `${issueIdentifier}: ${title}`,
-    ...(shapeSection ? ['', shapeSection] : []),
-    ...(freshnessSection ? ['', freshnessSection] : []),
-    ...(overlapSection ? ['', overlapSection] : []),
-    ...(duplicateSection ? ['', duplicateSection] : []),
+    ...[shapeSection, freshnessSection, overlapSection, duplicateSection, versionLabel.bodySection].filter(Boolean).flatMap((s) => ['', s]),
     '',
     '## Linear',
     `Closes ${issueIdentifier}`,
@@ -1232,7 +1232,7 @@ export async function commitAndCreatePRWithHead(
   const claimEvidence = publicationClaimEvidence(basePrBody, headSha);
   const prBody = claimEvidence.section ? `${basePrBody}\n\n${claimEvidence.section}` : basePrBody;
 
-  const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody];
+  const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody, ...versionLabel.createArgs];
   // Draft when the work never earned a review: a duplicate implementation must
   // not masquerade as the sole one, and work published because a run parked
   // (AGT-4076) never reached a reviewer at all.
