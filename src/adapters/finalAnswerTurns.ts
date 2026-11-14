@@ -176,7 +176,7 @@ export async function repairFinalAnswerFormat(
     const content = await callToolless(ctx);
     const repaired = typeof content === 'string' && content.trim() ? content : '';
     session?.record({ type: 'assistant', formatRepair: 1, content: repaired, toolCalls: [] });
-    if (repaired && !repair.needsRepair(repaired)) {
+    if (repaired && !repair.needsRepair(repaired) && (repair.acceptRepair?.(finalText, repaired) ?? true)) {
       onLog?.('✓ Format repair produced a readable answer');
       return repaired;
     }

@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { runAgenticLoop, type ChatMessage } from './agenticLoop.js';
-import { reviewerOutputNeedsFormatRepair, parseReviewerResult } from './resultParsing.js';
+import { reviewerOutputNeedsFormatRepair, reviewerFormatRepairIsConsistent, parseReviewerResult } from './resultParsing.js';
 import { RateLimitError } from './rateLimitError.js';
 import { REVIEWER_FORMAT_REPAIR_PROMPT } from '../agents/reviewer.js';
 
@@ -34,7 +34,12 @@ const REPAIRED =
   '"issues": ["src/a.ts:42 swallows the error", "src/b.ts:10 counter never reset"], "suggestions": []}\n```';
 const BARE_REJECT = 'Decision: reject';
 
-const repair = { needsRepair: reviewerOutputNeedsFormatRepair, prompt: REVIEWER_FORMAT_REPAIR_PROMPT };
+const repair = {
+  needsRepair: reviewerOutputNeedsFormatRepair,
+  prompt: REVIEWER_FORMAT_REPAIR_PROMPT,
+  acceptRepair: reviewerFormatRepairIsConsistent,
+};
+const MALFORMED_REJECT = '```json\n{"decision": "reject", "issues": ["src/a.ts:42 data loss"],}\n```';
 
 type CallApi = (messages: ChatMessage[], tools: unknown[]) => Promise<unknown>;
 
@@ -145,6 +150,24 @@ describe('agentic loop final-answer format repair', () => {
     const result = await runReview(callApi);
     expect(state.calls).toBe(1);
     expect(result.text).toBe(BARE_REJECT);
+  });
+
+  it('refuses a repair that turns a malformed but declared reject into an approval', async () => {
+    // The JSON is unreadable (trailing comma), so the predicate asks for a
+    // repair — but the reviewer had written down "reject". An approve coming
+    // back must not replace it.
+    expect(reviewerOutputNeedsFormatRepair(MALFORMED_REJECT)).toBe(true);
+    const { state, callApi } = scripted(MALFORMED_REJECT, 'Decision: approve\nLooks fine on a second look.');
+    const result = await runReview(callApi);
+    expect(state.calls).toBe(2);
+    expect(result.text).toBe(MALFORMED_REJECT);
+  });
+
+  it('accepts a repair that restates the malformed reject readably', async () => {
+    const restated = '```json\n{"decision": "reject", "feedback": "Data loss.", "issues": ["src/a.ts:42 data loss"]}\n```';
+    const { callApi } = scripted(MALFORMED_REJECT, restated);
+    const result = await runReview(callApi);
+    expect(parseReviewerResult(result.text).decision).toBe('reject');
   });
 
   it('propagates a rate limit hit on the repair turn instead of returning the unreadable answer', async () => {

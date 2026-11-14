@@ -12,7 +12,7 @@ import { getAdapter, spawnCli } from '../adapters/index.js';
 import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
-import { reviewerOutputNeedsFormatRepair } from '../adapters/resultParsing.js';
+import { reviewerFormatRepairIsConsistent, reviewerOutputNeedsFormatRepair } from '../adapters/resultParsing.js';
 import type { VerifyEvidence } from '../verify/runner.js';
 import { renderVerifyEvidence } from './verificationEvidence.js';
 import type { InstructionCapsule } from './instructionCapsule.js';
@@ -410,10 +410,13 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       readOnly: options.readOnly,
       coordinationContext: options.coordinationContext,
       // One bounded, tool-less restatement when the final answer carries no
-      // verdict at all; in-process adapters only (AGT-4313).
-      finalAnswerRepair: {
+      // verdict at all; in-process adapters only (AGT-4313). Not in blocker
+      // mode, where "approve" means "the worker's claim is confirmed" and the
+      // repair prompt's approve/revise wording would mean something else.
+      finalAnswerRepair: options.mode === 'blocker' ? undefined : {
         needsRepair: reviewerOutputNeedsFormatRepair,
         prompt: REVIEWER_FORMAT_REPAIR_PROMPT,
+        acceptRepair: reviewerFormatRepairIsConsistent,
       },
     });
 

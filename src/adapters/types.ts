@@ -32,6 +32,12 @@ export interface FinalAnswerRepair {
   needsRepair: (finalText: string) => boolean;
   /** The user turn appended after the unreadable answer. */
   prompt: string;
+  /**
+   * Last word on a readable repair: false keeps the original answer. Lets the
+   * caller refuse a repair that contradicts what the original already said
+   * (a reviewer's malformed `"decision": "reject"` coming back as approve).
+   */
+  acceptRepair?: (original: string, repaired: string) => boolean;
 }
 
 export interface FinishValidation {

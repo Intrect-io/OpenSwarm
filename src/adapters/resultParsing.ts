@@ -413,6 +413,28 @@ export class ReviewerVerdictWithoutFindingsError extends Error {
  * reached a conclusion, and a second ask must not be able to flip it into an
  * approval. Empty text is the salvage turn's job, not this one's. (AGT-4313)
  */
+/**
+ * A non-approving decision the reviewer wrote down, even in a form the parser
+ * could not read — a malformed JSON block (`"decision": "reject",}`) or a
+ * `decision = revise` line.
+ */
+const DECLARED_NON_APPROVAL =
+  /\bdecision\b["'`]?\s*[:=]\s*["'`]?\s*(?:reject(?:ed)?|revis(?:e|ion)|request[- ]?changes)\b/i;
+
+/**
+ * Accept a format repair unless it turns a written-down reject/revise into an
+ * approval. The repair exists to recover a verdict the reviewer never emitted,
+ * not to give it a second chance at a different one. (AGT-4313)
+ */
+export function reviewerFormatRepairIsConsistent(original: string, repaired: string): boolean {
+  if (!DECLARED_NON_APPROVAL.test(original)) return true;
+  try {
+    return parseReviewerResult(repaired).decision !== 'approve';
+  } catch {
+    return false;
+  }
+}
+
 export function reviewerOutputNeedsFormatRepair(text: string): boolean {
   if (!text.trim()) return false;
   try {
