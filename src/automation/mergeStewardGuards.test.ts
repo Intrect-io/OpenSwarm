@@ -22,6 +22,9 @@ const OLD = 'b'.repeat(40);
 function baseline(overrides: Partial<StewardSnapshot> = {}): StewardSnapshot {
   return {
     prNumber: 101,
+    author: 'swarm-publisher',
+    prReviews: [],
+    automationAccounts: ['swarm-publisher', 'swarm-worker', 'swarm-steward'],
     headSha: HEAD,
     title: 'fix(api): handle empty payload (AX-1)',
     files: ['src/api.ts', 'src/api.test.ts'],
@@ -121,7 +124,7 @@ describe('guard: required checks green on the head SHA', () => {
 });
 
 describe('guard: risk is low', () => {
-  it('a medium-risk PR is load-bearing', () => {
+  it('a medium-risk PR without a human approval is load-bearing', () => {
     expectLoadBearing('risk', baseline({ risk: { level: 'medium', headSha: HEAD } }));
   });
 
@@ -218,5 +221,80 @@ describe('dry-run only', () => {
     const imports = source.split('\n').filter((line) => /^\s*import\s/.test(line));
     expect(imports.every((line) => line.includes("'../agents/siblingWorkFormat.js'"))).toBe(true);
     expect(source).not.toMatch(/child_process|execFile|spawn\(|fetch\(|octokit|gh pr merge|\/merge\b/i);
+  });
+});
+
+// AGT-4881 — medium and above merge only after one human approval on the head SHA.
+describe('risk guard: medium and above need a human approval on the head', () => {
+  const at = (minute: number) => `2026-11-15T00:${String(minute).padStart(2, '0')}:00Z`;
+  const medium = (prReviews: StewardSnapshot['prReviews'], extra: Partial<StewardSnapshot> = {}) =>
+    baseline({ risk: { level: 'medium', headSha: HEAD }, prReviews, ...extra });
+
+  it('no approval: refused', () => {
+    expectLoadBearing('risk', medium([]));
+  });
+
+  it('a bot approval: refused', () => {
+    expectLoadBearing('risk', medium([
+      { login: 'ci-helper[bot]', userType: 'Bot', state: 'APPROVED', commitId: HEAD, submittedAt: at(1) },
+    ]));
+  });
+
+  it('an approval on an earlier SHA: refused', () => {
+    expectLoadBearing('risk', medium([
+      { login: 'alice', userType: 'User', state: 'APPROVED', commitId: OLD, submittedAt: at(1) },
+    ]));
+  });
+
+  it('a valid human approval on the head: passes', () => {
+    const decision = evaluateMergeSteward(medium([
+      { login: 'alice', userType: 'User', state: 'APPROVED', commitId: HEAD, submittedAt: at(1) },
+    ]));
+    expect(decision.mergeable).toBe(true);
+    expect(decision.results.find((r) => r.guard === 'risk')?.reason).toContain('approved on the head by alice');
+  });
+
+  it('high risk follows the same rule', () => {
+    const human = { login: 'alice', userType: 'User', state: 'APPROVED' as const, commitId: HEAD, submittedAt: at(1) };
+    expectLoadBearing('risk', baseline({ risk: { level: 'high', headSha: HEAD } }));
+    expect(evaluateMergeSteward(baseline({ risk: { level: 'high', headSha: HEAD }, prReviews: [human] })).mergeable).toBe(true);
+  });
+
+  it('factory accounts and the PR author do not count, even with a User type', () => {
+    expectLoadBearing('risk', medium([
+      { login: 'swarm-worker', userType: 'User', state: 'APPROVED', commitId: HEAD, submittedAt: at(1) },
+      { login: 'Swarm-Steward', userType: 'User', state: 'APPROVED', commitId: HEAD, submittedAt: at(2) },
+    ]));
+    expectLoadBearing('risk', medium(
+      [{ login: 'carol', userType: 'User', state: 'APPROVED', commitId: HEAD, submittedAt: at(1) }],
+      { author: 'carol' },
+    ));
+  });
+
+  it('a missing user type is not human', () => {
+    expectLoadBearing('risk', medium([{ login: 'alice', state: 'APPROVED', commitId: HEAD, submittedAt: at(1) }]));
+  });
+
+  it('a later change request or dismissal withdraws the approval; a comment does not', () => {
+    const approve = { login: 'alice', userType: 'User', state: 'APPROVED' as const, commitId: HEAD, submittedAt: at(1) };
+    expectLoadBearing('risk', medium([
+      { ...approve, state: 'CHANGES_REQUESTED', submittedAt: at(2) },
+      approve,
+    ]));
+    expectLoadBearing('risk', medium([approve, { ...approve, state: 'DISMISSED', submittedAt: at(3) }]));
+    expect(evaluateMergeSteward(medium([approve, { ...approve, state: 'COMMENTED', submittedAt: at(4) }])).mergeable).toBe(true);
+  });
+
+  it('without a configured automation account list no approval is trusted', () => {
+    expectLoadBearing('risk', medium(
+      [{ login: 'alice', userType: 'User', state: 'APPROVED', commitId: HEAD, submittedAt: at(1) }],
+      { automationAccounts: [] },
+    ));
+  });
+
+  it('the other guards still apply to an approved medium PR', () => {
+    const approved = [{ login: 'alice', userType: 'User', state: 'APPROVED' as const, commitId: HEAD, submittedAt: at(1) }];
+    expectLoadBearing('required-checks', medium(approved, { checks: [] }));
+    expectLoadBearing('review-completeness', medium(approved, { review: null }));
   });
 });

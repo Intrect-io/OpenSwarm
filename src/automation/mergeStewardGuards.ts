@@ -63,8 +63,30 @@ export interface StewardRisk {
   headSha: string;
 }
 
+/** One submitted GitHub PR review. */
+export interface StewardPrReview {
+  login: string;
+  /** GitHub user type: `User`, `Bot`, `Organization`, … Missing is treated as not human. */
+  userType?: string;
+  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING';
+  /** Commit the review was submitted against. */
+  commitId: string;
+  /** ISO timestamp; reviews are ordered by it. */
+  submittedAt: string;
+}
+
 export interface StewardSnapshot extends StewardFileList {
   prNumber: number;
+  /** Login that opened the PR. Its own approval never counts. */
+  author: string;
+  /** Submitted reviews on the PR (any order). */
+  prReviews: readonly StewardPrReview[];
+  /**
+   * Logins the factory itself acts as (steward, worker, publisher). Agents here can act
+   * under an account whose GitHub type is `User`, so the type alone proves nothing.
+   * Empty means "not configured", and then no approval can be trusted.
+   */
+  automationAccounts: readonly string[];
   /** The PR's current head commit. All evidence must be for this SHA. */
   headSha: string;
   title: string;
@@ -134,6 +156,42 @@ const requiredChecksGuard: StewardGuard = {
   },
 };
 
+/**
+ * The human approval a medium/high change needs (AGT-4881): at least one reviewer
+ * whose latest decisive review is APPROVED on the head SHA, who is a `User`, is not
+ * the PR author and is not one of the factory's own accounts. COMMENTED reviews do
+ * not change a reviewer's standing (GitHub semantics); a later CHANGES_REQUESTED or
+ * DISMISSED withdraws an earlier approval.
+ */
+export function humanApprovalOnHead(s: StewardSnapshot): { approvedBy: string[]; reason: string } {
+  if (s.automationAccounts.length === 0) {
+    return { approvedBy: [], reason: 'automation account list is not configured, so no approval can be trusted' };
+  }
+  const automation = new Set(s.automationAccounts.map((login) => login.toLowerCase()));
+  const author = s.author.toLowerCase();
+  const latest = new Map<string, StewardPrReview>();
+  const ordered = [...s.prReviews].sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
+  for (const review of ordered) {
+    if (review.state === 'COMMENTED' || review.state === 'PENDING') continue;
+    latest.set(review.login.toLowerCase(), review);
+  }
+  const approvedBy: string[] = [];
+  const ignored: string[] = [];
+  for (const [login, review] of latest) {
+    if (review.state !== 'APPROVED') continue;
+    if (review.commitId !== s.headSha) ignored.push(`${review.login} approved ${short(review.commitId)}, not the head`);
+    else if (review.userType !== 'User') ignored.push(`${review.login} is ${review.userType ?? 'of unknown type'}`);
+    else if (login === author) ignored.push(`${review.login} is the PR author`);
+    else if (automation.has(login)) ignored.push(`${review.login} is a factory account`);
+    else approvedBy.push(review.login);
+  }
+  if (approvedBy.length > 0) return { approvedBy, reason: `approved on the head by ${approvedBy.join(', ')}` };
+  return {
+    approvedBy,
+    reason: ignored.length > 0 ? `no valid human approval (${ignored.join('; ')})` : 'no human approval',
+  };
+}
+
 const riskGuard: StewardGuard = {
   name: 'risk',
   check(s) {
@@ -142,8 +200,13 @@ const riskGuard: StewardGuard = {
     if (s.risk.headSha !== s.headSha) {
       return fail(name, `risk was classified on ${short(s.risk.headSha)}, not the head ${short(s.headSha)}`);
     }
-    if (s.risk.level !== 'low') return fail(name, `risk is ${s.risk.level}; only low merges without a person`);
-    return pass(name, 'risk is low');
+    if (s.risk.level === 'low') return pass(name, 'risk is low');
+    // medium and high: the steward merges only after a person approved this exact head.
+    const approval = humanApprovalOnHead(s);
+    if (approval.approvedBy.length === 0) {
+      return fail(name, `risk is ${s.risk.level} and needs one human approval on the head: ${approval.reason}`);
+    }
+    return pass(name, `risk is ${s.risk.level}; ${approval.reason}`);
   },
 };
 
