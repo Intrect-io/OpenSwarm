@@ -227,8 +227,11 @@ export function costCeilingReasonWithAlert(
 }
 
 /**
- * What one issue has spent since an operator last resumed it (a resume is a
- * person granting a fresh budget). The attempt now being claimed is excluded:
+ * What one issue has spent since an operator last lifted ITS BUDGET PARK. Only
+ * a resume of an `issue_budget_exhausted` park resets the count: every other
+ * resume (idle fill, an ephemeral-path park, an answered question) also writes
+ * `operator_resumed`, and letting those reset it would let the AGT-4787 retry
+ * loop spend forever. The attempt now being claimed is excluded:
  * it has spent nothing yet, and counting it at the estimate would park an
  * issue for money it never spent.
  */
@@ -239,8 +242,10 @@ export function issueSpend(
   options: { excludeAttemptNo?: number; unknownAttemptCostUsd?: number } = {},
 ): DailySpend {
   const resumed = db.prepare(`
-    SELECT MAX(created_at) AS at FROM automation_events WHERE issue_id = ? AND kind = 'operator_resumed'
-  `).get(issueId) as { at: number | null };
+    SELECT MAX(created_at) AS at FROM automation_events
+    WHERE issue_id = ? AND kind = 'operator_resumed'
+      AND json_extract(data_json, '$.parkedUnder') = ?
+  `).get(issueId, ISSUE_BUDGET_PARK_REASON) as { at: number | null };
   const row = db.prepare(`
     SELECT COALESCE(SUM(cost_usd), 0) AS known,
            SUM(CASE WHEN cost_usd IS NULL

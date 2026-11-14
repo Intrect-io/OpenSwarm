@@ -180,6 +180,26 @@ describe('per-issue budget (AGT-4807)', () => {
     }
   });
 
+  it('a resume of some other park does not reset the issue budget', async () => {
+    const { coordinator, path, close } = fixture();
+    try {
+      await coordinator.execute(task('w'), '/repo', async () => spent(6));
+      const db = new Database(path);
+      try {
+        // What resumeNeedsHuman writes for an idle-fill lift of an unrelated park.
+        const later = Date.now() + 10;
+        db.prepare(`INSERT INTO automation_events(issue_id, attempt_no, kind, from_state, to_state, data_json, created_at)
+          VALUES (?, 1, 'operator_resumed', 'NEEDS_HUMAN', 'READY', ?, ?)`)
+          .run('w', JSON.stringify({ trigger: 'idle_fill', parkedUnder: 'publication_scope_mismatch' }), later);
+        expect(issueSpend(db, 'w', later + 1).totalUsd).toBe(6);
+      } finally {
+        db.close();
+      }
+    } finally {
+      close();
+    }
+  });
+
   it('an operator resume grants a fresh budget', async () => {
     const { coordinator, ledger, path, close } = fixture();
     try {
