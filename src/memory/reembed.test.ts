@@ -79,7 +79,7 @@ vi.mock('./memoryCore.js', () => ({
     return [1, 2, 3, 4];
   }),
   normalizeRecords: (rows: any[]) =>
-    rows.map((r) => ({ ...r, title: String(r.title ?? ''), content: String(r.content ?? ''), vector: [] })),
+    rows.map((r) => ({ ...r, title: String(r.title ?? ''), content: String(r.content ?? ''), vector: r.vector ?? [] })),
 }));
 
 const { reembedMemoryTable } = await import('./reembed.js');

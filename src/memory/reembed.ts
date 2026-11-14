@@ -6,8 +6,11 @@
 // dimension, passage/query prefixes, or the runtime that executes the ONNX
 // graph). Vectors from two different encoders coexist silently: writes succeed
 // and searches return rows, only the ranking is wrong. This rewrites the whole
-// table batch by batch, following compaction's build-then-swap shape so a failure
-// leaves the original table intact.
+// table batch by batch, following compaction's build-then-swap shape: a failure
+// while building leaves the live table untouched. The swap itself is an
+// overwrite followed by appends, so a failure during it can leave the live
+// table partly written — the complete replacement is then kept as
+// `<table>_reembed_<ms>` for recovery.
 
 import { join } from 'node:path';
 import { withFileLock } from '../support/fileLock.js';
@@ -146,7 +149,10 @@ export async function reembedMemoryTable(options: ReembedOptions = {}): Promise<
       } else {
         let target: Awaited<ReturnType<typeof db.openTable>> | null = null;
         for (let copied = 0; copied < total; ) {
-          const page = await replacement.query().offset(copied).limit(batchSize).toArray();
+          // Rows read back from Lance carry Arrow vectors; writing them as-is
+          // zeroed embeddings once already (see compaction.store.test.ts), so
+          // the copy goes through the same normalisation as the build.
+          const page = normalizeRecords(await replacement.query().offset(copied).limit(batchSize).toArray());
           if (page.length === 0) break;
           if (target) {
             await target.add(page);
