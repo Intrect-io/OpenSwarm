@@ -6,12 +6,15 @@ vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 // The worktrees here are fake paths; the gate itself is tested in testRemovalGate.test.ts.
 vi.mock('./testRemovalGate.js', () => ({ TEST_REMOVAL_PARK_REASON: 'active_tests_removed', testRemovalHold: async () => null }));
+const coverageRatchetHold = vi.hoisted(() => vi.fn());
+vi.mock('./coverageRatchetGate.js', () => ({ COVERAGE_DROP_PARK_REASON: 'coverage_dropped', coverageRatchetHold }));
 
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishFinishedRun, publishParkedIfNeeded, publishParkedWork, publishStuckWork, shouldPublishParkedWork, summarizeFailure } from './publishOnPark.js';
 
 beforeEach(() => {
   commitAndCreatePRWithHead.mockReset();
+  coverageRatchetHold.mockReset().mockResolvedValue({ status: 'skipped', reason: 'no coverage provider is configured' });
 });
 
 describe('shouldPublishParkedWork (AGT-4076)', () => {
@@ -512,5 +515,39 @@ describe('an unfinished run opens no pull request (AGT-4786)', () => {
       expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
       expect(hook).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('coverage ratchet before publication (AGT-4898)', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-4898', issueId: 'AGT-4898' };
+  const task = { id: 'task-1', issueIdentifier: 'AGT-4898', title: 'Coverage ratchet' };
+
+  it('parks an approved run whose coverage dropped, before the lease fence and without publishing', async () => {
+    coverageRatchetHold.mockResolvedValue({ status: 'hold', reason: 'coverage 80.00% -> 70.00%', baseline: 80, head: 70 });
+    const beforePublish = vi.fn(async () => true);
+    const durability = { beforePublish, onPublication: vi.fn(async () => true) } as unknown as ExecutionDurabilityHooks;
+    const result: { success: boolean; finalStatus: string; failureDetail?: string; operatorPark?: { code: string; reason: string } } = {
+      success: true,
+      finalStatus: 'approved',
+    };
+
+    await publishApprovedWork(info, task, result, durability);
+
+    expect(result.success).toBe(false);
+    expect(result.operatorPark).toEqual({ code: 'coverage_dropped', reason: 'coverage 80.00% -> 70.00%' });
+    expect(beforePublish).not.toHaveBeenCalled();
+    expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
+  });
+
+  it('publishes when the ratchet passes or is skipped', async () => {
+    for (const outcome of [{ status: 'pass', baseline: 80, head: 80 }, { status: 'skipped', reason: 'unsupported' }]) {
+      commitAndCreatePRWithHead.mockReset().mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/1', headSha: 'h' });
+      coverageRatchetHold.mockResolvedValue(outcome);
+      const result: { success: boolean; finalStatus: string; prUrl?: string } = { success: true, finalStatus: 'approved' };
+
+      await publishApprovedWork(info, task, result, undefined);
+
+      expect(result.prUrl).toBe('https://github.com/o/r/pull/1');
+    }
   });
 });
