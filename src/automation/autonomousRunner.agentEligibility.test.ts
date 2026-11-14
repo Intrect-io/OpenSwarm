@@ -24,9 +24,13 @@ type InternalRunner = {
   durableRuns: DurableRunCoordinator;
 };
 
+// A body that passes the Definition of Ready gate (AGT-4805), so the other rules are what is tested.
+const READY_BODY = '## Acceptance criteria\n- works\n## Out of scope\n- none\n## Verification\nnpm test';
+
 const task = (id: string, over: Partial<TaskItem> = {}): TaskItem => ({
   id, issueId: id, issueIdentifier: id.toUpperCase(), source: 'linear', title: `[B1] ${id}`,
-  priority: 2, createdAt: Date.now(), linearState: 'Todo', labels: [], ...over,
+  priority: 2, createdAt: Date.now(), linearState: 'Todo', labels: [], description: READY_BODY,
+  projectPath: '/repo', ...over,
 });
 
 describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () => {
@@ -53,7 +57,7 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
   async function runHeartbeat(
     fetched: TaskItem[],
     skip?: { labels: string[]; titleTags: string[]; epics: boolean },
-    extra: { includeBacklog?: boolean } = {},
+    extra: { includeBacklog?: boolean; projectAgents?: { projectPath: string; requireDefinitionOfReady?: boolean }[] } = {},
   ) {
     const [{ AutonomousRunner }, execution] = await Promise.all([
       import('./autonomousRunner.js'),
@@ -82,7 +86,7 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
     const processed = vi.spyOn(internal as unknown as { filterAlreadyProcessed: (t: TaskItem[]) => TaskItem[] }, 'filterAlreadyProcessed');
     await runner.heartbeat();
     internal.durableRuns.close();
-    return { processed, parallel: internal.heartbeatParallel };
+    return { processed, parallel: internal.heartbeatParallel, addComment: source.addComment as ReturnType<typeof vi.fn> };
   }
 
   it('hands only the work the swarm may take to idle fill and selection', async () => {
@@ -106,6 +110,21 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
 
     const on = await runHeartbeat(backlog, undefined, { includeBacklog: true });
     expect(on.processed.mock.calls[0][0].map((t) => t.id)).toEqual(['bl-1', 'td-1']);
+  }, 60_000);
+
+  it('holds a Todo issue without a Definition of Ready and proposes the sections once (AGT-4805)', async () => {
+    const fetched = [task('dor-1', { description: '결함 15건' }), task('td-1')];
+    const gated = await runHeartbeat(fetched);
+    expect(gated.processed.mock.calls[0][0].map((t) => t.id)).toEqual(['td-1']);
+    const comments = gated.addComment.mock.calls.filter((call: unknown[]) => String(call[1]).includes('Definition of Ready'));
+    expect(comments).toHaveLength(1);
+    expect(comments[0][0]).toBe('dor-1');
+    expect(String(comments[0][1]).startsWith('[OpenSwarm]')).toBe(true);
+
+    const optedOut = await runHeartbeat(fetched, undefined, {
+      projectAgents: [{ projectPath: '/repo', requireDefinitionOfReady: false }],
+    });
+    expect(optedOut.processed.mock.calls[0][0].map((t) => t.id)).toEqual(['dor-1', 'td-1']);
   }, 60_000);
 
   it('honours configured labels, and stops everything when nothing is left for the swarm', async () => {

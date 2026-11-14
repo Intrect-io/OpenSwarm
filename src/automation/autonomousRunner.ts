@@ -137,7 +137,7 @@ import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
 import { scopeDeclineComment, scopeDeclineMarker } from './draftGrooming.js';
-import { evaluateReadiness, formatReadinessSummary, partitionByReadiness, verdictFromDraft } from './readinessGate.js';
+import { evaluateReadiness, formatReadinessSummary, verdictFromDraft } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
 import { isScopeDeclined } from '../agents/draftScope.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
 import { completeParentIfChildrenDone as completeParentLocally, buildTaskStateSyncComment } from '../taskState/store.js';
@@ -2933,9 +2933,9 @@ export class AutonomousRunner {
       // state: a Backlog issue must not reach `filterAlreadyProcessed`, whose idle fill would lift
       // a park on it. (AGT-4784)
       const skipConfig = this.config.skip ?? DEFAULT_AGENT_SKIP;
-      const { ready: readyTasks, held: notReady } = partitionByReadiness(tasks, {
-        exclusionLabels: skipConfig.labels,
-        includeBacklog: this.config.includeBacklog ?? false,
+      const { ready: readyTasks, held: notReady } = await partitionByDefinitionOfReady(tasks, {
+        exclusionLabels: skipConfig.labels, includeBacklog: this.config.includeBacklog ?? false,
+        definitionOfReady: definitionOfReadyHooks(this.config.projectAgents, getTaskSource()), // AGT-4805
       });
       for (const line of formatReadinessSummary(notReady)) this.syslog(line);
       const { eligible: agentTasks, skipped: humanOwned } = partitionHumanOwned(readyTasks, skipConfig);
