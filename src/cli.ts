@@ -18,6 +18,7 @@ import { maybeAutoUpdate } from './support/updateNotifier.js';
 import { safeConsole } from './support/safeLog.js';
 import { atomicWriteFileSync } from './support/atomicFile.js';
 import { parsePositiveIntegerOption, parseTcpPortOption } from './cli/optionParsers.js';
+import { registerPauseCommands } from './cli/registerPauseCommands.js';
 
 // Load .env so CLI commands (e.g. `auth login --provider linear` reading
 // LINEAR_OAUTH_CLIENT_ID) see the same env the daemon does. Idempotent; never
@@ -262,21 +263,8 @@ program
     await launchChatTui(session);
   });
 
-// openswarm resume — reopen the most recent chat session
-
-program
-  .command('resume')
-  .description('Resume the most recently used chat session (its conversation + goal)')
-  .action(async () => {
-    const { latestSession } = await import('./support/chatSession.js');
-    const id = await latestSession();
-    if (!id) {
-      console.log('No saved chat sessions to resume. Run `openswarm chat` to start one.');
-      return;
-    }
-    console.log(`Resuming session ${id}…`);
-    await launchChatTui(id);
-  });
+// openswarm resume (chat session, or --factory/--project to lift a pause), pause, unpause (AGT-4808)
+registerPauseCommands(program, launchChatTui);
 
 // openswarm mcp add|list|remove
 

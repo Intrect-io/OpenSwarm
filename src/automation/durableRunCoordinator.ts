@@ -28,6 +28,7 @@ import {
 } from './runLedger.js';
 import type { TrackerTerminalState } from './runLedgerTrackerCache.js';
 import { pickPipelineFailureDetail } from './runnerState.js';
+import { fencedResult, nonExecutingResult } from './durableRunResults.js';
 import {
   normalizeOperatorQuestionCorrelations,
   OPERATOR_QUESTION_PARK_REASON,
@@ -112,39 +113,6 @@ export interface OutboxDrainResult {
   applied: number;
   retried: number;
   dead: number;
-}
-
-function nonExecutingResult(
-  task: TaskItem,
-  projectPath: string,
-  reason: string,
-  disposition: { status: 'deferred'; retryAt: number } | { status: 'superseded' },
-): PipelineResult {
-  return {
-    success: false,
-    sessionId: `durable-admission-${Date.now()}`,
-    stages: [],
-    finalStatus: disposition.status,
-    retryAt: disposition.status === 'deferred' ? disposition.retryAt : undefined,
-    totalDuration: 0,
-    iterations: 0,
-    taskContext: {
-      issueIdentifier: task.issueIdentifier || task.issueId,
-      projectName: task.linearProject?.name,
-      projectPath,
-      taskTitle: `${task.title} (${reason})`,
-    },
-  };
-}
-
-function fencedResult(result: PipelineResult): PipelineResult {
-  return {
-    ...result,
-    success: false,
-    finalStatus: 'infra_error',
-    failureDetail: 'durable completion: lease fence rejected result from an expired or replaced owner',
-    failureSignal: result.failureSignal ?? 'timeout',
-  };
 }
 
 /** Attempt from which a failing run's retry delay doubles; idle fill reads it too (AGT-4675). */
@@ -592,6 +560,12 @@ export class DurableRunCoordinator {
     // comparison, but must never claim, fence, enqueue effects, or alter tracker
     // delivery. Otherwise the observer itself becomes a second control plane.
     if (this.mode === 'shadow') return executor(this.noopHooks(), new AbortController().signal);
+
+    // Kill switch (AGT-4808). A paused repository is not "claim unavailable": deferring it would
+    // rewrite the row as RETRY_AT every 30 s, which reads as a re-dispatch. Leave the row alone.
+    // claimRun re-checks inside its transaction, so a pause written after this read still holds.
+    const paused = this.ledger.getBlockingPause(normalizeProjectPath(projectPath));
+    if (paused) return nonExecutingResult(task, projectPath, `factory paused: ${paused.reason}`, { status: 'superseded' });
 
     let claim = this.ledger.claimRun(issueId, {
       ownerInstanceId: this.instanceId,

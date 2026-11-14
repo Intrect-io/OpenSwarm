@@ -77,6 +77,7 @@ import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
 import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
+import { RunnerPauseControl } from './factoryPause.js';
 import { providerSwitchViolation } from '../adapters/unattendedPolicy.js';
 import {
   findPullRequestForBranch,
@@ -566,6 +567,8 @@ export class AutonomousRunner {
     () => (this.config.minFreeDiskGiB ?? 10) * 1024 ** 3,
   );
 
+  // Kill switch (AGT-4808): the durable pause table, read by the heartbeat, the candidate loop and executeDurably.
+  readonly pauses = new RunnerPauseControl(() => this.config.automationDbPath ?? defaultAutomationDbPath());
   // Issues whose Linear project can't be mapped to a local repo path. Recorded on
   // the first resolve failure so they aren't re-picked every heartbeat (which
   // starved other actionable tasks — they were top-priority but never runnable). (INT-1875)
@@ -1696,6 +1699,7 @@ export class AutonomousRunner {
       taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectPath, taskTitle: task.title },
     });
     if (this.stopping || signal?.aborted) return cancelled();
+    const paused = this.pauses.pausedResult(task, projectPath); if (paused) return paused; // AGT-4808, fresh read, fails closed
 
     let admission: RepositoryAdmissionPolicy;
     try {
@@ -2446,7 +2450,6 @@ export class AutonomousRunner {
     return repoRoot.split('/').pop() ?? repoRoot;
   }
 
-
   /** Send system message to dashboard LIVE LOG */
   private syslog(line: string): void {
     const safeLine = line.replace(/[\r\n]/g, '');
@@ -2790,7 +2793,6 @@ export class AutonomousRunner {
       // 0.05 Code-entity registry (Draft File Map / registryCheck) — throttled
       this.refreshCodeRegistries();
 
-
       // 0.1 Reconcile before pruning. Unknown/crash-recovery worktrees are never
       // deleted from a heartbeat without a terminal durable record.
       if (this.config.worktreeMode) {
@@ -2846,6 +2848,7 @@ export class AutonomousRunner {
         this.syslog(`⏸ Disk space hold: ${disk.line}`);
         return;
       }
+      if (!this.pauses.apply(this.scheduler, (line) => this.syslog(line))) return; // 1.15 Kill switch, one line per pause per heartbeat (AGT-4808)
 
       // 1.2 Rate-limit hold — skip the heartbeat while a 429 pause is still active.
       // Cleared implicitly once the clock passes rateLimitUntil. (INT-1906)
@@ -3116,7 +3119,7 @@ export class AutonomousRunner {
       for (const { task, projectPath } of candidates) {
         if (this.stopping) return;
         if (enqueuedCount >= maxSlots) break;
-        if (!safeTasks.has(task.id)) continue;
+        if (!safeTasks.has(task.id) || this.pauses.blocks(projectPath)) continue;
         if (!this.canQueueProjectCandidate(projectPath)) {
           this.syslog(`  Project cap reached: ${projectPath}`);
           continue;
@@ -3771,9 +3774,6 @@ export class AutonomousRunner {
       allowed.length > 0 ? (projectPath) => pathIsUnderAny(this.normalizePath(projectPath), allowed) : undefined,
     );
   }
-
-
-
 
   updateAllowedProjects(paths: string[]): void {
     this.config.allowedProjects = paths;

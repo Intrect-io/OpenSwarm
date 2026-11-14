@@ -8,9 +8,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { enableWalWithRetry } from '../support/sqliteWal.js';
-import {
-  OPERATOR_QUESTION_PARK_REASON,
-} from '../coordination/operatorAnswers.js';
+import { OPERATOR_QUESTION_PARK_REASON } from '../coordination/operatorAnswers.js';
 import { defaultAutomationDbPath } from './automationDbPath.js';
 import {
   ACTIVE_LEASE_STATES, ALLOWED_TRANSITIONS, AUTOMATION_SCHEMA_VERSION,
@@ -39,6 +37,7 @@ import {
 } from './runLedgerTrackerCache.js';
 import { assertRunState, parseJson, toEffectRecord, toRunRecord, type EffectRow, type RunRow } from './runLedgerRows.js';
 import { assertPositiveDuration, placeholders, stringifyJson } from './runLedgerUtils.js';
+import { pauseBlockingInDb, type FactoryPause } from './factoryPause.js';
 import type {
   AttemptResultInput,
   ClaimOptions,
@@ -119,7 +118,6 @@ export class RunLedger {
       throw error;
     }
   }
-
 
   registerRun(input: RegisterRunInput, now = Date.now()): RunRecord {
     if (!input.issueId.trim()) throw new Error('issueId is required');
@@ -360,6 +358,7 @@ export class RunLedger {
     return defer.immediate();
   }
 
+  getBlockingPause(normalizedProjectPath: string): FactoryPause | undefined { return pauseBlockingInDb(this.db, normalizedProjectPath); } // AGT-4808
   /** Return the active repository-circuit deadline blocking this issue. */
   getCircuitOpenUntil(issueId: string, now = Date.now()): number | undefined {
     const row = this.db.prepare(`
@@ -450,6 +449,7 @@ export class RunLedger {
 
       if (!CLAIMABLE_STATES.includes(row.state)) return null;
       if (row.state === 'RETRY_AT' && row.retry_at != null && row.retry_at > now) return null;
+      if (pauseBlockingInDb(this.db, row.project_path)) return null; // Kill switch (AGT-4808): read in the claim's own transaction, so no process claims past a pause
 
       // A post-merge rebase is about to force-update this run's PR branch.
       // Read and claim share one IMMEDIATE transaction, so a worker cannot
