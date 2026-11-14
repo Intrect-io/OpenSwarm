@@ -657,6 +657,19 @@ describe('runWorkCommand — SIGTERM takes the same cancellation path (AGT-3423)
     expect(deps.logs.join('\n')).toContain('Interrupted (SIGTERM)');
   });
 
+  it('a real SIGTERM delivered to the process aborts the run through the default wiring', async () => {
+    const deps = baseDeps();
+    delete deps.installSigintHandler;
+    const observed: boolean[] = [];
+    deps.exec.mockImplementation(async (_ctx, _task, _path, signal?: AbortSignal) => {
+      process.emit('SIGTERM', 'SIGTERM');
+      observed.push(!!signal?.aborted);
+      return pipelineResult({ success: false, finalStatus: 'cancelled' });
+    });
+    expect(await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps)).toBe(WORK_EXIT_TERMINATED);
+    expect(observed).toEqual([true]);
+  });
+
   it('default wiring listens for SIGTERM during the run and removes the listener after', async () => {
     const beforeTerm = process.listenerCount('SIGTERM');
     const beforeInt = process.listenerCount('SIGINT');

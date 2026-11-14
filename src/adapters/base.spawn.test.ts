@@ -240,6 +240,36 @@ describe('argv-safe adapter spawning', () => {
     }
   });
 
+  it('retains a bounded tail of stderr and stdout instead of the whole stream (AGT-3423)', async () => {
+    const proc = Object.assign(new EventEmitter(), {
+      pid: 122,
+      stdout: new PassThrough(), stderr: new PassThrough(),
+      stdin: Object.assign(new EventEmitter(), { end: vi.fn() }), kill: vi.fn(),
+    });
+    const line = `${'e'.repeat(1023)}\n`;
+    spawnMock.mockImplementationOnce(() => {
+      queueMicrotask(() => {
+        for (let i = 0; i < 3 * 1024; i++) proc.stderr.write(line); // 3 MiB of stderr
+        proc.stderr.end('LAST-STDERR\n');
+        proc.stdout.end('{"type":"result","result":"done"}\n');
+        setTimeout(() => proc.emit('close', 0), 20);
+      });
+      return proc;
+    });
+    const adapter: CliAdapter = {
+      name: 'claude', capabilities: { supportsStreaming: false, supportsJsonOutput: false, supportsModelSelection: true, managedGit: false, supportedSkills: [] },
+      isAvailable: async () => true, getDefaultModel: async () => 'sonnet',
+      buildCommand: () => ({ command: 'fixture-cli', args: [] }),
+      parseWorkerOutput: () => ({ success: true, summary: '', filesChanged: [], commands: [], output: '' }),
+      parseReviewerOutput: () => ({ decision: 'approve', feedback: '', issues: [], suggestions: [] }),
+    };
+    const result = await spawnCli(adapter, { prompt: 'p', cwd: process.cwd() });
+    expect(result.stderr.length).toBeLessThanOrEqual(1024 * 1024 + 200);
+    expect(result.stderr.startsWith('[openswarm: ')).toBe(true);
+    expect(result.stderr.trimEnd().endsWith('LAST-STDERR')).toBe(true);
+    expect(result.stdout).toBe('{"type":"result","result":"done"}\n');
+  });
+
   it('passes metacharacters as one argv value with shell disabled', async () => {
     const proc = Object.assign(new EventEmitter(), {
       pid: 123,
