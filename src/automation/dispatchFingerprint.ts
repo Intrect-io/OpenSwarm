@@ -46,6 +46,8 @@ export interface FingerprintInput {
 const DAEMON_SIGNATURES: readonly RegExp[] = [
   /^🧭 \*\*\[OpenSwarm\] /,
   /^\*\*\[OpenSwarm\]/,
+  /^🧭 \*\*\[OpenSwarm\]\*\*/,
+  /^\[OpenSwarm\]/,
   /_via OpenSwarm(?: ·[^_]*)?_\s*$/,
 ];
 
