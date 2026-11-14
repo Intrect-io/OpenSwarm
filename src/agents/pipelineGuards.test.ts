@@ -844,7 +844,7 @@ describe('pipelineGuards — changed paths that escape the project (AGT-3441)', 
 
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-  it('blocks and never hands escaping paths to file-reading guards', async () => {
+  it('reports escaping paths and never hands them to file-reading guards', async () => {
     const { symlinkSync } = await import('node:fs');
     symlinkSync(join(root, 'outside'), join(repo, 'link'));
     writeFileSync(join(repo, 'ok.ts'), 'export const ok = 1;\n');
@@ -854,7 +854,8 @@ describe('pipelineGuards — changed paths that escape the project (AGT-3441)', 
       { bsDetector: true },
     );
     const containment = result.results.find(r => r.guard === 'pathContainment');
-    expect(containment?.blocking).toBe(true);
+    expect(containment?.blocking).toBe(false);
+    expect(containment?.passed).toBe(false);
     expect(containment?.issues).toHaveLength(3);
     // bsDetector only ever saw ok.ts
     expect(guardIssues(result, 'bsDetector').every(issue => issue.includes('ok.ts'))).toBe(true);

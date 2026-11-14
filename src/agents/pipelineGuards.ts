@@ -923,9 +923,10 @@ export async function runGuards(
   // Keep the original result for reporting/publication, but never feed
   // generated pytest/venv artifacts — or paths that escape the project
   // (absolute, `..`, symlinked out) — into guards that open changed files.
+  // Reported, not blocking: a tracked symlink pointing outside is legitimate.
   const { contained, escaped } = partitionChangedPaths(projectPath, workerResult.filesChanged.filter((file) => !isEphemeralWorktreeArtifact(file)));
   const guardWorkerResult = { ...workerResult, filesChanged: contained };
-  if (escaped.length > 0) results.push({ passed: false, guard: 'pathContainment', blocking: true, issues: escaped.slice(0, 20).map((file) => `Changed path escapes the project: ${file}`) });
+  if (escaped.length > 0) results.push({ passed: false, guard: 'pathContainment', blocking: false, issues: escaped.slice(0, 20).map((file) => `Changed path escapes the project: ${file}`) });
 
   if (config.qualityGate) {
     console.warn('[Guard:qualityGate] Deprecated: use autonomous.verify baseline-diff verification instead.');
