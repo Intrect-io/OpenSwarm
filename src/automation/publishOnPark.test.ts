@@ -429,7 +429,7 @@ describe('an unfinished run opens no pull request (AGT-4786)', () => {
       commitAndCreatePRWithHead.mockResolvedValue(pr);
       const result: { success: boolean; finalStatus: string; prUrl?: string; failureDetail?: string } = { success: false, finalStatus, failureDetail: 'tests red' };
 
-      await publishFinishedRun(info, task, result, undefined, noHook, undefined, { failureSummary: 'reviewer: the new route has no test' });
+      await publishFinishedRun(info, task, result, undefined, noHook);
 
       expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
       expect(result).toEqual({ success: false, finalStatus, failureDetail: 'tests red' });
@@ -485,7 +485,7 @@ describe('an unfinished run opens no pull request (AGT-4786)', () => {
     it('publishes nothing for a lifecycle-fence failure', async () => {
       const result = { success: false, finalStatus: 'infra_error', failureDetail: 'lease lost' };
 
-      await publishFinishedRun(info, task, result, undefined, noHook, undefined, { lifecycleFailed: true });
+      await publishFinishedRun(info, task, result, undefined, noHook);
 
       expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
     });

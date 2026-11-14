@@ -30,11 +30,13 @@ export async function assertBranchWithinWriteScope(
   worktreePath: string,
   baseRef: string,
   fileScope: readonly string[] | undefined,
+  /** The commit to check; a branch name lets a caller check a branch without its worktree (AGT-4786). */
+  head = 'HEAD',
 ): Promise<void> {
   if (!fileScope || fileScope.length === 0) return;
   const { stdout } = await execFileAsync(
     'git',
-    ['-C', worktreePath, 'diff', '--name-only', `${baseRef}...HEAD`],
+    ['-C', worktreePath, 'diff', '--name-only', `${baseRef}...${head}`],
     { timeout: GIT_TIMEOUT_MS },
   );
   // The graph exporter writes these managed files into every worktree. They

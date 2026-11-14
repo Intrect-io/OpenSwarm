@@ -16,18 +16,16 @@ import { RateLimitError } from '../adapters/rateLimitError.js';
 
 const createPipelineFromConfig = vi.fn();
 const runDraftAnalysis = vi.fn();
-const plannerNeedsDecomposition = vi.fn();
-const plannerEstimateTaskDuration = vi.fn();
-const plannerRunPlanner = vi.fn();
-const plannerFormatPlannerResult = vi.fn();
+const plannerNeedsDecomposition = vi.fn(), plannerEstimateTaskDuration = vi.fn();
+const plannerRunPlanner = vi.fn(), plannerFormatPlannerResult = vi.fn();
 const createWorktree = vi.fn();
 // Stand-in for the real class — the instanceof check under test resolves
 // through this same mock, so identity (not origin) is what matters (AGT-4038).
 const WorktreeCoordinationError = class extends Error {};
-const commitAndCreatePR = vi.fn();
-const findOpenPRFileOverlaps = vi.fn();
+const commitAndCreatePR = vi.fn(), findOpenPRFileOverlaps = vi.fn();
 const hasRecoverableWorktree = vi.fn();
 const preserveWorktree = vi.fn();
+const keepUnfinishedWorkOnRemote = vi.fn(async () => ({ pushed: true, commitsAhead: 1, commented: true })); // AGT-4786
 const removeWorktree = vi.fn();
 const broadcastEvent = vi.fn();
 const analyzeIssue = vi.fn();
@@ -79,6 +77,7 @@ vi.mock('../support/planner.js', () => ({
   runPlanner: plannerRunPlanner,
   formatPlannerResult: plannerFormatPlannerResult,
 }));
+vi.mock('./unfinishedRunBranch.js', () => ({ keepUnfinishedWorkOnRemote }));
 vi.mock('../support/worktreeManager.js', () => ({
   createWorktree,
   commitAndCreatePR,
@@ -830,6 +829,7 @@ describe('runnerExecution.ts coverage extension', () => {
       expect(result.success).toBe(false);
       expect(preserveWorktree).toHaveBeenCalledWith(expect.objectContaining({ issueId: 'issue-1' }), 'session did not succeed');
       expect(removeWorktree).not.toHaveBeenCalled();
+      expect(keepUnfinishedWorkOnRemote).toHaveBeenCalledWith(expect.objectContaining({ issueId: 'issue-1' }), expect.anything(), expect.objectContaining({ finalStatus: 'rejected' }), expect.anything()); // AGT-4786: pushed branch + one comment, no PR
     });
 
     it('preserves the worktree when success is true but finalStatus is not approved', async () => {
