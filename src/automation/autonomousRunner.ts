@@ -1729,7 +1729,7 @@ export class AutonomousRunner {
         // independent safety boundaries.
         maxAttemptsPerHour: metadata?.automation?.maxAttemptsPerHour,
         maxFailuresPerHour: metadata?.automation?.maxFailuresPerHour ?? 6,
-        maxCostUsdPerDay: metadata?.automation?.maxCostUsdPerDay, globalMaxCostUsdPerDay: this.config.spend?.maxCostUsdPerDay, unknownAttemptCostUsd: this.config.spend?.unknownAttemptCostUsd,
+        maxCostUsdPerDay: metadata?.automation?.maxCostUsdPerDay ?? this.config.budget?.perProjectDailyUsd, globalMaxCostUsdPerDay: this.config.spend?.maxCostUsdPerDay, unknownAttemptCostUsd: this.config.spend?.unknownAttemptCostUsd, maxCostUsdPerIssue: this.config.budget?.perIssueUsd, // budget: AGT-4807
         circuitCooldownMs: (metadata?.automation?.circuitCooldownMinutes ?? 60) * 60_000,
       };
     } catch (error) {

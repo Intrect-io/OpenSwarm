@@ -102,7 +102,7 @@ export interface RepositoryAdmissionPolicy {
   unknownScopeAdmission?: 'serialize' | 'admit';
   maxAttemptsPerHour?: number;
   maxFailuresPerHour?: number;
-  maxCostUsdPerDay?: number; globalMaxCostUsdPerDay?: number; unknownAttemptCostUsd?: number; // runLedgerCost.ts
+  maxCostUsdPerDay?: number; globalMaxCostUsdPerDay?: number; unknownAttemptCostUsd?: number; maxCostUsdPerIssue?: number; // runLedgerCost.ts
   circuitCooldownMs?: number;
 }
 
@@ -707,7 +707,7 @@ export class DurableRunCoordinator {
 
     let result: PipelineResult;
     try {
-      result = await executor(hooks, leaseAbortController.signal);
+      result = this.ledger.issueBudgetPark(task, projectPath, admission?.maxCostUsdPerIssue, claim, admission?.unknownAttemptCostUsd) ?? await executor(hooks, leaseAbortController.signal); // AGT-4807
     } catch (error) {
       clearInterval(renewTimer);
       this.ledger.recordAttemptResult(claim, {

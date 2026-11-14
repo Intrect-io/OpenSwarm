@@ -121,6 +121,32 @@ An optional `automation` block in `openswarm.json` controls admission:
 Unreadable or invalid policy is an infrastructure failure, not permission to
 run with guessed defaults.
 
+### Spend budgets
+
+The daemon config sets two budgets (AGT-4807). They are read from the run
+ledger's recorded attempt costs. An attempt with no recorded cost counts at
+the same estimate the daily ceilings use.
+
+```yaml
+autonomous:
+  budget:
+    perProjectDailyUsd: 20   # used when openswarm.json sets no automation.maxCostUsdPerDay
+    perIssueUsd: 5
+```
+
+- **Project daily budget:** a project at or over it gets no claims until
+  00:00 UTC. The first refusal of the day sends **one** notifier alert per
+  project, deduplicated in the ledger (`automation_budget_alerts`), so
+  several daemons sharing one ledger still alert once. A repository's own
+  `automation.maxCostUsdPerDay` takes precedence. The daemon-wide
+  `autonomous.spend.maxCostUsdPerDay` also alerts once a day.
+- **Issue budget:** counts what one issue has spent since an operator last
+  resumed it. When the issue is at or over the budget, its next claim parks
+  it as `NEEDS_HUMAN` (`issue_budget_exhausted`) without running anything.
+  The park adds no spend of its own. The tracker gets the one operator-park
+  comment, which shows the spend. Moving the issue back to Todo resumes it
+  and starts a fresh budget.
+
 A separate `publication` block decides what happens to the pull requests the
 swarm publishes from this repository. Worker attempts run only deterministic
 guards and verification; the agentic fresh review (`openswarm pr review
