@@ -9,6 +9,7 @@ import { postStatusUpdate } from '../linear/index.js';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { withFileLock } from '../support/fileLock.js';
 
 let cronJob: Cron | null = null;
 let linearClient: LinearClient | null = null;
@@ -24,6 +25,17 @@ let projectPathMapping = new Map<string, string>();
 // record intact. `complete` flips to true once every active project has been
 // published; only then does a later run of the same day skip outright.
 const WATERMARK_FILE = join(homedir(), '.openswarm', 'daily-reporter-watermark.json');
+
+// Cross-process lock around a whole report run. `reportInFlight` only guards
+// one process; two daemon instances firing the same cron used to both read an
+// empty watermark and publish every project twice. The run holds this lock
+// from the watermark read to the last write, so the second instance waits,
+// then reads the first one's record and skips what it published. A holder that
+// died is reclaimed by the lock's dead-pid check.
+const REPORT_LOCK_FILE = `${WATERMARK_FILE}.lock`;
+/** How long a second instance waits for a running report before giving up. */
+const REPORT_LOCK_WAIT_MS = 15 * 60_000;
+const LOCK_TIMEOUT_PREFIX = 'Timed out waiting for file lock';
 
 interface DailyWatermark {
   /** Day (UTC, YYYY-MM-DD) this record describes. */
@@ -145,11 +157,32 @@ export function stopDailyReporter(): void {
  * republishes only the projects that failed; the day is marked complete once
  * every project succeeded.
  */
-export async function generateDailyReports(): Promise<void> {
+export async function generateDailyReports(
+  options: { lockWaitMs?: number } = {},
+): Promise<void> {
   if (!linearClient || !teamId) {
     console.warn('[DailyReporter] Linear client or team ID not configured');
     return;
   }
+
+  try {
+    await withFileLock(REPORT_LOCK_FILE, () => generateDailyReportsLocked(), {
+      timeoutMs: options.lockWaitMs ?? REPORT_LOCK_WAIT_MS,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith(LOCK_TIMEOUT_PREFIX)) {
+      // Another instance is still publishing; it records what it published,
+      // so the next window retries anything it could not finish.
+      console.warn('[DailyReporter] Another instance holds the report lock, skipping this run');
+      return;
+    }
+    console.error('[DailyReporter] Failed to generate reports:', error);
+  }
+}
+
+/** One report run. Must only be called while holding REPORT_LOCK_FILE. */
+async function generateDailyReportsLocked(): Promise<void> {
+  if (!linearClient || !teamId) return;
 
   const today = new Date().toISOString().slice(0, 10);
   const watermark = readWatermark();
