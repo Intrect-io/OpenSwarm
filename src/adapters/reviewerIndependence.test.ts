@@ -136,9 +136,15 @@ describe('collectReviewerFamilyViolations (AGT-4806)', () => {
     expect(collectReviewerFamilyViolations(config({ models: { worker: 'claude-haiku-4-5', reviewer: 'claude-sonnet-4' } }))).toHaveLength(1);
   });
 
-  it('skips a scope whose reviewer is switched off', () => {
+  it('still checks a disabled reviewer role: the PR-time fresh review runs on its model', () => {
     expect(collectReviewerFamilyViolations(config({
       defaultRoles: { worker: { model: 'gpt-5.6-terra' }, reviewer: { enabled: false, model: 'gpt-5.6-sol' } },
+    }))).toHaveLength(1);
+  });
+
+  it('skips a scope whose worker is switched off: nothing is produced to review', () => {
+    expect(collectReviewerFamilyViolations(config({
+      defaultRoles: { worker: { enabled: false, model: 'gpt-5.6-terra' }, reviewer: { model: 'gpt-5.6-sol' } },
     }))).toEqual([]);
   });
 

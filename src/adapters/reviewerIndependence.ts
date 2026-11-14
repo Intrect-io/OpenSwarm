@@ -132,15 +132,18 @@ function describeModel(model: string): string {
 
 /**
  * Every scope where the reviewer could run on the worker's model family, as
- * `<config path>: <reason>` lines. Empty when the operator opted out or the
- * reviewer is switched off.
+ * `<config path>: <reason>` lines. Empty when the operator opted out.
  */
 export function collectReviewerFamilyViolations(config: ReviewerIndependenceConfig): string[] {
   const autonomous = config.autonomous;
   if (!autonomous || autonomous.allowSameFamilyReview === true) return [];
   const violations: string[] = [];
   for (const { where, worker, reviewer } of pairs(config)) {
-    if (reviewer.enabled === false || worker.enabled === false) continue;
+    // A disabled reviewer ROLE still reviews: the PR-time fresh review, on by
+    // default for every repository, runs on the reviewer role's adapter and
+    // model whatever its `enabled` says (publicationReviewBudget.ts). Only a
+    // disabled worker means nothing in this scope is produced to review.
+    if (worker.enabled === false) continue;
     const workerModels = roleModels(worker, config.adapter);
     const reviewerModels = roleModels(reviewer, config.adapter);
     for (const reviewerModel of reviewerModels) {
