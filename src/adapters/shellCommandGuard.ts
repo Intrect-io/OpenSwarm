@@ -77,9 +77,10 @@ const COMMAND_LAUNCHERS: Record<string, true> = {
 
 /**
  * Reserved words that precede a command inside a compound statement:
- * `for f in a; do rm -rf /x; done` runs `rm` from the word after `do`.
+ * `for f in a; do rm -rf /x; done` runs `rm` from the word after `do`, and
+ * `{ rm -rf /x; }` from the word after `{`.
  */
-const COMPOUND_PREFIXES: ReadonlySet<string> = new Set(['do', 'then', 'else', 'if', 'elif', 'while', 'until', '!']);
+const COMPOUND_PREFIXES: ReadonlySet<string> = new Set(['do', 'then', 'else', 'if', 'elif', 'while', 'until', '!', '{']);
 
 /** Characters after `$` that make it a parameter expansion bash fills in (`$X`, `$1`, `$@`, `$$`). */
 const PARAMETER_START = /[A-Za-z_0-9@*#?!$-]/;
@@ -338,7 +339,8 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
       continue;
     }
     if (char === ' ' || char === '\t') { endWord(); atWordStart = true; continue; }
-    if (char === '\n' || char === ';' || char === '&' || char === '|') {
+    // `(` and `)` open and close a subshell: `(rm -rf /x)` runs `rm`.
+    if (char === '\n' || char === ';' || char === '&' || char === '|' || char === '(' || char === ')') {
       endCommand();
       if (char !== '\n' && command[i + 1] === char) i++;
       continue;
@@ -388,14 +390,37 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
  * from the resolution above so the two questions stay separable: what will run,
  * and is that thing destructive.
  */
+/** git's global options that take the next word as their value (`git -C dir reset`). */
+const GIT_VALUE_OPTIONS: ReadonlySet<string> = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace']);
+
+/**
+ * git's subcommand and the words after it, or null when there is none. The
+ * subcommand is the first word after the global options; matching `reset`
+ * anywhere in the line would make `git push origin reset` look like one.
+ */
+function gitSubcommand(args: string[]): { sub: string; rest: string[] } | null {
+  for (let i = 0; i < args.length; i++) {
+    if (GIT_VALUE_OPTIONS.has(args[i])) { i++; continue; }
+    if (args[i].startsWith('-')) continue;
+    return { sub: args[i], rest: args.slice(i + 1) };
+  }
+  return null;
+}
+
 const DESTRUCTIVE_RULES: ReadonlyArray<(name: string, args: string[]) => boolean> = [
   // `rm -rf`, `rm -fr`, `rm -R`, `rm --recursive` — the recursive flag is the destructive part.
   (name, args) => name === 'rm' && args.some((arg) => arg === '--recursive' || /^-[A-Za-z]*[rR][A-Za-z]*$/.test(arg)),
-  (name, args) => name === 'git' && args.includes('reset') && args.includes('--hard'),
+  (name, args) => {
+    const git = name === 'git' ? gitSubcommand(args) : null;
+    return git?.sub === 'reset' && git.rest.includes('--hard');
+  },
   // `git clean` deletes untracked files once force meets directories: `-fd`, `-fdx`, `-d -f`.
-  (name, args) => name === 'git' && args.includes('clean')
-    && args.some((arg) => arg === '--force' || /^-[A-Za-z]*f[A-Za-z]*$/.test(arg))
-    && args.some((arg) => /^-[A-Za-z]*d[A-Za-z]*$/.test(arg)),
+  (name, args) => {
+    const git = name === 'git' ? gitSubcommand(args) : null;
+    return git?.sub === 'clean'
+      && git.rest.some((arg) => arg === '--force' || /^-[A-Za-z]*f[A-Za-z]*$/.test(arg))
+      && git.rest.some((arg) => /^-[A-Za-z]*d[A-Za-z]*$/.test(arg));
+  },
   // The mode is chmod's first non-flag argument; a FILE named `777` is not a mode.
   (name, args) => name === 'chmod' && /^[0-7]*777[0-7]*$/.test(args.find((arg) => !arg.startsWith('-')) ?? ''),
   (name, args) => name === 'chown'
@@ -425,25 +450,43 @@ function hasOperand(args: string[]): boolean {
 }
 
 /**
+ * Word lists an unknown argument may turn into. A double-quoted expansion
+ * stays one word, so it can only become one stand-in. An unquoted one is split
+ * on whitespace, so it can also become a flag followed by a target, or two
+ * flags and a target (`F="-rf /x"; rm $F`), after any literal text it began with.
+ */
+function standInExpansions(word: string, dynamics: WordDynamics): string[][] {
+  const single = FLAG_STAND_INS.map((standIn) => [standIn]);
+  if (!dynamics.unquoted) return single;
+  const split: string[][] = [...single];
+  for (const first of FLAG_STAND_INS) {
+    split.push([first, '/x']);
+    for (const second of FLAG_STAND_INS) split.push([first, second, '/x']);
+  }
+  return dynamics.leading ? split : [...split, ...split.map((words) => [word, ...words])];
+}
+
+/**
  * Could the run-time value of an unknown argument make `name args` destructive?
  *
- * An argument is a flag candidate only when its unknown part decides how it
- * starts (`$F`, `"$(echo -rf)"`) or it already starts with `-` (`-$F`), and it
- * comes before `--`. A double-quoted one stays a single word, so it must still
- * leave an operand to act on: `rm -f "$tmp"` stays allowed, since at worst it
- * is `rm -f -r` with nothing to remove. An unquoted one can split into a flag
- * AND a target (`F="-rf /x"; rm $F`), so on a destructive program it is
- * refused on its own.
+ * A double-quoted unknown is a flag candidate only when it decides how the
+ * word starts (`"$(echo -rf)"`) or the word already starts with `-` (`-"$F"`),
+ * and it must still leave an operand to act on: `rm -f "$tmp"` stays allowed,
+ * since at worst it is `rm -f -r` with nothing to remove. An unquoted unknown
+ * is split by the shell wherever it sits, so `rm -f $tmp` and `rm ./$NAME.js`
+ * are refused — quote the variable and they pass. Words after `--` are
+ * operands whatever they expand to.
  */
 function unknownFlagIsDestructive(name: string, args: string[], argDynamics: WordDynamics[]): boolean {
+  if (!DESTRUCTIVE_PROGRAMS.includes(name)) return false;
   const endOfFlags = args.indexOf('--');
   for (let i = 0; i < args.length; i++) {
     if (endOfFlags >= 0 && i > endOfFlags) break;
     const dynamics = argDynamics[i] ?? STATIC_WORD;
-    if (!dynamics.any || !(dynamics.leading || args[i].startsWith('-'))) continue;
-    if (dynamics.unquoted && DESTRUCTIVE_PROGRAMS.includes(name)) return true;
-    for (const standIn of FLAG_STAND_INS) {
-      const candidate = [...args.slice(0, i), standIn, ...args.slice(i + 1)];
+    if (!dynamics.any) continue;
+    if (!dynamics.unquoted && !(dynamics.leading || args[i].startsWith('-'))) continue;
+    for (const expansion of standInExpansions(args[i], dynamics)) {
+      const candidate = [...args.slice(0, i), ...expansion, ...args.slice(i + 1)];
       if (rulesMatch(name, candidate) && hasOperand(candidate)) return true;
     }
   }

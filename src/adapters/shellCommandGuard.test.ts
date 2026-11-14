@@ -199,6 +199,16 @@ describe('destructive-command guard refuses run-time words it cannot see (AGT-34
     'timeout 5 $X -rf /foo',
     'for f in a; do rm -rf /foo; done',
     'if true; then rm -rf /foo; fi',
+    '(rm -rf /foo)',
+    '{ rm -rf /foo; }',
+    'git -C repo reset --hard',
+    'git $X',
+    // An unquoted expansion is split by the shell wherever it sits, so it can
+    // carry a flag and a target: NAME="x -rf /" turns the last one into
+    // `rm -f ./dist/x -rf /.js`. Quoting the variable is the fix.
+    'rm -f $tmp',
+    'rm -f ./dist/$NAME.js',
+    'kill $PID',
   ])('blocks: %s', (command) => {
     expect(isCommandBlocked(command)).toBe(true);
   });
@@ -224,8 +234,20 @@ describe('destructive-command guard refuses run-time words it cannot see (AGT-34
     'rm -f "$tmp"',
     'rm -f -- $tmp',
     'rm "$OUT_DIR/bundle.js"',
-    'rm -f ./dist/$NAME.js',
+    'rm -f "./dist/$NAME.js"',
     'git commit -m "$MSG"',
+    // git's subcommand is fixed by a literal word, so an unknown later on
+    // cannot turn it into `reset --hard` or `clean -fd`.
+    'git diff $BASE..HEAD',
+    'git log $(git merge-base HEAD origin/main)..HEAD',
+    'git push origin $BRANCH',
+    'git checkout $BRANCH',
+    'git add $FILES',
+    'git show $SHA',
+    'git push origin reset',
+    'chmod +x $F',
+    'kill "$PID"',
+    'rm -f -- $tmp $other',
     'git checkout "$BRANCH"',
     'git log --since="$SINCE"',
     'mkdir -p "$OUT"',
