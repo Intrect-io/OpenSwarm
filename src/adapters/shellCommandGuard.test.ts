@@ -209,6 +209,15 @@ describe('destructive-command guard refuses run-time words it cannot see (AGT-34
     'rm -f $tmp',
     'rm -f ./dist/$NAME.js',
     'kill $PID',
+    // Wrapping an unknown program in a compound statement or a launcher with
+    // nothing after it does not make it any less the program (X="rm -rf /x").
+    '{ $X; }',
+    'if true; then $X; fi',
+    '! $X',
+    'for f in a; do $X; done',
+    'command $X',
+    'exec $X',
+    'env $(echo rm -rf /x)',
   ])('blocks: %s', (command) => {
     expect(isCommandBlocked(command)).toBe(true);
   });
@@ -261,6 +270,9 @@ describe('destructive-command guard refuses run-time words it cannot see (AGT-34
     "awk '{print $2}' f.txt",
     'for f in $(ls); do echo "$f"; done',
     'echo $$',
+    'timeout 30 cat $FILE',
+    'xargs echo "$f"',
+    'for f in a b; do cat "$f"; done',
   ])('allows: %s', (command) => {
     expect(isCommandBlocked(command)).toBe(false);
   });

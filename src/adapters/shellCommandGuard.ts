@@ -430,6 +430,11 @@ const DESTRUCTIVE_RULES: ReadonlyArray<(name: string, args: string[]) => boolean
     && args.some((arg) => /^-[A-Za-z]*9$/.test(arg) || /^-(SIG)?KILL$/i.test(arg)),
 ];
 
+/** A launcher's own option, assignment or count (`-n`, `FOO=1`, `30`, `5m`) — not a program. */
+function isLauncherOption(word: string): boolean {
+  return word.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || /^\d+(?:\.\d+)?[smhd]?$/.test(word);
+}
+
 /** Programs a rule above can match — the only ones whose unknown flags matter. */
 const DESTRUCTIVE_PROGRAMS: readonly string[] = ['rm', 'git', 'chmod', 'chown', 'dd', 'kill', 'pkill'];
 
@@ -506,7 +511,7 @@ function unknownProgramIsDestructive(args: string[], argDynamics: WordDynamics[]
  * (`timeout $T npm test` — `$T` is a duration), so an unknown first word is
  * judged by what follows it instead of being refused outright.
  */
-function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number, asLauncherSuffix = false): boolean {
+function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number, asLauncherSuffix = false, programSlot = false): boolean {
   if (command.redirects.some((target) => target.startsWith('/dev/sd'))) return true;
   // SQL verbs are destructive wherever they sit in the line: a client reads
   // them as a statement, so position cannot separate `psql -c "drop database
@@ -531,7 +536,10 @@ function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number, asLau
     // `X=rm; $X -rf /`, `$(echo rm) -rf /`. The guard cannot know it, so it
     // refuses rather than guess — except in a launcher suffix, where the word
     // may be the launcher's own argument and the rest of the line decides.
-    if (!asLauncherSuffix) return true;
+    // With nothing after it, and only the launcher's options before it, it can
+    // only be the program the launcher runs: `command $X`, `timeout 5 $X`,
+    // `env $(echo rm -rf /x)`. (`timeout 30 cat $F` has `cat` before it.)
+    if (!asLauncherSuffix || (programSlot && args.length === 0)) return true;
     if (unknownProgramIsDestructive(args, argDynamics)) return true;
   }
 
@@ -540,7 +548,18 @@ function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number, asLau
     const scriptFlag = SCRIPT_HOSTS[name] ? args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg)) : -1;
     if (scriptFlag >= 0 && isCommandBlocked(args.slice(scriptFlag + 1).join(' '), depth + 1)) return true;
     if (name === 'eval' && isCommandBlocked(args.join(' '), depth + 1)) return true;
-    if (COMMAND_LAUNCHERS[name] || COMPOUND_PREFIXES.has(name)) {
+    // After `do`/`then`/`{`/`!` the next word IS the program, so it gets the
+    // strict program-position rule (`{ $X; }`), not the launcher's leniency.
+    if (COMPOUND_PREFIXES.has(name) && command.words.length > start + 1) {
+      const next: ResolvedCommand = {
+        words: command.words.slice(start + 1),
+        redirects: command.redirects,
+        nested: command.nested,
+        dynamics: command.dynamics.slice(start + 1),
+      };
+      if (resolvedCommandIsBlocked(next, depth + 1)) return true;
+    }
+    if (COMMAND_LAUNCHERS[name]) {
       // The launcher's own arguments may still be flags with values
       // (`sudo -u root rm -rf /`), so every suffix is a candidate command.
       const limit = Math.min(command.words.length, start + GUARD_MAX_WORDS);
@@ -551,7 +570,8 @@ function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number, asLau
           nested: command.nested,
           dynamics: command.dynamics.slice(i),
         };
-        if (resolvedCommandIsBlocked(suffix, depth + 1, true)) return true;
+        const programSlot = command.words.slice(start + 1, i).every(isLauncherOption);
+        if (resolvedCommandIsBlocked(suffix, depth + 1, true, programSlot)) return true;
       }
     }
   }
