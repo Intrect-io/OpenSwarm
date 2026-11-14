@@ -809,7 +809,7 @@ describe('service', () => {
       const configWithAutonomous: SwarmConfig = {
         ...mockConfig,
         autonomous: {
-          allowDelegatedAdapters: true,
+          allowDelegatedAdapters: true, allowSameFamilyReview: true, // this test starts the service; the policies have their own tests
           enabled: true,
           pairMode: true,
           schedule: '*/30 * * * *',
