@@ -26,7 +26,8 @@ import { embeddingTextFor } from './embeddingConfig.js';
 type MemoryTable = NonNullable<ReturnType<typeof getTable>>;
 const MAX_MEMORY_REVISIONS = 20;
 
-/** Rows deleted per Lance commit while sweeping expired records. */
+/** Rows deleted per Lance commit while sweeping expired records, and rows read
+ *  per page by the bounded recent-conversation scan. */
 const PAGE_SIZE = 10_000;
 
 /**
@@ -717,6 +718,46 @@ export async function saveConversation(
 }
 
 /**
+ * Walk every row of `table` in offset pages and return the newest `limit`
+ * rows that satisfy `accept`, ordered newest first by `createdAt`.
+ *
+ * Unlike fetchAllTableRows this never materialises the table: only the current
+ * page and the `limit` best candidates are held at once. Ties on `createdAt`
+ * keep the row seen first, matching a stable sort over the full scan.
+ */
+export async function selectNewestRows(
+  table: { query: () => { offset: (n: number) => { limit: (n: number) => { toArray: () => Promise<any[]> } } } },
+  accept: (row: any) => boolean,
+  limit: number,
+  pageSize: number = PAGE_SIZE,
+): Promise<any[]> {
+  const keep = Math.max(0, Math.floor(limit));
+  if (keep === 0) return [];
+  const size = Math.max(1, Math.floor(pageSize));
+  const best: any[] = [];  // newest first, length <= keep
+  const stamp = (row: any): number => row.createdAt || 0;
+
+  let offset = 0;
+  for (;;) {
+    const page = await table.query().offset(offset).limit(size).toArray();
+    if (page.length === 0) break;
+    for (const row of page) {
+      if (typeof row !== 'object' || row === null || !accept(row)) continue;
+      const t = stamp(row);
+      if (best.length === keep && t <= stamp(best[best.length - 1])) continue;
+      // Insert after every row that is at least as new (stable for ties).
+      let at = best.length;
+      while (at > 0 && stamp(best[at - 1]) < t) at--;
+      best.splice(at, 0, row);
+      if (best.length > keep) best.pop();
+    }
+    offset += page.length;
+    if (page.length < size) break;
+  }
+  return best;
+}
+
+/**
  * Get recent conversations (sorted by createdAt)
  * - Chronological lookup, not semantic search
  * - channelId is stored in the derivedFrom field (legacy: metadata.issueRef)
@@ -731,12 +772,13 @@ export async function getRecentConversations(
     if (!table) return [];
 
     // Scalar scan is intentional: vector similarity must not decide which
-    // messages count as recent. The final ordering uses the source timestamp.
-    const results = await table.query().limit(100_000).toArray();
-
-    // Filter: journal + chat (channelId matching is loose for legacy data compat)
-    const filtered = results
-      .filter((r: any) => {
+    // messages count as recent. The whole table is walked in offset pages —
+    // the previous single `.limit(100_000)` silently dropped every row past
+    // that boundary, so a large store could miss the newest messages — while
+    // only the newest `limit` matches are retained, keeping memory bounded.
+    const filtered = await selectNewestRows(
+      table,
+      (r: any) => {
         if (r.type !== 'journal' || (r.repo !== 'chat' && r.repo !== 'discord')) return false;  // Support legacy 'discord' repo
 
         // channelId matching: derivedFrom or metadata.issueRef
@@ -748,9 +790,9 @@ export async function getRecentConversations(
         if (meta.issueRef === channelId) return true;
 
         return false;
-      })
-      .sort((a: any, b: any) => (b.createdAt || 0) - (a.createdAt || 0))  // Newest first
-      .slice(0, limit);
+      },
+      limit,
+    );
 
     // Convert to MemorySearchResult format
     return filtered.map((r: any) => ({
