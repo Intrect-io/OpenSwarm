@@ -68,6 +68,21 @@ describe('cgf-portal #215 fixture', () => {
   });
 });
 
+describe('a removed name that is still defined elsewhere', () => {
+  it('does not flag callers of a same-named definition in an untouched file', async () => {
+    write('tools/a.py', 'def main():\n    pass\n');
+    write('tools/b.py', 'def main():\n    pass\n\nmain()\n');
+    write('src/config.ts', 'export const config = 1;\n');
+    write('src/other.ts', 'export const config = 2;\nconsole.log(config);\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    write('tools/a.py', '# retired\n');
+    write('src/config.ts', '// retired\n');
+    const res = await runCallerCheckGuard(repo);
+    expect(res.issues).toEqual([]);
+  });
+});
+
 describe('removedPublicSymbols', () => {
   it('does not treat a signature change as a removal', () => {
     const diff = [

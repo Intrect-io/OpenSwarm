@@ -63,12 +63,12 @@ async function git(projectPath: string, args: string[]): Promise<string> {
 }
 
 /** `git grep` hits for a symbol, or none. Exit status 1 means "no match"; anything else is an error. */
-async function references(projectPath: string, symbol: string): Promise<Array<{ file: string; line: string }>> {
+async function references(projectPath: string, symbol: string): Promise<Array<{ file: string; line: string; text: string }>> {
   try {
     const out = await git(projectPath, ['grep', '-n', '-w', '--untracked', '-e', symbol, '--', ...SOURCE_GLOBS]);
     return out.split('\n').flatMap((hit) => {
-      const match = /^(.+?):(\d+):/.exec(hit);
-      return match ? [{ file: match[1], line: match[2] }] : [];
+      const match = /^(.+?):(\d+):(.*)$/.exec(hit);
+      return match ? [{ file: match[1], line: match[2], text: match[3] }] : [];
     });
   } catch (err) {
     if ((err as { code?: unknown }).code === 1) return [];
@@ -87,7 +87,12 @@ export async function runCallerCheckGuard(projectPath: string): Promise<GuardRes
         if (file) changed.add(file);
       }
       for (const [symbol, definitionFile] of removed) {
-        for (const hit of await references(projectPath, symbol)) {
+        const hits = await references(projectPath, symbol);
+        // Still defined somewhere (`def main` in another script, a second
+        // `export const config`): callers may bind to that one, so a grep
+        // cannot tell a broken reference from a working one. Stay quiet.
+        if (hits.some(hit => definedSymbol(hit.file, hit.text) === symbol)) continue;
+        for (const hit of hits) {
           if (changed.has(hit.file)) continue;
           issues.push(`[${hit.file}:${hit.line}] still references removed public symbol "${symbol}" (removed from ${definitionFile}); update or remove this caller.`);
         }
