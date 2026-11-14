@@ -344,6 +344,7 @@ autonomous:
                             # trailing newlines in place (AGT-4406)
     claimEvidenceCheck: true # block a docs-only change that replaces figures the run never printed;
                             # flag approval claims without a link/date (AGT-4408)
+    callerCheck: true        # block removed/renamed public symbols with surviving callers (AGT-4417)
 
   # Self-repair reflection budget: max objective (lint/bs/test) failures tolerated
   # before the loop gives up on bad edits. Lower it to cap token burn when

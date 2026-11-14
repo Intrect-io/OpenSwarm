@@ -308,7 +308,6 @@ const OrchestratorConfigSchema = z.object({
   timeoutMs: z.number().int().min(1_000).max(60 * 60_000).default(600_000),
   maxTurns: z.number().int().min(1).max(50).default(12),
 }).optional();
-
 const PipelineStageSchema = z.enum(['worker', 'reviewer', 'tester', 'documenter', 'auditor', 'skill-documenter']);
 
 const JobProfileSchema = z.object({
@@ -343,6 +342,7 @@ const PipelineGuardsConfigSchema = z.object({
   claimEvidenceCheck: z.boolean().optional(),
   /** A run that claims to add a gate must assert every value it newly reports (AGT-3107). */
   gateClaimEvidenceCheck: z.boolean().optional(),
+  callerCheck: z.boolean().optional(),
 }).optional();
 
 const VerifyConfigSchema = z.object({

@@ -16,6 +16,7 @@ import { isEphemeralWorktreeArtifact } from '../support/worktreeEphemeral.js';
 import { inspectRewrites, describeRewrite } from './rewriteGuard.js';
 import { figuresChangedInPlace, unsourcedFigures, uncitedApprovalClaims } from './claimEvidenceGuard.js';
 import { claimsGate, unassertedReportedKeys, gateClaimIssue } from './gateClaimGuard.js';
+import { runCallerCheckGuard } from './callerCheckGuard.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -991,11 +992,10 @@ export async function runGuards(
     results.push(await runGateClaimGuard(guardWorkerResult, projectPath));
   }
 
+  if (config.callerCheck) results.push(await runCallerCheckGuard(projectPath));
+
   // conventionalCommits is checked separately (needs commit message)
   // haltToLinear is handled by the pipeline, not a guard function
 
-  const combinedIssues = results.flatMap(r => r.issues);
-  const allPassed = results.every(r => r.passed || !r.blocking);
-
-  return { allPassed, results, combinedIssues };
+  return { allPassed: results.every(r => r.passed || !r.blocking), results, combinedIssues: results.flatMap(r => r.issues) };
 }
