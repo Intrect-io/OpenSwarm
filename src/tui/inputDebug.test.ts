@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, statSync, existsSync, mkdirSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, readFileSync, statSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:os')>();
@@ -65,6 +65,18 @@ describe('appendInputDebug (INT-1964)', () => {
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain('cp=[51060]');
     expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it('tightens a pre-existing world-readable log to 0600 before appending', async () => {
+    const { appendInputDebug } = await import('./inputDebug.js');
+    const path = join(process.env.OSW_TEST_HOME!, '.openswarm', 'input-debug.log');
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, 'old line\n', { mode: 0o644 });
+    chmodSync(path, 0o644);
+    expect(statSync(path).mode & 0o777).toBe(0o644);
+    appendInputDebug('x', {}, path);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path, 'utf8')).toContain('old line');
   });
 
   it('swallows write errors (NUL in path)', async () => {
