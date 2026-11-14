@@ -18,6 +18,7 @@
 // described the code actually running.
 
 import { formatDateTime, formatHour } from './format.mjs';
+import { createUsageDrill } from './usageDrill.mjs';
 
 /** Axes fetched for every window. The time axis is chosen per window. */
 const AXES = ['model', 'stage', 'adapter', 'project', 'task'];
@@ -209,6 +210,24 @@ export function formatPercent(rate) {
   return `${(rate * 100).toFixed(1)}%`;
 }
 
+/**
+ * The key cell of a drillable table: a button, so it is reachable by keyboard,
+ * styled (usage.css `.drill-trigger`) to stay selectable and to ellipsise like
+ * the plain key cell does. (AGT-4297 round-3 items 1 and 2)
+ */
+function drillCell(key, axis) {
+  const td = cell('', 'key');
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'drill-trigger';
+  button.textContent = key;
+  button.title = key;
+  button.dataset.axis = axis;
+  button.dataset.key = key;
+  td.append(button);
+  return td;
+}
+
 function cell(text, className, { titled = false } = {}) {
   const td = document.createElement('td');
   td.textContent = text;
@@ -240,7 +259,7 @@ export function truncationNote(hidden) {
   return `${formatCount(hidden.count)} more row${hidden.count === 1 ? '' : 's'} (${formatCost(hidden.costUsd)}) not shown.`;
 }
 
-export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', label = '', excludeUnattributed = false } = {}) {
+export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', label = '', excludeUnattributed = false, drillAxis = null } = {}) {
   table.replaceChildren();
   // A ranking of tasks must not be topped by the bucket for calls that named
   // no task: it outweighs every real row and pushes them all below the fold.
@@ -290,7 +309,7 @@ export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', lab
     const rate = cacheRate(row);
     const per = costPerCall(row);
     tr.append(
-      cell(row.key, 'key', { titled: true }),
+      drillAxis ? drillCell(row.key, drillAxis) : cell(row.key, 'key', { titled: true }),
       cell(formatCount(row.calls), 'num'),
       cell(formatTokens((row.promptTokens ?? 0) + (row.completionTokens ?? 0)), 'num'),
       cell(formatPercent(rate), `num ${rateClass(rate)}`.trim()),
@@ -457,6 +476,10 @@ function writeWindowToUrl(value) {
 }
 
 export function startUsageView({ root = document, fetchImpl = globalThis.fetch, location: loc = globalThis.location } = {}) {
+  // One signal for every listener this view registers, so a second start (or a
+  // test) can remove them all instead of stacking duplicates. (AGT-4297 item 7)
+  const listeners = new AbortController();
+  const { signal } = listeners;
   // Only the newest request may paint. Windows differ in cost — 24h opens one
   // day file, 30d up to thirty — so picking 7d then 24h lands the 7d response
   // second, and every control on the page would then deny the numbers on it.
@@ -477,6 +500,7 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
 
   /** The window whose data is currently on screen, so a failure can go back to it. */
   let rendered = null;
+  const drill = createUsageDrill({ root, fetchImpl, getSince: () => rendered ?? windowSelect?.value ?? '24h', signal });
 
   async function refresh() {
     const since = windowSelect?.value ?? '24h';
@@ -503,7 +527,7 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
       for (const axis of ['model', 'stage', 'adapter', 'project']) {
         const table = root.querySelector(`#table-${axis}`);
         if (!table) continue;
-        const drew = renderTable(table, data[axis], { label: LABELS[axis] });
+        const drew = renderTable(table, data[axis], { label: LABELS[axis], drillAxis: axis });
         const note = root.querySelector(`#note-${axis}`);
         if (note) note.textContent = truncationNote(drew.hidden);
       }
@@ -523,6 +547,8 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
         }
       }
       rendered = since;
+      // An open breakdown follows the window, so it never disagrees with the tables.
+      if (drill.current()) drill.refresh();
       // `As of` names when the data ends. Falling back to `since` would print
       // the window's START under that label, which is the opposite.
       const until = data.model?.until;
@@ -549,9 +575,9 @@ export function startUsageView({ root = document, fetchImpl = globalThis.fetch, 
   windowSelect?.addEventListener('change', () => {
     writeWindowToUrl(windowSelect.value);
     refresh();
-  });
-  root.querySelector('#refresh')?.addEventListener('click', refresh);
-  return { refresh };
+  }, { signal });
+  root.querySelector('#refresh')?.addEventListener('click', refresh, { signal });
+  return { refresh, drill, dispose: () => listeners.abort() };
 }
 
 if (typeof document !== 'undefined' && document.querySelector('#days')) {

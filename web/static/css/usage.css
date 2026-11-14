@@ -134,3 +134,35 @@ td.key { color: var(--fg-primary); max-width: 22rem; overflow: hidden; text-over
 .usage-empty-window h2 { margin: 0 0 var(--space-2); font-size: var(--text-lg); font-weight: 600; color: var(--fg-primary); }
 .usage-empty-window p { margin: 0; color: var(--fg-secondary); }
 .usage-breakdown { display: contents; }
+
+/* --- drill-down (AGT-4297) --- */
+
+/* The key cell holds a button so a row is reachable by keyboard. Chrome blocks
+   text selection inside a button and a 100%-wide inline button never overflows
+   the cell, so without these the worktree UUID you came to grep for could not
+   be copied and lost its ellipsis (round-3 items 1 and 2). */
+.drill-trigger {
+  display: block;
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+  -webkit-user-select: text;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--fg-primary);
+  text-align: left;
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+.drill-trigger:hover { color: var(--accent); }
+.drill-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.drill-panel[hidden] { display: none; }
+.drill-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); border-bottom: 1px solid var(--border); }
+.drill-head .card-head { border-bottom: 0; }
+.drill-head .btn { margin-right: var(--space-3); }
