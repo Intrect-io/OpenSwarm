@@ -210,7 +210,10 @@ export async function classifyBranchRisk(
   protectedFiles: readonly string[] = [],
 ): Promise<ChangeRisk> {
   try {
-    const { stdout } = await exec('git', ['diff', '--numstat', '-M', `${baseRef}...HEAD`], {
+    // quotepath off: git otherwise prints a non-ASCII path quoted and escaped
+    // (`"\355\225\234.sql"`), and every suffix rule would miss it. cgf-portal
+    // tracks Korean file names.
+    const { stdout } = await exec('git', ['-c', 'core.quotepath=false', 'diff', '--numstat', '-M', `${baseRef}...HEAD`], {
       cwd: worktreePath,
       maxBuffer: 16 * 1024 * 1024,
     });

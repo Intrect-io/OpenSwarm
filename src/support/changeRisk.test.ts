@@ -149,6 +149,17 @@ describe('classifyBranchRisk', () => {
       expect(risk.level).toBe('high');
       expect(risk.reasons[0]).toMatch(/^CI/);
 
+      // A non-ASCII path is classified by its real name, not git's quoted form.
+      git(repo, 'checkout', '-qb', 'korean');
+      mkdirSync(join(repo, 'db'), { recursive: true });
+      writeFileSync(join(repo, 'db', '정산_보정.sql'), 'select 1;\n');
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-qm', 'sql');
+      const korean = await classifyBranchRisk(repo, 'feature', undefined);
+      expect(korean.level).toBe('high');
+      expect(korean.reasons).toContain('migration: `db/정산_보정.sql`');
+      git(repo, 'checkout', '-q', 'feature');
+
       const unknown = await classifyBranchRisk(repo, 'no-such-ref', undefined);
       expect(unknown.level).toBe('medium');
       expect(unknown.reasons[0]).toMatch(/^unknown/);
