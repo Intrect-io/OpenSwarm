@@ -15,7 +15,7 @@ import { promises as fs } from 'fs';
 import { resolve, basename, join } from 'path';
 import { getDateLocale } from '../locale/index.js';
 import { homedir } from 'os';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { withFileLock } from '../support/fileLock.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
 
@@ -365,6 +365,15 @@ async function updateIndex(session: CodexSession, summaryPath: string): Promise<
 }
 
 /**
+ * A session id that does not collide when two sessions start in the same
+ * millisecond (parallel workers). Keeps the `session-<ms>` prefix so ids still
+ * sort and read by start time; the random suffix makes them unique.
+ */
+export function newSessionId(now: number = Date.now()): string {
+  return `session-${now}-${randomUUID()}`;
+}
+
+/**
  * Session builder - incrementally construct a session
  */
 export class SessionBuilder {
@@ -373,7 +382,7 @@ export class SessionBuilder {
 
   constructor(title: string) {
     this.session = {
-      id: `session-${Date.now()}`,
+      id: newSessionId(),
       title,
       startedAt: Date.now(),
       tags: [],
