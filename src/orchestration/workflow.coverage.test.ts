@@ -1,4 +1,4 @@
-import { rm, writeFile } from 'node:fs/promises';
+import { readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -22,6 +22,7 @@ vi.mock('fs/promises', async importOriginal => {
 import {
   createCIPipelineTemplate,
   createReviewPipelineTemplate,
+  definitionStampsMatch,
   EXECUTION_DIR,
   getExecutableSteps,
   getParallelGroups,
@@ -243,7 +244,7 @@ describe('workflow storage round trips', () => {
       stepResults: {},
     };
     await saveExecution(execution);
-    expect(execution.definitionStamp).toMatch(/^\d+(\.\d+)?:\d+$/);
+    expect(execution.definitionStamp).toMatch(/^\d+(\.\d+)?:\d+:\d+$/);
 
     // Replace the definition so mtime/size change under the live execution.
     await saveWorkflow({
@@ -261,9 +262,91 @@ describe('workflow storage round trips', () => {
     ).rejects.toThrow(/Workflow definition changed/);
   });
 
+  it('refuses after a same-size replacement by rename that keeps the mtime', async () => {
+    const workflowId = uniqueId('cov-wf-ino');
+    const executionId = uniqueId('cov-exec-ino');
+    cleanupWorkflowIds.push(workflowId);
+    cleanupExecutionIds.push(executionId);
+
+    await saveWorkflow({
+      id: workflowId,
+      name: 'Name-A',
+      projectPath: '/tmp/project',
+      steps: [{ id: 'step', name: 'Step', prompt: 'run' }],
+    });
+    const definitionPath = resolve(WORKFLOW_DIR, `${workflowId}.yaml`);
+    // A whole-second mtime has no sub-millisecond part, so the replacement can
+    // be given a byte-identical mtimeMs and size: only the inode differs.
+    const sharedMtime = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await utimes(definitionPath, sharedMtime, sharedMtime);
+
+    const execution: WorkflowExecution = {
+      workflowId,
+      executionId,
+      status: 'running',
+      startedAt: Date.now(),
+      stepResults: {},
+    };
+    await saveExecution(execution);
+
+    const original = await readFile(definitionPath, 'utf-8');
+    const replaced = original.replace('Name-A', 'Name-B');
+    expect(Buffer.byteLength(replaced)).toBe(Buffer.byteLength(original));
+    const incoming = `${definitionPath}.incoming`;
+    await writeFile(incoming, replaced, 'utf-8');
+    await utimes(incoming, sharedMtime, sharedMtime);
+    await rename(incoming, definitionPath);
+
+    const after = await stat(definitionPath);
+    expect(after.mtimeMs).toBe(sharedMtime.getTime());
+
+    await expect(
+      saveExecution({ ...execution, status: 'completed', completedAt: Date.now() }),
+    ).rejects.toThrow(/Workflow definition changed/);
+  });
+
+  it('keeps accepting an execution stamped in the legacy mtime:size format', async () => {
+    const workflowId = uniqueId('cov-wf-legacy');
+    const executionId = uniqueId('cov-exec-legacy');
+    cleanupWorkflowIds.push(workflowId);
+    cleanupExecutionIds.push(executionId);
+
+    await saveWorkflow({
+      id: workflowId,
+      name: 'Legacy',
+      projectPath: '/tmp/project',
+      steps: [{ id: 'step', name: 'Step', prompt: 'run' }],
+    });
+    const st = await stat(resolve(WORKFLOW_DIR, `${workflowId}.yaml`));
+
+    await expect(saveExecution({
+      workflowId,
+      executionId,
+      status: 'running',
+      startedAt: Date.now(),
+      stepResults: {},
+      definitionStamp: `${st.mtimeMs}:${st.size}`,
+    })).resolves.toBeUndefined();
+  });
+
   it('returns null when loading a well-formed but nonexistent execution ID', async () => {
     const loaded = await loadExecution(uniqueId('cov-execution-missing'));
     expect(loaded).toBeNull();
+  });
+});
+
+describe('definitionStampsMatch', () => {
+  it('compares full stamps exactly', () => {
+    expect(definitionStampsMatch('1:2:3', '1:2:3')).toBe(true);
+    expect(definitionStampsMatch('1:2:3', '1:2:4')).toBe(false);
+    expect(definitionStampsMatch('missing', 'missing')).toBe(true);
+    expect(definitionStampsMatch('missing', '1:2:3')).toBe(false);
+  });
+
+  it('matches a legacy two-part stamp on mtime and size only', () => {
+    expect(definitionStampsMatch('1:2', '1:2:3')).toBe(true);
+    expect(definitionStampsMatch('1:2', '1:5:3')).toBe(false);
+    expect(definitionStampsMatch('1:2', 'missing')).toBe(false);
   });
 });
 

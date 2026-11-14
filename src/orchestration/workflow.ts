@@ -115,7 +115,9 @@ export interface WorkflowExecution {
   checkpoint?: string;  // git commit hash for rollback
   /**
    * Fence against concurrent workflow-definition replacement.
-   * Format matches filesystem identity: `${mtimeMs}:${size}` or `missing`.
+   * Format matches filesystem identity: `${mtimeMs}:${size}:${ino}` or `missing`.
+   * Executions persisted before the inode was added carry `${mtimeMs}:${size}`;
+   * those are compared on the two components they have.
    * Captured on first persist; later saves refuse if the definition file changed.
    */
   definitionStamp?: string;
@@ -400,14 +402,16 @@ export async function saveWorkflow(workflow: WorkflowConfig): Promise<void> {
 }
 
 /**
- * Loader-compatible stamp for a workflow definition file (`mtimeMs:size` or
- * `missing`). Same convention as storeFileStamp/atomicWriteFile consumers.
+ * Loader-compatible stamp for a workflow definition file (`mtimeMs:size:ino` or
+ * `missing`). Same convention as the task-state storeFileStamp: the inode is
+ * part of the identity so a same-size replacement by atomic rename that lands
+ * inside one mtime tick still trips the fence — mtime+size alone miss it.
  */
 export async function workflowDefinitionStamp(workflowId: string): Promise<string> {
   try {
     const filePath = storageFilePath(WORKFLOW_DIR, workflowId, '.yaml');
     const st = await fs.stat(filePath);
-    return `${st.mtimeMs}:${st.size}`;
+    return `${st.mtimeMs}:${st.size}:${st.ino}`;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
     // Invalid IDs throw from storageFilePath; propagate those.
@@ -462,6 +466,24 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
 }
 
 /**
+ * Compare a persisted definition stamp with the current one. A legacy
+ * two-component stamp (`mtimeMs:size`, written before the inode was added)
+ * matches on those two components, so executions already running across the
+ * upgrade are not refused for the format change alone.
+ */
+export function definitionStampsMatch(stored: string, current: string): boolean {
+  if (stored === current) return true;
+  const storedParts = stored.split(':');
+  const currentParts = current.split(':');
+  return (
+    storedParts.length === 2 &&
+    currentParts.length === 3 &&
+    storedParts[0] === currentParts[0] &&
+    storedParts[1] === currentParts[1]
+  );
+}
+
+/**
  * Save execution state — validated against the workflow definition when present.
  * Refuses to persist when the linked workflow definition was replaced under this
  * execution (definitionStamp fence), so a stale snapshot cannot be reported as a
@@ -469,7 +491,10 @@ export async function listWorkflows(): Promise<WorkflowConfig[]> {
  */
 export async function saveExecution(execution: WorkflowExecution): Promise<void> {
   const currentStamp = await workflowDefinitionStamp(execution.workflowId);
-  if (execution.definitionStamp !== undefined && execution.definitionStamp !== currentStamp) {
+  if (
+    execution.definitionStamp !== undefined &&
+    !definitionStampsMatch(execution.definitionStamp, currentStamp)
+  ) {
     throw new Error(
       `Workflow definition changed under execution ${execution.executionId} ` +
       `(expected ${execution.definitionStamp}, found ${currentStamp})`,
