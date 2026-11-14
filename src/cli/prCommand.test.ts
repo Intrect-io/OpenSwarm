@@ -374,6 +374,21 @@ describe('runPrCommand (INT-3282)', () => {
     expect(result.message).toMatch(/carried no verdict/);
   });
 
+  it('review --fresh says Decision: NONE and points at the posted partial notes (AGT-4413)', async () => {
+    const deps = mkDeps({
+      freshReviewOne: vi.fn(async () => ({
+        success: false,
+        error: 'reviewer-stage: produced no parseable verdict: Reviewer output carried no verdict',
+        iterations: 0,
+        gateRan: false,
+        partialFindingsPosted: true,
+      })),
+    });
+    const result = await runPrCommand('review', { fresh: true }, deps);
+    expect(result.exitCode).toBe(2);
+    expect(result.message).toMatch(/^Decision: NONE \(partial reviewer notes posted on the PR/m);
+  });
+
   it('review --fresh still exits 1 when the reviewer actually asked for changes', async () => {
     const deps = mkDeps({
       freshReviewOne: vi.fn(async () => ({ success: false, error: 'null deref in x.ts', iterations: 0, gateRan: true })),

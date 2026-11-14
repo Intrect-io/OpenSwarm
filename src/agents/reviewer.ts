@@ -3,6 +3,7 @@
 // Code review agent (CLI adapter based)
 // ============================================
 
+import { ReviewerNoVerdictError, partialReviewerText } from './reviewerNoVerdict.js';
 import { formatCommandEvidence } from './workerValidationEvidence.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import { t, getPrompts } from '../locale/index.js';
@@ -385,6 +386,8 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
   const prompt = buildReviewerPrompt(options);
   const cwd = expandPath(options.projectPath);
   const adapter = getAdapter(options.adapterName);
+  // The reviewer's final text, kept for a no-verdict failure below. (AGT-4413)
+  let finalText: string | undefined;
 
   try {
     // Run CLI via adapter
@@ -420,6 +423,7 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       },
     });
 
+    finalText = raw.stdout;
     // Parse result via adapter
     const parsedResult: ReviewResult = raw.blockedOnOperator || raw.executionOutcomeUnknown
       ? { decision: 'revise', feedback: raw.executionOutcomeUnknown
@@ -451,7 +455,8 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
     // error → the pipeline classifies infra_error (backoff retry, no STUCK) and the
     // CLI exits non-zero. (INT-2521)
     const msg = error instanceof Error ? error.message : String(error);
-    throw new Error(`reviewer-stage: produced no parseable verdict: ${msg}`, { cause: error });
+    // Carries the reviewer's last text so a caller can still show what it found. (AGT-4413)
+    throw new ReviewerNoVerdictError(`reviewer-stage: produced no parseable verdict: ${msg}`, partialReviewerText(finalText), { cause: error });
   }
 }
 
