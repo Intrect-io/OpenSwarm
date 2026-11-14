@@ -19,6 +19,7 @@ import {
   summarizeSettled,
   WORK_EXIT_FAILED,
   WORK_EXIT_INTERRUPTED,
+  WORK_EXIT_TERMINATED,
   WORK_EXIT_NOT_RUN,
   WORK_EXIT_OK,
   type WorkCommandDeps,
@@ -630,6 +631,46 @@ describe('runWorkCommand — abort propagation (SIGINT)', () => {
     });
     await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps);
     expect(exit).toHaveBeenCalledWith(130);
+  });
+});
+
+describe('runWorkCommand — SIGTERM takes the same cancellation path (AGT-3423)', () => {
+  it('SIGTERM aborts the pipeline signal, still closes the coordinator path, and exits 143', async () => {
+    let handler: ((signal?: 'SIGINT' | 'SIGTERM') => void) | undefined;
+    let uninstalled = 0;
+    const observedAborts: Array<string | undefined> = [];
+    const deps = baseDeps({
+      installSigintHandler: (fn) => {
+        handler = fn;
+        return () => { uninstalled += 1; };
+      },
+    });
+    deps.exec.mockImplementation(async (_ctx, _task, _path, signal?: AbortSignal) => {
+      handler?.('SIGTERM');
+      observedAborts.push(signal?.aborted ? 'aborted' : undefined);
+      return pipelineResult({ success: false, finalStatus: 'cancelled' });
+    });
+    const code = await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps);
+    expect(code).toBe(WORK_EXIT_TERMINATED);
+    expect(observedAborts).toEqual(['aborted']);
+    expect(uninstalled).toBe(1);
+    expect(deps.logs.join('\n')).toContain('Interrupted (SIGTERM)');
+  });
+
+  it('default wiring listens for SIGTERM during the run and removes the listener after', async () => {
+    const beforeTerm = process.listenerCount('SIGTERM');
+    const beforeInt = process.listenerCount('SIGINT');
+    let duringTerm = -1;
+    const deps = baseDeps();
+    delete deps.installSigintHandler;
+    deps.exec.mockImplementation(async () => {
+      duringTerm = process.listenerCount('SIGTERM');
+      return pipelineResult({ success: true, finalStatus: 'approved' });
+    });
+    expect(await runWorkCommand({ issueIds: ['INT-1'], path: '/repo', yes: true }, deps)).toBe(WORK_EXIT_OK);
+    expect(duringTerm).toBe(beforeTerm + 1);
+    expect(process.listenerCount('SIGTERM')).toBe(beforeTerm);
+    expect(process.listenerCount('SIGINT')).toBe(beforeInt);
   });
 });
 
