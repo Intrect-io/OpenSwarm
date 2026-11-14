@@ -13,6 +13,19 @@ vi.mock('./chatBackend.js', () => ({
   }),
 }));
 
+// Pass-through spy so the coalescing test can count real writes. (AGT-3494)
+const atomicWrites = vi.hoisted(() => ({ count: 0 }));
+vi.mock('./atomicFile.js', async () => {
+  const actual = await vi.importActual<typeof import('./atomicFile.js')>('./atomicFile.js');
+  return {
+    ...actual,
+    atomicWriteFileSync: (...args: Parameters<typeof actual.atomicWriteFileSync>) => {
+      atomicWrites.count += 1;
+      return actual.atomicWriteFileSync(...args);
+    },
+  };
+});
+
 import {
   generateSessionId,
   inferProvider,
@@ -100,6 +113,33 @@ describe('saveSession / loadSession (injectable dir)', () => {
     expect(loaded!.model).toBe('gpt-5.2-codex');
     expect(loaded!.messages).toEqual([{ role: 'user', content: 'hi' }]);
     expect(loaded!.totalTokens).toBe(42);
+  });
+
+  it('collapses a burst of saves into the newest snapshot without losing the final state (AGT-3494)', async () => {
+    const snap = (n: number) => mk({ messages: Array.from({ length: n }, (_, i) => ({ role: 'user' as const, content: `m${i}` })) });
+    const before = atomicWrites.count;
+    await Promise.all([1, 2, 3, 4, 5].map((n) => saveSession(snap(n), dir)));
+    const loaded = await loadSession('20260626-1200', dir);
+    expect(loaded!.messages).toHaveLength(5);
+    expect(atomicWrites.count - before).toBeLessThanOrEqual(2);
+  });
+
+  it('never leaves an older snapshot on disk after a newer save resolves', async () => {
+    const first = saveSession(mk({ messages: [{ role: 'user', content: 'old' }] }), dir);
+    const second = saveSession(mk({ messages: [{ role: 'user', content: 'new' }] }), dir);
+    await second;
+    expect((await loadSession('20260626-1200', dir))!.messages[0].content).toBe('new');
+    await first;
+    expect((await loadSession('20260626-1200', dir))!.messages[0].content).toBe('new');
+  });
+
+  it('recovers after a failed directory step instead of reusing its rejection', async () => {
+    const blocker = path.join(dir, 'not-a-dir');
+    await fs.writeFile(blocker, 'x');
+    await expect(saveSession(mk(), path.join(blocker, 'sub'))).rejects.toThrow();
+    await expect(saveSession(mk(), path.join(blocker, 'sub'))).rejects.toThrow();
+    await saveSession(mk(), dir);
+    expect(await loadSession('20260626-1200', dir)).not.toBeNull();
   });
 
   it('returns null for a missing session', async () => {

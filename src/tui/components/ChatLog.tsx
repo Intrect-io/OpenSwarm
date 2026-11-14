@@ -34,6 +34,8 @@ const ROLE_ICON: Record<ChatLine['role'], string> = {
 // fill the full-screen frame and push the input box off-screen. The finalized
 // message renders in full once committed to history. (INT-2014 / INT-2013)
 const STREAM_TAIL_LINES = 14;
+/** Most rows the live area can take: label + 5 activity lines + streaming tail (+1 for its ellipsis) + spinner. */
+const LIVE_AREA_ROWS = 1 + 5 + STREAM_TAIL_LINES + 1 + 1;
 
 export const MAX_LINE_WIDTH = 120;
 
@@ -47,13 +49,47 @@ function tailLines(text: string, n: number): string {
   return lines.length <= n ? text : `…\n${lines.slice(-n).join('\n')}`;
 }
 
-function Message({ line }: { line: ChatLine }) {
+/** The text a message renders, after sanitising, line truncation and Markdown. */
+function renderBody(line: ChatLine): string {
   // Bound lines + total payload before markdown so hostile content cannot blow the frame.
   const safeContent = sanitizeAndBoundTerminalText(line.content)
     .split('\n')
     .map(truncateLine)
     .join('\n');
-  const body = line.role === 'assistant' ? renderMarkdown(safeContent) : safeContent;
+  return line.role === 'assistant' ? renderMarkdown(safeContent) : safeContent;
+}
+
+/** Rows one rendered message takes: label line + body lines + bottom margin. */
+export function renderedMessageRows(body: string): number {
+  return 1 + body.split('\n').length + 1;
+}
+
+/**
+ * The newest messages that fit both budgets, oldest first. Rows are counted on
+ * the rendered body, after Markdown expansion: a short reply with a list or a
+ * code block can take many more rows than its source has lines, and counting
+ * source lines let a few such replies push the input box off a full-screen
+ * frame. The newest message is always shown. (AGT-3494)
+ */
+export function selectVisibleMessages(
+  history: ChatLine[],
+  maxMessages: number,
+  maxRows?: number,
+): Array<{ line: ChatLine; body: string; index: number }> {
+  if (maxMessages <= 0) return [];
+  const picked: Array<{ line: ChatLine; body: string; index: number }> = [];
+  let rows = 0;
+  for (let i = history.length - 1; i >= 0 && picked.length < maxMessages; i--) {
+    const body = renderBody(history[i]);
+    const need = renderedMessageRows(body);
+    if (maxRows !== undefined && picked.length > 0 && rows + need > maxRows) break;
+    rows += need;
+    picked.push({ line: history[i], body, index: i });
+  }
+  return picked.reverse();
+}
+
+function Message({ line, body }: { line: ChatLine; body: string }) {
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text color={ROLE_COLOR[line.role]} bold>{`${ROLE_ICON[line.role]} ${ROLE_LABEL[line.role]}`}</Text>
@@ -72,15 +108,20 @@ export interface ChatLogProps {
   busy?: boolean;
   /** Keep the last N messages on screen (bounds height in the full-screen layout). */
   maxMessages?: number;
+  /** Row budget for finished messages, counted after Markdown rendering. Unset = no row bound. */
+  maxRows?: number;
 }
 
-export function ChatLog({ history, streaming, activity = [], busy, maxMessages = 40 }: ChatLogProps) {
+export function ChatLog({ history, streaming, activity = [], busy, maxMessages = 40, maxRows }: ChatLogProps) {
   const live = streaming !== null || busy;
-  const shown = maxMessages > 0 ? history.slice(-maxMessages) : [];
+  // While a reply streams, its live area (label, up to 5 activity lines, the
+  // streaming tail, spinner) shares the same frame.
+  const budget = maxRows === undefined ? undefined : maxRows - (live ? LIVE_AREA_ROWS : 0);
+  const shown = selectVisibleMessages(history, maxMessages, budget);
   return (
     <Box flexDirection="column">
-      {shown.map((line, i) => (
-        <Message key={history.length - shown.length + i} line={line} />
+      {shown.map(({ line, body, index }) => (
+        <Message key={index} line={line} body={body} />
       ))}
       {live ? (
         <Box flexDirection="column">

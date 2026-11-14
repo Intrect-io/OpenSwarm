@@ -40,9 +40,34 @@ export const initialChatState: ChatState = { history: [], streaming: null };
 /** Retained / persisted / prompt chat-history budget (newest kept). */
 export const MAX_CHAT_HISTORY = 200;
 
-/** Keep the newest `MAX_CHAT_HISTORY` lines; no-op when already within budget. */
-export function boundChatHistory<T>(history: T[], max = MAX_CHAT_HISTORY): T[] {
-  return history.length <= max ? history : history.slice(-max);
+/**
+ * Keep at most `max` entries, newest first, without breaking the conversation.
+ * (AGT-3472, AGT-3494)
+ *
+ * - Transient `system` lines (slash-command output, notices) go first, so a
+ *   burst of them cannot push user/assistant turns out of the window.
+ * - Conversation is then cut on a turn boundary: the kept window starts at a
+ *   `user` line, never at an assistant reply whose question was cut away.
+ *
+ * No-op when already within budget.
+ */
+export function boundChatHistory<T extends { role: string }>(history: T[], max = MAX_CHAT_HISTORY): T[] {
+  if (history.length <= max) return history;
+  let excess = history.length - max;
+  // 1. Oldest system lines first.
+  const kept = history.filter((line) => {
+    if (excess > 0 && line.role === 'system') {
+      excess -= 1;
+      return false;
+    }
+    return true;
+  });
+  if (excess === 0) return kept;
+  // 2. Then whole turns from the front: cut `excess`, then up to the next user line.
+  let start = excess;
+  while (start < kept.length && kept[start].role !== 'user') start += 1;
+  // No user line left to start from: plain newest window rather than nothing.
+  return start < kept.length ? kept.slice(start) : kept.slice(-max);
 }
 
 /** Build a multi-turn prompt from messages (caller should already apply history budget). */
