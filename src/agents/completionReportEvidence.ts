@@ -244,24 +244,38 @@ const OBSERVED_EXIT_SUFFIX = /^(.*?)(?: \[exit (-?\d+|\?)\])?$/s;
 const REDIRECT_TOKEN = /^(?:\d*>>?|&>|<)/;
 const VALUE_FLAG = /^(?:-p|-c|--config|--project|--prefix|--manifest-path|--outputFile|--rootdir|--tsconfig)$/;
 const PATH_LIKE_TOKEN = /\/|::|\.[A-Za-z0-9]{1,6}$/;
+/** Flags that select a subset of tests by name (vitest/jest -t, pytest -k, mocha --grep, …). */
+const FILTER_FLAG = /^(?:-t|-k|-g|--testNamePattern|--grep|--filter|--testPathPattern)(?:=|$)/;
+const SHELL_SEPARATOR = /^(?:\||\|\||&&|;|\|&)$/;
 
-/** True when the args following a command occurrence narrow it to a subset (a targeted run). */
+/**
+ * True when the args following a command occurrence narrow it to a subset (a
+ * targeted run): a path argument, a name filter, or any positional argument
+ * after `--`. Flags alone after `--` (`npm test -- --run`) still run
+ * everything (#921 review follow-up).
+ */
 function isTargetedRemainder(remainder: string): boolean {
   const tokens = remainder.split(/\s+/).filter(Boolean);
+  let afterDashDash = false;
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
+    if (SHELL_SEPARATOR.test(token)) break; // what follows is another command (`| tail -20`)
     if (REDIRECT_TOKEN.test(token)) {
       // `> file` takes the next token as its target.
       if (/^(?:\d*>>?|&>|<)$/.test(token)) i++;
       continue;
     }
-    if (token === '--') return tokens.slice(i + 1).some((t) => !REDIRECT_TOKEN.test(t));
+    if (token === '--') {
+      afterDashDash = true;
+      continue;
+    }
+    if (FILTER_FLAG.test(token)) return true;
     if (VALUE_FLAG.test(token)) {
       i++; // `--config vitest.config.ts`: the value is configuration, not a target.
       continue;
     }
     if (token.startsWith('-')) continue;
-    if (PATH_LIKE_TOKEN.test(token)) return true;
+    if (afterDashDash || PATH_LIKE_TOKEN.test(token)) return true;
   }
   return false;
 }

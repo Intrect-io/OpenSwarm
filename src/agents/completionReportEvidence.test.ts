@@ -247,6 +247,17 @@ describe('cross-check against observed runs', () => {
     ))).toEqual([]);
   });
 
+  // Review follow-up: flags after `--` (`npm test -- --run`) still run every test,
+  // while a name filter or a positional argument after `--` narrows the run.
+  it('treats flags after -- as a full run, and name filters as targeted', () => {
+    const claim = 'Tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed';
+    expect(completionReportEvidenceIssues(report(claim, ['src/a.ts'], ['npm test -- --run']))).toEqual([]);
+    expect(completionReportEvidenceIssues(report(claim, ['src/a.ts'], ['npm test -- --run | tail -5']))).toEqual([]);
+    for (const observed of ['npm test -- -t parser', 'npm test -- parser', 'npm test -- --testNamePattern=parser']) {
+      expect(completionReportEvidenceIssues(report(claim, ['src/a.ts'], [observed])).join(' ')).toMatch(/only observed as a targeted run/);
+    }
+  });
+
   it('compares the exit code of the last observed matching run', () => {
     expect(completionReportEvidenceIssues(report(
       'Tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed',
