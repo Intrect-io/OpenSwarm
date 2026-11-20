@@ -19,7 +19,7 @@ import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
 import type { VerifyConfig } from '../core/types.js';
 import { regressedAgainstFreshBase } from './publicationRegressionProbe.js';
 import { publicationCommitSubject } from './publicationCommitMessage.js';
-import { changeShapeSection } from './publicationChangeShape.js';
+import { changeRiskSection, changeShapeSection, publicationRisk, type ChangeRisk } from './publicationChangeShape.js';
 import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFreshness.js';
 import { publicationClaimEvidence } from './publicationClaimEvidence.js';
 import { loadRepoMetadata } from './repoMetadata.js';
@@ -1046,13 +1046,13 @@ async function findOpenPullRequestUrl(worktreePath: string, branchName: string):
 }
 
 /** PR URL plus the immutable commit this publication call pushed. */
-export type PublishedPullRequest = { prUrl: string; headSha: string };
+export type PublishedPullRequest = { prUrl: string; headSha: string; risk?: ChangeRisk };
 export async function commitAndCreatePRWithHead(
   info: WorktreeInfo,
   title: string,
   issueIdentifier: string,
   description: string,
-  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig } = {},
+  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig; protectedFiles?: string[] } = {},
 ): Promise<PublishedPullRequest> {
   const { worktreePath, branchName } = info;
 
@@ -1168,7 +1168,7 @@ export async function commitAndCreatePRWithHead(
     );
   }
 
-  // If PR already exists, just return the URL
+  const risk = await publicationRisk(info.originalPath, worktreePath, base.ref, options.protectedFiles); // AGT-4804; then reuse an open PR if one exists
   const existing = await findOpenPullRequestUrl(worktreePath, branchName)
     .catch((e) => { console.warn(`[Worktree] PR list check failed for ${branchName}:`, e); return ''; });
 
@@ -1188,7 +1188,7 @@ export async function commitAndCreatePRWithHead(
       const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
       await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
     }
-    return { prUrl: existing, headSha };
+    return { prUrl: existing, headSha, risk };
   }
 
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
@@ -1218,7 +1218,7 @@ export async function commitAndCreatePRWithHead(
   const basePrBody = [
     '## Summary',
     description || `${issueIdentifier}: ${title}`,
-    ...(shapeSection ? ['', shapeSection] : []),
+    ...(shapeSection ? ['', shapeSection] : []), '', changeRiskSection(risk),
     ...(freshnessSection ? ['', freshnessSection] : []),
     ...(overlapSection ? ['', overlapSection] : []),
     ...(duplicateSection ? ['', duplicateSection] : []),
@@ -1276,7 +1276,7 @@ export async function commitAndCreatePRWithHead(
     }
   }
 
-  return { prUrl: url, headSha };
+  return { prUrl: url, headSha, risk };
 }
 
 /** Backwards-compatible URL-only publication surface. */

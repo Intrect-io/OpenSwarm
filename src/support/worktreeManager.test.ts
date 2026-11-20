@@ -919,7 +919,7 @@ describe('resolveBaseRef / createWorktree on non-main-default repos (INT-2545)',
       );
       expect(publication).toEqual({
         prUrl: 'https://example.test/park',
-        headSha: String(git(info.worktreePath, 'rev-parse', 'HEAD')).trim(),
+        headSha: String(git(info.worktreePath, 'rev-parse', 'HEAD')).trim(), risk: expect.objectContaining({ level: 'low', files: 1 }),
       });
     } finally {
       process.env.PATH = prevPath;
@@ -932,7 +932,7 @@ describe('resolveBaseRef / createWorktree on non-main-default repos (INT-2545)',
     expect(String(git(info.worktreePath, 'status', '--porcelain'))).toContain('wip.py');
     expect(String(git(info.worktreePath, 'log', '--oneline', '-1'))).toContain('finished part');
     // Draft, because nothing reviewed this.
-    expect(readFileSync(ghLog, 'utf8')).toContain('--draft');
+    expect(readFileSync(ghLog, 'utf8')).toContain('--draft'); expect(readFileSync(ghLog, 'utf8')).toContain('## Risk: low'); // AGT-4804
   });
 
   it('promotes a reused draft PR to ready when the reviewed path republishes (AGT-4076)', async () => {

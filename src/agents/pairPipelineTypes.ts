@@ -1,3 +1,4 @@
+import type { ChangeRisk } from '../support/changeRisk.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig, PipelineGuardsConfig, JobProfile, SecurityAuditConfig, VerifyConfig } from '../core/types.js';
 import type { CostInfo } from '../support/costTracker.js';
@@ -140,6 +141,8 @@ export interface PipelineResult {
     taskTitle?: string;
   };
   prUrl?: string;
+  /** Risk class of the published diff (AGT-4804); stored with the attempt's result_json. */
+  changeRisk?: ChangeRisk;
   totalCost?: CostInfo;
   /**
    * Operation/stage and original cause of the terminal failure, including
