@@ -73,6 +73,19 @@
       </section>
     </div>
 
+    <!-- Drill-down: one row of a table above, broken down by another axis
+         (AGT-4297). aria-live is on the one-line status only, so a 20-row
+         result is not read out as one block. -->
+    <section id="drill-panel" class="card panel drill-panel" aria-labelledby="drill-title" hidden>
+      <div class="drill-head">
+        <h2 id="drill-title" class="card-head">Breakdown</h2>
+        <button type="button" id="drill-close" class="btn btn-secondary btn-sm">Close</button>
+      </div>
+      <p id="drill-status" class="muted task-note" role="status" aria-live="polite"></p>
+      <div class="card-body table-wrap"><table id="drill-table"></table></div>
+      <p id="drill-footer" class="muted task-note"></p>
+    </section>
+
     <section class="card panel" aria-labelledby="tasks-title">
       <h2 id="tasks-title" class="card-head">By task, most calls first</h2>
       <p id="task-note" class="muted task-note"></p>
