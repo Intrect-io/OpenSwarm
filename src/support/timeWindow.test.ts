@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DEFAULT_TIME_WINDOW, getMarketStatus, isWorkAllowed } from './timeWindow.js';
+import {
+  DEFAULT_TIME_WINDOW,
+  getMarketStatus,
+  getTimeWindowSummary,
+  isWorkAllowed,
+  setTimeWindowConfig,
+} from './timeWindow.js';
 
 describe('timeWindow', () => {
   afterEach(() => {
     vi.useRealTimers();
+    setTimeWindowConfig({ ...DEFAULT_TIME_WINDOW });
   });
 
   it('reports the next allowed window start while inside a blocked window', () => {
@@ -35,5 +42,20 @@ describe('timeWindow', () => {
 
     expect(status.status).toBe('regular');
     expect(status.canWork).toBe(false);
+  });
+
+  it('getTimeWindowSummary uses the active configuration for market status', () => {
+    vi.useFakeTimers();
+    // Monday 10:00 KST — default config blocks this window.
+    vi.setSystemTime(new Date('2026-07-06T01:00:00.000Z'));
+
+    const blockedSummary = getTimeWindowSummary();
+    expect(blockedSummary).toContain('🔴');
+
+    // Clear blocked windows so market/work status follows the active override.
+    setTimeWindowConfig({ blockedWindows: [], allowedWindows: [{ start: '00:00', end: '23:59' }] });
+    const openSummary = getTimeWindowSummary();
+    expect(openSummary).toContain('🟢');
+    expect(openSummary).not.toEqual(blockedSummary);
   });
 });

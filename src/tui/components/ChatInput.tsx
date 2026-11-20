@@ -9,6 +9,7 @@ import { theme, ICON } from '../theme.js';
 import { sanitizeTerminalText } from '../sanitize.js';
 import { inputDebugEnabled, appendInputDebug } from '../inputDebug.js';
 import { dedupeDoubledGrapheme } from '../chatModel.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
 // Read once at module load — toggling mid-session isn't a use case. (INT-1964)
 const INPUT_DEBUG = inputDebugEnabled();
@@ -23,6 +24,43 @@ export function deleteLastGrapheme(value: string): string {
   let lastIndex = 0;
   for (const segment of GRAPHEME_SEGMENTER.segment(value)) lastIndex = segment.index;
   return value.slice(0, lastIndex);
+}
+
+/** Columns the input box uses besides the text: prompt icon (2) + cursor (1) + paddingX (2) + border (2). */
+export const CHAT_INPUT_DISPLAY_OVERHEAD = 2 + 1 + 2 + 2;
+
+const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0x1100, 0x115f], [0x2e80, 0xa4cf], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe4f],
+  [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1faff], [0x20000, 0x3fffd],
+];
+
+/** Terminal columns one code point takes: 2 for East Asian wide and emoji, else 1. */
+function charColumns(ch: string): number {
+  const cp = ch.codePointAt(0) ?? 0;
+  return WIDE_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1;
+}
+
+/**
+ * The part of the input that fits the terminal width. Only the rendered text is
+ * clipped; the controlled value the user edits and submits stays whole. Keeps
+ * the tail, where the cursor is, and marks the cut with a leading ellipsis.
+ * Hangul and other wide characters count as two columns.
+ */
+export function clipChatInputDisplay(value: string, columns: number): string {
+  const budget = Math.max(10, columns - CHAT_INPUT_DISPLAY_OVERHEAD);
+  const chars = Array.from(value);
+  let width = 0;
+  for (const ch of chars) width += charColumns(ch);
+  if (width <= budget) return value;
+  const kept: string[] = [];
+  let used = 1; // the ellipsis
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const w = charColumns(chars[i]);
+    if (used + w > budget) break;
+    kept.push(chars[i]);
+    used += w;
+  }
+  return `…${kept.reverse().join('')}`;
 }
 
 export interface ChatInputProps {
@@ -49,6 +87,7 @@ export function ChatInput({
   onPaletteSelect,
   onPaletteClose,
 }: ChatInputProps) {
+  const { columns } = useTerminalSize();
   useInput(
     (input, key) => {
       // Diagnostics for mobile-SSH multibyte doubling (OPENSWARM_DEBUG_INPUT). (INT-1964)
@@ -87,7 +126,7 @@ export function ChatInput({
       ) : (
         <Box>
           <Text color={theme.accent}>{`${ICON.prompt} `}</Text>
-          {value ? <Text>{sanitizeTerminalText(value)}</Text> : <Text color={theme.dim}>{'type a message…   / for commands'}</Text>}
+          {value ? <Text>{sanitizeTerminalText(clipChatInputDisplay(value, columns))}</Text> : <Text color={theme.dim}>{'type a message…   / for commands'}</Text>}
           {active ? <Text inverse> </Text> : null}
         </Box>
       )}
