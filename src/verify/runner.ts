@@ -709,13 +709,20 @@ async function createVerifySandboxRoot(prefix: string, scratchRoot?: string): Pr
 async function createHeadSandbox(
   projectPath: string,
   commands: VerifyCommand[],
-  scratchRoot?: string, baseRef?: string,
+  scratchRoot?: string, baseRef?: string, shareObjects = true,
 ): Promise<{ root: string; project: string }> {
   const root = await createVerifySandboxRoot('.openswarm-verify-head-', scratchRoot);
   const project = join(root, 'worktree');
   try {
     const headCommit = await git(projectPath, ['rev-parse', 'HEAD']);
-    await git(projectPath, ['clone', '--quiet', '--no-hardlinks', '--no-checkout', projectPath, project]);
+    // A full copy of the pack cost ~0.5 GB per run and filled the disk (AGT-4785).
+    // `--shared` reads the source objects through objects/info/alternates instead.
+    // The OS sandbox binds `/` read-only and only the sandbox root writable, so
+    // verified code can read but never write or prune the source object store;
+    // gc.auto=0 keeps the clone from ever repacking. The strict companion mounts
+    // only the workspace, so it keeps an independent full copy.
+    const objects = shareObjects ? ['--shared', '-c', 'gc.auto=0'] : ['--no-hardlinks'];
+    await git(projectPath, ['clone', '--quiet', ...objects, '--no-checkout', projectPath, project]);
     await git(project, ['checkout', '--quiet', '--detach', headCommit]);
     const sharedPaths = await verificationSharedPaths(projectPath, commands);
     const ignoredLinks = await validateSandboxSymlinks(projectPath, sharedPaths, true);
@@ -847,7 +854,9 @@ async function runVerifyInSlot(options: RunVerifyOptions): Promise<VerifyEvidenc
     const started = Date.now();
     let sandbox: Awaited<ReturnType<typeof createHeadSandbox>>;
     try {
-      sandbox = await createHeadSandbox(options.projectPath, [command], scratchRoot, options.baseRef);
+      sandbox = await createHeadSandbox(
+        options.projectPath, [command], scratchRoot, options.baseRef, !options.sandboxExecutorSessionFactory,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.startsWith('[security]')) throw error;

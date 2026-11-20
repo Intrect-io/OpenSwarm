@@ -171,6 +171,16 @@ export class HostDiskGate {
     return { pause: false, notice: 'Host resource hold expired; dispatch recovered.' };
   }
 
+  /**
+   * Measure now without touching the remembered state, so a caller freeing space
+   * (AGT-4816) can re-check between steps without spending the one recovery notice
+   * {@link evaluate} gives. False when the check is switched off or nothing is measurable.
+   */
+  belowFloor(): boolean {
+    const floor = this.minFreeBytes();
+    return floor > 0 && checkHostHealth(this.paths(), floor).verdict === 'low';
+  }
+
   /** Measure now and decide. A floor of zero or less switches the check off. */
   evaluate(): DispatchGateDecision {
     const floor = this.minFreeBytes();

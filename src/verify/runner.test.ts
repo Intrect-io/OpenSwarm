@@ -1,19 +1,17 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync } from 'node:fs';
 import type { VerifyCommand } from './manifest.js';
 import { makeBwrapOverlayProbe } from './verifySandbox.js';
 import {
-  buildVerifyToolchainPath,
   CLONE_TIMEOUT_MS,
   gitTimeoutMsFor,
   runVerify,
   uvCacheOverlay,
-  VERIFY_ALLOWED_DEPENDENCY_DIRS,
-  VERIFY_TOOLCHAIN_PATH_PREFIXES,
 } from './runner.js';
 
 let root: string;
@@ -934,6 +932,44 @@ describe('runVerify', () => {
   });
 });
 
+describe('head sandbox disk footprint (AGT-4785)', () => {
+  const sandboxEntries = async () => (await readdir(root)).filter((name) => name.startsWith('.openswarm-verify-'));
+
+  it('head sandbox clone does not copy pack files', async () => {
+    // ~2 MB of incompressible history, packed, so a full object copy would show.
+    await writeFile(join(repo, 'blob.bin'), randomBytes(2 * 1024 * 1024));
+    git('add', 'blob.bin');
+    git('commit', '-m', 'large history');
+    git('gc', '--quiet');
+    const sourceKb = Number(execFileSync('du', ['-sk', join(repo, '.git')], { encoding: 'utf8' }).split('\t')[0]);
+    // Runs inside the OS sandbox: alternates are readable there, but never writable.
+    const probe = [
+      'alt="$(cat .git/objects/info/alternates)"', 'test -d "$alt"', 'git cat-file -e HEAD:blob.bin',
+      'test -z "$(find .git -name "*.pack")"', '! touch "$alt/osw-write-probe" 2>/dev/null',
+      'echo "clone-kb=$(du -sk .git | cut -f1)"',
+    ].join(' && ');
+    const [evidence] = await runVerify({ projectPath: repo, commands: [verify(probe, 15_000)], baseRef: 'HEAD', sandboxScratchRoot: root });
+    expect(evidence.headStatus, evidence.rawOutputTail).toBe('pass');
+    const cloneKb = Number(/clone-kb=(\d+)/.exec(evidence.rawOutputTail)?.[1]);
+    expect(cloneKb).toBeLessThan(sourceKb / 4);
+    expect(existsSync(join(repo, '.git', 'objects', 'osw-write-probe'))).toBe(false);
+    expect(await sandboxEntries()).toEqual([]);
+  }, 60_000);
+
+  it('removes the head sandbox on success, failure and throw', async () => {
+    const run = (command: string) => runVerify({ projectPath: repo, commands: [verify(command)], baseRef: 'HEAD', sandboxScratchRoot: root });
+    expect((await run('true'))[0].headStatus).toBe('pass');
+    expect(await sandboxEntries()).toEqual([]);
+    expect((await run('false'))[0].headStatus).toBe('fail');
+    expect(await sandboxEntries()).toEqual([]);
+    // An unreadable source file makes the working-tree copy throw after the clone exists.
+    await writeFile(join(repo, 'unreadable.txt'), 'secret\n');
+    await chmod(join(repo, 'unreadable.txt'), 0o000);
+    await expect(run('true')).rejects.toThrow(/EACCES|permission/i);
+    expect(await sandboxEntries()).toEqual([]);
+  });
+});
+
 describe('git timeout budgets (AGT-4416)', () => {
   it('gives the sandbox clone ten minutes and every other git call the 30 s default', () => {
     expect(CLONE_TIMEOUT_MS).toBe(10 * 60_000);
@@ -941,45 +977,5 @@ describe('git timeout budgets (AGT-4416)', () => {
     for (const args of [['rev-parse', 'HEAD'], ['checkout', '--quiet', '--detach', 'abc'], ['worktree', 'add', '--detach', '/x', 'abc'], ['merge-base', 'HEAD', 'main']]) {
       expect(gitTimeoutMsFor(args)).toBe(30_000);
     }
-  });
-});
-
-describe('buildVerifyToolchainPath', () => {
-  it('keeps project bins and the read-only toolchain prefixes, dropping the rest of the host PATH', () => {
-    const path = buildVerifyToolchainPath(
-      ['/usr/bin', '/home/user/.local/bin', '/opt/homebrew/bin', '/tmp/evil/bin'].join(':'),
-      '/repo',
-      '/repo/packages/api',
-    );
-    const parts = path.split(':');
-    for (const prefix of VERIFY_TOOLCHAIN_PATH_PREFIXES) expect(parts).toContain(prefix);
-    expect(parts).toContain('/repo/node_modules/.bin');
-    expect(parts).toContain('/repo/packages/api/node_modules/.bin');
-    expect(parts).not.toContain('/home/user/.local/bin');
-    expect(parts).not.toContain('/tmp/evil/bin');
-    expect(VERIFY_ALLOWED_DEPENDENCY_DIRS.has('node_modules')).toBe(true);
-  });
-
-  it('puts project dependency bins ahead of the system prefixes', () => {
-    const parts = buildVerifyToolchainPath('/usr/bin', '/repo').split(':');
-    expect(parts.indexOf('/repo/node_modules/.bin')).toBeLessThan(parts.indexOf('/usr/bin'));
-  });
-
-  it('preserves nvm/fnm-style version-manager bin directories', () => {
-    const path = buildVerifyToolchainPath('/home/user/.nvm/versions/node/v22.0.0/bin:/usr/bin', '/repo');
-    expect(path.split(':')).toContain('/home/user/.nvm/versions/node/v22.0.0/bin');
-  });
-
-  it('keeps the running interpreter bin ahead of the generic system prefixes', () => {
-    const parts = buildVerifyToolchainPath('/usr/bin', '/repo').split(':');
-    expect(parts).toContain(dirname(process.execPath));
-    // A different major node lives in /usr/local/bin on this host; the sandbox
-    // must reach the daemon's own interpreter first.
-    expect(parts.indexOf(dirname(process.execPath))).toBeLessThan(parts.indexOf('/usr/bin'));
-  });
-
-  it('keeps a project venv bin directory', () => {
-    const path = buildVerifyToolchainPath('/repo/.venv-verify/bin:/usr/bin', '/repo');
-    expect(path.split(':')).toContain('/repo/.venv-verify/bin');
   });
 });

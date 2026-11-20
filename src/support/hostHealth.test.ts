@@ -216,4 +216,18 @@ describe('HostDiskGate', () => {
     expect(decision.pause && decision.line).toContain(tmpdir());
     expect(decision.pause && decision.line).toContain('below the');
   });
+
+  it('belowFloor re-measures without spending the recovery notice (AGT-4816)', () => {
+    const floor = { value: OVER };
+    const g = gate(floor);
+    expect(g.evaluate().pause).toBe(true);
+    expect(g.belowFloor()).toBe(true);
+    floor.value = UNDER;
+    expect(g.belowFloor()).toBe(false);
+    expect(g.belowFloor()).toBe(false);
+    // evaluate() still announces the recovery exactly once.
+    expect(g.evaluate()).toMatchObject({ pause: false, notice: expect.stringContaining('recovered') });
+    floor.value = 0;
+    expect(g.belowFloor()).toBe(false); // switched off
+  });
 });
