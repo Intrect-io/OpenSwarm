@@ -14,6 +14,7 @@ import Database from 'better-sqlite3';
 import { normalizeErrorForLoop } from '../support/stuckDetector.js';
 import { defaultAutomationDbPath } from './automationDbPath.js';
 import type { TaskState } from './taskSource.js';
+import { transitionWithReason } from './trackerTransition.js';
 
 /** How far back a run's attempts count toward a bucket. */
 const WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -118,6 +119,7 @@ export function composeRetrospectiveIssue(bucket: FailureBucket, windowHours: nu
 export interface RetrospectiveTaskSource {
   createTask(title: string, description: string, projectId?: string): Promise<{ id: string; identifier?: string; title?: string } | { error: string }>;
   updateState(issueId: string, state: TaskState): Promise<boolean>;
+  addComment(issueId: string, body: string, idempotencyKey?: string): Promise<void>;
 }
 
 export interface RetrospectiveResult {
@@ -166,7 +168,8 @@ export async function runLedgerRetrospective(options: {
     if ('error' in created) return { filed: false, reason: `createTask: ${created.error}` };
     // Todo is what admits it to the heartbeat; a filing that stays in the
     // default triage state would be a report, not a lane.
-    await options.taskSource.updateState(created.id, 'Todo');
+    await transitionWithReason(options.taskSource, created.id, 'Todo',
+      `Filed by the weekly ledger retrospective for failure bucket "${eligible.fingerprint.slice(0, 60)}"; moving to Todo so the heartbeat works it.`);
     writeMeta.run(FINGERPRINT_KEY_PREFIX + eligible.fingerprint, String(now));
     return { filed: true, reason: `filed for bucket "${eligible.fingerprint.slice(0, 60)}" (${eligible.attempts} attempts / ${eligible.distinctIssues} issues)`, identifier: created.identifier ?? created.id };
   } finally {

@@ -77,6 +77,7 @@ export const OpenSwarmTaskStateSchema = z.object({
    *  updatedAt so a worker touching the blocker does not look like a lookup. */
   dependencyCheckedAt: z.string().optional(),
   dependencyLookupFailed: z.boolean().optional(),
+  releasedAt: z.string().nullable().optional(), // AGT-4817: see holdsRelease; null once the tracker caught up
 });
 
 function createTaskMap(
@@ -512,14 +513,8 @@ const LINEAR_STATE_TO_EXECUTION_STATUS: Record<string, TaskExecutionStatus> = {
   Cancelled: 'backlog',
 };
 
-/**
- * The execution status this reconciliation would move the task to, or
- * `undefined` when it would leave the status where it is.
- *
- * Only a locally `in_progress` or `done` task is downgraded: those are the two
- * statuses that wrongly satisfy a dependency or wrongly look live if Linear has
- * since moved the issue elsewhere.
- */
+/** The execution status this reconciliation would move the task to, or `undefined` to leave it.
+ *  Only a local `in_progress` or `done` is downgraded: those wrongly satisfy a dependency or look live. */
 function reconciledExecutionStatus(
   current: OpenSwarmTaskState | undefined,
   linearState: string,
@@ -546,14 +541,21 @@ export function planLinearStateReconciliation(
   current: OpenSwarmTaskState | undefined,
   linearState: string,
 ): Partial<OpenSwarmTaskState> | null {
+  if (holdsRelease(current, linearState)) return null;
   const nextStatus = reconciledExecutionStatus(current, linearState);
-  if (current && current.linearState === linearState && nextStatus === undefined) return null;
-
-  const patch: Partial<OpenSwarmTaskState> = { linearState };
+  const clearRelease = Boolean(current?.releasedAt); // the tracker moved on from Backlog: drop the marker
+  if (current && current.linearState === linearState && nextStatus === undefined && !clearRelease) return null;
+  const patch: Partial<OpenSwarmTaskState> = clearRelease ? { linearState, releasedAt: null } : { linearState };
   if (current && nextStatus !== undefined) {
     patch.execution = { ...current.execution, status: nextStatus };
   }
   return patch;
+}
+
+/** AGT-4817: a dependent released locally (`releaseDependentTasks`) stays Todo until the tracker reports Todo or
+ *  later. A fetch, or an older sync comment, that still says Backlog must not revert the release meanwhile. */
+function holdsRelease(current: OpenSwarmTaskState | undefined, linearState: string | undefined): boolean {
+  return Boolean(current?.releasedAt) && current?.execution.status === 'todo' && linearState === 'Backlog';
 }
 
 export function updateTaskLinearState(issueId: string, linearState: string): OpenSwarmTaskState {
@@ -848,6 +850,7 @@ export function releaseDependentTasks(completedIssueId: string): OpenSwarmTaskSt
         retryCount: state.execution.retryCount,
       },
       linearState: 'Todo',
+      releasedAt: new Date().toISOString(),
     });
     released.push(next);
   }
@@ -883,6 +886,8 @@ export interface DependencyBlockerReconcileOptions {
    *  Looked up before the rest of the store so a live queue cannot starve
    *  behind July KT-* Backlog from projects this daemon does not run. */
   priorityDepIds?: ReadonlySet<string>;
+  /** Release dependents of a confirmed-terminal blocker and push them to the tracker (AGT-4817); default local-only. */
+  releaseDependents?: (depId: string) => Promise<OpenSwarmTaskState[]>;
 }
 
 export interface DependencyBlockerReconcileResult {
@@ -1010,10 +1015,9 @@ export async function reconcileDependencyBlockers(
     }
     if (isDependencyTerminal(getTaskState(depId))) {
       result.resolved++;
-      result.released += releaseDependentTasks(depId).length;
+      result.released += (options.releaseDependents ? await options.releaseDependents(depId) : releaseDependentTasks(depId)).length;
     }
   }
-
   return result;
 }
 
@@ -1136,17 +1140,10 @@ export function hydrateTaskStateFromComments(
 }
 
 /**
- * Reconcile the whole heartbeat fetch against the store in one pass: take the
- * store lock once, load it once, apply what changed, persist once.
- *
- * The heartbeat used to call `updateTaskLinearState` and
- * `hydrateTaskStateFromComments` per issue. Each took the file lock (create,
- * write, fsync, unlink), and the hydrate half rewrote the entire store for
- * every issue that carried a sync comment — measured on the deployed daemon on
- * 2026-10-03 as multi-second event-loop blocks every heartbeat, long enough to
- * fail health checks and drop the dashboard. Per issue the semantics are the
- * same as calling the two in that order; only the cost is different.
- *
+ * Reconcile the whole heartbeat fetch against the store in one pass: lock, load, apply, persist once.
+ * Calling `updateTaskLinearState` + `hydrateTaskStateFromComments` per issue took the file lock and
+ * rewrote the whole store per issue — multi-second event-loop blocks every heartbeat on 2026-10-03.
+ * Per issue it matches those two in that order, except that a held release (holdsRelease) is kept.
  * Returns how many rows changed (0 means nothing was written).
  */
 export function syncTaskStatesFromIssues(
@@ -1165,7 +1162,9 @@ export function syncTaskStatesFromIssues(
         changed += 1;
       }
       const latest = latestTaskStateFromComments(issue.issueId, issue.comments ?? []);
-      if (latest && applyTaskStatePatchIfChanged(store, issue.issueId, latest)) changed += 1;
+      // A comment snapshot neither reverts a held release nor re-arms a cleared marker (holdsRelease).
+      if (latest && !holdsRelease(store.tasks[issue.issueId], latest.linearState)
+        && applyTaskStatePatchIfChanged(store, issue.issueId, { ...latest, releasedAt: store.tasks[issue.issueId]?.releasedAt })) changed += 1;
     }
     if (changed > 0) persistStore();
     return changed;

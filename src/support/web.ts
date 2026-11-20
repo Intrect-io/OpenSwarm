@@ -40,7 +40,7 @@ import { execTasks, startExecTask } from './webExecTasks.js';
 import { startOptionalWebTerminal, stopOptionalWebTerminal } from './terminalServer.js';
 import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
-import { refuseForChildCap } from '../automation/decompositionLimits.js';
+import { refuseForChildCap } from '../automation/decompositionLimits.js'; import { transitionWithReason } from '../automation/trackerTransition.js';
 import { projectInfoForRepository } from '../automation/runnerState.js';
 import { loadConfig } from '../core/config.js'; import { getWorkScope } from '../core/workScope.js';
 import { loadRepoMetadata } from './repoMetadata.js';
@@ -1191,8 +1191,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             }
 
             if (tasks.length === 0) {
-              await source.addComment(parent.id, 'The planner proposed no sub-tasks, so this goal runs as one task: moved to Todo.').catch(() => {}); // AGT-4800
-              await source.updateState(parent.id, 'Todo').catch(() => {});
+              await transitionWithReason(source, parent.id, 'Todo', 'The planner proposed no sub-tasks, so this goal runs as one task: moved to Todo.').catch(() => {}); // AGT-4800
               triggerHeartbeat();
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({

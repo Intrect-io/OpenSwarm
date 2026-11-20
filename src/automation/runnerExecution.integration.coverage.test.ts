@@ -184,14 +184,15 @@ describe('runner execution state synchronization helpers', () => {
   it('syncCancellationState fails closed when updateState throws', async () => {
     (taskSource.updateState as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('linear down'));
     await expect(syncCancellationState(task())).rejects.toThrow('linear down');
-    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to move cancelled task'), expect.any(Error));
-    expect(taskSource.addComment).not.toHaveBeenCalled();
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to sync cancelled state'), expect.any(Error));
+    // AGT-4800: the reason is posted before the move, so it is there even when the move fails.
+    expect(taskSource.addComment).toHaveBeenCalledWith('issue-1', 'sync comment', undefined);
   });
 
   it('syncCancellationState fails closed when the tracker refuses Backlog', async () => {
     (taskSource.updateState as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
     await expect(syncCancellationState(task())).rejects.toThrow('refused Backlog');
-    expect(taskSource.addComment).not.toHaveBeenCalled();
+    expect(taskSource.addComment).toHaveBeenCalledTimes(1); // reason first (AGT-4800), then the refused move
   });
 
   it('syncCancellationState propagates an addComment failure for outbox retry', async () => {

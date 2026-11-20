@@ -286,7 +286,8 @@ describe('failure taxonomy review fixes (#876 review, AGT-4812)', () => {
     expect(later.filed).toEqual([]);
     expect(later.updated).toEqual(['uuid-1']);
     expect(lookupIssueState).toHaveBeenCalledWith('uuid-1');
-    expect(addComment).toHaveBeenCalledTimes(1);
+    // One filing reason (AGT-4800: the Backlog move says why) and one new-evidence comment.
+    expect(addComment.mock.calls.map((call: unknown[]) => String(call[1]).split(' ')[0])).toEqual(['Failure-taxonomy', 'Seen']);
     expect(src.createTask).toHaveBeenCalledTimes(1);
     db.close();
   });
