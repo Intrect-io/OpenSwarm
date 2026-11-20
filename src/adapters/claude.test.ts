@@ -178,3 +178,32 @@ describe('ClaudeCliAdapter diagnostics stay off stdout', () => {
     }
   });
 });
+
+describe('ClaudeCliAdapter observed execution evidence (AGT-4900)', () => {
+  const use = (id: string, name: string, input: object) =>
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
+  const result = (id: string, content: string, isError: boolean) =>
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content, is_error: isError }] } });
+  const final = (text: string) => JSON.stringify({ type: 'result', subtype: 'success', result: text });
+  const parse = (stdout: string) => new ClaudeCliAdapter().parseWorkerOutput({ exitCode: 0, stdout, stderr: '', durationMs: 1 });
+
+  it('pairs Bash tool_use with its tool_result exit status', () => {
+    const parsed = parse([
+      use('t1', 'Bash', { command: 'npm test' }), result('t1', 'Exit code 1\n2 failed', true),
+      use('t2', 'Bash', { command: 'npm test' }), result('t2', 'Tests 3 passed', false),
+      use('t3', 'Bash', { command: 'npm run lint' }), result('t3', 'Exit code 2\nerror', true),
+      use('t4', 'Bash', { command: 'rm -rf /' }), result('t4', '<tool_use_error>Harness rule</tool_use_error>', true),
+      use('t5', 'Bash', { command: 'npm run dev', run_in_background: true }), result('t5', 'Started in background', false),
+      use('t6', 'Read', { file_path: 'a.ts' }), result('t6', 'content', false),
+      use('t7', 'Bash', { command: 'npm run build' }),
+      final('All tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed'),
+    ].join('\n'));
+    // Refused (t4) and unanswered (t7) calls never ran; t5 has no known exit.
+    expect(parsed.executedCommands).toEqual(['npm test [exit 1]', 'npm test', 'npm run lint [exit 2]', 'npm run dev [exit ?]']);
+  });
+
+  it('leaves executedCommands unset for plain-text or truncated output', () => {
+    expect(parse('All tests pass.').executedCommands).toBeUndefined();
+    expect(parse(`[openswarm: 9 earlier characters of output were not retained]\n${final('done')}`).executedCommands).toBeUndefined();
+  });
+});

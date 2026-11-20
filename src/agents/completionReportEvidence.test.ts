@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   completionReportEvidenceIssues,
+  isProseDocFile,
   parseReportedRuns,
   verificationClaims,
 } from './completionReportEvidence.js';
@@ -116,5 +117,204 @@ describe('completionReportEvidenceIssues', () => {
 
   it('leaves a report that claims nothing to the missing-validation nudge', () => {
     expect(completionReportEvidenceIssues(report('Codename: Atlas\nRenamed the helper and updated callers.'))).toEqual([]);
+  });
+});
+
+describe('honest non-JS reports (review of #921)', () => {
+  it('accepts go test with ok/PASS or exit 0 and no counts', () => {
+    expect(completionReportEvidenceIssues(report('All tests pass.\nRan: go test ./... -> ok'))).toEqual([]);
+    expect(completionReportEvidenceIssues(report('All tests pass.\nRan: go test ./... -> PASS'))).toEqual([]);
+    expect(completionReportEvidenceIssues(report('All tests pass.\nRan: go test ./... -> exit 0'))).toEqual([]);
+  });
+
+  it('reads a missing failed count with exit 0 as zero failed', () => {
+    expect(parseReportedRuns('Ran: npx vitest run -> exit 0, 46 passed').runs[0].failed).toBe(0);
+    expect(completionReportEvidenceIssues(report('Tests pass.\nRan: npx vitest run -> exit 0, 46 passed'))).toEqual([]);
+  });
+
+  it('accepts Korean counts', () => {
+    expect(parseReportedRuns('Ran: npm test -> exit 0, 412개 통과, 0개 실패').runs[0])
+      .toMatchObject({ passed: 412, failed: 0 });
+    expect(parseReportedRuns('Ran: npm test -> exit 0, 통과 412, 실패 0').runs[0])
+      .toMatchObject({ passed: 412, failed: 0 });
+    expect(completionReportEvidenceIssues(report('테스트 모두 통과했습니다.\nRan: npm test -> exit 0, 통과 412, 실패 0'))).toEqual([]);
+  });
+});
+
+describe('known failures reported honestly', () => {
+  it('does not hold a failing lint run against a test claim', () => {
+    expect(completionReportEvidenceIssues(report(
+      'All tests pass.\nRan: npm test -> exit 0, 10 passed, 0 failed\nRan: npm run lint -> exit 1',
+    ))).toEqual([]);
+  });
+
+  it('still rejects a test claim backed only by a failing run of another kind', () => {
+    expect(completionReportEvidenceIssues(report('Tests pass.\nRan: npm run lint -> exit 1'))[0])
+      .toMatch(/shows no execution evidence/);
+  });
+
+  it('does not count a failing run marked pre-existing on the same or the next line', () => {
+    expect(completionReportEvidenceIssues(report(
+      'Tests pass.\nRan: npm test -> exit 1, 411 passed, 1 failed (pre-existing, already failing on main)',
+    ))).toEqual([]);
+    expect(completionReportEvidenceIssues(report(
+      '테스트 통과.\nRan: npm test -> exit 1, 411 passed, 1 failed\n이 1건은 기존 실패입니다.',
+    ))).toEqual([]);
+  });
+
+  it('still rejects a same-kind failure that is not marked pre-existing', () => {
+    expect(completionReportEvidenceIssues(report('Lint is clean.\nRan: npm run lint -> exit 1')).join(' '))
+      .toMatch(/evidence shows a failing run/);
+  });
+});
+
+describe('same-diff document detection', () => {
+  it('does not treat requirements/constraints/CMakeLists .txt files as docs', () => {
+    expect(isProseDocFile('requirements.txt')).toBe(false);
+    expect(isProseDocFile('requirements-dev.txt')).toBe(false);
+    expect(isProseDocFile('constraints.txt')).toBe(false);
+    expect(isProseDocFile('CMakeLists.txt')).toBe(false);
+    expect(isProseDocFile('src/readme.ts')).toBe(false);
+    expect(isProseDocFile('NOTES.txt')).toBe(true);
+    expect(isProseDocFile('README')).toBe(true);
+    expect(isProseDocFile('docs/results.txt')).toBe(true);
+    expect(isProseDocFile('guide.adoc')).toBe(true);
+  });
+
+  it('counts a run that takes a same-diff file as input, not just reads it', () => {
+    expect(completionReportEvidenceIssues(report(
+      'Lint is clean.\nRan: markdownlint docs/x.md -> exit 0',
+      ['docs/x.md'],
+    ))).toEqual([]);
+    expect(completionReportEvidenceIssues(report(
+      'The build passes.\nRan: pip install -r requirements.txt && make build -> exit 0',
+      ['requirements.txt'],
+    ))).toEqual([]);
+  });
+
+  it('flags an Evidence line citing a same-diff doc even when valid runs exist', () => {
+    const issues = completionReportEvidenceIssues(report(
+      'Tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed\nEvidence: docs/results.md',
+      ['src/a.ts', 'docs/results.md'],
+    ));
+    expect(issues.join(' ')).toMatch(/cites documents written in this same change as evidence \(docs\/results\.md\)/);
+  });
+});
+
+describe('claim detection loopholes', () => {
+  it('only exempts a line when the negation is attached to the verification verb', () => {
+    expect(verificationClaims('All tests pass (not flaky).')).toHaveLength(1);
+    expect(verificationClaims('Tests pass without network.')).toHaveLength(1);
+    expect(verificationClaims('Tests not run.')).toEqual([]);
+    expect(verificationClaims('I did not run tests, but the change is small.')).toEqual([]);
+    expect(verificationClaims('Tests weren\'t run here.')).toEqual([]);
+    expect(verificationClaims('테스트는 실행하지 않았습니다')).toEqual([]);
+  });
+
+  it('reads the summary/text of a JSON one-liner as report text', () => {
+    expect(verificationClaims('{"success":true,"summary":"all tests pass"}')).toEqual(['all tests pass']);
+    expect(completionReportEvidenceIssues(report('{"success":true,"summary":"all tests pass","commands":[]}'))[0])
+      .toMatch(/shows no execution evidence/);
+  });
+
+  it('does not treat "made the build succeed" as a verification claim', () => {
+    expect(verificationClaims('Made the build succeed on Node 22 by pinning the dep.')).toEqual([]);
+    expect(verificationClaims('빌드가 성공하도록 의존성을 고정했다')).toEqual([]);
+    expect(verificationClaims('The build passes.')).toHaveLength(1);
+    expect(verificationClaims('Build is green on Node 22.')).toHaveLength(1);
+    expect(verificationClaims('빌드 통과')).toHaveLength(1);
+  });
+});
+
+describe('cross-check against observed runs', () => {
+  it('does not let a targeted run satisfy a claim of the full run', () => {
+    const issues = completionReportEvidenceIssues(report(
+      'Tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed',
+      ['src/a.ts'],
+      ['npm test -- a.test.ts'],
+    ));
+    expect(issues.join(' ')).toMatch(/only observed as a targeted run/);
+    expect(completionReportEvidenceIssues(report(
+      'Tests pass.\nRan: npx vitest run -> exit 0, 3 passed, 0 failed',
+      ['src/a.ts'],
+      ['npx vitest run src/a.test.ts'],
+    )).join(' ')).toMatch(/only observed as a targeted run/);
+    // Redirects and pipes are not targeting.
+    expect(completionReportEvidenceIssues(report(
+      'Tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed',
+      ['src/a.ts'],
+      ['npm test 2>&1 | tail -20'],
+    ))).toEqual([]);
+  });
+
+  it('compares the exit code of the last observed matching run', () => {
+    expect(completionReportEvidenceIssues(report(
+      'Tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed',
+      ['src/a.ts'],
+      ['npm test [exit 1]', 'npm test'],
+    ))).toEqual([]);
+    expect(completionReportEvidenceIssues(report(
+      'Tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed',
+      ['src/a.ts'],
+      ['npm test', 'npm test [exit 1]'],
+    )).join(' ')).toMatch(/exit code does not match the observed run/);
+  });
+
+  it('only checks that the run was observed when its exit status is unknown', () => {
+    expect(completionReportEvidenceIssues(report(
+      'Tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed',
+      ['src/a.ts'],
+      ['npm test [exit ?]'],
+    ))).toEqual([]);
+  });
+});
+
+describe('compound observed lines and unrecognised commands', () => {
+  it('attributes a line exit code only to the command that ends the line', () => {
+    expect(completionReportEvidenceIssues(report(
+      'Lint is clean.\nRan: npm run lint -> exit 0\nRan: npm test -> exit 1, 9 passed, 1 failed (pre-existing)',
+      ['src/a.ts'],
+      ['npm run lint && npm test [exit 1]'],
+    ))).toEqual([]);
+    expect(completionReportEvidenceIssues(report(
+      'Lint is clean.\nRan: npm run lint -> exit 0\nRan: npm test -> exit 1, 9 passed, 1 failed (pre-existing)',
+      ['src/a.ts'],
+      ['npm run lint', 'npm test 2>&1 | tail -20'],
+    ))).toEqual([]);
+    // A clean `&&` chain proves every link exited 0.
+    expect(completionReportEvidenceIssues(report(
+      'Lint is clean.\nRan: npm run lint -> exit 1',
+      ['src/a.ts'],
+      ['npm run lint && npm test'],
+    )).join(' ')).toMatch(/exit code does not match the observed run/);
+  });
+
+  it('holds a failing run of an unrecognised kind against any claim', () => {
+    for (const command of ['make test', './gradlew test', 'dotnet test', 'tox', './scripts/check.sh']) {
+      expect(completionReportEvidenceIssues(report(
+        `Tests pass.\nRan: npm run lint -> exit 0\nRan: ${command} -> exit 2`,
+      )).join(' ')).toMatch(/evidence shows a failing run/);
+    }
+  });
+
+  it('does not read a value-taking flag as a target', () => {
+    expect(completionReportEvidenceIssues(report(
+      'Typecheck is clean.\nRan: npx tsc -> exit 0',
+      ['src/a.ts'],
+      ['npx tsc -p tsconfig.json'],
+    ))).toEqual([]);
+    expect(completionReportEvidenceIssues(report(
+      'Tests pass.\nRan: npx vitest run -> exit 0, 3 passed, 0 failed',
+      ['src/a.ts'],
+      ['npx vitest run --config vitest.config.ts'],
+    ))).toEqual([]);
+  });
+
+  it('does not read the exit digit as a count', () => {
+    expect(parseReportedRuns('Ran: npx vitest run -> exit 0 통과').runs[0].passed).toBeUndefined();
+  });
+
+  it('ignores a top-level text field on a stream event', () => {
+    expect(verificationClaims('{"type":"assistant","text":"All tests pass"}')).toEqual([]);
   });
 });

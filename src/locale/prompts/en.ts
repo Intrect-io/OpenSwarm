@@ -393,6 +393,10 @@ give the exit code):
 Ran: npm test -> exit 0, 412 passed, 0 failed
 Ran: npm run lint -> exit 0
 
+\`go test\` prints no counts, so \`ok\` or the exit code is enough for it. A check
+that was already failing before your change is not hidden: mark it
+\`pre-existing\` on its line or the next.
+
 A report that says tests or lint pass without such a line is not accepted as a
 success. A document you wrote or edited in this change is not evidence. If you
 could not run a check, say so instead of claiming it passed.

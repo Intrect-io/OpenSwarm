@@ -20,7 +20,7 @@ import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import { getCodexModelIds } from './codexModels.js';
 import { codexMcpConfigArgs } from './memoryMcp.js';
 import { codexUserMcpDisableArgs } from './codexUserMcp.js';
-import { extractSummary, isExplicitFailure, parseReviewerResult } from './resultParsing.js';
+import { extractSummary, isExplicitFailure, parseReviewerResult, withExecutionEvidence } from './resultParsing.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 
 const execFileAsync = promisify(execFile);
@@ -142,7 +142,12 @@ export class CodexCliAdapter implements CliAdapter {
     if (executed.length > 0) {
       result.commands = [...new Set([...result.commands, ...executed])].slice(0, 20);
     }
-    return result;
+    // The same events are what the completion-evidence gate cross-checks a
+    // report's `Ran:` lines against, so expose them as observed execution —
+    // but only when stdout is a whole event stream: a plain-text fallback or a
+    // stream whose head was dropped is not a complete record. (AGT-4900)
+    const observed = extractCodexObservedRuns(raw.stdout);
+    return observed ? withExecutionEvidence(result, { executedCommands: observed }) : result;
   }
 
   parseReviewerOutput(raw: CliRunResult): ReviewResult {
@@ -223,9 +228,7 @@ function extractCodexExecutedCommands(output: string): string[] {
         event.item?.type === 'command_execution' &&
         typeof event.item.command === 'string'
       ) {
-        const rawCmd: string = event.item.command;
-        const unwrapped = rawCmd.match(/^\/(?:usr\/)?bin\/(?:zsh|bash|sh)\s+-l?c\s+'([\s\S]*)'\s*$/);
-        const cmd = (unwrapped ? unwrapped[1] : rawCmd).trim();
+        const cmd = unwrapCodexShell(event.item.command);
         if (cmd && !commands.includes(cmd)) commands.push(cmd);
       }
     } catch {
@@ -233,6 +236,46 @@ function extractCodexExecutedCommands(output: string): string[] {
     }
   }
   return commands;
+}
+
+/**
+ * Executed commands with their exit status, in the form the agentic-loop
+ * adapters record: the bare command for exit 0, `<cmd> [exit N]` otherwise,
+ * and `<cmd> [exit ?]` when the event carries no numeric exit code. Re-runs
+ * move to the end, so the last entry for a command is its latest run.
+ * Undefined when stdout is not a complete Codex event stream.
+ */
+function extractCodexObservedRuns(output: string): string[] | undefined {
+  if (output.startsWith('[openswarm:')) return undefined; // head of the stream was not retained
+  const observed: string[] = [];
+  let sawStructuredEvent = false;
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    let event: { type?: unknown; item?: { type?: unknown; command?: unknown; exit_code?: unknown } };
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof event?.type === 'string') sawStructuredEvent = true;
+    const item = event.item;
+    if (event.type !== 'item.completed' || item?.type !== 'command_execution' || typeof item.command !== 'string') continue;
+    const cmd = unwrapCodexShell(item.command);
+    if (!cmd) continue;
+    const exit = typeof item.exit_code === 'number' ? item.exit_code : undefined;
+    const entry = exit === 0 ? cmd : `${cmd} [exit ${exit ?? '?'}]`;
+    const previous = observed.indexOf(entry);
+    if (previous !== -1) observed.splice(previous, 1);
+    observed.push(entry);
+  }
+  return sawStructuredEvent ? observed : undefined;
+}
+
+/** Codex wraps each command as `/bin/zsh -lc '<cmd>'`; return the inner command. */
+function unwrapCodexShell(rawCmd: string): string {
+  const unwrapped = rawCmd.match(/^\/(?:usr\/)?bin\/(?:zsh|bash|sh)\s+-l?c\s+'([\s\S]*)'\s*$/);
+  return (unwrapped ? unwrapped[1] : rawCmd).trim();
 }
 
 /** Every agent_message in order, and whether stdout was a Codex event stream at all. */

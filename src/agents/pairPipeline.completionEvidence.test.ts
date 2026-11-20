@@ -62,4 +62,49 @@ describe('retry after an unbacked completion claim (AGT-4900)', () => {
     expect(retry.previousFeedback).toContain('Ran: <command> -> exit <code>');
     expect(retry.previousFeedback).not.toContain('worker-evidence:');
   });
+
+  const rejection = (claim: string) => ({
+    success: false, summary: 'done', filesChanged: ['src/a.ts'], commands: [], output: claim,
+    unverifiedCompletionClaim: true,
+    error: `worker-evidence: Report claims a check passed but shows no execution evidence. Claim: "${claim}"`,
+  });
+  const pipelineWith = async (maxIterations: number, maxReflections: number) => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    return new PairPipeline({
+      stages: ['worker'], maxIterations, maxReflections,
+      roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },
+    } as unknown as ConstructorParameters<typeof PairPipeline>[0]);
+  };
+
+  it('does not spend the reflection budget on evidence rejections', async () => {
+    runWorker
+      .mockResolvedValueOnce(rejection('All tests pass.'))
+      .mockResolvedValueOnce(rejection('Lint is clean.'))
+      .mockResolvedValue({ success: false, summary: 'stopped', filesChanged: [], commands: [], output: '', error: 'stop' });
+    const pipeline = await pipelineWith(3, 1);
+    const counts: number[] = [];
+    const aborts: unknown[] = [];
+    pipeline.on('iteration:fail', ({ context }: { context: { reflection: { reflectionCount: number } } }) => {
+      counts.push(context.reflection.reflectionCount);
+    });
+    pipeline.on('reflection:abort', (event: unknown) => aborts.push(event));
+
+    await pipeline.run(task, process.cwd());
+
+    expect(runWorker).toHaveBeenCalledTimes(3);
+    expect(counts.slice(0, 2)).toEqual([0, 0]);
+    expect(aborts).toEqual([]);
+  });
+
+  it('stops when the same evidence rejection repeats', async () => {
+    runWorker.mockResolvedValue(rejection('All tests pass.'));
+    const pipeline = await pipelineWith(5, 3);
+    const aborts: Array<{ reason: string }> = [];
+    pipeline.on('reflection:abort', (event: { reason: string }) => aborts.push(event));
+
+    await pipeline.run(task, process.cwd());
+
+    expect(runWorker).toHaveBeenCalledTimes(2);
+    expect(aborts[0]?.reason).toMatch(/identical validation errors repeated/);
+  });
 });
