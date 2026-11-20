@@ -88,6 +88,13 @@ describe('key cells', () => {
     expect(trigger.dataset).toMatchObject({ axis: 'project', key: 'fba70edf-1234' });
   });
 
+  it('offers no drill on an empty key, which the API cannot filter on', () => {
+    const table = document.createElement('table');
+    renderTable(table, aggregate('model', ['', 'gpt']), { drillAxis: 'model' });
+    expect([...table.querySelectorAll('.drill-trigger')].map(b => (b as HTMLElement).dataset.key)).toEqual(['gpt']);
+    expect(table.querySelectorAll('tbody tr')).toHaveLength(2);
+  });
+
   it('keeps a plain key cell without drillAxis', () => {
     const table = document.createElement('table');
     renderTable(table, aggregate('task', ['AGT-1']));
@@ -124,6 +131,15 @@ describe('createUsageDrill', () => {
     expect(drillTable().querySelector('thead th')!.textContent).toBe('Stage');
     expect([...drillTable().querySelectorAll('tbody td.key')].map(td => td.textContent)).toEqual(['worker', 'draft']);
     expect(document.querySelector('#drill-footer')!.textContent).toContain('Stage breakdown of Project OpenSwarm');
+    expect(status()).toBe('');
+  });
+
+  it('says no calls in this window for an empty breakdown instead of an error', async () => {
+    const fetchImpl = vi.fn(async () => response({ ...aggregate('stage', []), total: row('total', { calls: 0, costUsd: 0 }) }));
+    const drill = createUsageDrill({ fetchImpl, getSince: () => '1h' });
+    await drill.open('project', 'AgedOut');
+    expect(panel().hidden).toBe(false);
+    expect(drillTable().textContent).toBe('No calls in this window.');
     expect(status()).toBe('');
   });
 

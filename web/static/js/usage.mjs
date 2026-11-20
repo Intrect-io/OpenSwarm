@@ -259,7 +259,7 @@ export function truncationNote(hidden) {
   return `${formatCount(hidden.count)} more row${hidden.count === 1 ? '' : 's'} (${formatCost(hidden.costUsd)}) not shown.`;
 }
 
-export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', label = '', excludeUnattributed = false, drillAxis = null } = {}) {
+export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', label = '', excludeUnattributed = false, drillAxis = null, emptyText = '' } = {}) {
   table.replaceChildren();
   // A ranking of tasks must not be topped by the bucket for calls that named
   // no task: it outweighs every real row and pushes them all below the fold.
@@ -278,7 +278,7 @@ export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', lab
     const tr = document.createElement('tr');
     const td = cell(filteredAll
       ? 'No call in this window was attributed to a task.'
-      : 'No usage recorded in this window.', 'usage-empty');
+      : (emptyText || 'No usage recorded in this window.'), 'usage-empty');
     td.colSpan = 7;
     tr.append(td);
     body.append(tr);
@@ -309,7 +309,9 @@ export function renderTable(table, aggregate, { limit = 25, sortBy = 'cost', lab
     const rate = cacheRate(row);
     const per = costPerCall(row);
     tr.append(
-      drillAxis ? drillCell(row.key, drillAxis) : cell(row.key, 'key', { titled: true }),
+      // An empty key has nothing to click and the API refuses an empty
+      // filter value, so it stays a plain cell. (AGT-4297 review)
+      drillAxis && row.key !== '' ? drillCell(row.key, drillAxis) : cell(row.key, 'key', { titled: true }),
       cell(formatCount(row.calls), 'num'),
       cell(formatTokens((row.promptTokens ?? 0) + (row.completionTokens ?? 0)), 'num'),
       cell(formatPercent(rate), `num ${rateClass(rate)}`.trim()),

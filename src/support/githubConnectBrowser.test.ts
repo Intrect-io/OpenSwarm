@@ -60,6 +60,18 @@ describe('GitHub repository search (AGT-4005)', () => {
     expect(lib.querySelector('button.gh-clone')).toBeNull();
   });
 
+  it('renders a name-taken repository with no clone action (review finding 3)', async () => {
+    fetchMock.mockResolvedValueOnce(json(200, [
+      { fullName: 'bob/tools', private: false, cloned: false, nameTaken: true },
+    ]));
+    await api.searchGithubRepos('tools');
+    const [row] = rows();
+    expect(row.dataset.state).toBe('name-taken');
+    expect(row.textContent).toContain('name taken');
+    expect(row.textContent).not.toContain('cloned');
+    expect(row.querySelector('button.gh-clone')).toBeNull();
+  });
+
   it('renders a hostile repository name as text, never as markup', async () => {
     fetchMock.mockResolvedValueOnce(json(200, [
       { fullName: '<img src=x onerror=alert(1)>/x', private: false, cloned: false },
@@ -129,5 +141,25 @@ describe('GitHub repository clone (AGT-4005)', () => {
     expect(button.disabled).toBe(false);
     expect(button.textContent).toBe('Retry');
     expect(reloadProjectList).not.toHaveBeenCalled();
+  });
+
+  it('shows a 409 name-taken answer from the server and drops the clone action', async () => {
+    const button = await renderOne();
+    fetchMock.mockResolvedValueOnce(json(409, { error: 'Name taken: /work/app already exists and is not acme/app', nameTaken: true }));
+    await api.cloneGithubRepo(button);
+    const row = rows()[0];
+    expect(row.dataset.state).toBe('name-taken');
+    expect(row.querySelector('.gh-repo-note')!.textContent).toContain('Name taken');
+    expect(row.querySelector('button.gh-clone')).toBeNull();
+  });
+
+  it('keeps the clone result and says so when the repository panel fails to refresh', async () => {
+    const button = await renderOne();
+    fetchMock.mockResolvedValueOnce(json(201, { fullName: 'acme/app', destination: '/work/app' }));
+    reloadProjectList.mockRejectedValueOnce(new Error('/api/projects → HTTP 500'));
+    await api.cloneGithubRepo(button);
+    const row = rows()[0];
+    expect(row.dataset.state).toBe('cloned');
+    expect(row.querySelector('.gh-repo-note')!.textContent).toContain('did not refresh');
   });
 });

@@ -26,7 +26,7 @@
     if (status === 503 && body && body.error === 'GH_TOKEN not configured') {
       return 'GitHub is not connected: set GH_TOKEN for the daemon.';
     }
-    if (status === 409) return 'Already cloned at the destination.';
+    if (status === 409 && !(body && typeof body.error === 'string')) return 'Already cloned at the destination.';
     const detail = body && typeof body.error === 'string' ? body.error : 'HTTP ' + status;
     return detail.slice(0, 200);
   }
@@ -84,6 +84,12 @@
       if (repo.private) row.appendChild(badge('private', 'is-private'));
       if (repo.cloned) {
         row.appendChild(badge('cloned', 'is-cloned'));
+      } else if (repo.nameTaken) {
+        // Another repository already holds the destination directory (same
+        // name, other owner): cloning would collide, so offer no action.
+        row.dataset.state = 'name-taken';
+        row.appendChild(badge('name taken', 'is-name-taken'));
+        note.textContent = 'A different repository already uses this folder name.';
       } else {
         const button = document.createElement('button');
         button.type = 'button';
@@ -147,6 +153,12 @@
       const body = await readJson(res);
       if (!res.ok) {
         if (note) note.textContent = errorMessage(res.status, body);
+        if (res.status === 409 && body && body.nameTaken === true) {
+          // Retrying cannot help: the folder belongs to another repository.
+          if (row) row.dataset.state = 'name-taken';
+          button.replaceWith(badge('name taken', 'is-name-taken'));
+          return;
+        }
         if (row) row.dataset.state = 'failed';
         button.disabled = false;
         button.textContent = 'Retry';
@@ -155,9 +167,14 @@
       if (row) row.dataset.state = 'cloned';
       button.replaceWith(badge('cloned', 'is-cloned'));
       if (note) note.textContent = body && typeof body.destination === 'string' ? body.destination : 'Cloned';
-      // supervisor.js owns the Repositories panel; refresh it when present.
+      // supervisorPanels.js owns the Repositories panel; refresh it when present.
       if (typeof window.reloadProjectList === 'function') {
-        try { await window.reloadProjectList(); } catch { /* panel refresh is best effort */ }
+        try {
+          await window.reloadProjectList();
+        } catch (e) {
+          // The clone succeeded; say the panel is stale rather than hide it.
+          if (note) note.textContent += ' · Repository list did not refresh: ' + String(e && e.message || e).slice(0, 200);
+        }
       }
     } catch (e) {
       if (note) note.textContent = 'Clone failed: ' + String(e && e.message || e).slice(0, 200);

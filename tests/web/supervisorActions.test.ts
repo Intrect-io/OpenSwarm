@@ -383,3 +383,39 @@ describe('Factory kill switch button (AGT-4808 review H)', () => {
     expect(btn.title).toContain('Factory paused (drain) by auto:disk: low disk');
   });
 });
+
+describe('Repositories panel keeps its list when a reload fails (AGT-4005 review)', () => {
+  const ALPHA = [{ name: 'alpha-repo', path: '/work/alpha-repo', enabled: true, prs: [], running: [], queued: [], pending: [] }];
+
+  it('reloadProjectList rejects on a non-OK answer and leaves the rendered list intact', async () => {
+    let projectsStatus = 200;
+    const page = load((url) => (url === '/api/projects'
+      ? (projectsStatus === 200 ? { status: 200, body: ALPHA } : { status: 500, body: { error: 'boom' } })
+      : undefined));
+    await page.settle();
+    // Seed through the same path a successful clone takes.
+    await call(page, 'reloadProjectList');
+    const list = page.doc.getElementById('project-list')!;
+    expect(list.textContent).toContain('alpha-repo');
+    projectsStatus = 500;
+    await expect(call(page, 'reloadProjectList') as Promise<void>).rejects.toThrow('HTTP 500');
+    expect(list.textContent).toContain('alpha-repo');
+  });
+
+  it('pickRepo shows an error and keeps the list when the refresh fails', async () => {
+    let projectsStatus = 200;
+    const page = load((url) => (url === '/api/projects'
+      ? (projectsStatus === 200 ? { status: 200, body: ALPHA } : { status: 500, body: { error: 'boom' } })
+      : undefined));
+    await page.settle();
+    await call(page, 'reloadProjectList');
+    projectsStatus = 500;
+    const item = page.doc.createElement('div');
+    item.setAttribute('data-path', '/work/beta-repo');
+    await call(page, 'pickRepo', item);
+    expect(page.doc.getElementById('project-list')!.textContent).toContain('alpha-repo');
+    const alert = page.doc.querySelector('#repo-picker-list .picker-error');
+    expect(alert?.textContent).toContain('Add failed');
+    expect(alert?.textContent).toContain('HTTP 500');
+  });
+});

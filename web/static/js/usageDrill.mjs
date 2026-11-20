@@ -88,7 +88,9 @@ export function createUsageDrill({ root = document, fetchImpl = globalThis.fetch
       const data = await res.json();
       if (seq !== latest) return;
       const child = DRILL_TARGET[axis];
-      const drew = table ? renderTable(table, data, { label: AXIS_LABELS[child] ?? child }) : null;
+      // A row can age out of the window between refreshes; the server answers
+      // that with an empty aggregate, which reads as "no calls", not an error.
+      const drew = table ? renderTable(table, data, { label: AXIS_LABELS[child] ?? child, emptyText: 'No calls in this window.' }) : null;
       if (footer) footer.textContent = [drillFooter(axis, key, data), truncationNote(drew?.hidden)].filter(Boolean).join(' · ');
       say('');
     } catch (err) {

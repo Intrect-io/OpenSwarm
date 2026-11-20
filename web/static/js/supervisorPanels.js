@@ -67,17 +67,38 @@ function filterRepos(q) {
   }).join("");
 }
 
+// Fetch a JSON list, refusing a non-OK or non-array answer so a 500 never
+// replaces a good list with an error object.
+async function fetchJsonList(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(url + " \u2192 HTTP " + res.status);
+  const data = await res.json();
+  if (!Array.isArray(data)) throw new Error(url + " returned no list");
+  return data;
+}
+
 // Re-read the Repositories panel and the local picker list. githubConnect.js
-// calls this after a clone registers a new repository (AGT-4005).
+// calls this after a clone registers a new repository (AGT-4005). On failure
+// the previous lists stay and the error is thrown to the caller.
 async function reloadProjectList() {
-  const res = await fetch("/api/projects");
-  projects = await res.json();
+  projects = await fetchJsonList("/api/projects");
   renderProjects();
   if (pickerOpen) {
-    const local = await fetch("/api/local-projects");
-    allLocalProjects = await local.json();
+    allLocalProjects = await fetchJsonList("/api/local-projects");
     filterRepos(document.getElementById("repo-search").value);
   }
+}
+
+// One-line error at the top of the picker list; the next filterRepos clears it.
+function showPickerError(message) {
+  const list = document.getElementById("repo-picker-list");
+  if (!list) return;
+  const note = document.createElement("div");
+  note.className = "empty picker-error";
+  note.setAttribute("role", "alert");
+  note.textContent = message;
+  list.querySelector(".picker-error")?.remove();
+  list.prepend(note);
 }
 
 async function pickRepo(el) {
@@ -85,14 +106,14 @@ async function pickRepo(el) {
   if (!path) return;
   el.style.opacity = "0.4";
   try {
-    await fetch("/api/projects/pin", {
+    const pin = await fetch("/api/projects/pin", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ projectPath: path }),
     });
-    // Refresh project list
-    const res = await fetch("/api/projects");
-    projects = await res.json();
+    if (!pin.ok) throw new Error("/api/projects/pin \u2192 HTTP " + pin.status);
+    // Refresh project list; a failed read keeps the previous one.
+    projects = await fetchJsonList("/api/projects");
     renderProjects();
     // Mark as pinned in local picker list
     const item = allLocalProjects.find(p => p.path === path);
@@ -100,6 +121,7 @@ async function pickRepo(el) {
     filterRepos(document.getElementById("repo-search").value);
   } catch(e) {
     console.error("Pin failed:", e);
+    showPickerError("Add failed: " + String(e && e.message || e).slice(0, 200));
   }
   el.style.opacity = "1";
 }
