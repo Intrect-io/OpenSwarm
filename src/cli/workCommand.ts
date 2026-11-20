@@ -59,6 +59,9 @@ export const WORK_EXIT_OK = 0;
 export const WORK_EXIT_FAILED = 1;
 export const WORK_EXIT_NOT_RUN = 2;
 export const WORK_EXIT_INTERRUPTED = 130;
+/** 128 + SIGTERM: a supervisor (systemd, docker stop, CI) stopped the run. */
+export const WORK_EXIT_TERMINATED = 143;
+export type WorkInterruptSignal = 'SIGINT' | 'SIGTERM';
 
 /** The daemon's fan-out admission (autonomousRunner.executeDurably) with the
  *  repository's own openswarm.json automation policy layered in. Worktrees
@@ -136,8 +139,8 @@ export interface WorkCommandDeps {
   deliverEffect?: (effect: EffectClaim, source: ITaskSource | null) => Promise<void>;
   hasRecoverableWorktree?: (repoPath: string, issueId: string, branchName: string) => Promise<boolean>;
   resolveTaskFileScope?: (task: TaskItem, projectPath: string) => Promise<string[]>;
-  /** Installs the SIGINT handler; returns the uninstaller. */
-  installSigintHandler?: (onSigint: () => void) => () => void;
+  /** Installs the SIGINT + SIGTERM handler; returns the uninstaller. */
+  installSigintHandler?: (onSignal: (signal?: WorkInterruptSignal) => void) => () => void;
   isTTY?: boolean;
   /** Progress/diagnostics — stderr, so `--json | jq` parses. */
   log?: (line: string) => void;
@@ -559,18 +562,31 @@ async function runWorkCommandInner(
 
   const exec = deps.executePipeline ?? executePipeline;
 
+  // SIGINT (Ctrl-C) and SIGTERM (systemd/docker stop/CI cancel) take the same
+  // path: abort the pipelines, then the finally below releases the uninstaller
+  // and closes the coordinator. Without a SIGTERM listener the process-tree
+  // relay re-raised SIGTERM and Node died before that cleanup ran.
   const sigint = new AbortController();
   let interrupts = 0;
+  let interruptSignal: WorkInterruptSignal = 'SIGINT';
   const forceExit = deps.exit ?? ((code: number) => process.exit(code));
-  const onSigint = (): void => {
+  const exitCodeFor = (signal: WorkInterruptSignal): number => (signal === 'SIGTERM' ? WORK_EXIT_TERMINATED : WORK_EXIT_INTERRUPTED);
+  const onSigint = (signal: WorkInterruptSignal = 'SIGINT'): void => {
     interrupts += 1;
-    if (interrupts > 1) forceExit(WORK_EXIT_INTERRUPTED);
-    log('Interrupted — aborting running pipelines. Worktrees holding work are preserved; re-run the same command to resume. (Ctrl-C again to force quit)');
-    sigint.abort(new Error('SIGINT'));
+    if (interrupts > 1) forceExit(exitCodeFor(signal));
+    interruptSignal = signal;
+    log(`Interrupted (${signal}) — aborting running pipelines. Worktrees holding work are preserved; re-run the same command to resume. (Ctrl-C again to force quit)`);
+    sigint.abort(new Error(signal));
   };
-  const uninstallSigint = (deps.installSigintHandler ?? ((handler: () => void) => {
-    process.on('SIGINT', handler);
-    return () => process.removeListener('SIGINT', handler);
+  const uninstallSigint = (deps.installSigintHandler ?? ((handler: (signal?: WorkInterruptSignal) => void) => {
+    const onInt = (): void => handler('SIGINT');
+    const onTerm = (): void => handler('SIGTERM');
+    process.on('SIGINT', onInt);
+    process.on('SIGTERM', onTerm);
+    return () => {
+      process.removeListener('SIGINT', onInt);
+      process.removeListener('SIGTERM', onTerm);
+    };
   }))(onSigint);
 
   let settledRows: Array<{ value?: PipelineResult; error?: unknown }>;
@@ -666,7 +682,7 @@ async function runWorkCommandInner(
   const summaries = plan.map((row, index) => summarizeSettled(row, settledRows[index] ?? {}));
   const failed = summaries.some((s) => !s.success && s.status !== 'superseded');
   const exitCode = interrupts > 0
-    ? WORK_EXIT_INTERRUPTED
+    ? exitCodeFor(interruptSignal)
     : failed ? WORK_EXIT_FAILED : WORK_EXIT_OK;
 
   if (opts.json) {
