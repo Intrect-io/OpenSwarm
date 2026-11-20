@@ -8,6 +8,7 @@ import {
   aggregateTaxonomy, classifyCause, composeCandidateIssue, mergeSignals, runFailureTaxonomy,
   type FailureSignal,
 } from './failureTaxonomy.js';
+import { missingDefinitionOfReadySections } from './definitionOfReady.js';
 
 // The fixture mirrors the shape of the 2026-10-20 night on the production
 // ledger (see the PR for the measured counts): workers declaring the remaining
@@ -219,8 +220,171 @@ describe('composeCandidateIssue', () => {
     const { title, description } = composeCandidateIssue(candidate, { since: NOW - 7 * 24 * HOUR, until: NOW });
     expect(title).toBe('[Failure taxonomy] guard candidate: ENOSPC — host disk full');
     expect(description).toContain('nothing has been applied');
-    expect(description).toContain('`A#1`, `B#2`, `hq-0000000000000003`');
+    // Ledger sessions outside code spans, so the tracker links the identifier.
+    expect(description).toContain('A (attempt 1), B (attempt 2), `hq-0000000000000003`');
+    expect(description).toContain('<!-- failure-taxonomy-cause: host_disk_full -->');
     expect(description).toContain('| Signals | 3 (attempt 2, question 1) |');
     expect(description).toContain(ENOSPC);
+  });
+});
+
+describe('failure taxonomy review fixes (#876 review, AGT-4812)', () => {
+  const WEEK = 7 * 24 * HOUR;
+  const enospc = (issues: string[], at = NOW - 2 * HOUR): AttemptSeed[] => issues.map((issue, i) => ({ issue, attempt: i + 1, message: ENOSPC, at }));
+  function source(overrides: Partial<{ updateState: (id: string, state: 'Backlog') => Promise<boolean> }> = {}) {
+    let n = 0;
+    return {
+      createTask: vi.fn(async () => { n += 1; return { id: `uuid-${n}`, identifier: `AGT-90${n}` }; }),
+      updateState: vi.fn(overrides.updateState ?? (async () => true)),
+    };
+  }
+
+  it('a weekly callback that fires a few ms earlier than last week still runs', async () => {
+    const { db } = seededLedger(enospc(['T-1', 'T-2', 'T-3']));
+    const src = source();
+    await runFailureTaxonomy({ db, taskSource: src, now: NOW });
+    const next = await runFailureTaxonomy({ db, taskSource: src, now: NOW + WEEK - 30 });
+    expect(next.ran).toBe(true);
+    // ...but a second pass the same week does not.
+    expect((await runFailureTaxonomy({ db, taskSource: src, now: NOW + WEEK + HOUR })).ran).toBe(false);
+    db.close();
+  });
+
+  it('after a missed week the window reaches back to the last pass', async () => {
+    const { db } = seededLedger(enospc(['T-1', 'T-2', 'T-3'], NOW + 3 * 24 * HOUR));
+    const src = source();
+    await runFailureTaxonomy({ db, taskSource: { ...src, createTask: vi.fn(async () => ({ error: 'none yet' })) }, now: NOW });
+    // The daemon missed NOW + 1 week; the signals sit 11 days before this pass.
+    const late = await runFailureTaxonomy({ db, taskSource: src, now: NOW + 2 * WEEK });
+    expect(late.candidates.map(c => c.id)).toContain('host_disk_full');
+    db.close();
+  });
+
+  it('a failed move to Backlog is reported, does not cause a twin, and the body is held by the readiness gate', async () => {
+    const { db } = seededLedger(enospc(['T-1', 'T-2', 'T-3']));
+    const src = source({ updateState: async () => false });
+    const first = await runFailureTaxonomy({ db, taskSource: src, now: NOW });
+    expect(first.filed).toEqual(['AGT-901']);
+    expect(first.notInBacklog).toEqual(['AGT-901']);
+    expect(src.updateState).toHaveBeenCalledTimes(3);
+    expect(first.reason).toContain('NOT in Backlog');
+    const description = (src.createTask.mock.calls[0] as unknown as [string, string])[1];
+    expect(missingDefinitionOfReadySections(description).length).toBeGreaterThan(0);
+    const next = await runFailureTaxonomy({ db, taskSource: src, now: NOW + WEEK });
+    expect(next.filed).toEqual([]);
+    db.close();
+  });
+
+  it('an issue still open gets the new evidence as a comment instead of a twin, whenever it was filed', async () => {
+    const { db } = seededLedger([...enospc(['T-1', 'T-2', 'T-3']), ...enospc(['T-4', 'T-5', 'T-6'], NOW + 5 * WEEK - 2 * HOUR)]);
+    const addComment = vi.fn(async () => {});
+    const lookupIssueState = vi.fn(async () => ({ ok: true as const, issue: { state: 'Backlog', stateType: 'backlog' } }));
+    const src = { ...source(), addComment, lookupIssueState };
+    await runFailureTaxonomy({ db, taskSource: src, now: NOW });
+    // Five weeks later, past the old four-week quiet period, the issue is still open.
+    const later = await runFailureTaxonomy({ db, taskSource: src, now: NOW + 5 * WEEK });
+    expect(later.filed).toEqual([]);
+    expect(later.updated).toEqual(['uuid-1']);
+    expect(lookupIssueState).toHaveBeenCalledWith('uuid-1');
+    expect(addComment).toHaveBeenCalledTimes(1);
+    expect(src.createTask).toHaveBeenCalledTimes(1);
+    db.close();
+  });
+
+  it('files again only after the quiet period once a person closed the issue, and never on an unknown state', async () => {
+    const { db } = seededLedger([...enospc(['T-1', 'T-2', 'T-3']), ...enospc(['T-4', 'T-5', 'T-6'], NOW + WEEK - 2 * HOUR), ...enospc(['T-7', 'T-8', 'T-9'], NOW + 5 * WEEK - 2 * HOUR)]);
+    let lookup: { ok: true; issue: { state: string; stateType?: string } } | { ok: false; error: string } = { ok: false, error: 'tracker down' };
+    const src = { ...source(), addComment: vi.fn(async () => {}), lookupIssueState: vi.fn(async () => lookup) };
+    await runFailureTaxonomy({ db, taskSource: src, now: NOW });
+    expect((await runFailureTaxonomy({ db, taskSource: src, now: NOW + WEEK })).filed).toEqual([]);
+    lookup = { ok: true, issue: { state: 'Canceled', stateType: 'canceled' } };
+    expect((await runFailureTaxonomy({ db, taskSource: src, now: NOW + 5 * WEEK })).filed).toEqual(['AGT-902']);
+    db.close();
+  });
+
+  it('one candidate throwing does not drop the others', async () => {
+    const attempts = [
+      ...enospc(['T-1', 'T-2', 'T-3']),
+      ...['T-4', 'T-5', 'T-6'].map((issue, i) => ({ issue, attempt: 1 + i, message: 'blocked_by_dependency: needs a client decision' })),
+    ];
+    const { db } = seededLedger(attempts);
+    let calls = 0;
+    const src = {
+      createTask: vi.fn(async () => { calls += 1; if (calls === 1) throw new Error('Linear 500'); return { id: 'uuid-2', identifier: 'AGT-902' }; }),
+      updateState: vi.fn(async () => true),
+    };
+    const result = await runFailureTaxonomy({ db, taskSource: src, now: NOW });
+    expect(result.candidates).toHaveLength(2);
+    expect(result.filed).toEqual(['AGT-902']);
+    db.close();
+  });
+
+  it('the same unnamed cause keeps one id across numbers, dates and PR numbers', () => {
+    const a = classifyCause('worker: tsc exited with code 137 (PR #812) on 2026-10-20 09:00');
+    const b = classifyCause('worker: tsc exited with code 1 (PR #813) on 2026-10-27 10:15');
+    expect(a.id.startsWith('other:')).toBe(true);
+    expect(a.id).toBe(b.id);
+  });
+
+  it.each([
+    ['pr-review: changes requested: release notes missing entry', 'review_changes_requested'],
+    ['pr-review: changes requested: reviewer would approve once tests added', 'review_changes_requested'],
+    ['verify-runner: infrastructure failure — failed to release lock', 'verify_infra_failure'],
+    ['Please write the release notes for this change', 'other'],
+  ])('a stage-stamped or bare-word record is not misread: %s', (text, cause) => {
+    expect(classifyCause(text).id.startsWith(cause)).toBe(true);
+  });
+
+  it('redacts secret-shaped values from the filed title and body', () => {
+    const leak = 'worker: curl failed with GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789 set';
+    const [candidate] = aggregateTaxonomy([
+      { source: 'attempt', issue: 'A', session: 'A#1', text: leak, at: NOW },
+      { source: 'attempt', issue: 'B', session: 'B#1', text: leak, at: NOW },
+      { source: 'attempt', issue: 'C', session: 'C#1', text: leak, at: NOW },
+    ]);
+    const { title, description } = composeCandidateIssue(candidate, { since: NOW - WEEK, until: NOW });
+    expect(`${title}\n${description}`).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(description).toContain('[redacted]');
+  });
+
+  it('reads question threads from the durable trace, once per thread, merged with the board', async () => {
+    const { db } = seededLedger([]);
+    db.exec(`CREATE TABLE IF NOT EXISTS coordination_trace (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp INTEGER NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, correlation_id TEXT NOT NULL, task_id TEXT NOT NULL DEFAULT '', task_label TEXT, summary TEXT NOT NULL DEFAULT '')`);
+    const q = db.prepare('INSERT INTO coordination_trace(timestamp, kind, status, correlation_id, task_label, summary) VALUES (?, ?, ?, ?, ?, ?)');
+    const ask = 'Do you authorise the release workflow_dispatch?';
+    // Each thread is paged: 'waiting' then 'running' under one id.
+    for (const [id, issue] of [['hq-0000000000000a01', 'Q-1'], ['hq-0000000000000a02', 'Q-2']] as const) {
+      q.run(NOW - 3 * HOUR, 'human-question', 'waiting', id, issue, ask);
+      q.run(NOW - 3 * HOUR + 1000, 'human-question', 'running', id, issue, ask);
+    }
+    // The board still holds one of the two threads.
+    const coordinationPath = board([{ issue: 'Q-2', id: 'hq-0000000000000a02', text: ask }]);
+    const result = await runFailureTaxonomy({ db, coordinationPath, now: NOW, force: true, minSignals: 2 });
+    db.close();
+    const deploy = result.candidates.find(c => c.id === 'human_only_deploy');
+    expect(deploy?.signals).toBe(2);
+    expect(deploy?.sessions).toEqual(['hq-0000000000000a01', 'hq-0000000000000a02']);
+    // Four trace rows plus a board copy are still two questions: below a floor of three.
+    const strict = seededLedger([]).db;
+    expect(aggregateTaxonomy(mergeSignals([], [
+      { source: 'question', issue: 'Q-1', session: 'hq-1', text: ask, at: NOW },
+      { source: 'question', issue: 'Q-1', session: 'hq-1', text: ask, at: NOW + 1 },
+      { source: 'question', issue: 'Q-2', session: 'hq-2', text: ask, at: NOW },
+      { source: 'question', issue: 'Q-2', session: 'hq-2', text: ask, at: NOW + 1 },
+    ]))).toEqual([]);
+    strict.close();
+  });
+
+  it('counts an attempt the in-pipeline reviewer rejected, even without a message', async () => {
+    const { db } = seededLedger(['R-1', 'R-2', 'R-3'].map((issue, i) => ({ issue, attempt: i + 1, message: '', status: 'rejected' })));
+    const result = await runFailureTaxonomy({ db, now: NOW, force: true });
+    db.close();
+    expect(result.candidates.map(c => c.id)).toContain('review_changes_requested');
+  });
+
+  it('drops an attempt waiting on several questions when the board holds them', () => {
+    const waiting: FailureSignal = { source: 'attempt', issue: 'A', session: 'A#1', text: 'Waiting for operator answers (hq-00000000000000aa, hq-00000000000000bb)', at: NOW };
+    const asked: FailureSignal = { source: 'question', issue: 'A', session: 'hq-00000000000000bb', text: 'which DSN?', at: NOW };
+    expect(mergeSignals([waiting], [asked])).toEqual([asked]);
   });
 });

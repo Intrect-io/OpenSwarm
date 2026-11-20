@@ -23,6 +23,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { Cron } from 'croner';
 import { normalizeErrorForLoop } from '../support/stuckDetector.js';
+import { redactSecrets } from '../support/secretRedaction.js';
 import { coordinationFilePath } from '../coordination/coordinationPaths.js';
 import { defaultAutomationDbPath } from './automationDbPath.js';
 
@@ -65,7 +66,9 @@ export const CAUSE_RULES: readonly CauseRule[] = [
     label: 'human-only deploy / production action',
     kind: 'readiness_check',
     proposal: 'Do not dispatch an issue whose remaining definition of done is a production write, deploy, release or live readback. Route it to the operator at triage instead of after a worker run.',
-    match: /^human_action_only:|\b(?:deploy|release|workflow[_ ]dispatch|production (?:write|read|data|master)|live (?:publication|readback))\b|운영 (?:작업|NAS|승인)|배포/i,
+    // A bare "release" is not a deploy ("release notes", "release the lock"):
+    // only a release workflow or a release to production counts.
+    match: /^human_action_only:|\b(?:deploy(?:s|ed|ing|ment)?|workflow[_ ]dispatch|production (?:write|read|data|master)|live (?:publication|readback))\b|\brelease (?:workflow|to (?:prod|production))\b|운영 (?:작업|NAS|승인)|배포/i,
   },
   {
     id: 'missing_credential',
@@ -116,7 +119,37 @@ export const CAUSE_RULES: readonly CauseRule[] = [
  * question itself is the better text, so the attempt is dropped when the
  * board has that question.
  */
-const WAITING_ON_QUESTION = /Waiting for operator answer \((hq-[0-9a-f]+)\)/;
+const WAITING_ON_QUESTION = /Waiting for operator answers? \(([^)]*)\)/;
+const QUESTION_ID = /hq-[0-9a-f]+/g;
+
+/**
+ * A record whose writer stamped its stage names its cause outright: a PR review
+ * that asked for changes is a rejection even when its words mention a release
+ * or an approval, and a verify-runner infrastructure failure is that even when
+ * it failed "to release a lock". These are checked before the word rules.
+ */
+const PREFIXED_CAUSES: ReadonlyArray<[RegExp, string]> = [
+  [/^pr-review: /i, 'review_changes_requested'],
+  [/^verify-runner: .*infrastructure failure/i, 'verify_infra_failure'],
+  [/^human_action_only:/i, 'human_only_deploy'],
+  [/^blocked_by_dependency:/i, 'decision_pending'],
+];
+
+/**
+ * The fallback cause id: the retrospective lane's normalised error, then every
+ * remaining number, date and PR/issue number replaced, so one unnamed cause
+ * keeps one id from week to week ("exited with code 137 (PR #812)" and
+ * "code 1 (PR #813)" are the same cause).
+ */
+export function taxonomyFingerprint(text: string): string {
+  return normalizeErrorForLoop(text)
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, '<date>')
+    .replace(/#\d+/g, '#<n>')
+    .replace(/\d+/g, '<n>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+}
 
 export interface CauseClassification {
   id: string;
@@ -127,10 +160,15 @@ export interface CauseClassification {
 
 export function classifyCause(text: string): CauseClassification {
   const trimmed = text.trim();
-  for (const rule of CAUSE_RULES) {
-    if (rule.match.test(trimmed)) return { id: rule.id, label: rule.label, kind: rule.kind, proposal: rule.proposal };
+  const named = (rule: CauseRule) => ({ id: rule.id, label: rule.label, kind: rule.kind, proposal: rule.proposal });
+  for (const [prefix, id] of PREFIXED_CAUSES) {
+    const rule = CAUSE_RULES.find(candidate => candidate.id === id);
+    if (rule && prefix.test(trimmed)) return named(rule);
   }
-  const fingerprint = normalizeErrorForLoop(trimmed).slice(0, 80);
+  for (const rule of CAUSE_RULES) {
+    if (rule.match.test(trimmed)) return named(rule);
+  }
+  const fingerprint = taxonomyFingerprint(redactSecrets(trimmed));
   return {
     id: `other:${fingerprint}`,
     label: fingerprint,
@@ -177,16 +215,30 @@ export function aggregateTaxonomy(
 interface AttemptRow { identifier: string | null; issue_id: string; attempt_no: number; error_message: string; finished_at: number }
 interface ParkRow { identifier: string | null; issue_id: string; attempt_no: number | null; data_json: string | null; created_at: number }
 
-/** Failed or parked attempts, and park events, from the run ledger. */
+/**
+ * Failed or parked attempts, and park events, from the run ledger.
+ *
+ * Reviewer rejections come from two places, both attempts: an attempt the
+ * in-pipeline reviewer rejected ends `result_status = 'rejected'` (kept even
+ * when it recorded no message), and a PR-time review that asked for changes
+ * rolls the run back with a `pr-review: changes requested` message
+ * (prReviewRollback). `publication_reviews` is not read: its PR-time rows are
+ * those same rollbacks (counting them again would double every rejection),
+ * and its CLI rows are reviews an operator ran by hand, not factory failures.
+ */
 export function collectLedgerSignals(db: Database.Database, since: number, until: number): FailureSignal[] {
   const attempts = db.prepare(`
-    SELECT r.identifier, a.issue_id, a.attempt_no, a.error_message, a.finished_at
+    SELECT r.identifier, a.issue_id, a.attempt_no,
+      COALESCE(NULLIF(a.error_message, ''), 'reviewer rejected the attempt') AS error_message, a.finished_at
     FROM automation_attempts a JOIN automation_runs r USING (issue_id)
     WHERE a.finished_at >= ? AND a.finished_at < ?
-      AND a.error_message IS NOT NULL AND a.error_message != ''
-      -- A worker that declares the work human-only ends 'superseded' with
-      -- success = 1; its reason is a park in all but name.
-      AND (a.success IS NULL OR a.success = 0 OR a.result_status = 'superseded')
+      AND (
+        (a.error_message IS NOT NULL AND a.error_message != ''
+          -- A worker that declares the work human-only ends 'superseded' with
+          -- success = 1; its reason is a park in all but name.
+          AND (a.success IS NULL OR a.success = 0 OR a.result_status = 'superseded'))
+        OR a.result_status = 'rejected'
+      )
   `).all(since, until) as AttemptRow[];
   const parks = db.prepare(`
     SELECT r.identifier, e.issue_id, e.attempt_no, e.data_json, e.created_at
@@ -235,15 +287,57 @@ export function collectQuestionSignals(coordinationPath: string, since: number, 
   });
 }
 
-/** Drop ledger records that only point at a question the board already holds. */
+/**
+ * `human-question` threads from the durable coordination trace (same database
+ * as the ledger). The board file keeps only its newest events, so a busy week
+ * pushes early questions out of it; the trace keeps them. One row per thread:
+ * a paged question writes `waiting` and `running` under one correlation id.
+ */
+export function collectTraceQuestionSignals(db: Database.Database, since: number, until: number): FailureSignal[] {
+  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'coordination_trace'").get();
+  if (!exists) return [];
+  const rows = db.prepare(`
+    SELECT correlation_id, MIN(timestamp) AS at,
+      (SELECT COALESCE(t2.task_label, t2.task_id) FROM coordination_trace t2
+        WHERE t2.correlation_id = t.correlation_id AND t2.kind = 'human-question' ORDER BY t2.timestamp LIMIT 1) AS issue,
+      (SELECT t3.summary FROM coordination_trace t3
+        WHERE t3.correlation_id = t.correlation_id AND t3.kind = 'human-question' ORDER BY t3.timestamp LIMIT 1) AS summary
+    FROM coordination_trace t
+    WHERE kind = 'human-question' AND timestamp >= ? AND timestamp < ?
+    GROUP BY correlation_id
+  `).all(since, until) as Array<{ correlation_id: string; at: number; issue: string | null; summary: string | null }>;
+  return rows.map(row => ({
+    source: 'question' as const,
+    issue: row.issue || 'unknown',
+    session: row.correlation_id,
+    text: row.summary ?? '',
+    at: row.at,
+  }));
+}
+
+/** One signal per question thread, whichever store reported it (earliest wins). */
+export function dedupeQuestions(questions: readonly FailureSignal[]): FailureSignal[] {
+  const byThread = new Map<string, FailureSignal>();
+  for (const question of questions) {
+    const seen = byThread.get(question.session);
+    if (!seen || question.at < seen.at) byThread.set(question.session, question);
+  }
+  return [...byThread.values()];
+}
+
+/** Drop ledger records that only point at questions the board already holds. */
 export function mergeSignals(ledger: readonly FailureSignal[], questions: readonly FailureSignal[]): FailureSignal[] {
-  const asked = new Set(questions.map(q => q.session));
+  const threads = dedupeQuestions(questions);
+  const asked = new Set(threads.map(q => q.session));
   return [
     ...ledger.filter((signal) => {
       const waiting = WAITING_ON_QUESTION.exec(signal.text);
-      return !waiting || !asked.has(waiting[1]);
+      if (!waiting) return true;
+      // One attempt can wait on several questions: "(hq-a, hq-b)".
+      const ids = waiting[1].match(QUESTION_ID) ?? [];
+      return ids.length === 0 || !ids.some(id => asked.has(id));
     }),
-    ...questions,
+    ...threads,
   ];
 }
 
@@ -258,7 +352,13 @@ const KIND_LABEL: Record<CandidateKind, string> = {
 export function composeCandidateIssue(candidate: TaxonomyCandidate, window: { since: number; until: number }): { title: string; description: string } {
   const sources = Object.entries(candidate.sources).map(([source, n]) => `${source} ${n}`).join(', ');
   const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
-  const title = `[Failure taxonomy] ${KIND_LABEL[candidate.kind]} candidate: ${candidate.label}`.slice(0, 120);
+  const title = `[Failure taxonomy] ${KIND_LABEL[candidate.kind]} candidate: ${redactSecrets(candidate.label)}`.slice(0, 120);
+  // Ledger sessions stay outside code spans so the tracker links the issue
+  // identifier; question ids are not tracker ids and stay as code.
+  const session = (s: string) => {
+    const ledger = /^(.*)#(\d+)$/.exec(s);
+    return ledger ? `${ledger[1]} (attempt ${ledger[2]})` : `\`${s}\``;
+  };
   const description = [
     '## Measured (auto-filed by the weekly failure taxonomy, AGT-4812)',
     '',
@@ -271,26 +371,36 @@ export function composeCandidateIssue(candidate: TaxonomyCandidate, window: { si
     `| Signals | ${candidate.signals} (${sources}) |`,
     `| Issues | ${candidate.issues.length}: ${candidate.issues.slice(0, 15).join(', ')}${candidate.issues.length > 15 ? ', …' : ''} |`,
     '',
-    '**Sessions** (`<issue>#<attempt>` in the run ledger, `hq-…` on the coordination board):',
+    '**Sessions** (issue and attempt in the run ledger, `hq-…` on the coordination board):',
     '',
-    candidate.sessions.slice(0, 40).map(s => `\`${s}\``).join(', ') + (candidate.sessions.length > 40 ? `, … (${candidate.sessions.length} in all)` : ''),
+    candidate.sessions.slice(0, 40).map(session).join(', ') + (candidate.sessions.length > 40 ? `, … (${candidate.sessions.length} in all)` : ''),
     '',
-    '**Example, verbatim:**',
+    '**Example** (secret-shaped values redacted):',
     '',
     '```',
-    candidate.example.slice(0, 600),
+    redactSecrets(candidate.example).slice(0, 600).replaceAll('```', "'''"),
     '```',
     '',
     '## Proposal',
     '',
     candidate.proposal,
+    '',
+    causeMarker(candidate.id),
   ].join('\n');
   return { title, description };
+}
+
+/** Hidden in the filed body so a person (or a later tool) can find every issue for one cause. */
+export function causeMarker(causeId: string): string {
+  return `<!-- failure-taxonomy-cause: ${causeId.replace(/-->/g, '')} -->`;
 }
 
 export interface TaxonomyTaskSource {
   createTask(title: string, description: string, projectId?: string): Promise<{ id: string; identifier?: string } | { error: string }>;
   updateState(issueId: string, state: 'Backlog'): Promise<boolean>;
+  /** Present on real task sources: lets a still-open candidate get this week's evidence instead of a twin. */
+  lookupIssueState?(issueId: string): Promise<{ ok: true; issue: { state: string; stateType?: string } | null } | { ok: false; error: string }>;
+  addComment?(issueId: string, body: string, idempotencyKey?: string): Promise<void>;
 }
 
 export interface TaxonomyRunResult {
@@ -298,13 +408,33 @@ export interface TaxonomyRunResult {
   reason: string;
   candidates: TaxonomyCandidate[];
   filed: string[];
+  /** Open candidates that got this week's evidence as a comment instead of a new issue. */
+  updated?: string[];
+  /** Filed issues whose move to Backlog failed; they sit in the tracker's default state. */
+  notInBacklog?: string[];
 }
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * The cron fires at the same wall-clock time each week, but a callback can run
+ * a few ms earlier than last week's (or an hour earlier across a DST change):
+ * a strict `< WEEK_MS` would then skip the whole week. Half a day of slack
+ * keeps one pass per week without admitting a second one the same week.
+ */
+const MIN_INTERVAL_MS = WEEK_MS - 12 * 60 * 60 * 1000;
+/** A gap (daemon down on Monday) is backfilled from the last pass, at most this far. */
+const MAX_BACKFILL_MS = 4 * WEEK_MS;
 const LAST_RUN_KEY = 'failure_taxonomy_last_run_at';
 const FILED_KEY_PREFIX = 'failure_taxonomy_filed:';
-/** A cause already filed stays quiet for four weeks, so an open candidate is not filed again each week. */
+const FILED_ISSUE_KEY_PREFIX = 'failure_taxonomy_filed_issue:';
+/**
+ * Without a tracker lookup, a cause already filed stays quiet for four weeks.
+ * With one, a cause whose issue is still open is never filed twice: the open
+ * issue gets the new evidence as a comment.
+ */
 const REFILE_AFTER_MS = 4 * WEEK_MS;
+const TERMINAL_STATE_TYPES = new Set(['completed', 'canceled', 'cancelled']);
+const TERMINAL_STATES = /^(?:done|canceled|cancelled|duplicate)$/i;
 
 /**
  * One weekly pass. With `taskSource` unset it only measures (a dry run):
@@ -326,40 +456,95 @@ export async function runFailureTaxonomy(options: {
   const windowMs = options.windowMs ?? WEEK_MS;
   const { db } = options;
   db.exec('CREATE TABLE IF NOT EXISTS automation_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
-  const readMeta = (key: string) => Number((db.prepare('SELECT value FROM automation_meta WHERE key = ?').get(key) as { value: string } | undefined)?.value ?? 0);
-  const writeMeta = (key: string, value: number) => db.prepare('INSERT INTO automation_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, String(value));
+  const readText = (key: string) => (db.prepare('SELECT value FROM automation_meta WHERE key = ?').get(key) as { value: string } | undefined)?.value;
+  const readMeta = (key: string) => Number(readText(key) ?? 0);
+  const writeText = (key: string, value: string) => db.prepare('INSERT INTO automation_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  const writeMeta = (key: string, value: number) => writeText(key, String(value));
 
-  if (!options.force && now - readMeta(LAST_RUN_KEY) < WEEK_MS) return { ran: false, reason: 'interval', candidates: [], filed: [] };
+  const previousRun = readMeta(LAST_RUN_KEY);
+  if (!options.force && now - previousRun < MIN_INTERVAL_MS) return { ran: false, reason: 'interval', candidates: [], filed: [] };
   // Claim the week before filing, atomically, so a second process reading the
   // same ledger cannot file the same candidates in the same minute.
   if (options.taskSource && !options.force) {
     const claimed = db.transaction(() => {
-      if (now - readMeta(LAST_RUN_KEY) < WEEK_MS) return false;
+      if (now - readMeta(LAST_RUN_KEY) < MIN_INTERVAL_MS) return false;
       writeMeta(LAST_RUN_KEY, now);
       return true;
     }).immediate();
     if (!claimed) return { ran: false, reason: 'interval', candidates: [], filed: [] };
   }
 
-  const since = now - windowMs;
+  // Normally the last week; after a missed week, everything since the last
+  // pass (bounded), so a skipped Monday does not drop that week's signals.
+  const defaultSince = now - windowMs;
+  const since = previousRun > 0 && previousRun < defaultSince ? Math.max(previousRun, now - MAX_BACKFILL_MS) : defaultSince;
   const ledger = collectLedgerSignals(db, since, now);
-  const questions = options.coordinationPath ? collectQuestionSignals(options.coordinationPath, since, now) : [];
+  const questions = [
+    ...collectTraceQuestionSignals(db, since, now),
+    ...(options.coordinationPath ? collectQuestionSignals(options.coordinationPath, since, now) : []),
+  ];
   const candidates = aggregateTaxonomy(mergeSignals(ledger, questions), { minSignals: options.minSignals, minIssues: options.minIssues });
   if (!options.taskSource) return { ran: true, reason: 'dry run', candidates, filed: [] };
 
+  const source = options.taskSource;
   const filed: string[] = [];
+  const updated: string[] = [];
+  const notInBacklog: string[] = [];
   for (const candidate of candidates) {
-    if (now - readMeta(FILED_KEY_PREFIX + candidate.id) < REFILE_AFTER_MS) continue;
-    const issue = composeCandidateIssue(candidate, { since, until: now });
-    const created = await options.taskSource.createTask(issue.title, issue.description, options.projectId);
-    if ('error' in created) continue;
-    // Backlog, explicitly: a team whose default state is Todo would otherwise
-    // hand the proposal to the heartbeat — applied without approval.
-    await options.taskSource.updateState(created.id, 'Backlog');
-    writeMeta(FILED_KEY_PREFIX + candidate.id, now);
-    filed.push(created.identifier ?? created.id);
+    // One candidate failing (a tracker error thrown, not returned) must not
+    // drop the rest of the week: the week is already claimed.
+    try {
+      const priorIssue = readText(FILED_ISSUE_KEY_PREFIX + candidate.id);
+      if (priorIssue && source.lookupIssueState) {
+        const lookup = await source.lookupIssueState(priorIssue);
+        // Unknown state: do not risk a twin of an issue that may still be open.
+        if (!lookup.ok) continue;
+        const open = lookup.issue !== null
+          && !TERMINAL_STATE_TYPES.has((lookup.issue.stateType ?? '').toLowerCase())
+          && !TERMINAL_STATES.test(lookup.issue.state);
+        if (open) {
+          const issue = composeCandidateIssue(candidate, { since, until: now });
+          await source.addComment?.(priorIssue, `Seen again (${candidate.signals} signal(s) this window).\n\n${issue.description}`,
+            `failure-taxonomy:${candidate.id}:${new Date(now).toISOString().slice(0, 10)}`);
+          updated.push(priorIssue);
+          continue;
+        }
+        // Closed or cancelled: a person decided. Re-propose only after the quiet period.
+        if (now - readMeta(FILED_KEY_PREFIX + candidate.id) < REFILE_AFTER_MS) continue;
+      } else if (now - readMeta(FILED_KEY_PREFIX + candidate.id) < REFILE_AFTER_MS) {
+        continue;
+      }
+      const issue = composeCandidateIssue(candidate, { since, until: now });
+      const created = await source.createTask(issue.title, issue.description, options.projectId);
+      if ('error' in created) continue;
+      // Recorded before the state move, so a failed move cannot cause a twin next week.
+      writeMeta(FILED_KEY_PREFIX + candidate.id, now);
+      writeText(FILED_ISSUE_KEY_PREFIX + candidate.id, created.id);
+      filed.push(created.identifier ?? created.id);
+      // Backlog, explicitly: a team whose default state is Todo would otherwise
+      // hand the proposal to the heartbeat — applied without approval. The move
+      // is retried; if it still fails the issue is reported, and the body has
+      // none of the Definition of Ready sections, so the readiness gate holds
+      // it in Todo instead of dispatching it.
+      let moved = false;
+      for (let tries = 0; tries < 3 && !moved; tries++) moved = await source.updateState(created.id, 'Backlog');
+      if (!moved) {
+        notInBacklog.push(created.identifier ?? created.id);
+        console.error(`[FailureTaxonomy] ${created.identifier ?? created.id} could not be moved to Backlog; it is in the tracker's default state. Move it to Backlog or cancel it.`);
+      }
+    } catch (error) { // cxt-ignore: error_swallow — reported, and the other candidates still run
+      console.warn(`[FailureTaxonomy] candidate ${candidate.id} failed:`, error instanceof Error ? error.message : error);
+    }
   }
-  return { ran: true, reason: `${candidates.length} candidate(s), ${filed.length} filed`, candidates, filed };
+  const extra = [
+    updated.length ? `${updated.length} updated` : '',
+    notInBacklog.length ? `${notInBacklog.length} NOT in Backlog (${notInBacklog.join(', ')})` : '',
+  ].filter(Boolean).join(', ');
+  return {
+    ran: true,
+    reason: `${candidates.length} candidate(s), ${filed.length} filed${extra ? `, ${extra}` : ''}`,
+    candidates, filed, updated, notInBacklog,
+  };
 }
 
 /**
