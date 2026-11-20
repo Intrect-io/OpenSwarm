@@ -14,8 +14,7 @@ import * as dev from '../support/dev.js';
 import * as scheduler from '../automation/scheduler.js';
 import * as codex from '../memory/codex.js';
 import * as autonomous from '../automation/autonomousRunner.js';
-import { selectTaskSource } from '../automation/taskSource.js';
-import { linearIssueToTask, TaskItem } from '../orchestration/decisionEngine.js';
+import { createScopedTaskSource } from '../automation/scopedTaskSource.js';
 
 import {
   onPauseAgent,
@@ -872,31 +871,9 @@ export async function handleAuto(msg: Message, args: string[]): Promise<void> {
         },
       });
 
-      // Register the task source (Linear when configured, else local SQLite).
-      autonomous.setTaskSource(selectTaskSource(linear.isLinearInitialized(), async (): Promise<TaskItem[]> => {
-        try {
-          const issues = await linear.getMyIssues({ slim: true, timeoutMs: 30000 });
-          return issues.map((issue: any) => linearIssueToTask({
-            id: issue.id,
-            identifier: issue.identifier,
-            title: issue.title,
-            url: issue.url,
-            description: issue.description,
-            priority: issue.priority || 3,
-            dueDate: issue.dueDate,
-            state: issue.state,
-            labels: issue.labels,
-            updatedAt: issue.updatedAt,
-            project: issue.project ? {
-              id: issue.project.id,
-              name: issue.project.name,
-            } : undefined,
-          }));
-        } catch (err) {
-          console.error('Linear fetch error:', err);
-          return [];
-        }
-      }));
+      // Register the task source (Linear when configured, else local SQLite). Shared with
+      // service.ts so this restart cannot drop the configured milestone scope (AGT-3188).
+      autonomous.setTaskSource(createScopedTaskSource(linear.isLinearInitialized()));
 
       // Start runner
       console.log(`[Auto] Starting with pairMode: ${hasPairFlag}`);

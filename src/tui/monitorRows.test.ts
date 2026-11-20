@@ -82,4 +82,10 @@ describe('workScopeCaption (AGT-3188)', () => {
     expect(workScopeCaption({ milestone: null })).toBe('Work scope: all issues in the allowed projects');
     expect(workScopeCaption(undefined)).toBe('Work scope: unknown');
   });
+
+  it('flags a milestone the daemon found no open issues for', async () => {
+    const { workScopeCaption } = await import('./monitorRows.js');
+    expect(workScopeCaption({ milestone: 'S9', matched: false })).toBe('Work scope: milestone "S9" only (matches no open issues)');
+    expect(workScopeCaption({ milestone: 'S9', matched: true })).toBe('Work scope: milestone "S9" only');
+  });
 });

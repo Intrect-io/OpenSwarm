@@ -14,7 +14,7 @@ import * as scheduler from '../automation/scheduler.js';
 import * as web from '../support/web.js';
 import * as autonomous from '../automation/autonomousRunner.js';
 import { createNotifier } from '../notify/notifier.js';
-import { selectTaskSource } from '../automation/taskSource.js';
+import { createScopedTaskSource } from '../automation/scopedTaskSource.js';
 import { PRProcessor, type PRProcessorConfig } from '../automation/prProcessor.js';
 import { startCIWorker, stopCIWorker } from '../automation/ciWorker.js';
 import { initMonitors } from '../automation/longRunningMonitor.js';
@@ -26,7 +26,6 @@ import { compactMemoryTable, shouldCompact, cleanupBackupFiles } from '../memory
 import { Cron } from 'croner';
 import { setDefaultAdapter } from '../adapters/index.js';
 import { readProviderOverride, formatProviderOverrideMismatchWarning } from './providerOverride.js';
-import { enrichTaskFromState, syncTaskStatesFromIssues } from '../taskState/store.js';
 import { probeDaemonPort } from '../cli/daemon.js';
 import { daemonPort } from './daemonPort.js';
 import { rotateServiceLogs } from '../support/logRotation.js';
@@ -316,42 +315,12 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       : '[Service] Autonomous runner starting in explicit-dispatch mode (heartbeat off)');
 
     // Select the task source: Linear when configured, else the local SQLite
-    // store (no external account). The Linear fetcher closure is preserved
-    // verbatim — slim mode (1 resolver call/issue vs 3) + comment hydration +
-    // task-state enrichment — and only used by LinearTaskSource.
+    // store (no external account). The Linear fetcher (slim mode, task-state
+    // sync + enrichment, milestone scope) is shared with Discord `!auto start`.
     const linearConfigured = !!(config.linearApiKey && config.linearTeamId);
     // The dashboard and TUI show this so a person can see what the work queue is (AGT-3188).
     console.log(`[Service] Autonomous work scope: ${describeWorkScope(setWorkScope(config.autonomous?.scope))}`);
-    const selectedTaskSource = selectTaskSource(linearConfigured, async () => {
-      await linear.ensureLinearAuthFresh(); // refresh OAuth token (no-op for API key) each heartbeat
-      const issues = await linear.getMyIssues({ slim: true, timeoutMs: 300000, milestone: config.autonomous?.scope?.milestone });
-      const { linearIssueToTask } = await import('../orchestration/decisionEngine.js');
-      // One lock, one load, one write for the whole fetch — not one of each per issue (AGT-4659).
-      syncTaskStatesFromIssues(issues.map((issue: any) => ({
-        issueId: issue.id,
-        linearState: issue.state,
-        comments: issue.comments || [],
-      })));
-      return issues.map((issue: any) => {
-        return enrichTaskFromState(linearIssueToTask({
-          id: issue.id,
-          identifier: issue.identifier,
-          title: issue.title,
-          url: issue.url,
-          description: issue.description,
-          priority: issue.priority,
-          state: issue.state,
-          labels: issue.labels,
-          hasChildren: issue.hasChildren,
-          blockedBy: issue.blockedBy,
-          updatedAt: issue.updatedAt,
-          project: issue.project ? {
-            id: issue.project.id,
-            name: issue.project.name,
-          } : undefined,
-        }));
-      });
-    });
+    const selectedTaskSource = createScopedTaskSource(linearConfigured); // reads the scope at fetch time
     autonomous.setTaskSource(selectedTaskSource);
     console.log(`[Service] Task source registered (${linearConfigured ? 'linear' : 'local'})`);
 

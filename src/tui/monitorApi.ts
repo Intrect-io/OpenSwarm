@@ -39,11 +39,11 @@ export async function fetchProjects(port: number, signal?: AbortSignal): Promise
 }
 
 /** Best effort: an older daemon has no `workScope` in /api/stats, and the table must still load. */
-async function fetchWorkScope(port: number, signal?: AbortSignal): Promise<{ milestone?: string | null } | undefined> {
+async function fetchWorkScope(port: number, signal?: AbortSignal): Promise<{ milestone?: string | null; matched?: boolean } | undefined> {
   try {
     const res = await fetch(`${base(port)}/api/stats`, { signal: timeoutSignal(signal) });
     if (!res.ok) return undefined;
-    return ((await res.json()) as { workScope?: { milestone?: string | null } }).workScope;
+    return ((await res.json()) as { workScope?: { milestone?: string | null; matched?: boolean } }).workScope;
   } catch {
     return undefined;
   }

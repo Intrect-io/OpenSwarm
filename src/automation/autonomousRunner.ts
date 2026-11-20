@@ -54,7 +54,7 @@ import { PipelineResult, formatPipelineResultEmbed } from '../agents/pairPipelin
 import type { DefaultRolesConfig } from '../core/types.js';
 import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
-import { dispatchBudget } from './dispatchRamp.js';
+import { dispatchBudget, recordDispatchClaims } from './dispatchRamp.js';
 import { pipelineExecutionBoundary } from '../agents/stageExecutionBoundary.js';
 import * as execution from './runnerExecution.js';
 import { draftFingerprint, pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
@@ -3013,7 +3013,7 @@ export class AutonomousRunner {
       return;
     }
 
-    const maxSlots = dispatchBudget(this, this.config.dispatchRampClaims, availableSlots); // free slots, capped by the cold-start ramp
+    const maxSlots = dispatchBudget(this, this.config.dispatchRampClaims, availableSlots, this.config.heartbeatSchedule); // free slots, capped by the cold-start ramp
 
     // Pre-filter tasks to enabled projects only (before DecisionEngine selection)
     // This prevents DecisionEngine from wasting its max-slot budget on non-enabled projects.
@@ -3153,6 +3153,7 @@ export class AutonomousRunner {
     } else {
       this.syslog(`✓ Enqueued ${enqueuedCount} task(s) | skipped: ${skippedCount}`);
     }
+    recordDispatchClaims(this, enqueuedCount); // only claiming passes advance the cold-start ramp
 
     // Execute tasks
     if (!this.stopping) await this.runAvailableTasks();

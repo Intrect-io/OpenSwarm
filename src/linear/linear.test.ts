@@ -522,6 +522,52 @@ describe('createSubIssue idempotent recovery (AGT-4048)', () => {
   });
 });
 
+// AGT-3188: a milestone-scoped daemon only fetches issues in the milestone, so a sub-issue
+// created without it would fall out of scope the moment its in-scope parent was decomposed.
+describe('createSubIssue milestone inheritance (AGT-3188)', () => {
+  function installCreateClient(parentMilestone: { id: string; projectId: string } | undefined) {
+    const parentIssue = {
+      id: 'parent-uuid',
+      identifier: 'AGT-1',
+      team: Promise.resolve({ id: 'team-uuid' }),
+      projectMilestone: parentMilestone
+        ? Promise.resolve({ id: parentMilestone.id, project: Promise.resolve({ id: parentMilestone.projectId }) })
+        : undefined,
+    };
+    const created = { id: 'child', identifier: 'AGT-2', title: 't', url: 'u', description: 'd', priority: 3, state: Promise.resolve({ name: 'Todo' }) };
+    const fakeClient = {
+      issue: vi.fn(async () => parentIssue),
+      team: vi.fn(async () => ({ labels: vi.fn(async () => ({ nodes: [] })) })),
+      createIssue: vi.fn(async (_input: Record<string, unknown>) => ({ issue: Promise.resolve(created) })),
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1');
+    return fakeClient;
+  }
+
+  it("copies the parent's milestone into the create input", async () => {
+    const client = installCreateClient({ id: 'ms-s4', projectId: 'proj-1' });
+    await createSubIssue('parent-uuid', 'child', 'body', { projectId: 'proj-1' });
+    expect(client.createIssue).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'proj-1', projectMilestoneId: 'ms-s4' }));
+  });
+
+  it("sends the milestone's project when the caller passed none", async () => {
+    const client = installCreateClient({ id: 'ms-s4', projectId: 'proj-1' });
+    await createSubIssue('parent-uuid', 'child', 'body');
+    expect(client.createIssue).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'proj-1', projectMilestoneId: 'ms-s4' }));
+  });
+
+  it('leaves the milestone off when the parent has none or the child goes to another project', async () => {
+    let client = installCreateClient(undefined);
+    await createSubIssue('parent-uuid', 'child', 'body', { projectId: 'proj-1' });
+    expect(client.createIssue.mock.calls[0][0]).not.toHaveProperty('projectMilestoneId');
+    client = installCreateClient({ id: 'ms-s4', projectId: 'proj-1' });
+    await createSubIssue('parent-uuid', 'child', 'body', { projectId: 'proj-2' });
+    expect(client.createIssue.mock.calls[0][0]).toMatchObject({ projectId: 'proj-2' });
+    expect(client.createIssue.mock.calls[0][0]).not.toHaveProperty('projectMilestoneId');
+  });
+});
+
 // AGT-4051: same shape as AGT-4048, one call deeper — a stable commentId is
 // the identity guarantee; the body (which callers bake a timestamp into) can
 // legitimately differ on every retry and must not block convergence.

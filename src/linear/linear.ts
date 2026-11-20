@@ -1511,9 +1511,8 @@ export async function createSubIssue(
 
     // Add auto-decomposed label
     const autoLabel = teamLabels.nodes.find((l) => l.name === 'auto-decomposed');
-    if (autoLabel) {
-      labelIds.push(autoLabel.id);
-    }
+    if (autoLabel) labelIds.push(autoLabel.id);
+    const { subIssueProjectFields } = await import('./subIssueMilestone.js'); // inherit the parent's milestone (AGT-3188 scope)
 
     const issuePayload = await linear.createIssue({
       id: options?.idempotencyId,
@@ -1523,7 +1522,7 @@ export async function createSubIssue(
       description,
       labelIds,
       priority: options?.priority ?? 3,
-      projectId: options?.projectId,
+      ...(await subIssueProjectFields(parentIssue, options?.projectId)),
     });
 
     const issue = await issuePayload.issue;
