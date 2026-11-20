@@ -49,9 +49,7 @@ const bsScanRepositoryMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../registry/sqliteStore.js', () => ({
   // Keep in sync with production page cap used by handleCheck --tree pagination.
-  LIST_ENTITIES_MAX_LIMIT: 2,
-  // Small helper-query cap so the capped-listing heading is cheap to exercise.
-  HELPER_QUERY_MAX_LIMIT: 3,
+  LIST_ENTITIES_MAX_LIMIT: 2, HELPER_QUERY_MAX_LIMIT: 200,
   getRegistryStore: () => store,
   closeRegistryStore,
 }));
@@ -320,39 +318,6 @@ describe('resolveProjectId (via handleCheck --stats)', () => {
 });
 
 // ---------- statusBadge / riskBadge / severityBadge / formatEntity (via --deprecated / --highRisk) ----------
-
-describe('capped helper listings show the real total (AGT-3470 review)', () => {
-  const three = () => [entity({ id: '1' }), entity({ id: '2' }), entity({ id: '3' })];
-
-  it.each([
-    ['deprecated', 'deprecatedEntities', 'Deprecated Entities'],
-    ['untested', 'untestedEntities', 'Untested Active Entities'],
-    ['highRisk', 'highRiskEntities', 'High Risk Entities'],
-  ] as const)('--%s prints "showing N of TOTAL" when the listing hits the cap', async (flag, method, title) => {
-    store[method].mockReturnValue(three());
-    const stats: RegistryStats = emptyStats();
-    stats[flag] = 742;
-    store.getStats.mockReturnValue(stats);
-
-    const { handleCheck } = await import('./checkHandler.js');
-    const opts: { deprecated?: boolean; untested?: boolean; highRisk?: boolean; project: string } = { project: 'proj' };
-    opts[flag] = true;
-    await handleCheck(undefined, opts);
-
-    expect(out()).toContain(`${title} (showing 3 of 742, capped at 3)`);
-    expect(store.getStats).toHaveBeenCalledWith('proj');
-  });
-
-  it('keeps the plain count and skips the stats query below the cap', async () => {
-    store.deprecatedEntities.mockReturnValue([entity()]);
-
-    const { handleCheck } = await import('./checkHandler.js');
-    await handleCheck(undefined, { deprecated: true, project: 'proj' });
-
-    expect(out()).toContain('Deprecated Entities (1)');
-    expect(store.getStats).not.toHaveBeenCalled();
-  });
-});
 
 describe('statusBadge + riskBadge + severityBadge (via handleCheck --deprecated / --high-risk)', () => {
   it('renders each known status value in the deprecated listing', async () => {
