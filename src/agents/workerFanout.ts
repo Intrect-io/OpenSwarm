@@ -52,9 +52,14 @@ export interface RunWorkerFanoutOptions {
   keepSandboxes?: boolean;
   /**
    * Shared deps/data handling:
-   * - undefined: copy shared paths into each sandbox (verification works, no loser write leak)
-   * - true: symlink shared paths (faster, but writes hit the original shared path)
+   * - undefined or true: copy shared paths into each sandbox, so a candidate
+   *   can never write through to the real project (verification still works)
    * - false: do not provide shared paths
+   *
+   * @deprecated `true` used to symlink shared paths into every sandbox, which
+   * let a candidate mutate the real project's files through the link. Link
+   * mode is removed (AGT-3441): `true` is accepted but ignored with a one-time
+   * warning and behaves like the default copy mode.
    */
   linkSharedPaths?: boolean;
   guards?: Partial<PipelineGuardsConfig>;
@@ -219,39 +224,17 @@ export async function cloneSandbox(
   projectPath: string,
   root: string,
   id: string,
-  sharedPathMode: 'copy' | 'link' | 'off',
+  sharedPathMode: 'copy' | 'off',
   sharedPathSnapshot?: SharedPathSnapshot,
 ): Promise<{ sandbox: string; linkedSharedPaths: string[] }> {
   const sandbox = join(root, id);
   await git(projectPath, ['clone', '--quiet', '--no-hardlinks', '--', projectPath, sandbox]);
-  const linkedSharedPaths = sharedPathMode === 'link'
-    ? await linkSharedPaths(projectPath, sandbox)
-    : sharedPathMode === 'copy'
-      ? sharedPathSnapshot
-        ? await copySharedPathSnapshot(sharedPathSnapshot, sandbox)
-        : await copySharedPaths(projectPath, sandbox)
-      : [];
+  const linkedSharedPaths = sharedPathMode === 'copy'
+    ? sharedPathSnapshot
+      ? await copySharedPathSnapshot(sharedPathSnapshot, sandbox)
+      : await copySharedPaths(projectPath, sandbox)
+    : [];
   return { sandbox, linkedSharedPaths };
-}
-
-async function linkSharedPaths(projectPath: string, sandboxPath: string): Promise<string[]> {
-  let metadata = null;
-  try {
-    metadata = await loadRepoMetadata(projectPath);
-  } catch {
-    metadata = null;
-  }
-
-  const linked: string[] = [];
-  for (const rel of resolveSharedPaths(projectPath, metadata)) {
-    const target = resolve(projectPath, rel);
-    const linkPath = resolve(sandboxPath, rel);
-    if (existsSync(linkPath)) continue;
-    await mkdir(dirname(linkPath), { recursive: true });
-    await symlink(target, linkPath);
-    linked.push(rel);
-  }
-  return linked;
 }
 
 async function copySharedPaths(projectPath: string, sandboxPath: string): Promise<string[]> {
@@ -301,9 +284,21 @@ async function copySharedPathSnapshot(snapshot: SharedPathSnapshot, sandboxPath:
   return copied;
 }
 
-function sharedPathModeFor(linkSharedPaths: boolean | undefined): 'copy' | 'link' | 'off' {
-  if (linkSharedPaths === true) return 'link';
+let warnedLinkSharedPathsDeprecated = false;
+
+/**
+ * Shared paths are always copied, never symlinked: a link would let a candidate
+ * write through to the real project (AGT-3441). The deprecated `true` value is
+ * ignored with a one-time warning.
+ */
+function sharedPathModeFor(linkSharedPaths: boolean | undefined, onLog?: (line: string) => void): 'copy' | 'off' {
   if (linkSharedPaths === false) return 'off';
+  if (linkSharedPaths === true && !warnedLinkSharedPathsDeprecated) {
+    warnedLinkSharedPathsDeprecated = true;
+    const warning = '[fanout] linkSharedPaths: true is deprecated and ignored; shared paths are copied into each sandbox';
+    if (onLog) onLog(warning);
+    else console.warn(warning);
+  }
   return 'copy';
 }
 
@@ -814,7 +809,7 @@ export async function runWorkerFanout(options: RunWorkerFanoutOptions): Promise<
       );
     }
     let sharedPathSnapshot: SharedPathSnapshot | undefined;
-    if (sharedPathModeFor(options.linkSharedPaths) === 'copy') {
+    if (sharedPathModeFor(options.linkSharedPaths, options.onLog) === 'copy') {
       try {
         sharedPathSnapshot = await createSharedPathSnapshot(
           options.projectPath,

@@ -48,6 +48,15 @@ describe('bash tool under the fence', () => {
     expect(ordinary.content).toContain('fine');
   });
 
+  it('refuses gh pr merge in a worker stage', async () => {
+    // AGT-4414: merging is publication too; a worker stage must not land its own PR.
+    expect(publicationCommandIn('gh pr merge 5')).toBe('gh pr');
+    const fenced = await executeTool(call('echo started && gh pr merge 5 --squash'), dir, undefined, { forbidPublication: true });
+    expect(fenced.is_error).toBe(true);
+    expect(fenced.content).toMatch(/^PUBLICATION_FENCED: gh pr/);
+    expect(fenced.content).not.toContain('started');
+  });
+
   it('does not fence a run that did not ask for it', async () => {
     const result = await executeTool(call('echo "git push"'), dir, undefined, {});
     expect(result.is_error).toBe(false);

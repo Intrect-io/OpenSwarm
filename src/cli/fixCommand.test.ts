@@ -18,6 +18,15 @@ import {
 const runWorkerMock = vi.hoisted(() => vi.fn());
 vi.mock('../agents/worker.js', () => ({ runWorker: runWorkerMock }));
 
+// Spy on execFile so the default check runner's options can be inspected. It
+// delegates to the real execFile unless a test overrides the implementation.
+const childProcess = vi.hoisted(() => ({ execFile: vi.fn() }));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  childProcess.execFile.mockImplementation(actual.execFile as never);
+  return { ...actual, execFile: childProcess.execFile };
+});
+
 describe('resolveChecks (INT-2267)', () => {
   const scripts = { lint: 'oxlint src/', typecheck: 'tsc --noEmit', build: 'tsc', test: 'vitest run', dev: 'x' };
 
@@ -319,5 +328,34 @@ describe('runFixCommand loop (INT-2267)', () => {
       },
     );
     expect(recordOutcome).not.toHaveBeenCalled();
+  });
+});
+
+describe('default check runner (AGT-3423)', () => {
+  it('runs the objective check with timeout 300000 and maxBuffer 32 MiB', async () => {
+    const calls: Array<{ program: string; args: string[]; options: Record<string, unknown> }> = [];
+    childProcess.execFile.mockImplementationOnce(((
+      program: string,
+      args: string[],
+      options: Record<string, unknown>,
+      cb: (err: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      calls.push({ program, args, options });
+      cb(null, '', '');
+      return {};
+    }) as never);
+
+    // No injected runCheck, so the default runner calls execFile.
+    const report = await runFixCommand(
+      { rounds: 1 },
+      { log: () => {}, exists: () => true, recordOutcome: async () => {},
+        checks: [{ key: 'test', program: 'npm', args: ['run', 'test'] }] },
+    );
+    expect(report.green).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].program).toBe('npm');
+    expect(calls[0].args).toEqual(['run', 'test']);
+    expect(calls[0].options.timeout).toBe(300_000);
+    expect(calls[0].options.maxBuffer).toBe(32 * 1024 * 1024);
   });
 });

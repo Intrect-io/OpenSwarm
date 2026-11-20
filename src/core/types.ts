@@ -385,7 +385,11 @@ export type RoleConfig = {
     concurrency?: number;
     /** Keep temporary candidate repos for debugging. */
     keepSandboxes?: boolean;
-    /** Shared paths default to sandbox-local copies; true symlinks them, false disables them. */
+    /**
+     * Shared paths are always sandbox-local copies; false disables them.
+     * @deprecated `true` (symlink mode) is ignored with a warning: links let
+     * candidates mutate the real project (AGT-3441).
+     */
     linkSharedPaths?: boolean;
     /** Candidate lanes. Omit for primary + Spark diversity defaults. */
     candidates?: WorkerFanoutCandidateConfig[];

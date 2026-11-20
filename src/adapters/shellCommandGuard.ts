@@ -6,6 +6,7 @@
 // ============================================
 
 import path from 'node:path';
+import { launcherProgramWords } from './shellLaunchers.js';
 
 /**
  * Destructive-command guard (AGT-3436).
@@ -72,7 +73,7 @@ const COMMAND_LAUNCHERS: Record<string, true> = {
   sudo: true, doas: true, su: true, command: true, builtin: true, env: true,
   nohup: true, nice: true, ionice: true, stdbuf: true, setsid: true, time: true,
   timeout: true, watch: true, flock: true, chroot: true, exec: true, xargs: true,
-  find: true,
+  find: true, chrt: true, taskset: true,
 };
 
 /**
@@ -519,7 +520,8 @@ function unknownFlagIsDestructive(name: string, args: string[], argDynamics: Wor
  * Could an unknown program, run with these arguments, be a destructive one?
  * An unquoted program word is split at run time, so it may also carry flags of
  * its own: `X="rm -rf"; sudo $X /x` runs `rm -rf /x`. A bare-word target
- * (`sudo $X build`) is not covered: it reads the same as a program name.
+ * (`sudo $X build`) reads the same as a program name, so it is not judged
+ * here: the launcher's program slot (`launcherProgramWords`) refuses it.
  */
 function unknownProgramIsDestructive(args: string[], argDynamics: WordDynamics[], programUnquoted = false): boolean {
   return DESTRUCTIVE_PROGRAMS.some((name) => {
@@ -626,6 +628,12 @@ function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number, asLau
       if (resolvedCommandIsBlocked(next, depth + 1)) return true;
     }
     if (COMMAND_LAUNCHERS[name]) {
+      // The word in the launcher's program slot IS the program, so a run-time
+      // word there gets the strict rule (`X="rm -rf"; sudo $X build`), while
+      // one in a value slot stays allowed (`timeout $T npm test`, `sudo -u $USER ls`).
+      for (const slot of launcherProgramWords(name, args)) {
+        if (argDynamics[slot]?.any) return true;
+      }
       // The launcher's own arguments may still be flags with values
       // (`sudo -u root rm -rf /`), so every suffix is a candidate command.
       const limit = Math.min(command.words.length, start + GUARD_MAX_WORDS);

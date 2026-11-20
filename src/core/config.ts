@@ -149,7 +149,7 @@ const RoleConfigSchema = z.object({
     minScore: z.number().min(1).max(10).optional(),
     concurrency: z.number().int().min(1).max(256).optional(),
     keepSandboxes: z.boolean().optional(),
-    linkSharedPaths: z.boolean().optional(),
+    linkSharedPaths: z.boolean().optional().describe('Deprecated (AGT-3441): true is ignored, shared paths are always copied; false disables them.'),
     candidates: z.array(z.object({
       id: z.string().min(1),
       adapter: AdapterNameSchema.optional(),
