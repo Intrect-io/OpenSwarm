@@ -232,6 +232,8 @@ describe('PRProcessor.freshReview with no verdict (AGT-4413)', () => {
     expect(body).toContain('headsha: no decision');
     expect(body).toContain('**Decision: NONE.**');
     expect(body).toContain('src/a.ts:42 swallows the error');
+    // Per-head dedupe fence (AGT-4413 review).
+    expect(body).toContain('<!-- openswarm:no-decision:headsha1234567 -->');
   });
 
   it('posts nothing for a no-verdict error without partial text, and survives a failed comment', async () => {

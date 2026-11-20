@@ -63,6 +63,23 @@ describe('buildAuditReviewerOptions (AGT-3990)', () => {
     expect(timeoutFor('openrouter', 3)).not.toBeUndefined();
   });
 
+  // AGT-4313 review: no --adapter means the registry default, which a provider
+  // override can make OpenRouter; that area still needs the OpenRouter budget.
+  it('scales by the effective registry default adapter when --adapter is absent', async () => {
+    const registry = await import('../adapters/index.js');
+    const before = registry.getDefaultAdapterName();
+    try {
+      registry.setDefaultAdapter('openrouter');
+      const options = buildAuditReviewerOptions({ label: 'src/x', dir: 'src/x', files: ['a.ts'] }, '/repo', {
+        concurrency: 16,
+      }, () => {});
+      expect(options.timeoutMs).toBe(900_000);
+      expect(options.adapterName).toBeUndefined();
+    } finally {
+      registry.setDefaultAdapter(before);
+    }
+  });
+
   it('lets an explicit --timeout win over the scaled default', () => {
     const options = buildAuditReviewerOptions({ label: 'src/x', dir: 'src/x', files: ['a.ts'] }, '/repo', {
       concurrency: 16,

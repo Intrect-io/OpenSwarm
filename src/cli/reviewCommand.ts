@@ -533,6 +533,11 @@ export async function runReviewCommand(
     deps.review ??
     (async (wr: WorkerResult, c: string, onLog?: (line: string) => void) => {
       const { runReviewer } = await import('../agents/reviewer.js');
+      // No flag, env or config: the reviewer runs on the registry default, which a
+      // provider override may have set to OpenRouter — budget for that adapter,
+      // not for "unknown". (AGT-4313 review)
+      const { getDefaultAdapterName } = await import('../adapters/index.js');
+      const budgetAdapter = adapterChoice.name ?? getDefaultAdapterName();
       return runReviewer({
         taskTitle: opts.base ? `CLI committed-diff review (vs ${opts.base})` : 'CLI working-tree review',
         taskDescription: opts.base
@@ -545,7 +550,7 @@ export async function runReviewCommand(
         priorReviewContext: history.context,
         readOnly: opts.readOnly,
         maxTurns: opts.maxTurns ?? scaledReviewMaxTurns(changed.length),
-        timeoutMs: opts.timeoutMs ?? scaledReviewTimeoutMs(changed.length, undefined, adapterChoice.name),
+        timeoutMs: opts.timeoutMs ?? scaledReviewTimeoutMs(changed.length, undefined, budgetAdapter),
         model: opts.model,
         processContext: opts.processContext,
         diff: await deps.getDiff?.(c, opts.base) ?? await defaultGetDiff(c, opts.base),

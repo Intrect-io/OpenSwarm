@@ -42,6 +42,20 @@ export function partialReviewerText(stdout: string | undefined): string | undefi
     : text;
 }
 
+/**
+ * Partial notes built from the loop's transcript digest, for a reviewer whose
+ * final message was empty (cgf-portal PR 521: the forced final turn and its
+ * retry both came back empty). Labelled, so nobody reads a list of tool calls
+ * as the reviewer's conclusion. (AGT-4413)
+ */
+export function transcriptNotes(digest: string | undefined): string | undefined {
+  if (!digest?.trim()) return undefined;
+  return partialReviewerText(
+    "_The reviewer's final message was empty. Below is a digest of what it said and which tools it called._\n\n"
+      + digest.trim(),
+  );
+}
+
 /** PR comment body for a fresh review that ended without a decision. */
 export function noDecisionComment(input: { reviewedSha: string; reason: string; partialText: string }): string {
   return [

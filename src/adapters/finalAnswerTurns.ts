@@ -36,6 +36,84 @@ export interface FinalTurnContext {
   onLog?: (line: string) => void;
 }
 
+/**
+ * A `FinalAnswerRepair` whose owner also wants the run's transcript digest when
+ * the salvage turn ends with no text at all. The adapters forward the repair
+ * object untouched, which makes it the one channel that survives an adapter
+ * that swallows the loop's error into `{exitCode: 1, stdout: ''}`. (AGT-4413)
+ */
+export interface TranscriptAwareRepair extends FinalAnswerRepair {
+  onNoFinalAnswer?: (partialTranscript: string) => void;
+}
+
+/** The salvage turn's failure, carrying what the run did before it. (AGT-4413) */
+export class NoFinalAnswerError extends Error {
+  /** Bounded digest of the run's assistant text and tool calls; undefined when there was none. */
+  readonly partialTranscript?: string;
+
+  constructor(message: string, partialTranscript: string | undefined) {
+    super(message);
+    this.name = 'NoFinalAnswerError';
+    this.partialTranscript = partialTranscript;
+  }
+}
+
+/** Longest transcript digest carried on a NoFinalAnswerError. */
+export const MAX_TRANSCRIPT_DIGEST_CHARS = 4000;
+const DIGEST_TOOL_ARGS_CHARS = 120;
+const DIGEST_TEXT_CHARS = 1500;
+
+/**
+ * What a run that never answered still said and did: its assistant texts and
+ * its tool calls (name + shortened arguments), newest kept when the bound bites.
+ * No line starts with `{` even after trimming (JSON-looking text is quoted
+ * with `> `), so the digest is not mistaken for a CLI event stream downstream
+ * (partialReviewerText) and dropped.
+ */
+export function transcriptDigest(messages: ChatMessage[], maxChars = MAX_TRANSCRIPT_DIGEST_CHARS): string | undefined {
+  const lines: string[] = [];
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+    const text = typeof message.content === 'string' ? message.content.trim() : '';
+    if (text) {
+      const bounded = text.length > DIGEST_TEXT_CHARS ? `${text.slice(0, DIGEST_TEXT_CHARS)} …` : text;
+      lines.push(...bounded.split('\n').map((line) => (line.trimStart().startsWith('{') ? `> ${line}` : line)));
+    }
+    for (const call of message.tool_calls ?? []) {
+      const args = call.function.arguments.replace(/\s+/g, ' ').trim();
+      const shortArgs = args.length > DIGEST_TOOL_ARGS_CHARS ? `${args.slice(0, DIGEST_TOOL_ARGS_CHARS)}…` : args;
+      lines.push(`- tool \`${call.function.name}\` ${shortArgs}`.trimEnd());
+    }
+  }
+  if (lines.length === 0) return undefined;
+  const omitted = '… (earlier steps omitted)';
+  const kept: string[] = [];
+  let size = omitted.length + 1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (size + lines[i].length + 1 > maxChars) {
+      kept.unshift(omitted);
+      break;
+    }
+    kept.unshift(lines[i]);
+    size += lines[i].length + 1;
+  }
+  return kept.join('\n');
+}
+
+/**
+ * Did the main loop end on an answer worth repairing? Not when it stopped on a
+ * user abort, an API error or an empty API response — those sentinels are the
+ * loop's own words, not the model's, and a repair turn would spend a call (or
+ * ignore the operator's stop) asking the model to restate text it never wrote.
+ * Nor after a sandbox outcome the loop refuses to continue past. (AGT-4313 review)
+ */
+export function loopEndedOnAnswer(finalText: string): boolean {
+  return finalText !== '(stopped)'
+    && finalText !== 'Empty API response'
+    && !finalText.startsWith('API error: ')
+    && !finalText.startsWith('OUTCOME_UNKNOWN_DO_NOT_RETRY');
+}
+
 /** Re-throw the errors that must not be replaced by a fallback answer. */
 function rethrowIfFatal(err: unknown): string {
   // A rate limit must still propagate — swallowing it would return an answer
@@ -77,7 +155,7 @@ async function callToolless(ctx: FinalTurnContext): Promise<string | null | unde
  * 않으면 딱 한 번 재시도한다. 두 번 모두 비면 성공/REVISE로 위장하지 않고 실패로
  * 올려 보내 reviewer/worker 호출자가 명시적으로 처리하게 한다. (INT-1442, INT-2879)
  */
-export async function salvageFinalAnswer(ctx: FinalTurnContext): Promise<string> {
+export async function salvageFinalAnswer(ctx: FinalTurnContext, repair?: TranscriptAwareRepair): Promise<string> {
   const { messages, session, onLog } = ctx;
   const maxFinalAnswerAttempts = 2;
   const stepLimitPrompt = SALVAGE_PROMPT;
@@ -139,7 +217,11 @@ export async function salvageFinalAnswer(ctx: FinalTurnContext): Promise<string>
       note: 'salvage-exhausted',
       reason: 'every final-answer attempt came back empty; the run ends with no answer',
     });
-    throw new Error('Agentic loop produced no final message after one retry');
+    // Carry what the run did, so a reviewer can still post its reading as
+    // "no decision" notes instead of nothing (cgf-portal PR 521). (AGT-4413)
+    const partialTranscript = transcriptDigest(messages);
+    if (partialTranscript) repair?.onNoFinalAnswer?.(partialTranscript);
+    throw new NoFinalAnswerError('Agentic loop produced no final message after one retry', partialTranscript);
   }
   return finalText;
 }
@@ -161,7 +243,7 @@ export async function repairFinalAnswerFormat(
   finalText: string,
   repair: FinalAnswerRepair | undefined,
 ): Promise<string> {
-  if (!repair || !finalText || !repair.needsRepair(finalText)) return finalText;
+  if (!repair || !finalText || !loopEndedOnAnswer(finalText) || !repair.needsRepair(finalText)) return finalText;
   const { messages, session, onLog } = ctx;
   onLog?.('↻ Final answer is not in the required format — one repair turn (no tools)');
   messages.push({ role: 'assistant', content: finalText });

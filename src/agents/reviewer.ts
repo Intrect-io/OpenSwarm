@@ -3,7 +3,7 @@
 // Code review agent (CLI adapter based)
 // ============================================
 
-import { ReviewerNoVerdictError, partialReviewerText } from './reviewerNoVerdict.js';
+import { ReviewerNoVerdictError, partialReviewerText, transcriptNotes } from './reviewerNoVerdict.js';
 import { formatCommandEvidence } from './workerValidationEvidence.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import { t, getPrompts } from '../locale/index.js';
@@ -14,6 +14,7 @@ import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { reviewerFormatRepairIsConsistent, reviewerOutputNeedsFormatRepair } from '../adapters/resultParsing.js';
+import { NoFinalAnswerError, type TranscriptAwareRepair } from '../adapters/finalAnswerTurns.js';
 import type { VerifyEvidence } from '../verify/runner.js';
 import { renderVerifyEvidence } from './verificationEvidence.js';
 import type { InstructionCapsule } from './instructionCapsule.js';
@@ -393,6 +394,16 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
   const adapter = getAdapter(options.adapterName);
   // The reviewer's final text, kept for a no-verdict failure below. (AGT-4413)
   let finalText: string | undefined;
+  // What the run did when it ended with no final text at all, reported by the
+  // loop through the repair object, which survives an adapter that swallows
+  // the loop's error. (AGT-4413)
+  let partialTranscript: string | undefined;
+  const finalAnswerRepair: TranscriptAwareRepair | undefined = options.mode === 'blocker' ? undefined : {
+    needsRepair: reviewerOutputNeedsFormatRepair,
+    prompt: REVIEWER_FORMAT_REPAIR_PROMPT,
+    acceptRepair: reviewerFormatRepairIsConsistent,
+    onNoFinalAnswer: (digest) => { partialTranscript = digest; },
+  };
 
   try {
     // Run CLI via adapter
@@ -421,11 +432,7 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       // verdict at all; in-process adapters only (AGT-4313). Not in blocker
       // mode, where "approve" means "the worker's claim is confirmed" and the
       // repair prompt's approve/revise wording would mean something else.
-      finalAnswerRepair: options.mode === 'blocker' ? undefined : {
-        needsRepair: reviewerOutputNeedsFormatRepair,
-        prompt: REVIEWER_FORMAT_REPAIR_PROMPT,
-        acceptRepair: reviewerFormatRepairIsConsistent,
-      },
+      finalAnswerRepair,
     });
 
     finalText = raw.stdout;
@@ -461,7 +468,11 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
     // CLI exits non-zero. (INT-2521)
     const msg = error instanceof Error ? error.message : String(error);
     // Carries the reviewer's last text so a caller can still show what it found. (AGT-4413)
-    throw new ReviewerNoVerdictError(`reviewer-stage: produced no parseable verdict: ${msg}`, partialReviewerText(finalText), { cause: error });
+    // An empty final text falls back to the transcript digest: on the error when
+    // the adapter let it through, else the one the loop reported. (AGT-4413)
+    const notes = partialReviewerText(finalText)
+      ?? transcriptNotes(error instanceof NoFinalAnswerError ? error.partialTranscript : partialTranscript);
+    throw new ReviewerNoVerdictError(`reviewer-stage: produced no parseable verdict: ${msg}`, notes, { cause: error });
   }
 }
 

@@ -1071,8 +1071,8 @@ async function runAgenticLoopInner(
     messages, callApi, session, onLog,
     onCall: (usage, startedAt, model) => { accountUsage(usage, startedAt, model); apiCallCount++; },
   };
-  if (!finalText && apiCallCount > 0) finalText = await salvageFinalAnswer(finalTurns);
-  finalText = await repairFinalAnswerFormat(finalTurns, finalText, finalAnswerRepair);
+  if (!finalText && apiCallCount > 0) finalText = await salvageFinalAnswer(finalTurns, finalAnswerRepair);
+  finalText = await repairFinalAnswerFormat(finalTurns, finalText, signal?.aborted ? undefined : finalAnswerRepair);
 
   return {
     text: finalText,

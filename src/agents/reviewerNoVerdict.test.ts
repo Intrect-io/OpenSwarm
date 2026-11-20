@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_PARTIAL_REVIEW_CHARS, noDecisionComment, partialReviewerText } from './reviewerNoVerdict.js';
+import { MAX_PARTIAL_REVIEW_CHARS, noDecisionComment, partialReviewerText, transcriptNotes } from './reviewerNoVerdict.js';
 
 describe('partialReviewerText (AGT-4413)', () => {
   it('returns nothing for empty output', () => {
@@ -29,5 +29,18 @@ describe('noDecisionComment', () => {
     expect(body.split('\n')[0]).toContain('abcdef1: no decision');
     expect(body.indexOf('**Decision: NONE.**')).toBeLessThan(body.indexOf('note A'));
     expect(body).toContain('**Reason:** no verdict');
+  });
+});
+
+describe('transcriptNotes (AGT-4413)', () => {
+  it('labels a digest so it is not read as a conclusion', () => {
+    const notes = transcriptNotes('- tool `read_file` {"path":"a.ts"}')!;
+    expect(notes).toMatch(/^_The reviewer's final message was empty/);
+    expect(notes).toContain('- tool `read_file`');
+  });
+
+  it('returns nothing for an empty digest', () => {
+    expect(transcriptNotes(undefined)).toBeUndefined();
+    expect(transcriptNotes('  ')).toBeUndefined();
   });
 });
