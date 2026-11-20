@@ -2,7 +2,7 @@
 // KnowledgeGraph → .openswarm/repo.graphql + repo-snapshot.json
 // 에이전트가 컨텍스트 윈도우 없이도 저장소를 완전히 이해할 수 있는 정적 파일 생성
 
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import type { KnowledgeGraph } from './graph.js';
 import type { GraphNode, GraphEdge } from './types.js';
@@ -413,8 +413,14 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
   snapshotPath: string;
 } {
   const dir = join(projectPath, '.openswarm');
-  if (!existsSync(dir)) {
+  if (!existsSync(dir) && !isSymlink(dir)) {
     mkdirSync(dir, { recursive: true });
+  }
+  // A symlinked `.openswarm/` would send both writes outside the repository
+  // (AGT-3467). It is the repository owner's link, so it is refused, not
+  // replaced; the reader treats it as "no snapshot" for the same reason.
+  if (!isRegularEntry(dir, 'directory')) {
+    throw new Error(`${dir} is not a plain directory (symlink?) — refusing to export the repo graph into it`);
   }
 
   const schemaPath = join(dir, 'repo.graphql');
@@ -430,17 +436,88 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
   return { schemaPath, snapshotPath };
 }
 
-// 스냅샷이 존재하는지 확인
-export function hasRepoSnapshot(projectPath: string): boolean {
-  return existsSync(join(projectPath, '.openswarm', 'repo-snapshot.json'));
+/**
+ * Upper bound on `.openswarm/repo-snapshot.json`. The file lives in the
+ * repository a worker edits, so its size is not ours to trust: a large repo's
+ * real snapshot is a few MB, and anything past this is refused, not parsed.
+ */
+export const MAX_REPO_SNAPSHOT_BYTES = 32 * 1024 * 1024;
+
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
-// 스냅샷 로드 (에이전트가 읽을 때)
-export function loadRepoSnapshot(projectPath: string): RepoSnapshot | null {
-  const snapshotPath = join(projectPath, '.openswarm', 'repo-snapshot.json');
-  if (!existsSync(snapshotPath)) return null;
+/**
+ * Is `path` a real directory or file entry rather than a symbolic link?
+ * `lstat` looks at the entry itself; `existsSync` would follow the link.
+ */
+function isRegularEntry(path: string, kind: 'file' | 'directory'): boolean {
   try {
-    return JSON.parse(readFileSync(snapshotPath, 'utf8')) as RepoSnapshot;
+    const info = lstatSync(path);
+    return kind === 'file' ? info.isFile() : info.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Path of the snapshot when both `.openswarm/` and the snapshot itself are
+ * plain entries, otherwise null. A symlink at either level could point the
+ * read at any file the daemon can open (AGT-3467).
+ */
+function plainSnapshotPath(projectPath: string): string | null {
+  const dir = join(projectPath, '.openswarm');
+  const snapshotPath = join(dir, 'repo-snapshot.json');
+  if (!isRegularEntry(dir, 'directory') || !isRegularEntry(snapshotPath, 'file')) return null;
+  return snapshotPath;
+}
+
+/**
+ * Read the snapshot without following a link and without reading past
+ * `MAX_REPO_SNAPSHOT_BYTES`. `O_NOFOLLOW` closes the window between the
+ * `lstat` above and the open; reading at most cap+1 bytes from the descriptor
+ * keeps a file that grows after `fstat` from being read whole.
+ */
+function readSnapshotBounded(snapshotPath: string): string | null {
+  const fd = openSync(snapshotPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_REPO_SNAPSHOT_BYTES) return null;
+    const buffer = Buffer.alloc(Math.min(info.size, MAX_REPO_SNAPSHOT_BYTES) + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = readSync(fd, buffer, length, buffer.length - length, null);
+      if (read === 0) break;
+      length += read;
+    }
+    if (length > MAX_REPO_SNAPSHOT_BYTES) return null;
+    return buffer.subarray(0, length).toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// 스냅샷이 존재하는지 확인 — a symlinked snapshot counts as absent, so the
+// caller rescans and atomicWriteFileSync replaces the link with a real file.
+export function hasRepoSnapshot(projectPath: string): boolean {
+  return plainSnapshotPath(projectPath) !== null;
+}
+
+// 스냅샷 로드 (에이전트가 읽을 때) — refuses symlinks and oversized files.
+export function loadRepoSnapshot(projectPath: string): RepoSnapshot | null {
+  const snapshotPath = plainSnapshotPath(projectPath);
+  if (!snapshotPath) return null;
+  try {
+    const text = readSnapshotBounded(snapshotPath);
+    if (text === null) {
+      console.warn(`[Knowledge] Ignoring ${snapshotPath}: not a regular file or larger than ${MAX_REPO_SNAPSHOT_BYTES} bytes`);
+      return null;
+    }
+    return JSON.parse(text) as RepoSnapshot;
   } catch {
     return null;
   }
