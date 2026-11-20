@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { getResumedTaskFiles } from './worktreeResumeFiles.js';
+import { serializePerRepository } from './worktreeAddQueue.js';
 import { stagePreservableWorktreeChanges, purgeTrackedEphemeralArtifacts } from './worktreeEphemeralOps.js';
 import { getInstanceId } from './healthEndpoint.js';
 import { readyReusedPullRequest, upsertPullRequestRiskSection } from './pullRequestReady.js';
@@ -842,7 +843,7 @@ export async function createWorktree(
 
   let baseRef = branchName;
   if (branchExists) {
-    await git(repoPath, 'worktree', 'add', worktreePath, branchName);
+    await serializePerRepository(repoPath, () => git(repoPath, 'worktree', 'add', worktreePath, branchName));
   } else {
     // Resolve the repo's real base ref (remote + default branch) — NOT hardcoded
     // origin/main, which fataled on master-default / non-origin repos. (INT-2545)
@@ -858,9 +859,8 @@ export async function createWorktree(
     // the repository's shared .git/config. The lifecycle lock is per issue, so
     // two issues of one repo reach this line together and the loser fails with
     // "could not lock config file .git/config: File exists" — leaving a branch
-    // with no worktree and costing the issue an attempt. Nothing reads that
-    // upstream before publication, where `push -u` sets the real one.
-    await git(repoPath, 'worktree', 'add', '--no-track', '-b', branchName, worktreePath, baseRef);
+    // with no worktree and costing the issue an attempt; `push -u` sets the real upstream at publication.
+    await serializePerRepository(repoPath, () => git(repoPath, 'worktree', 'add', '--no-track', '-b', branchName, worktreePath, baseRef));
   }
   console.log(`[Worktree] Created: ${worktreePath} (branch: ${branchName}, base: ${baseRef})`);
 
