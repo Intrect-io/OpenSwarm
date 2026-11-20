@@ -9,7 +9,8 @@
 // being recomputed on nearly every retry of the same task.
 //
 // It was already cached by the right key. `autonomousRunner` fingerprints a task
-// as [title, description] (trackerUpdatedAt was dropped in AGT-4300 — it bumps on
+// as [title, description] (+ goal hash and prompt version; a declined draft also carries
+// the issue activity, AGT-4784) (trackerUpdatedAt was dropped in AGT-4300 — it bumps on
 // the daemon's own tracker mutations, not just content edits, and was causing the
 // exact self-inflicted misses this cache exists to prevent), which deliberately
 // omits the attempt number so a retry reuses the previous analysis. What failed
@@ -44,12 +45,20 @@ import { defaultAutomationDbPath } from './automationDbPath.js';
  * that stops a worker before any worktree is created: cgf-portal AX-1726, a
  * kyte-dev-server task, ran two attempts that way on 2026-10-03 (AGT-4669).
  * Editing the goal changes the key too, so cached drafts are judged again.
+ *
+ * `version` names the prompt the draft was made with. A draft from before the
+ * pre-claim hold asked every project for a scope verdict carries none, so the
+ * runner passes {@link DRAFT_SCOPE_KEY_VERSION} and those entries miss (AGT-4784).
  */
-export function draftFingerprint(title: string, description: string | undefined, goal?: string): string {
-  const base = [title, description ?? ''];
-  if (!goal) return JSON.stringify(base);
-  return JSON.stringify([...base, createHash('sha256').update(goal).digest('hex').slice(0, 12)]);
+export function draftFingerprint(title: string, description: string | undefined, goal?: string, version?: string): string {
+  const base: string[] = [title, description ?? ''];
+  if (goal) base.push(createHash('sha256').update(goal).digest('hex').slice(0, 12));
+  if (version) base.push(version);
+  return JSON.stringify(base);
 }
+
+/** The draft prompt asks every project for a scope verdict (AGT-4784). */
+export const DRAFT_SCOPE_KEY_VERSION = 'scope-v2';
 
 /** What the pre-admission pass computed, and the inputs it was computed from. */
 export interface CachedDraftEntry<TDraft = unknown> {
@@ -58,6 +67,12 @@ export interface CachedDraftEntry<TDraft = unknown> {
   fileScope: string[];
   description?: string;
   executionCommentsLoaded?: boolean;
+  /**
+   * Issue activity when a declined draft was stored (`draftActivityStamp`). Title and description
+   * alone never change when a person answers in a comment, so a held issue is re-judged when this
+   * moves (AGT-4784).
+   */
+  activity?: string;
 }
 
 /**

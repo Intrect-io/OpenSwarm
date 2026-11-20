@@ -460,6 +460,11 @@ export type ProjectAgentConfig = {
    */
   requireDefinitionOfReady?: boolean;
   /**
+   * Labels that keep an issue of this project away from the daemon, merged with the global
+   * `autonomous.skip.labels` in the readiness partition (AGT-4784).
+   */
+  skipLabels?: string[];
+  /**
    * Standing goal for every task in this project (AGT-4662). The draft, worker,
    * reviewer and planner all read it, and the draft may decline a task that
    * cannot serve it before any worktree is created.
@@ -750,8 +755,11 @@ export type AutonomousStartupConfig = {
    * wins when set); a project over it stops dispatching until 00:00 UTC and
    * alerts once. `perIssueUsd` caps what one issue may spend since an operator
    * last resumed it; past it the issue parks NEEDS_HUMAN with one comment.
+   * `perIssueAttemptsPerDay` (AGT-4787, default 3 even without this block)
+   * caps the attempts one issue may start in a rolling 24 hours since an
+   * operator last resumed it; at it the issue parks NEEDS_HUMAN the same way.
    */
-  budget?: { perProjectDailyUsd?: number; perIssueUsd?: number };
+  budget?: { perProjectDailyUsd?: number; perIssueUsd?: number; perIssueAttemptsPerDay?: number };
   /**
    * Run unattended work on delegated CLI adapters (claude/codex/cursor) even
    * though OpenSwarm's publication fence, protected files and credential-free

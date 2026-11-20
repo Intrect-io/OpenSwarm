@@ -284,6 +284,85 @@ export function issueBudgetPark(
     : '';
   const reason = `${DAEMON_COMMENT_LEAD} This issue has spent ${usd(spend.totalUsd)} of its ${usd(capUsd)} budget`
     + ` (autonomous.budget.perIssueUsd)${unknown}. Raise the budget or narrow the issue, then dispatch it from the dashboard issue board to resume; moving it back to Todo alone does not lift a budget park.`;
+  return budgetParkResult(reason, ISSUE_BUDGET_PARK_REASON, task, projectPath);
+}
+
+// ============================================
+// Per-issue attempt budget (AGT-4787): attempts per rolling day
+// ============================================
+//
+// The USD cap above cannot see a retry loop of cheap or cost-less attempts. An
+// issue that has already started `perIssueAttemptsPerDay` attempts in the last
+// 24 hours parks NEEDS_HUMAN instead of trying again.
+
+/** NEEDS_HUMAN code for an issue whose attempts reached `autonomous.budget.perIssueAttemptsPerDay`. */
+export const ISSUE_ATTEMPT_BUDGET_PARK_REASON = 'issue_attempt_budget_exhausted';
+/** Attempts one issue may start per rolling 24 hours when the config sets none. */
+export const DEFAULT_PER_ISSUE_ATTEMPTS_PER_DAY = 3;
+const ATTEMPT_WINDOW_MS = 24 * 60 * 60_000;
+
+/** Whether a NEEDS_HUMAN code is a budget park, which only an explicit operator resume may lift. */
+export function isBudgetPark(code: string | null | undefined): boolean {
+  return code === ISSUE_BUDGET_PARK_REASON || code === ISSUE_ATTEMPT_BUDGET_PARK_REASON;
+}
+
+/** The attempt budget the runner admits with: the configured value, else the default of 3. */
+export function resolvePerIssueAttemptsPerDay(budget: { perIssueAttemptsPerDay?: number } | undefined): number {
+  return budget?.perIssueAttemptsPerDay ?? DEFAULT_PER_ISSUE_ATTEMPTS_PER_DAY;
+}
+
+/**
+ * Attempts the issue started in the rolling 24 hours before `now`, counted only
+ * after the latest operator resume of a budget park (the resume that grants a
+ * fresh USD budget grants fresh attempts too; any other resume does not, as in
+ * `issueSpend`). Attempts that ended before any model call and operator
+ * remediations are not attempts at the work; the claim being admitted is
+ * excluded.
+ */
+export function issueAttemptsInWindow(
+  db: Database.Database,
+  issueId: string,
+  now: number,
+  options: { excludeAttemptNo?: number } = {},
+): { attempts: number; since: number } {
+  const resumed = db.prepare(`
+    SELECT MAX(created_at) AS at FROM automation_events
+    WHERE issue_id = ? AND kind = 'operator_resumed'
+      AND json_extract(data_json, '$.parkedUnder') IN (?, ?)
+  `).get(issueId, ISSUE_BUDGET_PARK_REASON, ISSUE_ATTEMPT_BUDGET_PARK_REASON) as { at: number | null };
+  const since = Math.max(now - ATTEMPT_WINDOW_MS, resumed.at ?? 0);
+  const row = db.prepare(`
+    SELECT COUNT(*) AS attempts FROM automation_attempts
+    WHERE issue_id = ? AND started_at >= ? AND attempt_no != ?
+      AND COALESCE(result_status, '') NOT IN (${NO_SPEND_STATUSES.map(() => '?').join(', ')}, 'operator_remediated')
+  `).get(issueId, since, options.excludeAttemptNo ?? -1, ...NO_SPEND_STATUSES) as { attempts: number };
+  return { attempts: row.attempts, since };
+}
+
+/**
+ * The park for an issue at its daily attempt budget, or null. Like
+ * `issueBudgetPark` it replaces the pipeline run: the coordinator parks the run
+ * NEEDS_HUMAN under `ISSUE_ATTEMPT_BUDGET_PARK_REASON` and the runner posts this
+ * reason as the issue's one tracker comment.
+ */
+export function issueAttemptBudgetPark(
+  used: { attempts: number },
+  maxAttempts: number | undefined,
+  task: { issueId?: string; id: string; issueIdentifier?: string; title: string },
+  projectPath: string,
+): PipelineResult | null {
+  if (maxAttempts == null || used.attempts < maxAttempts) return null;
+  const reason = `${DAEMON_COMMENT_LEAD} This issue has started ${used.attempts} of its ${maxAttempts} attempts in the last 24 hours`
+    + ' (autonomous.budget.perIssueAttemptsPerDay). Narrow the issue or raise the budget, then dispatch it from the dashboard issue board to resume; moving it back to Todo alone does not lift a budget park.';
+  return { ...budgetParkResult(reason, ISSUE_ATTEMPT_BUDGET_PARK_REASON, task, projectPath), sessionId: `issue-attempt-budget-${Date.now()}` };
+}
+
+function budgetParkResult(
+  reason: string,
+  code: string,
+  task: { issueId?: string; id: string; issueIdentifier?: string; title: string },
+  projectPath: string,
+): PipelineResult {
   return {
     success: false,
     sessionId: `issue-budget-${Date.now()}`,
@@ -293,7 +372,25 @@ export function issueBudgetPark(
     iterations: 0,
     totalCost: { costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, durationMs: 0 },
     failureDetail: reason,
-    operatorPark: { code: ISSUE_BUDGET_PARK_REASON, reason },
+    operatorPark: { code, reason },
     taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectPath, taskTitle: task.title },
   };
+}
+
+/**
+ * Both per-issue budgets at claim time: the USD cap first, then the attempt
+ * budget. The attempt now being claimed is excluded from both counts.
+ */
+export function issueBudgetsPark(
+  db: Database.Database,
+  claim: { issueId: string; attemptNo: number },
+  task: { issueId?: string; id: string; issueIdentifier?: string; title: string },
+  projectPath: string,
+  limits: { capUsd?: number; maxAttemptsPerDay?: number; unknownAttemptCostUsd?: number },
+  now = Date.now(),
+): PipelineResult | null {
+  const usd = limits.capUsd == null ? null
+    : issueBudgetPark(issueSpend(db, claim.issueId, now, { excludeAttemptNo: claim.attemptNo, unknownAttemptCostUsd: limits.unknownAttemptCostUsd }), limits.capUsd, task, projectPath);
+  if (usd || limits.maxAttemptsPerDay == null) return usd;
+  return issueAttemptBudgetPark(issueAttemptsInWindow(db, claim.issueId, now, { excludeAttemptNo: claim.attemptNo }), limits.maxAttemptsPerDay, task, projectPath);
 }

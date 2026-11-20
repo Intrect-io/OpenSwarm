@@ -6,10 +6,14 @@ import Database from 'better-sqlite3';
 import { DurableRunCoordinator } from './durableRunCoordinator.js';
 import { RunLedger } from './runLedger.js';
 import {
+  DEFAULT_PER_ISSUE_ATTEMPTS_PER_DAY,
+  ISSUE_ATTEMPT_BUDGET_PARK_REASON,
   ISSUE_BUDGET_PARK_REASON,
   costCeilingReasonWithAlert,
   dailySpend,
+  issueAttemptsInWindow,
   issueSpend,
+  resolvePerIssueAttemptsPerDay,
   setBudgetAlertSink,
 } from './runLedgerCost.js';
 import type { PipelineResult } from '../agents/pairPipeline.js';
@@ -234,5 +238,117 @@ describe('per-issue budget (AGT-4807)', () => {
     } finally {
       close();
     }
+  });
+});
+
+describe('per-issue daily attempt budget (AGT-4787)', () => {
+  const admission = { maxConcurrent: 4, maxAttemptsPerIssuePerDay: 3 };
+
+  /** Three failed attempts, each made due again, so the issue is queued for a fourth. */
+  async function threeAttempts(coordinator: ReturnType<typeof fixture>['coordinator'], path: string, id: string): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+      await coordinator.execute(task(id), '/repo', async () => spent(0.01), { admission });
+      makeDue(path, id);
+    }
+  }
+
+  it('parks an issue NEEDS_HUMAN after its daily attempt budget and claims nothing', async () => {
+    const { coordinator, ledger, reader, path, close } = fixture();
+    try {
+      await threeAttempts(coordinator, path, 'q');
+
+      const executor = vi.fn(async () => spent(1));
+      const result = await coordinator.execute(task('q'), '/repo', executor, { admission });
+
+      expect(executor).not.toHaveBeenCalled();
+      expect(result.operatorPark?.code).toBe(ISSUE_ATTEMPT_BUDGET_PARK_REASON);
+      expect(result.operatorPark?.reason).toContain('🧭 **[OpenSwarm]** This issue has started 3 of its 3 attempts in the last 24 hours');
+      expect(result.operatorPark?.reason).toContain('autonomous.budget.perIssueAttemptsPerDay');
+      expect(result.operatorPark?.reason).toContain('dispatch it from the dashboard issue board to resume');
+      const run = ledger.getRun('q');
+      expect(run?.state).toBe('NEEDS_HUMAN');
+      expect(run?.lastErrorCode).toBe(ISSUE_ATTEMPT_BUDGET_PARK_REASON);
+      // The park ran no model, so it records no spend of its own.
+      const costs = reader.prepare('SELECT cost_usd FROM automation_attempts WHERE issue_id = ? ORDER BY attempt_no').all('q') as Array<{ cost_usd: number | null }>;
+      expect(costs.map((a) => a.cost_usd)).toEqual([0.01, 0.01, 0.01, 0]);
+
+      // Still parked: a Todo move, another dispatch tick and an idle fill neither
+      // run the issue nor park it again, so its one comment stays one.
+      const later = vi.fn(async () => spent(1));
+      await coordinator.execute({ ...task('q'), linearState: 'Todo' }, '/repo', later, { admission });
+      await coordinator.execute(task('q'), '/repo', later, { admission });
+      expect(ledger.resumeNeedsHuman('q', Date.now(), 'idle_fill')).toBeNull();
+      expect(later).not.toHaveBeenCalled();
+      expect(ledger.getRun('q')?.state).toBe('NEEDS_HUMAN');
+      const parks = reader.prepare(`SELECT COUNT(*) AS n FROM automation_events WHERE issue_id = ? AND kind = 'operator_parked'`).get('q') as { n: number };
+      expect(parks.n).toBe(1);
+    } finally {
+      close();
+    }
+  });
+
+  it('runs an issue under its attempt budget, and the window rolls', async () => {
+    const { coordinator, path, close } = fixture();
+    try {
+      await coordinator.execute(task('u'), '/repo', async () => spent(0.01), { admission });
+      makeDue(path, 'u');
+      await coordinator.execute(task('u'), '/repo', async () => spent(0.01), { admission });
+      makeDue(path, 'u');
+      const executor = vi.fn(async () => spent(0.01));
+      await coordinator.execute(task('u'), '/repo', executor, { admission });
+      expect(executor).toHaveBeenCalledTimes(1);
+
+      const db = new Database(path);
+      try {
+        const now = Date.now();
+        expect(issueAttemptsInWindow(db, 'u', now).attempts).toBe(3);
+        // An attempt started more than 24 hours ago is outside the window.
+        db.prepare('UPDATE automation_attempts SET started_at = ? WHERE issue_id = ? AND attempt_no = 1').run(now - 24 * 60 * 60_000 - 1, 'u');
+        expect(issueAttemptsInWindow(db, 'u', now).attempts).toBe(2);
+        // Attempts that ended before any model call are not counted.
+        db.prepare(`UPDATE automation_attempts SET result_status = 'rate_limited' WHERE issue_id = ? AND attempt_no = 2`).run('u');
+        expect(issueAttemptsInWindow(db, 'u', now).attempts).toBe(1);
+      } finally {
+        db.close();
+      }
+    } finally {
+      close();
+    }
+  });
+
+  it('resets the attempt count after an operator resume', async () => {
+    const { coordinator, ledger, path, close } = fixture();
+    try {
+      await threeAttempts(coordinator, path, 'r');
+      const parked = await coordinator.execute(task('r'), '/repo', vi.fn(), { admission });
+      expect(parked.operatorPark?.code).toBe(ISSUE_ATTEMPT_BUDGET_PARK_REASON);
+
+      const db = new Database(path);
+      try {
+        const now = Date.now();
+        const lastStart = (db.prepare('SELECT MAX(started_at) AS at FROM automation_attempts WHERE issue_id = ?').get('r') as { at: number }).at;
+        expect(issueAttemptsInWindow(db, 'r', lastStart).attempts).toBe(4);
+        // A resume of some other park does not reset the count.
+        db.prepare(`INSERT INTO automation_events(issue_id, attempt_no, kind, from_state, to_state, data_json, created_at)
+          VALUES (?, 4, 'operator_resumed', 'NEEDS_HUMAN', 'READY', ?, ?)`)
+          .run('r', JSON.stringify({ trigger: 'idle_fill', parkedUnder: 'publication_scope_mismatch' }), lastStart + 1);
+        expect(issueAttemptsInWindow(db, 'r', lastStart + 2).attempts).toBe(4);
+        // The explicit operator resume that grants a fresh USD budget grants fresh attempts.
+        const resumeAt = Math.max(now, lastStart) + 5;
+        expect(ledger.resumeNeedsHuman('r', resumeAt, 'explicit_dispatch')).not.toBeNull();
+        expect(issueAttemptsInWindow(db, 'r', resumeAt + 1).attempts).toBe(0);
+      } finally {
+        db.close();
+      }
+    } finally {
+      close();
+    }
+  });
+
+  it('defaults to 3 attempts when the config sets none', () => {
+    expect(DEFAULT_PER_ISSUE_ATTEMPTS_PER_DAY).toBe(3);
+    expect(resolvePerIssueAttemptsPerDay(undefined)).toBe(3);
+    expect(resolvePerIssueAttemptsPerDay({})).toBe(3);
+    expect(resolvePerIssueAttemptsPerDay({ perIssueAttemptsPerDay: 7 })).toBe(7);
   });
 });

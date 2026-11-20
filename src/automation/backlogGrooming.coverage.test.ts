@@ -198,6 +198,8 @@ describe('applyBacklogGrooming additional branches', () => {
       moved: 0,
       movedIssueIds: [],
       skippedUnknown: 0,
+      skippedOpenPr: 0,
+      skippedByCap: 0,
     });
     expect(src.addComment).not.toHaveBeenCalled();
   });
@@ -229,16 +231,18 @@ describe('applyBacklogGrooming additional branches', () => {
     expect(src.addComment.mock.calls[0][1]).toContain('description update skipped because this task source does not support it');
   });
 
-  it('still counts the underlying mutation even when the trailing comment fails', async () => {
+  // Before AGT-4603 a stale move ran before its comment; the state path now
+  // posts evidence first (see backlogGrooming.test.ts), so this covers the
+  // description path, which still comments after the mutation.
+  it('still counts the description update even when the trailing comment fails', async () => {
     const src = source();
     src.addComment.mockRejectedValueOnce(new Error('comment API down'));
     const applied = await applyBacklogGrooming(src, {
       success: true,
-      decisions: [{ issueId: 'id-1', status: 'stale', reason: 'implemented', evidence: ['src/a.ts:1'], closeState: 'Done' }],
+      decisions: [{ issueId: 'id-1', status: 'needs_update', reason: 'drifted', evidence: ['src/a.ts:1'], updatedDescription: 'new body' }],
     }, 'apply', new Set(['id-1']));
-    expect(src.updateState).toHaveBeenCalledWith('id-1', 'Done');
-    expect(applied.moved).toBe(1);
-    expect(applied.movedIssueIds).toEqual(['id-1']);
+    expect(src.updateDescription).toHaveBeenCalledWith('id-1', 'new body');
+    expect(applied.updatedDescriptions).toBe(1);
     expect(applied.commented).toBe(0);
     expect(applied.failedComments).toBe(1);
   });

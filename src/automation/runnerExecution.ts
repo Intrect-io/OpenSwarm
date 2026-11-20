@@ -247,7 +247,7 @@ export async function runPreAdmissionDraft(
   await prepareTaskExecutionContext(task);
   const operatorFeedback = loadAuthoritativeOperatorFeedback(task.issueId || task.id);
   if (operatorFeedback) task.authoritativeOperatorFeedback = operatorFeedback;
-  return runDraftAnalysis(draftOptionsFor(ctx, task, projectPath));
+  return runDraftAnalysis({ ...draftOptionsFor(ctx, task, projectPath), askScopeVerdict: true }); // every project gets a scope verdict (AGT-4784)
 }
 
 // Project Path Resolution
