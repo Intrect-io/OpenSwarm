@@ -12,6 +12,7 @@ import { getAdapter, spawnCli } from '../adapters/index.js';
 import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
+import { reviewerFormatRepairIsConsistent, reviewerOutputNeedsFormatRepair } from '../adapters/resultParsing.js';
 import type { VerifyEvidence } from '../verify/runner.js';
 import { renderVerifyEvidence } from './verificationEvidence.js';
 import type { InstructionCapsule } from './instructionCapsule.js';
@@ -362,6 +363,22 @@ export async function runPreCheck(options: ReviewerOptions): Promise<PreCheckRes
 // Reviewer Execution
 
 /**
+ * The one tool-less repair turn a reviewer gets when its final answer carries
+ * no verdict (AGT-4313). It asks for a restatement, not a new review: the
+ * reviewer has already read everything it is going to read.
+ */
+export const REVIEWER_FORMAT_REPAIR_PROMPT =
+  'Your previous message did not contain a verdict this harness can read: there was no JSON ' +
+  'result block and no `Decision:` line. Do not call tools and do not start the review over. ' +
+  'Restate the conclusion you already reached as exactly one fenced JSON block of this shape:\n\n' +
+  '```json\n' +
+  '{"decision": "approve" | "revise" | "reject", "feedback": "<one-paragraph summary>", ' +
+  '"issues": ["<file:line — concrete defect>"], "suggestions": ["<concrete change>"]}\n' +
+  '```\n\n' +
+  'Use "approve" only if your review found nothing that must change. If you found any defect, ' +
+  'the decision is "revise" or "reject" and every defect goes in "issues".';
+
+/**
  * Run Reviewer agent (full review with Sonnet)
  */
 export async function runReviewer(options: ReviewerOptions): Promise<ReviewResult> {
@@ -392,6 +409,15 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       signal: options.signal,
       readOnly: options.readOnly,
       coordinationContext: options.coordinationContext,
+      // One bounded, tool-less restatement when the final answer carries no
+      // verdict at all; in-process adapters only (AGT-4313). Not in blocker
+      // mode, where "approve" means "the worker's claim is confirmed" and the
+      // repair prompt's approve/revise wording would mean something else.
+      finalAnswerRepair: options.mode === 'blocker' ? undefined : {
+        needsRepair: reviewerOutputNeedsFormatRepair,
+        prompt: REVIEWER_FORMAT_REPAIR_PROMPT,
+        acceptRepair: reviewerFormatRepairIsConsistent,
+      },
     });
 
     // Parse result via adapter

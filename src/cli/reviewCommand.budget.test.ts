@@ -42,7 +42,14 @@ describe('runReviewCommand forwards the caller\'s reviewer budget (AGT-4410)', (
     const [opts] = runReviewerMock.mock.calls[0] as [Record<string, unknown>];
     expect(opts.model).toBeUndefined();
     expect(opts.processContext).toBeUndefined();
-    expect(opts.timeoutMs).toBe(300_000);
+    // OpenRouter gets its own, larger floor (AGT-4313); other adapters keep 300 s.
+    expect(opts.timeoutMs).toBe(900_000);
     expect(opts.maxTurns).toBe(20);
+  });
+
+  it('keeps the 300 s floor for a non-OpenRouter adapter', async () => {
+    await runReviewCommand({ path: '/repo', adapter: 'codex' }, stubDeps);
+    const [opts] = runReviewerMock.mock.calls[0] as [Record<string, unknown>];
+    expect(opts.timeoutMs).toBe(300_000);
   });
 });

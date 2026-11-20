@@ -13,8 +13,9 @@ import { DIAGNOSTICS_TOOL } from './diagnosticsTool.js';
 import { WEB_TOOL_DEFINITIONS } from './webTools.js';
 import { detectRateLimit, RateLimitError } from './rateLimitError.js';
 import { isInfraError } from './errorClassification.js';
+import { salvageFinalAnswer, repairFinalAnswerFormat, type FinalTurnContext } from './finalAnswerTurns.js';
 import { parseSearchReplaceBlocks, applyEditBlock, type EditFormat } from '../support/editParser.js';
-import type { CliRunResult, FinishValidation } from './types.js';
+import type { CliRunResult, FinalAnswerRepair, FinishValidation } from './types.js';
 import type { ChatUsage } from './chatStream.js';
 import { recordUsage, type UsageAttribution } from '../support/usageLedger.js';
 import { createSessionRecorder, type SessionRecorder } from '../support/sessionLog.js';
@@ -194,6 +195,8 @@ export interface AgenticLoopOptions {
   finishValidator?: (finalText: string, attempt: number) => FinishValidation | Promise<FinishValidation>;
   /** Max times `finishValidator` may reject an answer before the loop gives up and returns it anyway. Default 0. */
   finishValidatorMaxRetries?: number;
+  /** One tool-less same-conversation format repair of the final answer (AGT-4313). See FinalAnswerRepair. */
+  finalAnswerRepair?: FinalAnswerRepair;
   /** Verification-harness files for which edit/write are refused (see tools.ts ToolExecOptions) */
   protectedFiles?: string[];
   /** OS fence for the bash tool — see ToolExecOptions.sandbox (AGT-4387). */
@@ -396,6 +399,7 @@ async function runAgenticLoopInner(
     nudgeMaxOnNoEdit = 0,
     finishValidator,
     finishValidatorMaxRetries = 0,
+    finalAnswerRepair,
     protectedFiles,
     sandbox,
     forbidPublication,
@@ -1060,96 +1064,15 @@ async function runAgenticLoopInner(
     }
   }
 
-  // Final answer turn — maxTurns/타임아웃으로 끊겼는데 모델이 최종 텍스트를 못 낸 경우,
-  // 도구 없이 호출해 결론을 강제한다. 이게 없으면 진단·분석형 작업이
-  // 끝까지 도구만 호출하다 빈 결과("(no summary)")로 끝난다 — SWE 하이브리드 진단
-  // 단계에서 발견된 결함.
-  // 첫 salvage가 reasoning-only 응답처럼 사용자에게 보이는 content를 하나도 내지
-  // 않으면 딱 한 번 재시도한다. 두 번 모두 비면 성공/REVISE로 위장하지 않고 실패로
-  // 올려 보내 reviewer/worker 호출자가 명시적으로 처리하게 한다. (INT-1442, INT-2879)
-  if (!finalText && apiCallCount > 0) {
-    const maxFinalAnswerAttempts = 2;
-    const stepLimitPrompt =
-      "You've reached this turn's step limit, so stop calling tools now. Using everything " +
-      'above, write a non-empty final answer now. Follow the output format requested in the ' +
-      'original task exactly. If the original task requests a review or verdict, begin with ' +
-      '`Decision: approve`, `Decision: revise`, or `Decision: reject` and give concrete ' +
-      'reasoning; do not return a worker-status summary. Do not mention step/tool limits or ' +
-      '"budget" to the user.';
-    messages.push({ role: 'user', content: stepLimitPrompt });
-    // Salvage is where a cut-short run gets the answer that becomes its verdict,
-    // and it used to leave no trace at all: the transcript ended on a tool
-    // result, and the reviewer's entire REVISE — evidence table, three named
-    // problems, decision JSON — existed only inside the `end` summary. Reading
-    // the events, the run looked like it simply stopped. Worse, nothing said the
-    // loop had run out of turns; establishing that meant counting API calls
-    // against recorded events. Record the reason, the injected prompt and every
-    // attempt, so a salvaged run explains itself. (AGT-4450)
-    session?.record({
-      type: 'notice',
-      note: 'salvage',
-      reason: 'the loop ended without a final message; asking for an answer with no tools',
-      attempts: maxFinalAnswerAttempts,
-      prompt: stepLimitPrompt,
-    });
-
-    for (let attempt = 1; attempt <= maxFinalAnswerAttempts && !finalText; attempt++) {
-      if (attempt === 1) {
-        onLog?.('▸ Final answer turn (no tools) — loop ended without a final message');
-      } else {
-        onLog?.('↻ Final answer was empty — retrying once (no tools)');
-        const retryPrompt =
-          'Your previous final-answer attempt returned no user-visible text. Respond now with ' +
-          'the complete, non-empty final answer in the exact format requested by the original task.';
-        messages.push({ role: 'user', content: retryPrompt });
-        session?.record({ type: 'notice', note: 'salvage-retry', attempt, prompt: retryPrompt });
-      }
-
-      try {
-        const salvageStartedAt = Date.now();
-        const response = await callApi(messages, []);
-        accountUsage(response.usage, salvageStartedAt, response.model);
-        apiCallCount++;
-        const content = response.choices?.[0]?.message?.content;
-        finalText = typeof content === 'string' && content.trim() ? content : '';
-        // Recorded even when empty, so recorded assistant events reconcile with
-        // `apiCallCount` and an empty salvage is visible rather than inferred.
-        session?.record({
-          type: 'assistant',
-          salvage: attempt,
-          content: typeof content === 'string' ? content : '',
-          toolCalls: [],
-        });
-      } catch (err) {
-        session?.record({
-          type: 'notice',
-          note: 'salvage-failed',
-          attempt,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        // A rate limit on a salvage call must still propagate — swallowing it
-        // here would return an empty result the scheduler reads as a plain failure
-        // instead of pausing. Mirror the main call path: preserve a typed
-        // RateLimitError, then re-detect an untyped one from the message. (INT-2519)
-        if (err instanceof RateLimitError) throw err;
-        const msg = err instanceof Error ? err.message : String(err);
-        const rl = detectRateLimit('', msg);
-        if (rl) throw rl;
-        if (isInfraError(err)) throw err; // infra on salvage → infra_error, not fake result (INT-2520)
-        onLog?.(`✖ Final answer turn failed (${attempt}/${maxFinalAnswerAttempts}): ${msg}`);
-      }
-    }
-
-    if (!finalText) {
-      onLog?.('✖ Final answer remained empty after one retry');
-      session?.record({
-        type: 'notice',
-        note: 'salvage-exhausted',
-        reason: 'every final-answer attempt came back empty; the run ends with no answer',
-      });
-      throw new Error('Agentic loop produced no final message after one retry');
-    }
-  }
+  // Post-loop tool-less turns: salvage a missing final answer (INT-1442,
+  // INT-2879, AGT-4450), then one format repair if the caller cannot read it
+  // (AGT-4313). Both live in finalAnswerTurns.ts.
+  const finalTurns: FinalTurnContext = {
+    messages, callApi, session, onLog,
+    onCall: (usage, startedAt, model) => { accountUsage(usage, startedAt, model); apiCallCount++; },
+  };
+  if (!finalText && apiCallCount > 0) finalText = await salvageFinalAnswer(finalTurns);
+  finalText = await repairFinalAnswerFormat(finalTurns, finalText, finalAnswerRepair);
 
   return {
     text: finalText,

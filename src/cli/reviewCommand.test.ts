@@ -91,7 +91,28 @@ describe('scaledReviewMaxTurns / scaledReviewTimeoutMs', () => {
     for (let n = 1; n < 100; n++) {
       expect(scaledReviewMaxTurns(n + 1)).toBeGreaterThanOrEqual(scaledReviewMaxTurns(n));
       expect(scaledReviewTimeoutMs(n + 1)).toBeGreaterThanOrEqual(scaledReviewTimeoutMs(n));
+      expect(scaledReviewTimeoutMs(n + 1, undefined, 'openrouter'))
+        .toBeGreaterThanOrEqual(scaledReviewTimeoutMs(n, undefined, 'openrouter'));
     }
+  });
+
+  // OpenRouter reviews run the loop in-process over a remote API and were cut
+  // at the flat 5-minute wall mid-analysis. (AGT-4313)
+  it('gives OpenRouter a larger floor and cap, and leaves other adapters unchanged', () => {
+    expect(scaledReviewTimeoutMs(1, undefined, 'openrouter')).toBe(900_000);
+    expect(scaledReviewTimeoutMs(10, undefined, 'OpenRouter')).toBe(900_000);
+    expect(scaledReviewTimeoutMs(29, undefined, 'openrouter')).toBe(1_280_000);
+    expect(scaledReviewTimeoutMs(500, undefined, 'openrouter')).toBe(1_800_000); // cap
+    expect(scaledReviewTimeoutMs(29, undefined, 'codex')).toBe(585_000);
+    expect(scaledReviewTimeoutMs(29, undefined, undefined)).toBe(585_000);
+    for (const n of [1, 10, 11, 29, 200]) {
+      expect(scaledReviewTimeoutMs(n, undefined, 'openrouter')).toBeGreaterThan(scaledReviewTimeoutMs(n, undefined, 'claude'));
+    }
+  });
+
+  it('honours an explicit base for any adapter', () => {
+    expect(scaledReviewTimeoutMs(5, 60_000, 'openrouter')).toBe(60_000);
+    expect(scaledReviewTimeoutMs(5, 60_000)).toBe(60_000);
   });
 });
 
