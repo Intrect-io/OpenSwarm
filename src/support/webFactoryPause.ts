@@ -6,7 +6,7 @@
 // the same ones `openswarm pause` writes; the daemon applies them on its next
 // heartbeat with no restart.
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { RunnerPauseControl } from '../automation/factoryPause.js';
+import type { RunnerPauseControl } from '../automation/runnerPauseControl.js';
 import { readBody } from './httpBody.js';
 import { safeErrorMessage } from './webServiceControl.js';
 

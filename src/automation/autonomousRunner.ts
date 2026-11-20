@@ -77,7 +77,7 @@ import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
 import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
-import { RunnerPauseControl } from './factoryPause.js';
+import { RunnerPauseControl } from './runnerPauseControl.js';
 import { providerSwitchViolation } from '../adapters/unattendedPolicy.js'; import { providerSwitchFamilyViolation } from '../adapters/reviewerIndependence.js';
 import {
   findPullRequestForBranch,
@@ -2848,7 +2848,7 @@ export class AutonomousRunner {
         this.syslog(`⏸ Disk space hold: ${disk.line}`);
         return;
       }
-      if (!this.pauses.apply(this.scheduler, (line) => this.syslog(line))) return; // 1.15 Kill switch, one line per pause per heartbeat (AGT-4808)
+      if (!(await this.pauses.apply(this.scheduler, (line) => this.syslog(line), { projects: this.config.allowedProjects, alert: reportToDiscord }))) return; // 1.15 Kill switch + anomaly auto-pause (AGT-4808, AGT-4809)
 
       // 1.2 Rate-limit hold — skip the heartbeat while a 429 pause is still active.
       // Cleared implicitly once the clock passes rateLimitUntil. (INT-1906)
@@ -3892,7 +3892,6 @@ export class AutonomousRunner {
       orchestratorSchedule: this.config.orchestratorSchedule,
     };
   }
-
 
   async getAdapterSummary() {
     const defaultAdapter = this.config.defaultAdapter ?? 'codex';

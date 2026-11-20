@@ -30,7 +30,6 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { defaultAutomationDbPath } from './automationDbPath.js';
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
-import type { PipelineResult } from '../agents/pairPipeline.js';
 
 /** The scope key for a factory-wide pause. */
 export const GLOBAL_PAUSE_SCOPE = '*';
@@ -54,6 +53,10 @@ export const PAUSE_TABLE_DDL = `
     reason TEXT NOT NULL,
     actor TEXT NOT NULL,
     created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS automation_pause_lifts (
+    scope TEXT PRIMARY KEY,
+    lifted_at INTEGER NOT NULL
   );
 `;
 
@@ -130,11 +133,23 @@ export function setPauseInDb(db: Database.Database, input: SetPauseInput, now = 
   }).immediate();
 }
 
-/** Lift a pause. Returns whether a row was removed. */
-export function clearPauseInDb(db: Database.Database, projectPath?: string | null): boolean {
+/**
+ * Lift a pause. Returns whether a row was removed. The lift time is kept so the
+ * anomaly monitor (AGT-4809) does not re-trip on history it already acted on.
+ */
+export function clearPauseInDb(db: Database.Database, projectPath?: string | null, now = Date.now()): boolean {
   db.exec(PAUSE_TABLE_DDL);
   const scope = pauseScopeKey(projectPath);
-  return db.prepare('DELETE FROM automation_pauses WHERE scope = ?').run(scope).changes > 0;
+  return db.transaction(() => {
+    const removed = db.prepare('DELETE FROM automation_pauses WHERE scope = ?').run(scope).changes > 0;
+    if (removed) {
+      db.prepare(`
+        INSERT INTO automation_pause_lifts(scope, lifted_at) VALUES (?, ?)
+        ON CONFLICT(scope) DO UPDATE SET lifted_at = excluded.lifted_at
+      `).run(scope, now);
+    }
+    return removed;
+  }).immediate();
 }
 
 // --------------------------------------------
@@ -224,117 +239,4 @@ export function formatPauseLine(pause: FactoryPause, now = Date.now()): string {
   const scope = pause.scope === GLOBAL_PAUSE_SCOPE ? 'factory' : pause.scope.split('/').pop() || pause.scope;
   const minutes = Math.max(0, Math.round((now - pause.createdAt) / 60_000));
   return `⏸ Paused (${scope}, ${pause.mode}) for ${minutes}m by ${pause.actor}: ${pause.reason}`;
-}
-
-// --------------------------------------------
-// The daemon's side: one object the runner holds
-// --------------------------------------------
-
-interface PausableScheduler {
-  getRunningTasks(): Array<{ task: { id: string } }>;
-  cancelTask(taskId: string): boolean;
-  cancelProjectTasks(projectPath: string): number;
-}
-
-interface PausedTask {
-  issueId?: string;
-  issueIdentifier?: string;
-  title: string;
-}
-
-/**
- * What `AutonomousRunner` does with the pause table, kept out of the runner so
- * the runner only calls it at its three gates: the heartbeat, the candidate
- * loop, and `executeDurably` (a queued task can start minutes after the
- * heartbeat that admitted it, so that gate re-reads the table).
- */
-export class RunnerPauseControl {
-  private handle: FactoryPauseStore | undefined;
-  private snapshot: PauseSnapshot = { projects: new Map() };
-
-  constructor(private readonly resolveDbPath: () => string) {}
-
-  get store(): FactoryPauseStore {
-    this.handle ??= new FactoryPauseStore(this.resolveDbPath());
-    return this.handle;
-  }
-
-  /**
-   * Read the table once per heartbeat and act on it. Returns false when nothing
-   * may be dispatched this heartbeat (a global pause, or an unreadable table).
-   * `now` pauses cancel matching in-flight runs through the scheduler's abort
-   * path, the same one disabling a project uses; `drain` pauses let them finish.
-   */
-  apply(scheduler: PausableScheduler, log: (line: string) => void, now = Date.now()): boolean {
-    const snapshot = readPauseSnapshot(this.store);
-    this.snapshot = snapshot;
-    if (snapshot.unreadable) {
-      log(`⏸ Pause table unreadable, holding dispatch: ${snapshot.unreadable}`);
-      return false;
-    }
-    if (snapshot.global) {
-      log(formatPauseLine(snapshot.global, now));
-      if (snapshot.global.mode === 'now') {
-        let cancelled = 0;
-        for (const running of scheduler.getRunningTasks()) {
-          if (scheduler.cancelTask(running.task.id)) cancelled++;
-        }
-        if (cancelled > 0) log(`⏹ Cancelled ${cancelled} in-flight task(s) (factory paused --now)`);
-      }
-      return false;
-    }
-    for (const [projectPath, pause] of snapshot.projects) {
-      log(formatPauseLine(pause, now));
-      if (pause.mode !== 'now') continue;
-      const cancelled = scheduler.cancelProjectTasks(projectPath);
-      if (cancelled > 0) log(`⏹ Cancelled ${cancelled} in-flight task(s) for paused project ${projectPath.split('/').pop()}`);
-    }
-    return true;
-  }
-
-  /** From the last heartbeat's snapshot: whether this repository is paused. */
-  blocks(projectPath: string): boolean {
-    return !!snapshotBlocks(this.snapshot, projectPath);
-  }
-
-  /**
-   * A fresh read for a task about to execute. Returns the non-executing result
-   * to hand back, or undefined to proceed. Fails closed.
-   */
-  pausedResult(task: PausedTask, projectPath: string): PipelineResult | undefined {
-    let reason: string | undefined;
-    try {
-      reason = this.store.blocking(projectPath)?.reason;
-    } catch (error) {
-      reason = `pause table unreadable: ${error instanceof Error ? error.message : String(error)}`;
-    }
-    if (reason === undefined) return undefined;
-    return {
-      success: false,
-      sessionId: `factory-paused-${Date.now()}`,
-      stages: [],
-      finalStatus: 'superseded',
-      totalDuration: 0,
-      iterations: 0,
-      taskContext: {
-        issueIdentifier: task.issueIdentifier || task.issueId,
-        projectPath,
-        taskTitle: `${task.title} (factory paused: ${reason})`,
-      },
-    };
-  }
-
-  /** Dashboard read. */
-  list(): { pauses: FactoryPause[]; error?: string } {
-    try {
-      return { pauses: this.store.list() };
-    } catch (error) {
-      return { pauses: [], error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-
-  close(): void {
-    this.handle?.close();
-    this.handle = undefined;
-  }
 }

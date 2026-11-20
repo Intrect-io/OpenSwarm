@@ -22,7 +22,7 @@ import {
   isHumanSurfaceReadOnlyEnabled,
 } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
-import { getWorkerNetworkPolicy, looksLikeSandboxDenial, workerWritableRoots, wrapForSandbox } from '../support/osSandbox.js';
+import { getWorkerNetworkPolicy, noteSandboxDenial, workerWritableRoots, wrapForSandbox } from '../support/osSandbox.js';
 import { listNotes, readNote, writeNote } from '../support/scratchpad.js';
 import { stageMemory, type RememberKind } from '../agents/stagedMemory.js';
 import { linkedMainCheckoutOf } from '../security/gitWorktreeIdentity.js';
@@ -1130,7 +1130,7 @@ export async function executeTool(
           }
           // Name the fence when it is what refused the write, so the model fixes
           // its target instead of concluding the filesystem is broken.
-          const fenceHint = fenced && looksLikeSandboxDenial(out)
+          const fenceHint = fenced && noteSandboxDenial(out, command, cwd)
             ? '\n[sandbox] Writes are limited to this worktree, the temp dir and build caches; this command tried to write elsewhere.'
             : '';
           const body = out.trim()
