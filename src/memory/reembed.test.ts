@@ -17,15 +17,31 @@ const state = {
   openTable: vi.fn(),
   setTable: vi.fn(),
   embedCalls: [] as string[],
+  /** Commit counter per table, like Lance's table version. */
+  versions: new Map<string, number>(),
+  optimize: vi.fn(),
+  lockHeld: false,
+  /** Fail appends to the live table, i.e. die mid-swap after the first overwrite. */
+  failLiveAdd: false,
+  /** Was the cross-process lock held at each live-table overwrite? */
+  lockHeldAtOverwrite: [] as boolean[],
 };
+
+function bump(name: string) {
+  state.versions.set(name, (state.versions.get(name) ?? 0) + 1);
+}
 
 function fakeTable(name: string) {
   return {
     name,
     schema: async () => ({ fields: [] }),
     countRows: async () => state.tables.get(name)!.length,
+    version: async () => state.versions.get(name) ?? 0,
+    optimize: async () => state.optimize(name),
     add: async (rows: any[]) => {
+      if (name === LIVE && state.failLiveAdd) throw new Error('killed mid-swap');
       state.tables.get(name)!.push(...rows.map((r) => ({ ...r })));
+      bump(name);
       return {};
     },
     query: () => {
@@ -48,13 +64,21 @@ function fakeTable(name: string) {
 function resetDb() {
   state.tables = new Map([[LIVE, []]]);
   state.maxPageRead = new Map();
+  state.versions = new Map();
+  state.optimize.mockReset();
+  state.lockHeld = false;
+  state.failLiveAdd = false;
+  state.lockHeldAtOverwrite = [];
   state.createTable.mockReset().mockImplementation(async (name: string, rows: any[], opts?: { mode?: string }) => {
     if (state.tables.has(name) && opts?.mode !== 'overwrite') throw new Error(`table ${name} exists`);
+    if (name === LIVE) state.lockHeldAtOverwrite.push(state.lockHeld);
     state.tables.set(name, rows.map((r) => ({ ...r })));
+    bump(name);
     return fakeTable(name);
   });
   state.createEmptyTable.mockReset().mockImplementation(async (name: string) => {
     state.tables.set(name, []);
+    bump(name);
     return fakeTable(name);
   });
   state.dropTable.mockReset().mockImplementation(async (name: string) => { state.tables.delete(name); });
@@ -71,6 +95,17 @@ vi.mock('./memoryCore.js', () => ({
     createEmptyTable: state.createEmptyTable,
     dropTable: state.dropTable,
     openTable: state.openTable,
+    tableNames: async () => [...state.tables.keys()],
+  }),
+  // Call-through stand-in for the real file lock (which would live under the
+  // real home directory): records whether the body runs while it is held.
+  withCrossProcessMemoryMutationLock: vi.fn(async (op: () => Promise<unknown>) => {
+    state.lockHeld = true;
+    try {
+      return await op();
+    } finally {
+      state.lockHeld = false;
+    }
   }),
   getTable: () => fakeTable(LIVE),
   setTable: state.setTable,
@@ -224,5 +259,128 @@ describe('reembedMemoryTable', () => {
     expect(state.tables.get(LIVE)!.every((r) => r.vector === undefined)).toBe(true);
     expect([...state.tables.keys()]).toEqual([LIVE]); // incomplete temp table dropped
     expect(existsSync(resolve(dir, 'embedding.json'))).toBe(false);
+  });
+  it('runs the build and the swap under the cross-process memory mutation lock', async () => {
+    state.tables.set(LIVE, [row({ id: 'a' }), row({ id: 'b' }), row({ id: 'c' })]);
+    const heldDuringEncode: boolean[] = [];
+    embedMock().mockImplementation(async () => {
+      heldDuringEncode.push(state.lockHeld);
+      return [1, 2, 3, 4];
+    });
+
+    await reembedMemoryTable({ memoryDir: tmp(), batchSize: 2 });
+
+    expect(heldDuringEncode).toEqual([true, true, true]);
+    expect(state.lockHeldAtOverwrite).toEqual([true]);
+    expect(state.lockHeld).toBe(false);
+  });
+
+  it('refuses to swap when another writer committed to the source although the row count still matches', async () => {
+    state.tables.set(LIVE, [row({ id: 'a' }), row({ id: 'b' })]);
+    const dir = tmp();
+    let calls = 0;
+    embedMock().mockImplementation(async () => {
+      // An update commit from a writer that ignored the lock: same row count, new version.
+      if (++calls === 1) bump(LIVE);
+      return [1, 2, 3, 4];
+    });
+
+    await expect(reembedMemoryTable({ memoryDir: dir })).rejects.toThrow(/Re-embed refused: source table changed/);
+
+    expect(state.createTable.mock.calls.some((c) => c[0] === LIVE)).toBe(false);
+    expect([...state.tables.keys()]).toEqual([LIVE]);
+    expect(existsSync(resolve(dir, '.reembed-swap.json'))).toBe(false);
+    expect(existsSync(resolve(dir, 'embedding.json'))).toBe(false);
+  });
+
+  it('keeps a swap marker and the full temp table when the swap dies after the first overwrite, and the next run refuses', async () => {
+    state.tables.set(LIVE, Array.from({ length: 5 }, (_, i) => row({ id: `r${i}` })));
+    const dir = tmp();
+    state.failLiveAdd = true;
+
+    await expect(reembedMemoryTable({ memoryDir: dir, batchSize: 2 })).rejects.toThrow('killed mid-swap');
+
+    const markerPath = resolve(dir, '.reembed-swap.json');
+    expect(existsSync(markerPath)).toBe(true);
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    expect(marker.liveTable).toBe(LIVE);
+    expect(marker.sourceRows).toBe(5);
+    expect(state.tables.get(marker.tempTable)).toHaveLength(5);
+    expect(state.tables.get(LIVE)).toHaveLength(2); // partial live table
+    expect(existsSync(resolve(dir, 'embedding.json'))).toBe(false);
+
+    state.failLiveAdd = false;
+    const encodesBefore = state.embedCalls.length;
+    await expect(reembedMemoryTable({ memoryDir: dir, batchSize: 2 })).rejects.toThrow(
+      new RegExp(`interrupted.*${marker.tempTable}`),
+    );
+    expect(state.embedCalls.length).toBe(encodesBefore);
+    expect(state.tables.get(marker.tempTable)).toHaveLength(5);
+    expect(state.tables.get(LIVE)).toHaveLength(2);
+  });
+
+  it('refuses to run while a leftover re-embed table exists without a swap marker', async () => {
+    state.tables.set(LIVE, [row()]);
+    state.tables.set(`${LIVE}_reembed_123`, [row()]);
+
+    await expect(reembedMemoryTable({ memoryDir: tmp() })).rejects.toThrow(/leftover table\(s\) cognitive_memory_reembed_123/);
+
+    expect(state.embedCalls).toEqual([]);
+    expect(state.createTable).not.toHaveBeenCalled();
+  });
+
+  it('optimizes the swapped live table once and no other table', async () => {
+    state.tables.set(LIVE, Array.from({ length: 4 }, (_, i) => row({ id: `r${i}` })));
+
+    await reembedMemoryTable({ memoryDir: tmp(), batchSize: 2 });
+
+    expect(state.optimize).toHaveBeenCalledTimes(1);
+    expect(state.optimize).toHaveBeenCalledWith(LIVE);
+  });
+
+  it('retries a row whose encode fails before giving up on the run', async () => {
+    state.tables.set(LIVE, [row({ id: 'a' })]);
+    let calls = 0;
+    embedMock().mockImplementation(async () => {
+      if (++calls <= 2) throw new Error('transient encoder failure');
+      return [1, 2, 3, 4];
+    });
+
+    const result = await reembedMemoryTable({ memoryDir: tmp(), embedRetryDelayMs: 0 });
+
+    expect(calls).toBe(3);
+    expect(result.reembedded).toBe(1);
+    expect(state.tables.get(LIVE)![0].vector).toEqual([1, 2, 3, 4]);
+  });
+
+  it('aborts with the live table untouched when a row keeps failing to encode', async () => {
+    state.tables.set(LIVE, [row({ id: 'a' }), row({ id: 'b' })]);
+    const dir = tmp();
+    let calls = 0;
+    embedMock().mockImplementation(async () => {
+      calls++;
+      throw new Error('encoder down');
+    });
+
+    await expect(reembedMemoryTable({ memoryDir: dir, embedRetryDelayMs: 0 })).rejects.toThrow('encoder down');
+
+    expect(calls).toBe(3);
+    expect(state.tables.get(LIVE)!.every((r) => r.vector === undefined)).toBe(true);
+    expect([...state.tables.keys()]).toEqual([LIVE]);
+    expect(existsSync(resolve(dir, '.reembed-swap.json'))).toBe(false);
+    expect(existsSync(resolve(dir, 'embedding.json'))).toBe(false);
+  });
+
+  it('rebuilds an empty store on the lean schema with the current vector width', async () => {
+    await reembedMemoryTable({ memoryDir: tmp() });
+
+    expect(state.createEmptyTable).toHaveBeenCalledTimes(2); // temp table, then the live overwrite
+    for (const [, schema] of state.createEmptyTable.mock.calls) {
+      const fields = schema.fields as Array<{ name: string; type: { listSize?: number } }>;
+      expect(fields.find((f) => f.name === 'vector')?.type.listSize).toBe(4);
+      // The live table's own schema (empty in this fake) is no longer copied.
+      expect(fields.map((f) => f.name)).toEqual(expect.arrayContaining(['id', 'title', 'content', 'vector']));
+    }
+    expect(state.createEmptyTable.mock.calls[1][2]).toEqual({ mode: 'overwrite' });
   });
 });
