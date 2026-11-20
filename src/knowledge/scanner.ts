@@ -60,6 +60,10 @@ const TEST_PATTERNS = [
 const MAX_FILE_SIZE = 512 * 1024; // 512KB — skip large generated files
 const MAX_DEPTH = 15;
 const SCAN_TIMEOUT_MS = 30_000;
+// Total-size budgets: the time limit alone lets a huge repository grow the
+// graph without bound until the timeout fires (AGT-4871).
+const MAX_SCAN_FILES = 20_000;
+const MAX_SCAN_NODES = 50_000;
 
 // Import Regex Patterns
 
@@ -77,6 +81,23 @@ const PY_IMPORT = /^import\s+([\w.]+)/gm;
 export interface ScanOptions {
   maxDepth?: number;
   timeoutMs?: number;
+  /** Maximum number of source files added to the graph (default MAX_SCAN_FILES). */
+  maxFiles?: number;
+  /** Maximum number of graph nodes created by the walk, root included (default MAX_SCAN_NODES). */
+  maxNodes?: number;
+}
+
+interface WalkContext {
+  graph: KnowledgeGraph;
+  maxDepth: number;
+  startTime: number;
+  timeoutMs: number;
+  maxFiles: number;
+  maxNodes: number;
+  fileCount: number;
+  /** Set once a budget is exhausted; the walk stops descending and adding. */
+  budgetExhausted: boolean;
+  incompleteReasons: string[];
 }
 
 /**
@@ -90,6 +111,8 @@ export async function scanProject(
   const graph = new KnowledgeGraph(projectSlug, projectPath);
   const maxDepth = options.maxDepth ?? MAX_DEPTH;
   const timeoutMs = options.timeoutMs ?? SCAN_TIMEOUT_MS;
+  const maxFiles = Math.max(0, options.maxFiles ?? MAX_SCAN_FILES);
+  const maxNodes = Math.max(1, options.maxNodes ?? MAX_SCAN_NODES);
   const startTime = Date.now();
 
   // Project root node
@@ -102,7 +125,18 @@ export async function scanProject(
 
   // Phase 1: Directory walking — collect nodes
   const incompleteReasons: string[] = [];
-  await walkDirectory(graph, projectPath, '.', 0, maxDepth, startTime, timeoutMs, incompleteReasons);
+  const ctx: WalkContext = {
+    graph,
+    maxDepth,
+    startTime,
+    timeoutMs,
+    maxFiles,
+    maxNodes,
+    fileCount: 0,
+    budgetExhausted: false,
+    incompleteReasons,
+  };
+  await walkDirectory(ctx, projectPath, '.', 0);
 
   // Phase 2: Import parsing — create edges
   const modules = [...graph.getNodesByType('module'), ...graph.getNodesByType('test_file')];
@@ -125,7 +159,11 @@ export async function scanProject(
 
   graph.scannedAt = Date.now();
   graph.incomplete = incompleteReasons.length > 0;
-  graph.incompleteReasons = Array.from(new Set(incompleteReasons)).slice(0, 50);
+  // Budget reasons go first: a repo with many size/depth reasons would
+  // otherwise push them past the 50-entry cut.
+  const unique = Array.from(new Set(incompleteReasons));
+  const isBudget = (reason: string) => / budget \d+ reached$/.test(reason);
+  graph.incompleteReasons = [...unique.filter(isBudget), ...unique.filter(r => !isBudget(r))].slice(0, 50);
   return graph;
 }
 
@@ -218,15 +256,13 @@ export async function incrementalUpdate(
 // Internal: Directory Walking
 
 async function walkDirectory(
-  graph: KnowledgeGraph,
+  ctx: WalkContext,
   currentPath: string,
   relPath: string,
   depth: number,
-  maxDepth: number,
-  startTime: number,
-  timeoutMs: number,
-  incompleteReasons: string[],
 ): Promise<void> {
+  const { graph, maxDepth, startTime, timeoutMs, incompleteReasons } = ctx;
+  if (ctx.budgetExhausted) return;
   if (depth > maxDepth) {
     incompleteReasons.push(`${relPath || '.'}: depth limit ${maxDepth} reached`);
     return;
@@ -243,13 +279,17 @@ async function walkDirectory(
   } catch {
     return; // Inaccessible directory
   }
+  // Name order, so which files a budget cuts off is the same on every scan.
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
   for (const entry of entries) {
+    if (ctx.budgetExhausted) return;
     const entryPath = join(currentPath, entry.name);
     const entryRelPath = relPath === '.' ? entry.name : `${relPath}/${entry.name}`;
 
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name) || SKIP_DIR_PREFIXES.some(p => entry.name.startsWith(p))) continue;
+      if (!reserveNode(ctx, entryRelPath)) return;
 
       graph.addNode({
         id: entryRelPath,
@@ -259,10 +299,17 @@ async function walkDirectory(
       });
       graph.addEdge({ source: relPath === '.' ? '.' : relPath, target: entryRelPath, type: 'contains' });
 
-      await walkDirectory(graph, entryPath, entryRelPath, depth + 1, maxDepth, startTime, timeoutMs, incompleteReasons);
+      await walkDirectory(ctx, entryPath, entryRelPath, depth + 1);
     } else if (entry.isFile()) {
       const ext = extname(entry.name);
       if (!SOURCE_EXTENSIONS.has(ext)) continue;
+
+      if (ctx.fileCount >= ctx.maxFiles) {
+        ctx.budgetExhausted = true;
+        incompleteReasons.push(`${entryRelPath}: file budget ${ctx.maxFiles} reached`);
+        return;
+      }
+      if (!reserveNode(ctx, entryRelPath)) return;
 
       const language = detectLanguage(ext);
       const isTest = isTestFile(entry.name);
@@ -286,9 +333,18 @@ async function walkDirectory(
         path: entryRelPath,
         metrics,
       });
+      ctx.fileCount++;
       graph.addEdge({ source: relPath === '.' ? '.' : relPath, target: entryRelPath, type: 'contains' });
     }
   }
+}
+
+/** True when one more node fits the node budget; otherwise marks the walk exhausted. */
+function reserveNode(ctx: WalkContext, entryRelPath: string): boolean {
+  if (ctx.graph.nodeCount < ctx.maxNodes) return true;
+  ctx.budgetExhausted = true;
+  ctx.incompleteReasons.push(`${entryRelPath}: node budget ${ctx.maxNodes} reached`);
+  return false;
 }
 
 // Internal: Import Parsing
