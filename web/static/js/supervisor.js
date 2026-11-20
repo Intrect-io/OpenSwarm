@@ -145,6 +145,8 @@ function updateStats(data) {
   setText("stat-running", data.runningTasks ?? 0);
   setText("stat-queued", data.queuedTasks ?? 0);
   setText("stat-completed", data.completedToday ?? 0);
+  // What the daemon may pick from (AGT-3188): one milestone, or every issue in the allowed projects.
+  if (data.workScope) setText("stat-scope", data.workScope.milestone ? data.workScope.milestone : "all issues");
   const adapters = data.adapters || {};
   const defaultAdapter = adapters.defaultAdapter ?? "";
   // Say which model each role runs, in words: "Pair W/R" meant nothing.
