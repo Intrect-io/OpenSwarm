@@ -608,6 +608,8 @@ export interface PipelineGuardsConfig {
   claimEvidenceCheck?: boolean;
   /** A run that claims to add a gate must assert every value it newly reports (AGT-3107). */
   gateClaimEvidenceCheck?: boolean;
+  /** Block removed/renamed public symbols that still have callers (AGT-4417). */
+  callerCheck?: boolean;
   /**
    * When the reviewer approves, file its recommendedActions as follow-up
    * sub-issues (INT-1611 / INT-1704). Optional, default OFF. (INT-1704)

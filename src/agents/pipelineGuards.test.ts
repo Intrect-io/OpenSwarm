@@ -801,6 +801,45 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
     expect(res.results.find(r => r.guard === 'reformatScope')).toBeUndefined();
   });
 
+  describe('callerCheck', () => {
+    it('blocks a removed public symbol with a surviving caller', async () => {
+      writeFileSync(join(repo, 'api.ts'), 'export function read_bank_accounts() {}\n');
+      writeFileSync(join(repo, 'consumer.ts'), 'read_bank_accounts();\n');
+      execFileSync('git', ['add', 'api.ts', 'consumer.ts'], { cwd: repo });
+      execFileSync('git', ['commit', '-m', 'add api'], { cwd: repo });
+      writeFileSync(join(repo, 'api.ts'), 'export function fetch_bank_accounts() {}\n');
+      const res = await runGuards(mockWorker(['api.ts']), repo, { callerCheck: true });
+      expect(guardIssues(res, 'callerCheck').join('\n')).toContain('[consumer.ts:1]');
+      expect(res.allPassed).toBe(false);
+    });
+
+    it('fails closed when git inspection errors', async () => {
+      const originalPath = process.env.PATH;
+      try {
+        process.env.PATH = '';
+        const res = await runGuards(mockWorker(), repo, { callerCheck: true });
+        expect(guardIssues(res, 'callerCheck').join(' ')).toContain('Unable to verify surviving callers:');
+        expect(res.allPassed).toBe(false);
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+      }
+    });
+
+    it('does not report when callers are updated, and is disabled by default', async () => {
+      writeFileSync(join(repo, 'api.ts'), 'export function read_bank_accounts() {}\n');
+      writeFileSync(join(repo, 'consumer.ts'), 'read_bank_accounts();\n');
+      execFileSync('git', ['add', 'api.ts', 'consumer.ts'], { cwd: repo });
+      execFileSync('git', ['commit', '-m', 'add api'], { cwd: repo });
+      writeFileSync(join(repo, 'api.ts'), 'export function fetch_bank_accounts() {}\n');
+      writeFileSync(join(repo, 'consumer.ts'), 'fetch_bank_accounts();\n');
+      const enabled = await runGuards(mockWorker(['api.ts', 'consumer.ts']), repo, { callerCheck: true });
+      expect(guardIssues(enabled, 'callerCheck')).toEqual([]);
+      const disabled = await runGuards(mockWorker(['api.ts']), repo, { callerCheck: false });
+      expect(disabled.results.some(r => r.guard === 'callerCheck')).toBe(false);
+    });
+  });
+
   // A worker can close a "diagnose root cause" task while its own report admits
   // the cause was never pinned down — this signal must reach the reviewer instead
   // of dying silently (INT-2421, real incident: STO-1447/PR #217).
