@@ -181,6 +181,17 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
           return { success: false };
         }
         if (detail?.startsWith('worker-scope:')) context.repeatedScopeRejection = detail;
+        // An unbacked "tests pass" is rejected in the worker, but a bare
+        // failure never reaches the next attempt's prompt. Record it so the
+        // retry sees exactly what was missing and the line format to use
+        // instead of repeating the same claim blind (AGT-4900).
+        if (failedWorker.unverifiedCompletionClaim && failedWorker.error) {
+          recordReflection(context.reflection, {
+            iteration: context.currentIteration,
+            source: 'validation',
+            errors: [failedWorker.error.replace(/^worker-evidence:\s*/, '')],
+          });
+        }
         // A no-edit stop with a stated reason is a claim about the task: put it
         // to the reviewer once instead of retrying blind (AGT-4535).
         const blocker = await reviewWorkerBlocker(host.config, context, failedWorker, context.abortSignal);
