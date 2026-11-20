@@ -21,6 +21,15 @@ const VALIDATION_COMMAND_RE = /\b(npm\s+(?:test|run\s+(?:test|build|lint|typeche
 // run it), so the segment is skipped rather than the whole command rejected.
 const INSPECTION_ONLY_COMMAND_RE = /^\s*(?:rg|grep|sed|cat|ls|find|pwd|git\s+(?:status|diff|show|log|grep)|jq|head|tail|wc|tree|du|file|which|echo|printf)\b/i;
 const SCRIPT_SMOKE_COMMAND_RE = /^\s*(?:python3?|node|tsx|ts-node|uv\s+run|npx|bunx|bash|sh)\b.*\b(?:scripts?\/|tests?\/|\.py|\.js|\.ts|\.sh|--help|--dry-run|smoke|verify|validate|check|test|build|compile)\b/i;
+// A segment that names a validation tool but does not run it: a shell comment,
+// a no-op builtin (`:`, `true`, `false`), `command -v`/`type`/`man`/`help`
+// lookups, or help/version/list/dry-run flags. These print text, they do
+// not build or test anything, so they are not validation evidence.
+const NON_EXECUTING_PREFIX_RE = /^\s*(?:#|:(?:\s|$)|true\b|false\b|command\s+-[vV]\b|type\b|man\b|help\b|whatis\b|whereis\b)/i;
+// Only flags that mean "do not run" for every tool here; `-v`/`-n` stay out
+// because pytest uses them for verbose output and parallel workers.
+const NON_EXECUTING_FLAG_RE = /(?:^|\s)(?:--help|-h|--version|--listTests|--collect-only|--co|--showConfig|--print-config)(?=\s|=|$)/;
+const MAKE_DRY_RUN_RE = /^\s*(?:make|gmake)\b.*\s(?:-n|--dry-run|--just-print|--recon)(?=\s|$)/;
 const TESTER_CODE_FILE_RE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|rs|go|java|rb|c|cpp|h|hpp)$/;
 
 export function isValidationRelevantFile(file: string): boolean {
@@ -39,17 +48,71 @@ function validationRelevantFiles(files: string[]): string[] {
   });
 }
 
+/** `if`/`while`/... make the command after them conditional on something unseen. */
+const CONTROL_KEYWORD_RE = /^(?:if|then|elif|else|while|until|do|for|case|select|!)(?=\s|$)/;
+/** Segments that always succeed (`true`, `:`) or always fail (`false`). */
+const ALWAYS_TRUE_RE = /^(?:true|:)$/;
+const ALWAYS_FALSE_RE = /^false$/;
+
+/**
+ * The shell segments of `command` that can actually run, in order. A comment
+ * (`cd . # npm test`) is cut off; a segment that short-circuit makes dead
+ * (`false && npm test`, `true || npm test`) is dropped; a segment under a
+ * control keyword (`if false; then npm test; fi`) is dropped, since whether it
+ * ran depends on a condition the evidence does not show. (#897 review)
+ */
+function executedSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  let operator = ';';
+  let previous = '';
+  const push = (next: string) => {
+    const seg = current.trim();
+    current = '';
+    if (seg) {
+      const dead = (operator === '&&' && ALWAYS_FALSE_RE.test(previous))
+        || (operator === '||' && ALWAYS_TRUE_RE.test(previous));
+      if (!dead && !CONTROL_KEYWORD_RE.test(seg)) segments.push(seg);
+      previous = dead ? (operator === '&&' ? 'false' : 'true') : seg;
+    }
+    operator = next;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (quote) {
+      if (char === quote) quote = null;
+      else if (char === '\\' && quote === '"') { current += char + (command[i + 1] ?? ''); i++; continue; }
+      current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') { quote = char; current += char; continue; }
+    if (char === '#' && (i === 0 || /\s/.test(command[i - 1]))) {
+      const newline = command.indexOf('\n', i);
+      if (newline < 0) break;
+      i = newline - 1;
+      continue;
+    }
+    const two = command.slice(i, i + 2);
+    if (two === '&&' || two === '||') { push(two); i++; continue; }
+    if (char === ';' || char === '|' || char === '\n') { push(char === '|' ? '|' : ';'); continue; }
+    current += char;
+  }
+  push(';');
+  return segments;
+}
+
 function commandLooksLikeValidation(command: string): boolean {
   // Workers routinely chain inspection then validation in one string
   // (e.g. "git diff && npm test"). Evaluate each shell segment independently so
   // a leading inspection verb does not mask a real validation command in a later
   // segment, while an inspection-only segment (which may merely *mention* a test
   // command as a search string) still counts as no validation.
-  const segments = command.split(/&&|\|\||;|\|/).map(s => s.trim()).filter(Boolean);
-  const candidates = segments.length > 0 ? segments : [command];
+  const candidates = executedSegments(command);
   return candidates.some(seg => {
-    if (INSPECTION_ONLY_COMMAND_RE.test(seg)) return false;
-    return VALIDATION_COMMAND_RE.test(seg) || SCRIPT_SMOKE_COMMAND_RE.test(seg);
+    if (INSPECTION_ONLY_COMMAND_RE.test(seg) || NON_EXECUTING_PREFIX_RE.test(seg)) return false;
+    if (VALIDATION_COMMAND_RE.test(seg)) return !NON_EXECUTING_FLAG_RE.test(seg) && !MAKE_DRY_RUN_RE.test(seg);
+    return SCRIPT_SMOKE_COMMAND_RE.test(seg);
   });
 }
 

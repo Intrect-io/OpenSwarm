@@ -41,6 +41,14 @@ const rewriteBypasses = [
 ];
 
 describe('destructive-command guard sees what the shell will run (AGT-3436)', () => {
+  it.each([
+    'cat <(rm -rf /foo)',
+    'diff <(git reset --hard) out.txt',
+    'tee >(rm -rf /foo)',
+  ])('blocks destructive process substitution: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(true);
+  });
+
   it.each(rewriteBypasses)('blocks the shell-rewritten form: %s', (command) => {
     expect(isCommandBlocked(command)).toBe(true);
   });
@@ -155,6 +163,171 @@ describe('destructive-command guard sees what the shell will run (AGT-3436)', ()
     'echo "}"',
     'echo "{unclosed"',
   ])('returns promptly for a brace that is not a group: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(false);
+  });
+});
+
+// ──────────────────────────────────────────────
+// AGT-3436 (remainder) — words the shell fills in at run time
+// ──────────────────────────────────────────────
+
+/**
+ * `$X`, `${X}`, `$(...)` and backticks produce text the guard cannot see. In
+ * program position that text can be any program; where it decides how an
+ * argument starts it can be any flag. Each of these ran `rm -rf` (or another
+ * destructive form) past the resolver on 2026-10-21.
+ */
+describe('destructive-command guard refuses run-time words it cannot see (AGT-3436)', () => {
+  it.each([
+    // program position — variable
+    'X=rm; $X -rf /foo',
+    '$X -rf /foo',
+    '${X} -rf /foo',
+    '"$X" -rf /foo',
+    '$1 -rf /foo',
+    '/bin/$X -rf /foo',
+    // program position — command substitution
+    '$(echo rm) -rf /x',
+    '`echo rm` -rf /x',
+    '"$(printf rm)" -rf /x',
+    '$(echo rm -rf /x)',
+    // flag position — command substitution and variables
+    'rm $(echo -rf) /foo',
+    'rm "$(echo -rf)" /foo',
+    'rm `echo -rf` /foo',
+    'F="-rf /x"; rm $F',
+    'rm -$F /foo',
+    'rm "$A" "$B"',
+    'git reset "$MODE"',
+    'git $(echo reset) --hard',
+    'chmod "$PERM" file.txt',
+    'kill $SIG 1234',
+    // reached through a launcher or a compound statement
+    'sudo $X -rf /foo',
+    'timeout 5 $X -rf /foo',
+    'for f in a; do rm -rf /foo; done',
+    'if true; then rm -rf /foo; fi',
+    '(rm -rf /foo)',
+    '{ rm -rf /foo; }',
+    'git -C repo reset --hard',
+    'git $X',
+    // An unquoted expansion is split by the shell wherever it sits, so it can
+    // carry a flag and a target: NAME="x -rf /" turns the last one into
+    // `rm -f ./dist/x -rf /.js`. Quoting the variable is the fix.
+    'rm -f $tmp',
+    'rm -f ./dist/$NAME.js',
+    'kill $PID',
+    // Wrapping an unknown program in a compound statement or a launcher with
+    // nothing after it does not make it any less the program (X="rm -rf /x").
+    '{ $X; }',
+    'if true; then $X; fi',
+    '! $X',
+    'for f in a; do $X; done',
+    'command $X',
+    'exec $X',
+    'env $(echo rm -rf /x)',
+  ])('blocks: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(true);
+  });
+
+  it.each(['X=rm; $X -rf /foo', '$(echo rm) -rf /x', 'rm $(echo -rf) /foo'])(
+    'refuses it through the bash tool too: %s',
+    async (command) => {
+      const result = await executeTool(makeCall('bash', { command }), TMP_DIR);
+      expect(result.is_error).toBe(true);
+      expect(result.content).toContain('BLOCKED');
+      expect(result.executed).toBeUndefined();
+    },
+  );
+
+  // Variables in argument position are everyday shell. Only an unknown that
+  // can become a flag of a destructive program is refused.
+  it.each([
+    'echo "$HOME"',
+    'echo $PATH',
+    'ls $HOME',
+    'cd "$DIR" && npm test',
+    'cat "$(git rev-parse --show-toplevel)/package.json"',
+    'rm -f "$tmp"',
+    'rm -f -- $tmp',
+    'rm "$OUT_DIR/bundle.js"',
+    'rm -f "./dist/$NAME.js"',
+    'git commit -m "$MSG"',
+    // git's subcommand is fixed by a literal word, so an unknown later on
+    // cannot turn it into `reset --hard` or `clean -fd`.
+    'git diff $BASE..HEAD',
+    'git log $(git merge-base HEAD origin/main)..HEAD',
+    'git push origin $BRANCH',
+    'git checkout $BRANCH',
+    'git add $FILES',
+    'git show $SHA',
+    'git push origin reset',
+    'chmod +x $F',
+    'kill "$PID"',
+    'rm -f -- $tmp $other',
+    'git checkout "$BRANCH"',
+    'git log --since="$SINCE"',
+    'mkdir -p "$OUT"',
+    'timeout $T npm test',
+    'nice -n $N npm test',
+    'sudo -u $USER ls',
+    'env NODE_ENV=$MODE npm test',
+    'kill -0 "$PID"',
+    'chmod 755 "$SCRIPT"',
+    "echo '$X -rf /foo'",
+    "awk '{print $2}' f.txt",
+    'for f in $(ls); do echo "$f"; done',
+    'echo $$',
+    'timeout 30 cat $FILE',
+    'xargs echo "$f"',
+    'for f in a b; do cat "$f"; done',
+  ])('allows: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(false);
+  });
+});
+
+describe('process substitution is recognised only outside double quotes (#851 + #882)', () => {
+  it.each([
+    'git commit -m "support Map<(K,V)> types"',
+    'echo "List<(int)>"',
+    'echo "a =>(b"',
+    'grep -n "x<(y" file.ts',
+  ])('allows the literal <( / >( inside double quotes: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(false);
+  });
+
+  it.each([
+    'cat <(rm -rf /foo)',
+    'echo hi > >(rm -rf /foo)',
+    'cat < <(rm -rf /foo)',
+  ])('still refuses a destructive process substitution: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(true);
+  });
+});
+
+describe('destructive-command guard closes the remaining run-time program forms (#882 review)', () => {
+  it.each([
+    'X="rm -rf"; sudo $X /x',
+    'X="rm -rf"; timeout 5 $X /x',
+    'X="rm -rf"; command $X /x',
+    'X="rm -rf"; env $X /x',
+    '$"rm" -rf /x',
+    '/bin/r[m] -rf /x',
+    '/bin/r? -rf /x',
+    '/bin/r* -rf /x',
+    'coproc rm -rf /x',
+  ])('refuses %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(true);
+  });
+
+  it.each([
+    'ls *.txt',
+    '[ -f x ] && echo ok',
+    '[[ -n "$a" ]] && echo hi',
+    'echo $"hello"',
+    '/usr/bin/l? -la',
+    'timeout $T npm test',
+  ])('still allows %s', (command) => {
     expect(isCommandBlocked(command)).toBe(false);
   });
 });

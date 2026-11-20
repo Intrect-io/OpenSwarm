@@ -28,3 +28,33 @@ describe('parseTesterOutput fake-pass guard (INT-2521)', () => {
     expect(parseTesterOutput('2 failed, 3 passed').success).toBe(false);
   });
 });
+
+describe('parseTesterOutput validates result field types (AGT-3441)', () => {
+  const wrap = (obj: unknown) => JSON.stringify({ type: 'result', result: '```json\n' + JSON.stringify(obj) + '\n```' });
+
+  it('does not coerce a string "false" into success', () => {
+    const r = parseTesterOutput(wrap({ success: 'false', testsPassed: 1, testsFailed: 2 }));
+    expect(r.success).toBe(false);
+  });
+
+  it('keeps only string list entries, clipped and capped', () => {
+    const r = parseTesterOutput(wrap({
+      success: false,
+      testsFailed: 1,
+      failedTests: ['a.test.ts > case', 42, null, { x: 1 }, '', 'z'.repeat(2000)],
+      suggestions: [{ nested: true }],
+    }));
+    expect(r.failedTests?.[0]).toBe('a.test.ts > case');
+    expect(r.failedTests).toHaveLength(2);
+    expect(r.failedTests?.[1].length).toBe(500);
+    expect(r.suggestions).toBeUndefined();
+  });
+
+  it('drops non-finite or negative counts and non-string errors', () => {
+    const r = parseTesterOutput(wrap({ success: false, testsPassed: -3, testsFailed: '7', coverage: 'high', error: { code: 1 } }));
+    expect(r.testsPassed).toBe(0);
+    expect(r.testsFailed).toBe(0);
+    expect(r.coverage).toBeUndefined();
+    expect(r.error).toBeUndefined();
+  });
+});

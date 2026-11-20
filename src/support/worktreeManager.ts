@@ -192,7 +192,7 @@ async function linkSharedPaths(repoPath: string, worktreePath: string): Promise<
     console.warn(`[Worktree] openswarm.json unreadable; skipping sharedPaths config:`, err);
   }
 
-  const shared = resolveSharedPaths(repoPath, meta);
+  const shared = resolveSharedPaths(repoPath, meta); // warns on secret-like entries itself
   if (shared.length === 0 && !(meta?.sandbox?.sharedPaths?.length)) {
     const warning = emptyDetectionWarning(repoPath, detectSharedPaths(repoPath));
     if (warning) console.warn(warning);

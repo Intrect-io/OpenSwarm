@@ -267,19 +267,43 @@ function extractResultJson(text: string): TesterResult | null {
   }
 }
 
+/** Caps on model-supplied lists so repair feedback stays bounded. */
+const MAX_RESULT_LIST_ITEMS = 50;
+const MAX_RESULT_ITEM_CHARS = 500;
+
+const countField = (value: unknown): number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+
+/** Keep only non-empty string entries, clipped; anything else is not a test id or suggestion. */
+function stringListField(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    .slice(0, MAX_RESULT_LIST_ITEMS)
+    .map((item) => item.slice(0, MAX_RESULT_ITEM_CHARS));
+  return items.length > 0 ? items : undefined;
+}
+
 /**
- * Normalize result
+ * Normalize result. Only schema-valid fields reach repair feedback: `success`
+ * is true only for a literal boolean true (the string "false" used to coerce
+ * to true), counts
+ * must be finite non-negative numbers, list entries must be strings, and
+ * `error` must be a string.
  */
-function normalizeResult(parsed: any, output: string): TesterResult {
+function normalizeResult(parsed: unknown, output: string): TesterResult | null {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const raw = parsed as Record<string, unknown>;
   return {
-    success: Boolean(parsed.success),
-    testsPassed: typeof parsed.testsPassed === 'number' ? parsed.testsPassed : 0,
-    testsFailed: typeof parsed.testsFailed === 'number' ? parsed.testsFailed : 0,
-    coverage: typeof parsed.coverage === 'number' ? parsed.coverage : undefined,
+    // Fail closed: only a literal true is success.
+    success: raw.success === true,
+    testsPassed: countField(raw.testsPassed),
+    testsFailed: countField(raw.testsFailed),
+    coverage: typeof raw.coverage === 'number' && Number.isFinite(raw.coverage) ? raw.coverage : undefined,
     output,
-    failedTests: Array.isArray(parsed.failedTests) ? parsed.failedTests : undefined,
-    suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : undefined,
-    error: parsed.error,
+    failedTests: stringListField(raw.failedTests),
+    suggestions: stringListField(raw.suggestions),
+    error: typeof raw.error === 'string' ? raw.error.slice(0, MAX_RESULT_ITEM_CHARS * 4) : undefined,
   };
 }
 

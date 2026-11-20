@@ -11,7 +11,7 @@
 //
 // Policy, measured on cgf-portal (2026-09-17, AGT-4387): a worker needs to
 // write its worktree, the temp dir, and the package-manager caches (uv, npm,
-// cargo, wrangler's log dir). Everything else — other repos, ~/.ssh, the
+// cargo). Wrangler's directories are excluded: they hold its credentials. Everything else — other repos, ~/.ssh, the
 // daemon's own state and credentials — stays read-only. The worker's network
 // is loopback-only by default (AGT-4798): dependency installs belong to the
 // project's `setup` step, which runs with the network open, and a test can
@@ -132,8 +132,8 @@ export function wrapForSandbox(
 
 /**
  * The writable set a coding worker needs, measured on cgf-portal: its own
- * worktree, the temp dirs, and the caches uv / npm / cargo / wrangler write
- * to. Paths are resolved through realpath — sandbox-exec matches the real
+ * worktree, the temp dirs, and the caches uv / npm / cargo write to
+ * (wrangler's directories are excluded; they hold its credentials). Paths are resolved through realpath — sandbox-exec matches the real
  * path, and on macOS $TMPDIR and /tmp are both symlinks into /private.
  * Directories that do not exist are dropped: bwrap fails on a missing bind
  * source, and a cache the host has never created needs no exception yet.
@@ -170,8 +170,6 @@ export function defaultWorkerWritableRoots(
     join(home, '.cache'),
     join(home, '.npm'),
     join(home, 'Library', 'Caches'),
-    join(home, 'Library', 'Preferences', '.wrangler'),
-    join(home, '.wrangler'),
     join(home, '.cargo', 'registry'),
   ];
   const roots: string[] = [];

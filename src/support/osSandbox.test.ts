@@ -9,7 +9,7 @@
 // ============================================
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, existsSync } from 'node:fs';
+import { mkdtempSync, realpathSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -90,6 +90,27 @@ describe('defaultWorkerWritableRoots', () => {
     expect(roots.some((r) => r.startsWith(realpathSync(home)))).toBe(false);
     // No duplicates even when TMPDIR and /tmp resolve to the same place.
     expect(new Set(roots).size).toBe(roots.length);
+  });
+
+  it('excludes Wrangler directories from writable roots and refuses a Linux sandbox write', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'osw-wrangler-wt-'));
+    const home = mkdtempSync(join(process.env.HOME ?? '/home', 'osw-wrangler-home-'));
+    try {
+      mkdirSync(join(home, '.wrangler'));
+      mkdirSync(join(home, 'Library', 'Preferences', '.wrangler'), { recursive: true });
+      const roots = defaultWorkerWritableRoots(wt, { TMPDIR: '/tmp' }, home);
+      expect(roots).not.toContain(realpathSync(join(home, '.wrangler')));
+      expect(roots).not.toContain(realpathSync(join(home, 'Library', 'Preferences', '.wrangler')));
+      if (process.platform === 'linux' && existsSync('/usr/bin/bwrap')) {
+        const wrapped = wrapForSandbox(['bash', '-c', `touch "${join(home, '.wrangler', 'x')}"`],
+          { writableRoots: roots, allowNetwork: false }, 'bwrap')!;
+        expect(() => execFileSync(wrapped.file, wrapped.args, { stdio: 'pipe' })).toThrow();
+        expect(existsSync(join(home, '.wrangler', 'x'))).toBe(false);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(wt, { recursive: true, force: true });
+    }
   });
 });
 

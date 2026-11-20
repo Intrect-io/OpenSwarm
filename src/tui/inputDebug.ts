@@ -10,7 +10,7 @@
 // keypress logs one code point but the screen shows two glyphs, it's terminal
 // echo (fix in the client); if it logs the code point twice, it's ink-level.
 
-import { closeSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, isAbsolute, relative, resolve } from 'node:path';
 
@@ -95,8 +95,20 @@ export function appendInputDebug(input: string, key: DebugKeyFlags = {}, path = 
   try {
     const safePath = assertPathInDebugSandbox(path);
     mkdirSync(dirname(safePath), { recursive: true, mode: 0o700 });
-    const fd = openSync(safePath, 'a', 0o600);
+    // The mode argument only applies when the file is created, so a log left
+    // behind world-readable keeps its old mode; repair it on the open fd (the
+    // inode actually written, not whatever the path points at later).
+    // O_NOFOLLOW: a symlink swapped in after the sandbox check is refused
+    // rather than followed, so the chmod below can only reach the log itself.
+    const fd = openSync(safePath, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
     try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) throw new Error(`Diagnostic log is not a regular file: ${safePath}`);
+      // A hard link makes another path share this inode; tightening or
+      // appending to it would change that file too. (#899 review)
+      if (stat.nlink !== 1) throw new Error(`Diagnostic log has other hard links: ${safePath}`);
+      if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new Error(`Diagnostic log is not ours: ${safePath}`);
+      if ((stat.mode & 0o777) !== 0o600) fchmodSync(fd, 0o600);
       writeFileSync(fd, `${formatInputDebug(input, key)}\n`, 'utf8');
     } finally {
       closeSync(fd);

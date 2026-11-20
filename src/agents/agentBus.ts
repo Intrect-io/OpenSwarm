@@ -437,8 +437,29 @@ export class AgentBus {
         .sort();
 
       for (const file of newFiles) {
-        const content = await fs.readFile(resolve(this.messagesPath, file), 'utf-8');
-        const message: AgentMessage = JSON.parse(content);
+        // One bad file must not wedge the queue: a parse or shape failure used
+        // to escape to the outer catch, abort this pass and, because the file
+        // was never marked processed, abort every later pass too.
+        let message: AgentMessage;
+        // A read failure is not a malformed message: EMFILE/EACCES pass and
+        // the file is read again next poll; ENOENT means it was pruned or
+        // consumed meanwhile. Only content that fails to parse is quarantined.
+        let raw: string;
+        try {
+          raw = await fs.readFile(resolve(this.messagesPath, file), 'utf-8');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') this.markProcessed(file);
+          continue;
+        }
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (!isWellFormedMessage(parsed)) throw new Error('message is missing required fields');
+          message = parsed;
+        } catch (error) {
+          await this.quarantineMessageFile(file, error);
+          this.markProcessed(file);
+          continue;
+        }
 
         // Invoke listeners
         const callbacks = this.listeners.get(message.type);
@@ -452,14 +473,30 @@ export class AgentBus {
           }
         }
 
-        this.processedMessageIds.add(file);
-        if (this.processedMessageIds.size > MAX_RETAINED_MESSAGES) {
-          this.processedMessageIds.delete(this.processedMessageIds.values().next().value!);
-        }
+        this.markProcessed(file);
       }
     } catch {
       // Ignore
     }
+  }
+
+  private markProcessed(file: string): void {
+    this.processedMessageIds.add(file);
+    if (this.processedMessageIds.size > MAX_RETAINED_MESSAGES) {
+      this.processedMessageIds.delete(this.processedMessageIds.values().next().value!);
+    }
+  }
+
+  /**
+   * Move a malformed message file beside the messages dir (kept for inspection,
+   * never deleted) and log which file and why.
+   */
+  private async quarantineMessageFile(file: string, reason: unknown): Promise<void> {
+    const quarantineDir = resolve(this.messagesPath, '..', QUARANTINE_DIRNAME);
+    const detail = reason instanceof Error ? reason.message : String(reason);
+    console.warn(`[AgentBus] Quarantined malformed message ${file} (execution ${this.executionId}): ${detail.slice(0, 200)}`);
+    await fs.mkdir(quarantineDir, { recursive: true }).catch(() => {});
+    await fs.rename(resolve(this.messagesPath, file), join(quarantineDir, file)).catch(() => {});
   }
 
   /**
@@ -478,15 +515,10 @@ export class AgentBus {
             throw new Error('message is missing required fields');
           }
           messages.push(parsed);
-        } catch {
+        } catch (error) {
           // Malformed history is quarantined beside the messages dir, so a
           // corrupt payload cannot wedge the whole retrieval pass.
-          const quarantineDir = resolve(this.messagesPath, '..', QUARANTINE_DIRNAME);
-          await fs.mkdir(quarantineDir, { recursive: true }).catch(() => {});
-          await fs.rename(
-            resolve(this.messagesPath, file),
-            join(quarantineDir, file),
-          ).catch(() => {});
+          await this.quarantineMessageFile(file, error);
         }
       }
 

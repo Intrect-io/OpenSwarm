@@ -4,7 +4,7 @@
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentBus, BUS_DIR } from './agentBus.js';
 import { parseAuditorOutput } from './auditor.js';
 import { parseDocumenterOutput } from './documenter.js';
@@ -62,5 +62,39 @@ describe('auditor/documenter non-string output guard', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('expected string output');
     expect(result.summary).toBe('Documenter output was not a string');
+  });
+});
+
+describe('agentBus polling skips malformed message files (AGT-3441)', () => {
+  it('quarantines a malformed file and still delivers the later valid message', async () => {
+    const executionId = `test-poll-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const publisher = new AgentBus(executionId);
+    const subscriber = new AgentBus(executionId);
+    await publisher.init('workflow-123');
+    const messagesDir = resolve(BUS_DIR, executionId, 'messages');
+    // Sorted before every published file, so it is the first one polled.
+    await writeFile(join(messagesDir, '0000-corrupt.json'), '{ not json', 'utf-8');
+    await writeFile(join(messagesDir, '0001-wrong-shape.json'), JSON.stringify({ type: 'log' }), 'utf-8');
+
+    const seen: unknown[] = [];
+    subscriber.on('log', (msg) => { seen.push(msg.payload); });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await publisher.publish('log', 'step-1', 'after the bad files');
+      await subscriber.pollOnce();
+      expect(seen).toEqual(['after the bad files']);
+
+      const quarantined = await readdir(resolve(messagesDir, '..', 'quarantine'));
+      expect(quarantined).toEqual(expect.arrayContaining(['0000-corrupt.json', '0001-wrong-shape.json']));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('0000-corrupt.json'));
+
+      // A later poll sees the next message too; the bad files never come back.
+      await publisher.publish('log', 'step-2', 'second');
+      await subscriber.pollOnce();
+      expect(seen).toEqual(['after the bad files', 'second']);
+    } finally {
+      warn.mockRestore();
+      await publisher.cleanup();
+    }
   });
 });

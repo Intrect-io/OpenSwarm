@@ -3,6 +3,7 @@
 // Shared spawn logic for all CLI adapters
 // ============================================
 
+import { BoundedOutput, MAX_RETAINED_STDERR_CHARS, MAX_RETAINED_STDOUT_CHARS, boundStreamRemainder } from './outputRetention.js';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -249,22 +250,23 @@ export async function spawnCli(
         }, proc);
       }
 
-      let stdout = '';
-      let stderr = '';
+      // Bounded: keep the tail, which holds the result/cost/error events. (AGT-3423)
+      const stdoutBuf = new BoundedOutput(MAX_RETAINED_STDOUT_CHARS);
+      const stderrBuf = new BoundedOutput(MAX_RETAINED_STDERR_CHARS);
       let streamBuffer = '';
 
       proc.stdout?.on('data', (data: Buffer) => {
         const text = data.toString();
-        stdout += text;
+        stdoutBuf.append(text);
         if (options.onLog && adapter.capabilities.supportsStreaming) {
-          streamBuffer = adapter.parseStreamingChunk
+          streamBuffer = boundStreamRemainder(adapter.parseStreamingChunk
             ? adapter.parseStreamingChunk(text, options.onLog, streamBuffer)
-            : parseCliStreamChunk(text, options.onLog, streamBuffer);
+            : parseCliStreamChunk(text, options.onLog, streamBuffer));
         }
       });
 
       proc.stderr?.on('data', (data: Buffer) => {
-        stderr += data.toString();
+        stderrBuf.append(data.toString());
       });
 
       let exitDrainTimer: NodeJS.Timeout | null = null;
@@ -280,7 +282,7 @@ export async function spawnCli(
         cleanupLifecycle();
         terminateCliProcessTree(proc);
         const reason = lifecycleController.signal.reason;
-        session?.record({ type: 'assistant', rawStdout: stdout, rawStderr: stderr });
+        session?.record({ type: 'assistant', rawStdout: stdoutBuf.toString(), rawStderr: stderrBuf.toString() });
         session?.close({
           outcome: 'aborted', durationMs: Date.now() - startTime,
           error: reason instanceof Error ? `${reason.name}: ${reason.message}` : String(reason),
@@ -300,6 +302,8 @@ export async function spawnCli(
             : parseCliStreamChunk('\n', options.onLog, streamBuffer);
         }
 
+        const stdout = stdoutBuf.toString();
+        const stderr = stderrBuf.toString();
         session?.record({ type: 'assistant', rawStdout: stdout, rawStderr: stderr });
         session?.close({
           outcome: code === 0 || code === null ? 'returned' : 'exit_nonzero',
@@ -308,7 +312,10 @@ export async function spawnCli(
         });
 
         if (code !== 0 && code !== null) {
-          const stderrSnippet = stderr.slice(0, 500);
+          // The retained body, not toString(): once stderr was truncated the
+          // latter starts with the retention marker, which would become the
+          // error message and hide extractStreamJsonError's fallback. (#900 review)
+          const stderrSnippet = stderrBuf.body.slice(0, 500);
           const stdoutSnippet = stdout.slice(0, 300);
           console.error(`[${adapter.name}] CLI exited with code ${code}`);
           console.error(`[${adapter.name}] stderr: ${stderrSnippet || '(empty)'}`);

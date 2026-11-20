@@ -43,6 +43,19 @@ export interface SandboxConfig {
   sandbox?: { sharedPaths?: string[] } | null;
 }
 
+/** Secret-like path components must not be silently shared into worker worktrees. */
+export function secretSharedPathComponents(paths: string[]): string[] {
+  const patterns = [/^\.env.*$/i, /^.+\.pem$/i, /^.+\.key$/i, /^credentials.*$/i];
+  return paths.filter((path) => path.split(/[\\/]/).some((part) => patterns.some((pattern) => pattern.test(part))));
+}
+
+export function secretSharedPathsWarning(paths: string[]): string | null {
+  const matches = secretSharedPathComponents(paths);
+  if (matches.length === 0) return null;
+  return `[Worktree] sharedPaths may expose secret files to the worker: ${matches.join(', ')}. `
+    + 'Remove these entries from openswarm.json sandbox.sharedPaths to keep them out of worktrees.';
+}
+
 export interface SharedPathDetection {
   /** Repo-relative dependency dirs that qualify for sharing, root first, then by walk order. */
   shared: string[];
@@ -140,7 +153,25 @@ export function resolveSharedPaths(repoPath: string, openswarmJson?: SandboxConf
     seen.add(p);
     if (existsSync(join(repoPath, p))) out.push(p);
   }
+  warnSecretSharedPathsOnce(repoPath, out);
   return out;
+}
+
+const warnedSecretSharedPaths = new Set<string>();
+
+/**
+ * Every consumer of the shared list — worktree creation, worker fan-out
+ * (symlink and copy) and verification sandboxes — goes through
+ * `resolveSharedPaths`, so the secret-path warning is raised here, once per
+ * repository and list, instead of by one caller only. (#848 review)
+ */
+function warnSecretSharedPathsOnce(repoPath: string, paths: string[]): void {
+  const warning = secretSharedPathsWarning(paths);
+  if (!warning) return;
+  const key = `${repoPath}\0${warning}`;
+  if (warnedSecretSharedPaths.has(key)) return;
+  warnedSecretSharedPaths.add(key);
+  console.warn(warning);
 }
 
 /**
