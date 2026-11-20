@@ -29,6 +29,8 @@ export type ChangeRiskLevel = 'low' | 'medium' | 'high';
 /** One changed file. `null` line counts mean git could not count them (binary). */
 export interface DiffFileStat {
   path: string;
+  /** For a rename, the path the file had before; it is classified too. */
+  previousPath?: string;
   added: number | null;
   deleted: number | null;
 }
@@ -79,16 +81,23 @@ const DEFAULT_HIGH_PATHS: ReadonlyArray<{ pattern: RegExp; reason: string; docsE
   { pattern: /(?:^|\/)(?:deploy(?:ment)?s?|infra(?:structure)?|terraform|k8s|kubernetes|helm|charts|ansible)\//i, reason: 'deploy/infra', docsExempt: true },
   { pattern: /(?:^|\/)(?:Dockerfile[^/]*|docker-compose[^/]*\.ya?ml|compose\.ya?ml|wrangler\.toml|fly\.toml|vercel\.json|netlify\.toml|Procfile|[^/]+\.tf)$/i, reason: 'deploy/infra', docsExempt: true },
   { pattern: /(?:^|\/)(?:deploy|release)[^/]*\.(?:sh|py|ts|js|mjs)$/i, reason: 'deploy/infra', docsExempt: true },
-  { pattern: /^\.github\/workflows\/|^\.gitlab-ci\.yml$|^\.circleci\/|(?:^|\/)Jenkinsfile$|^azure-pipelines|^\.githooks\/|^\.github\/actions\//i, reason: 'CI', docsExempt: true },
-  { pattern: /(?:^|\/)(?:migrations?|alembic)\/|\.sql$/i, reason: 'migration' },
+  { pattern: /^\.github\/workflows\/|^\.gitlab-ci\.yml$|^\.circleci\/|(?:^|\/)Jenkinsfile$|^azure-pipelines|^\.githooks\/|^\.github\/actions\/|(?:^|\/)CODEOWNERS$|^\.github\/dependabot\.ya?ml$/i, reason: 'CI', docsExempt: true },
+  { pattern: /(?:^|\/)(?:migrations?|migrate|alembic)\/|\.sql$|(?:^|\/)schema\.(?:prisma|rb)$|(?:^|\/)alembic\.ini$/i, reason: 'migration' },
   { pattern: /(?:^|[/._-])(?:auth|oauth|secrets?|credentials?|passwords?|permissions?|rbac|acl|keys?|tokens?|crypto|encrypt(?:ion)?)(?:[/._-]|$)/i, reason: 'auth/secrets' },
   { pattern: /(?:^|\/)\.env(?:\.[^/]*)?$|\.(?:pem|key|p12|pfx|keystore)$/i, reason: 'auth/secrets' },
+  // Words the rule above misses because they extend the stem (`authentication/`,
+  // `authMiddleware.ts`, `authz/`) or name the boundary without saying "auth"
+  // (`session.ts`, `jwt.ts`, `security/`, Next.js `middleware.ts`). (#884 review)
+  { pattern: /(?:^|[/._-])(?:(?!author(?:s|ed|ing|ship)?(?:[/._-]|[A-Z]|$))[Aa]uth[a-z]*|[Aa]uth[nz]|[Ss]essions?|[Jj]wt|[Ll]og(?:in|out)|[Ss]ign[-_]?(?:[Ii]n|[Uu]p)|[Ss]ecurity|[Cc]sp|[Cc]ors|[Mm]iddleware)(?:[/._-]|[A-Z]|$)/, reason: 'auth/secrets' },
+  { pattern: /[a-z](?:Auth|Session|Jwt|Token|Secret|Credential|Password|Permission)(?:[A-Z]|[/._-]|$)/, reason: 'auth/secrets' },
 ];
 
 /** Dependency manifests and lockfiles: a change here is at least medium. */
-const DEPENDENCY_FILE = /(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|requirements[^/]*\.txt|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile(?:\.lock)?|setup\.py|setup\.cfg|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|Gemfile(?:\.lock)?|composer\.(?:json|lock)|build\.gradle(?:\.kts)?|pom\.xml)$/;
+const DEPENDENCY_FILE = /(?:^|\/)(?:\.npmrc|\.yarnrc(?:\.ya?ml)?|deno\.jsonc?|deno\.lock|\.terraform\.lock\.hcl|package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|requirements[^/]*\.txt|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile(?:\.lock)?|setup\.py|setup\.cfg|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|Gemfile(?:\.lock)?|composer\.(?:json|lock)|build\.gradle(?:\.kts)?|pom\.xml)$/;
 
 const DOC_FILE = /(?:^|\/)(?:docs?|documentation)\/|\.(?:md|mdx|rst|txt|adoc)$/i;
+/** Prose, by extension. Only prose is exempt from deploy/CI rules: `docs/deploy.sh` still runs. */
+const DOC_TEXT_FILE = /\.(?:md|mdx|rst|txt|adoc)$/i;
 
 const RANK: Record<ChangeRiskLevel, number> = { low: 0, medium: 1, high: 2 };
 
@@ -103,8 +112,10 @@ export function parseNumstat(text: string): DiffFileStat[] | null {
     if (!line.trim()) continue;
     const match = /^(\d+|-)\t(\d+|-)\t(.+)$/.exec(line);
     if (!match) return null;
+    const { from, to } = renamedPaths(match[3]);
     stats.push({
-      path: renamedPath(match[3]),
+      path: to,
+      ...(from !== to ? { previousPath: from } : {}),
       added: match[1] === '-' ? null : Number(match[1]),
       deleted: match[2] === '-' ? null : Number(match[2]),
     });
@@ -112,12 +123,15 @@ export function parseNumstat(text: string): DiffFileStat[] | null {
   return stats;
 }
 
-/** `src/{a => b}/x.ts` and `a => b` (renames) → the new path. */
-function renamedPath(path: string): string {
-  const braced = /^(.*)\{[^{}]* => ([^{}]*)\}(.*)$/.exec(path);
-  if (braced) return `${braced[1]}${braced[2]}${braced[3]}`.replace(/\/\//g, '/');
-  const plain = / => (.+)$/.exec(path);
-  return plain ? plain[1] : path;
+/** `src/{a => b}/x.ts` and `a => b` (renames) → both paths; anything else → the path twice. */
+function renamedPaths(path: string): { from: string; to: string } {
+  const braced = /^(.*)\{([^{}]*) => ([^{}]*)\}(.*)$/.exec(path);
+  if (braced) {
+    const join = (middle: string) => `${braced[1]}${middle}${braced[4]}`.replace(/\/\//g, '/');
+    return { from: join(braced[2]), to: join(braced[3]) };
+  }
+  const plain = /^(.+) => (.+)$/.exec(path);
+  return plain ? { from: plain[1], to: plain[2] } : { from: path, to: path };
 }
 
 function matchesAny(path: string, globs: readonly string[] | undefined): boolean {
@@ -145,17 +159,20 @@ export function classifyChangeRisk(
     if (file.added === null || file.deleted === null) uncounted++;
     else lines += file.added + file.deleted;
 
-    const isDoc = DOC_FILE.test(file.path);
-    for (const { pattern, reason, docsExempt } of DEFAULT_HIGH_PATHS) {
-      if (docsExempt && isDoc) continue;
-      if (pattern.test(file.path)) high.add(`${reason}: \`${file.path}\``);
+    // A rename is judged on both ends: moving auth code out of `auth/` is an auth change.
+    for (const path of file.previousPath ? [file.path, file.previousPath] : [file.path]) {
+      const isDoc = DOC_TEXT_FILE.test(path);
+      for (const { pattern, reason, docsExempt } of DEFAULT_HIGH_PATHS) {
+        if (docsExempt && isDoc) continue;
+        if (pattern.test(path)) high.add(`${reason}: \`${path}\``);
+      }
+      if (protectedFiles.includes(path) || matchesAny(path, rules.protectedPaths)) {
+        high.add(`protected file: \`${path}\``);
+      }
+      if (matchesAny(path, rules.highPaths)) high.add(`project high-risk path: \`${path}\``);
+      if (DEPENDENCY_FILE.test(path)) medium.add(`dependencies: \`${path}\``);
+      if (matchesAny(path, rules.mediumPaths)) medium.add(`project medium-risk path: \`${path}\``);
     }
-    if (protectedFiles.includes(file.path) || matchesAny(file.path, rules.protectedPaths)) {
-      high.add(`protected file: \`${file.path}\``);
-    }
-    if (matchesAny(file.path, rules.highPaths)) high.add(`project high-risk path: \`${file.path}\``);
-    if (DEPENDENCY_FILE.test(file.path)) medium.add(`dependencies: \`${file.path}\``);
-    if (matchesAny(file.path, rules.mediumPaths)) medium.add(`project medium-risk path: \`${file.path}\``);
   }
   if (uncounted > 0) medium.add(`${uncounted} file(s) git cannot count lines for (binary)`);
 

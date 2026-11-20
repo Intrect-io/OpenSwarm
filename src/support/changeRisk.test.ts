@@ -101,8 +101,8 @@ describe('parseNumstat', () => {
     expect(parsed).toEqual([
       { path: 'src/a.ts', added: 3, deleted: 1 },
       { path: 'img/x.png', added: null, deleted: null },
-      { path: 'src/new/b.ts', added: 2, deleted: 2 },
-      { path: 'new.ts', added: 0, deleted: 0 },
+      { path: 'src/new/b.ts', previousPath: 'src/old/b.ts', added: 2, deleted: 2 },
+      { path: 'new.ts', previousPath: 'old.ts', added: 0, deleted: 0 },
     ]);
   });
 
@@ -182,5 +182,28 @@ describe('classifyBranchRisk', () => {
     } finally {
       rmSync(repo, { recursive: true, force: true });
     }
+  });
+});
+
+describe('change risk paths the first rules missed (#884 review)', () => {
+  it.each([
+    'src/authentication/login.ts', 'src/middleware/authMiddleware.ts', 'src/lib/authorization.ts', 'src/authz/policy.ts',
+    'src/session.ts', 'src/jwt.ts', 'src/security/csp.ts', 'middleware.ts', 'src/userSession.ts',
+    'db/migrate/20261120_add.rb', 'prisma/schema.prisma', 'db/schema.rb', 'alembic.ini',
+    '.github/CODEOWNERS', 'docs/deploy.sh',
+  ])('%s is high', (path) => {
+    expect(classifyChangeRisk([stat(path)]).level).toBe('high');
+  });
+
+  it.each(['.npmrc', 'deno.json', '.terraform.lock.hcl'])('%s is a dependency change (medium)', (path) => {
+    expect(classifyChangeRisk([stat(path)]).level).toBe('medium');
+  });
+
+  it('judges a rename on its old path too', () => {
+    expect(classifyChangeRisk(parseNumstat('3\t1\tsrc/{auth => util}/x.ts')!).level).toBe('high');
+  });
+
+  it('still leaves deploy prose under docs/ low', () => {
+    expect(classifyChangeRisk([stat('docs/deploy.md')]).level).toBe('low');
   });
 });
