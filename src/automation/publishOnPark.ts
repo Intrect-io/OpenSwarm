@@ -28,6 +28,7 @@ import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeS
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { SensitiveDataError } from '../support/sensitiveDataFence.js';
 import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
+import { computeProtectedFiles } from '../agents/protectedFiles.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { WORKER_NO_CHANGES_PARK_REASON, WORKER_NO_CHANGES_STATEMENT_PREFIX } from '../agents/pairPipelineTypes.js';
 import type { VerifyConfig } from '../core/types.js';
@@ -350,7 +351,9 @@ export async function publishApprovedWork(
           task.title,
           task.issueIdentifier || '',
           task.description || '',
-          { fileScope: enforcedFileScope(task), verify },
+          // The grader files the worker was told not to edit (base tests, verify
+          // config): a change to one is high risk on the PR (AGT-4804, #884 review).
+          { fileScope: enforcedFileScope(task), verify, protectedFiles: await computeProtectedFiles(worktreeInfo.originalPath, task) },
         );
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;
