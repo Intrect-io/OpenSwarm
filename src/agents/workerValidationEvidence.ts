@@ -48,14 +48,67 @@ function validationRelevantFiles(files: string[]): string[] {
   });
 }
 
+/** `if`/`while`/... make the command after them conditional on something unseen. */
+const CONTROL_KEYWORD_RE = /^(?:if|then|elif|else|while|until|do|for|case|select|!)(?=\s|$)/;
+/** Segments that always succeed (`true`, `:`) or always fail (`false`). */
+const ALWAYS_TRUE_RE = /^(?:true|:)$/;
+const ALWAYS_FALSE_RE = /^false$/;
+
+/**
+ * The shell segments of `command` that can actually run, in order. A comment
+ * (`cd . # npm test`) is cut off; a segment that short-circuit makes dead
+ * (`false && npm test`, `true || npm test`) is dropped; a segment under a
+ * control keyword (`if false; then npm test; fi`) is dropped, since whether it
+ * ran depends on a condition the evidence does not show. (#897 review)
+ */
+function executedSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  let operator = ';';
+  let previous = '';
+  const push = (next: string) => {
+    const seg = current.trim();
+    current = '';
+    if (seg) {
+      const dead = (operator === '&&' && ALWAYS_FALSE_RE.test(previous))
+        || (operator === '||' && ALWAYS_TRUE_RE.test(previous));
+      if (!dead && !CONTROL_KEYWORD_RE.test(seg)) segments.push(seg);
+      previous = dead ? (operator === '&&' ? 'false' : 'true') : seg;
+    }
+    operator = next;
+  };
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (quote) {
+      if (char === quote) quote = null;
+      else if (char === '\\' && quote === '"') { current += char + (command[i + 1] ?? ''); i++; continue; }
+      current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') { quote = char; current += char; continue; }
+    if (char === '#' && (i === 0 || /\s/.test(command[i - 1]))) {
+      const newline = command.indexOf('\n', i);
+      if (newline < 0) break;
+      i = newline - 1;
+      continue;
+    }
+    const two = command.slice(i, i + 2);
+    if (two === '&&' || two === '||') { push(two); i++; continue; }
+    if (char === ';' || char === '|' || char === '\n') { push(char === '|' ? '|' : ';'); continue; }
+    current += char;
+  }
+  push(';');
+  return segments;
+}
+
 function commandLooksLikeValidation(command: string): boolean {
   // Workers routinely chain inspection then validation in one string
   // (e.g. "git diff && npm test"). Evaluate each shell segment independently so
   // a leading inspection verb does not mask a real validation command in a later
   // segment, while an inspection-only segment (which may merely *mention* a test
   // command as a search string) still counts as no validation.
-  const segments = command.split(/&&|\|\||;|\|/).map(s => s.trim()).filter(Boolean);
-  const candidates = segments.length > 0 ? segments : [command];
+  const candidates = executedSegments(command);
   return candidates.some(seg => {
     if (INSPECTION_ONLY_COMMAND_RE.test(seg) || NON_EXECUTING_PREFIX_RE.test(seg)) return false;
     if (VALIDATION_COMMAND_RE.test(seg)) return !NON_EXECUTING_FLAG_RE.test(seg) && !MAKE_DRY_RUN_RE.test(seg);

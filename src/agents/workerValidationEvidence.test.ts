@@ -171,3 +171,27 @@ describe('non-executing command forms are not validation evidence (AGT-3441)', (
     expect(issuesFor(command)).toEqual([]);
   });
 });
+
+describe('validation evidence counts only segments that can run (#897 review)', () => {
+  const ranOnly = (command: string) => missingWorkerValidationIssues({
+    success: true, summary: 'done', filesChanged: ['src/a.ts'], commands: [command], executedCommands: [command],
+  } as WorkerResult);
+
+  it.each([
+    'false && npm test',
+    'true || npm test',
+    'if false; then npm test; fi',
+    'cd . # npm test',
+    'false && echo hi && npm test',
+  ])('does not accept %s as validation', (command) => {
+    expect(ranOnly(command)).not.toEqual([]);
+  });
+
+  it.each([
+    'npm test # run the suite',
+    'echo "a # b" && npm test',
+    'git diff && npm test',
+  ])('still accepts %s', (command) => {
+    expect(ranOnly(command)).toEqual([]);
+  });
+});
