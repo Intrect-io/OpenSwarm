@@ -21,8 +21,11 @@ function boundText(value: string, maxBytes: number): string {
 
 function boundMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
   const bounded: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(metadata)) {
+  for (const [key, raw] of Object.entries(metadata)) {
     try {
+      // Keep a JSON copy, not the caller's object: a reference could be
+      // mutated after the check and grow past the bound. (#851 review)
+      const value: unknown = raw !== null && typeof raw === 'object' ? JSON.parse(JSON.stringify(raw)) : raw;
       const encoded = JSON.stringify({ ...bounded, [key]: value });
       if (encoded !== undefined && Buffer.byteLength(encoded, 'utf8') <= MAX_METADATA_BYTES) bounded[key] = value;
       else if (typeof value === 'string') {

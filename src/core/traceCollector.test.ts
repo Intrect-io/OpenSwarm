@@ -8,6 +8,16 @@ describe('TraceCollector', () => {
     collector = new TraceCollector();
   });
 
+  it('keeps a copy of object metadata, so a later mutation cannot grow it past the bound (#851 review)', () => {
+    const bounded = new TraceCollector();
+    const details: { items: string[] } = { items: ['a'] };
+    const traceId = bounded.startTrace('t', { details });
+    details.items.push('x'.repeat(100_000));
+    const trace = bounded.getTrace(traceId)!;
+    expect(trace.metadata.details).toEqual({ items: ['a'] });
+    expect(Buffer.byteLength(JSON.stringify(trace.metadata), 'utf8')).toBeLessThanOrEqual(4096);
+  });
+
   it('bounds retained names, metadata, and error payloads by UTF-8 bytes', () => {
     const bounded = new TraceCollector();
     const traceId = bounded.startTrace('😀'.repeat(100_000), { kept: 'yes', huge: 'x'.repeat(100_000) });
