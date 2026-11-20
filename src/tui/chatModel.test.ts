@@ -207,3 +207,55 @@ describe('movePaletteSelection (INT-1959)', () => {
     expect(movePaletteSelection(0, 1, 0)).toBe(0);
   });
 });
+
+describe('boundChatHistory keeps whole conversations (AGT-3494)', () => {
+  it('evicts transient system lines before any user/assistant turn', () => {
+    const turns: ChatLine[] = Array.from({ length: 20 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `t${i}`,
+    }));
+    const noise: ChatLine[] = Array.from({ length: 30 }, (_, i) => ({ role: 'system', content: `n${i}` }));
+    const bounded = boundChatHistory([...turns.slice(0, 10), ...noise, ...turns.slice(10)], 25);
+    expect(bounded).toHaveLength(25);
+    expect(historyToMessages(bounded)).toEqual(historyToMessages(turns));
+    // The newest system lines survive; the oldest went first.
+    expect(bounded.filter((l) => l.role === 'system').map((l) => l.content)).toEqual(['n25', 'n26', 'n27', 'n28', 'n29']);
+  });
+
+  it('cuts conversation on a turn boundary, never starting at an orphan reply', () => {
+    const history: ChatLine[] = [
+      { role: 'user', content: 'q1' }, { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'q2' }, { role: 'assistant', content: 'a2' },
+      { role: 'user', content: 'q3' }, { role: 'assistant', content: 'a3' },
+    ];
+    const bounded = boundChatHistory(history, 5);
+    expect(bounded.map((l) => l.content)).toEqual(['q2', 'a2', 'q3', 'a3']);
+  });
+
+  it('persisted messages keep every turn when only system lines push the cap', () => {
+    let s = initialChatState;
+    for (let i = 0; i < 50; i++) {
+      s = chatReducer(s, { type: 'user', content: `u${i}` });
+      s = chatReducer(s, { type: 'stream', chunk: `a${i}` });
+      s = chatReducer(s, { type: 'commit' });
+    }
+    for (let i = 0; i < MAX_CHAT_HISTORY; i++) s = chatReducer(s, { type: 'system', content: `notice ${i}` });
+    expect(s.history).toHaveLength(MAX_CHAT_HISTORY);
+    expect(historyToMessages(s.history)).toHaveLength(100);
+  });
+});
+
+describe('boundChatHistory at the cap (AGT-3494)', () => {
+  it('keeps a system notice that arrives when the history is full of conversation', () => {
+    let s = initialChatState;
+    for (let i = 0; i < MAX_CHAT_HISTORY / 2; i++) {
+      s = chatReducer(s, { type: 'user', content: `u${i}` });
+      s = chatReducer(s, { type: 'stream', chunk: `a${i}` });
+      s = chatReducer(s, { type: 'commit' });
+    }
+    s = chatReducer(s, { type: 'system', content: '✖ failed to save session: disk full' });
+    expect(s.history.at(-1)).toEqual({ role: 'system', content: '✖ failed to save session: disk full' });
+    expect(s.history.length).toBeLessThanOrEqual(MAX_CHAT_HISTORY);
+    expect(s.history[0]?.role).toBe('user');
+  });
+});

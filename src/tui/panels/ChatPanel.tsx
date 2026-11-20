@@ -24,6 +24,7 @@ import {
   type ChatLine,
 } from '../chatModel.js';
 import { ChatLog } from '../components/ChatLog.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { ChatInput } from '../components/ChatInput.js';
 import { CommandPalette } from '../components/CommandPalette.js';
 import { SelectList } from '../components/SelectList.js';
@@ -52,7 +53,11 @@ export interface ChatPanelProps {
 /** Process-scoped: the signal is "did this session engage at all", not a counter. */
 let engagementReported = false;
 
+/** Rows outside the chat log: the input box (3) plus the app's tab bar and status line. */
+const CHAT_CHROME_ROWS = 6;
+
 export function ChatPanel({ active, provider: providerProp, model: modelProp, projectPath, sessionId: sessionIdProp, initialHistory, goal: goalProp }: ChatPanelProps) {
+  const { rows: terminalRows } = useTerminalSize();
   const [state, dispatch] = useReducer(
     chatReducer,
     undefined,
@@ -443,7 +448,14 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
 
   return (
     <Box flexDirection="column">
-      <ChatLog history={state.history} streaming={state.streaming} activity={activity} busy={busy && pending === null} />
+      <ChatLog
+        history={state.history}
+        streaming={state.streaming}
+        activity={activity}
+        busy={busy && pending === null}
+        // Leave room for the input box, palette and the live reply. (AGT-3494)
+        maxRows={Math.max(8, terminalRows - CHAT_CHROME_ROWS)}
+      />
       <ChatInput
         value={input}
         active={inputActive}

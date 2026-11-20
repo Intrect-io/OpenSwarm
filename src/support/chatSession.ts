@@ -18,6 +18,12 @@ import { getDefaultChatModel, runChatCompletion } from './chatBackend.js';
 import { atomicWriteFileSync } from './atomicFile.js';
 
 const sessionWriteQueues = new Map<string, Promise<void>>();
+/**
+ * A write queued behind another one and not yet started, with the newest
+ * snapshot it will write. Later saves of the same path replace the snapshot
+ * instead of queueing one more write. (AGT-3494)
+ */
+const pendingSessionWrites = new Map<string, { session: Session; write: Promise<void> }>();
 
 /**
  * On-disk location for persisted chat sessions. Read via OPENSWARM_CHAT_DIR when
@@ -52,14 +58,40 @@ export async function ensureChatDir(dir: string = getChatDir()): Promise<void> {
   await mkdir(dir, { recursive: true });
 }
 
+/**
+ * Persist a session. Writes to one path run one at a time, and saves that
+ * arrive while a write is still queued collapse into that queued write: it
+ * writes the newest snapshot, so the file never goes back to an older state
+ * and a burst of saves costs at most two writes. Every caller's promise
+ * settles once its snapshot, or a newer one, is on disk. (AGT-3494)
+ */
 export async function saveSession(session: Session, dir: string = getChatDir()): Promise<void> {
-  await ensureChatDir(dir);
+  // Queue bookkeeping happens before any await. Awaiting the directory first
+  // let concurrent saves resume in mkdir-completion order rather than call
+  // order, so an older snapshot could be written last.
   const path = resolveSessionPath(session.id, dir);
+  const pending = pendingSessionWrites.get(path);
+  if (pending) {
+    pending.session = session;
+    return pending.write;
+  }
   const previous = sessionWriteQueues.get(path) ?? Promise.resolve();
-  const write = previous.catch(() => undefined).then(() => {
-    session.updatedAt = new Date().toISOString();
-    atomicWriteFileSync(path, `${JSON.stringify(session, null, 2)}\n`);
+  const entry = { session, write: Promise.resolve() };
+  entry.write = previous.catch(() => undefined).then(async () => {
+    // Once the directory step settles the write has started: a later save
+    // queues behind it. Cleared even when mkdir fails, so one failure does not
+    // hand every later save the same rejected promise.
+    try {
+      await ensureChatDir(dir);
+    } finally {
+      pendingSessionWrites.delete(path);
+    }
+    const latest = entry.session;
+    latest.updatedAt = new Date().toISOString();
+    atomicWriteFileSync(path, `${JSON.stringify(latest, null, 2)}\n`);
   });
+  pendingSessionWrites.set(path, entry);
+  const write = entry.write;
   sessionWriteQueues.set(path, write);
   try {
     await write;

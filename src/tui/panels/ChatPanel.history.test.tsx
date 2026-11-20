@@ -18,7 +18,10 @@ describe('ChatPanel long-session history budgets', () => {
       state = chatReducer(state, { type: 'stream', chunk: `reply-${i}` });
       state = chatReducer(state, { type: 'commit' });
     }
-    expect(state.history).toHaveLength(MAX_CHAT_HISTORY);
+    // Cut on a turn boundary: never more than the budget, and never an orphan reply first.
+    expect(state.history.length).toBeLessThanOrEqual(MAX_CHAT_HISTORY);
+    expect(state.history.length).toBeGreaterThanOrEqual(MAX_CHAT_HISTORY - 1);
+    expect(state.history[0]?.role).toBe('user');
     expect(state.history.some((l) => l.content === 'turn-0')).toBe(false);
     expect(state.history.at(-1)).toEqual({ role: 'assistant', content: `reply-${MAX_CHAT_HISTORY + 14}` });
   });
