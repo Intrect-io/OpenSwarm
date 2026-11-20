@@ -7,6 +7,7 @@ import { expandPath } from '../core/config.js';
 import { ghWithTimeout } from '../support/ghPullRequests.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { ITaskSource, TaskState } from './taskSource.js';
+import { ReasonCommentError, transitionWithReason } from './trackerTransition.js';
 
 export type BacklogGroomingMode = 'comment' | 'apply';
 export type GroomingStatus = 'active' | 'stale' | 'needs_update';
@@ -371,19 +372,23 @@ export async function applyBacklogGrooming(
       continue;
     }
 
-    // Evidence comment first; without it the transition would be unexplained.
+    // Evidence comment first; without it the transition would be unexplained, so a failed
+    // comment aborts the move ('abort') instead of closing the issue silently.
     const targetState = decision.closeState ?? 'Done';
-    if (!await comment(decision.issueId, formatGroomingComment(decision, `moving to ${targetState}.`))) {
-      log(`${label(decision)}: state change skipped, evidence comment failed to post`);
-      continue;
-    }
-    budget.remaining--;
     let updated = false;
     try {
-      updated = await source.updateState(decision.issueId, targetState);
+      updated = await transitionWithReason(source, decision.issueId, targetState,
+        formatGroomingComment(decision, `moving to ${targetState}.`), { commentFailure: 'abort' });
     } catch (error) {
+      if (error instanceof ReasonCommentError) {
+        applied.failedComments++;
+        log(`${label(decision)}: state change skipped, evidence comment failed to post`);
+        continue;
+      }
       log(`${label(decision)}: move to ${targetState} threw (${error instanceof Error ? error.message : String(error)})`);
     }
+    applied.commented++;
+    budget.remaining--;
     if (updated) {
       applied.moved++;
       applied.movedIssueIds.push(decision.issueId);

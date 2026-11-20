@@ -85,9 +85,9 @@ import {
   markTaskDecomposed,
   markTaskDone,
   markTaskInProgress,
-  releaseDependentTasks,
   upsertTaskState,
 } from '../taskState/store.js';
+import { transitionWithReason } from './trackerTransition.js'; import { releaseDependentsInTracker } from './dependentRelease.js';
 import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import { getEnabledStages, otherStageTimeoutsMs } from './runnerStageBudget.js';
@@ -493,21 +493,16 @@ export async function createSubIssuesWithDependencies(
 
     if (!taskSource) throw new Error('Task source unavailable while initializing decomposition');
     const targetState = isReady ? 'Todo' : 'Backlog';
-    const accepted = await taskSource.updateState(subIssue.id, targetState);
+    // The state snapshot is the reason; a refusal throws below, and the idempotency key keeps a retry to one comment.
+    const accepted = await transitionWithReason(taskSource, subIssue.id, targetState, buildTaskStateSyncComment(
+      childState, isReady ? 'Task ready after decomposition' : 'Task blocked by decomposition dependency',
+    ), { idempotencyKey: `decomposition:${parentIssueId}:child:${subIssue.topoRank}:state`, commentFailure: 'rethrow' });
     if (!accepted) {
       throw new Error(`Task source refused ${targetState} transition for decomposed child ${subIssue.identifier}`);
     }
     console.log(isReady
       ? `[AutonomousRunner] Moved ${subIssue.identifier} to Todo`
       : `[AutonomousRunner] Keeping ${subIssue.identifier} in Backlog until dependencies resolve`);
-    await taskSource.addComment(
-      subIssue.id,
-      buildTaskStateSyncComment(
-        childState,
-        isReady ? 'Task ready after decomposition' : 'Task blocked by decomposition dependency'
-      ),
-      `decomposition:${parentIssueId}:child:${subIssue.topoRank}:state`,
-    );
   }
 
   // Publish parent completion only after every child/dependency state has
@@ -601,8 +596,7 @@ export async function decomposeTask(
       console.log(`[AutonomousRunner] Decomposition depth limit reached: ${currentDepth}/${maxDepth}`);
       if (autoBacklog && task.issueId) {
         try {
-          await taskSource?.updateState(task.issueId, 'Backlog');
-          await taskSource?.addComment(task.issueId,
+          if (taskSource) await transitionWithReason(taskSource, task.issueId, 'Backlog',
             `⚠️ **Auto-moved to Backlog**\n\n` +
             `Reason: Decomposition depth limit reached (${currentDepth}/${maxDepth})\n\n` +
             `This task has been nested too deeply. Please review and simplify the task structure, ` +
@@ -623,8 +617,7 @@ export async function decomposeTask(
       console.log(`[AutonomousRunner] Children count limit reached: ${existingChildren}/${maxChildren}`);
       if (autoBacklog) {
         try {
-          await taskSource?.updateState(task.issueId, 'Backlog');
-          await taskSource?.addComment(task.issueId,
+          if (taskSource) await transitionWithReason(taskSource, task.issueId, 'Backlog',
             `⚠️ **Auto-moved to Backlog**\n\n` +
             `Reason: Too many sub-issues already created (${existingChildren}/${maxChildren})\n\n` +
             `This task has generated too many sub-issues. Please review the decomposition strategy, ` +
@@ -1223,7 +1216,7 @@ export async function executePipeline(
       } catch (err) {
         console.error(`[${taskPrefix}] Linear logPairStart failed:`, err);
         // Continue pipeline even if this fails
-        await taskSource?.updateState(task.issueId, 'In Progress');
+        if (taskSource) await transitionWithReason(taskSource, task.issueId, 'In Progress', 'Task execution started; moving to In Progress (the pair-start log did not post).');
       }
     }
 
@@ -1396,18 +1389,7 @@ export async function reportExecutionResult(
 export async function reconcileCompletionState(task: TaskItem): Promise<void> {
   if (!task.issueId) return;
 
-  const released = releaseDependentTasks(task.issueId);
-  for (const child of released) {
-    try {
-      await taskSource?.updateState(child.issueId, 'Todo');
-      await taskSource?.addComment(
-        child.issueId,
-        buildTaskStateSyncComment(child, 'Task unblocked and ready')
-      );
-    } catch (err) {
-      console.warn(`[AutonomousRunner] Failed to release dependent task ${child.issueId}:`, err);
-    }
-  }
+  await releaseDependentsInTracker(taskSource, task.issueId);
 
   // The parent is not closed here. A publication leaves its issue In Review,
   // and one child's open PR used to close the whole epic (AGT-4409); the merge
@@ -1419,8 +1401,9 @@ export async function syncFailureState(task: TaskItem, reason: string, retryStat
   if (!task.issueId) return false;
   let stateSynced = retryState === undefined;
   if (retryState) {
+    // Prose reason, not a state snapshot: a snapshot posted before a refused move would be read back as truth.
     try {
-      stateSynced = await taskSource?.updateState(task.issueId, retryState) === true;
+      stateSynced = !!taskSource && await transitionWithReason(taskSource, task.issueId, retryState, `Task failed and returns to ${retryState} for a retry. Reason: ${reason}`);
       if (!stateSynced) console.warn(`[AutonomousRunner] Tracker refused ${retryState} for failed task ${task.issueId}`);
     } catch (err) {
       console.warn(`[AutonomousRunner] Failed to return failed task ${task.issueId} to ${retryState}:`, err);
@@ -1429,8 +1412,9 @@ export async function syncFailureState(task: TaskItem, reason: string, retryStat
   const state = markTaskBlocked(
     task.issueId, reason, task.blockedBy || [], stateSynced && retryState ? retryState : task.linearState,
   );
+  // A retry move that landed already said why; the snapshot is posted only where no move did (one comment each way).
   try {
-    await taskSource?.addComment(task.issueId, buildTaskStateSyncComment(state, 'Task blocked'));
+    if (!retryState || !stateSynced) await taskSource?.addComment(task.issueId, buildTaskStateSyncComment(state, 'Task blocked'));
   } catch (err) {
     console.warn(`[AutonomousRunner] Failed to sync blocked state for ${task.issueId}:`, err);
   }
@@ -1455,22 +1439,13 @@ export async function syncCancellationState(
   if (!task.issueId || !state) return;
   if (!taskSource) return;
 
+  // A comment failure still parks the task, then throws so the outbox retries the comment under its key.
   try {
-    const accepted = await taskSource.updateState(task.issueId, 'Backlog');
+    const accepted = await transitionWithReason(taskSource, task.issueId, 'Backlog',
+      preparedComment ?? buildTaskStateSyncComment(state, 'Task cancelled'), { idempotencyKey, commentFailure: 'rethrow' });
     if (!accepted) throw new Error(`Tracker refused Backlog reconciliation for ${task.issueId}`);
   } catch (err) {
-    console.warn(`[AutonomousRunner] Failed to move cancelled task ${task.issueId} to Backlog:`, err);
-    throw err;
-  }
-
-  try {
-    await taskSource.addComment(
-      task.issueId,
-      preparedComment ?? buildTaskStateSyncComment(state, 'Task cancelled'),
-      idempotencyKey,
-    );
-  } catch (err) {
-    console.warn(`[AutonomousRunner] Failed to sync cancelled state for ${task.issueId}:`, err);
+    console.warn(`[AutonomousRunner] Failed to sync cancelled state for ${task.issueId} (Backlog move or its reason):`, err);
     throw err;
   }
 }

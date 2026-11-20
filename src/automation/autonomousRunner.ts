@@ -135,7 +135,7 @@ import { cachedDraftReusable, currentDraftActivity, draftActivityStamp, holdBefo
 import { formatReadinessSummary, projectSkipLabelsHook } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
 import { isScopeDeclined } from '../agents/draftScope.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
-import { completeParentIfChildrenDone as completeParentLocally, buildTaskStateSyncComment } from '../taskState/store.js';
+import { completeParentIfChildrenDone as completeParentLocally } from '../taskState/store.js'; import { transitionWithReason } from './trackerTransition.js'; import { releaseDependentsInTracker } from './dependentRelease.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
 import {
   isExplicitAdmissionRetry,
@@ -2601,14 +2601,13 @@ export class AutonomousRunner {
       }
 
       const targetState = decision.action === 'done' ? 'Done' : 'Backlog';
-      const accepted = await source.updateState(issueId, targetState).catch((error) => {
+      const accepted = await transitionWithReason(source, issueId, targetState, decision.comment).catch((error) => {
         console.warn(`[AutonomousRunner] Failed to move ${label} → ${targetState}:`, error);
         return false;
       });
       if (!accepted) continue;
       task.linearState = targetState;
       updateTaskLinearState(issueId, targetState);
-      await source.addComment(issueId, decision.comment).catch(() => undefined);
       moved++;
       this.syslog(`${targetState === 'Done' ? '✓' : '↩'} ${label}: PR ${lifecycle.state.toLowerCase()} → ${targetState}`);
 
@@ -2630,9 +2629,9 @@ export class AutonomousRunner {
     }
     const parent = completeParentLocally(childIssueId);
     if (!parent) return;
-    const accepted = await source.updateState(parent.issueId, 'Done').catch(() => false);
+    const accepted = await transitionWithReason(source, parent.issueId, 'Done', `All ${parent.childIssueIds.length} child tasks merged, so this parent closes as Done.`).catch(() => false);
     if (!accepted) return;
-    await source.addComment(parent.issueId, buildTaskStateSyncComment(parent, 'All child tasks merged')).catch(() => undefined);
+    await releaseDependentsInTracker(source, parent.issueId); // AGT-4817: tasks waiting on the parent go to Todo in the tracker too
     this.syslog(`✓ ${parent.issueIdentifier ?? parent.issueId}: all children merged → Done`);
   }
 
@@ -2684,7 +2683,8 @@ export class AutonomousRunner {
         );
         continue;
       }
-      const accepted = await source.updateState(issueId, targetState).catch((error) => {
+      const reason = `No OpenSwarm run, lease or pull request has owned this issue for ${this.config.stalledInProgressHours ?? 6}h, so it returns to ${targetState}.`;
+      const accepted = await transitionWithReason(source, issueId, targetState, reason).catch((error) => {
         console.warn(`[AutonomousRunner] Failed to retire stalled ${task.issueIdentifier ?? issueId}:`, error);
         return false;
       });
@@ -2692,7 +2692,6 @@ export class AutonomousRunner {
         console.warn(`[AutonomousRunner] Tracker refused stale-state repair for ${task.issueIdentifier ?? issueId}`);
         continue;
       }
-      await source.addComment(issueId, `No OpenSwarm run, lease or pull request has owned this issue for ${this.config.stalledInProgressHours ?? 6}h, so it returns to ${targetState}.`).catch((error) => console.warn(`[AutonomousRunner] Stale-state comment failed for ${task.issueIdentifier ?? issueId}:`, error)); // AGT-4800: say why, after the tracker accepted the move
       task.linearState = targetState; updateTaskLinearState(issueId, targetState);
       moved++;
       this.syslog(`↩ ${task.issueIdentifier ?? issueId}: stale In Progress → ${targetState}`);
@@ -2854,6 +2853,7 @@ export class AutonomousRunner {
         source: getTaskSource(),
         knownTaskIds,
         priorityDepIds,
+        releaseDependents: (depId) => releaseDependentsInTracker(getTaskSource(), depId), // AGT-4817: Todo in the tracker too
       });
       if (depReconcile.lookedUp > 0) {
         this.syslog(`✓ Dependency cache: ${depReconcile.lookedUp} explicit lookup(s), ${depReconcile.resolved} blocker(s) confirmed done, ${depReconcile.released} dependent task(s) released`);

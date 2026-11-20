@@ -29,6 +29,7 @@ import { taskAttributionKey } from '../orchestration/decisionEngine.js';
 import { workerScratchpadRunId } from '../agents/workerScratchpad.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { postPairVerdictOnPullRequest } from './pairVerdictComment.js';
+import { transitionWithReason } from './trackerTransition.js';
 
 export interface CompletionEffectPayload {
   version: 1;
@@ -188,7 +189,8 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
         `Refusing Todo reconciliation for ${payload.issueId}; tracker moved to ${lookup.issue.state}`,
       );
     }
-    const accepted = await source.updateState(payload.issueId, 'Todo');
+    // The reason is the marker-fenced evidence comment posted above, before the live-state check.
+    const accepted = await transitionWithReason(source, payload.issueId, 'Todo', payload.comment, { reasonAlreadyPosted: true });
     if (!accepted) throw new Error(`Tracker refused Todo reconciliation for ${payload.issueId}`);
     return;
   }
@@ -220,7 +222,7 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
     // while the following state mutation/local ack did not. Reapply the
     // idempotent state transition but never duplicate the completion comment.
     const target = completionTargetState(payload.stats);
-    const accepted = await source.updateState(issueId, target);
+    const accepted = await transitionWithReason(source, issueId, target, markerComment, { reasonAlreadyPosted: true });
     if (!accepted) throw new Error(`Tracker refused ${target} reconciliation for ${issueId}`);
   } else {
     await source.logPairComplete(issueId, effect.dedupeKey, payload.stats);

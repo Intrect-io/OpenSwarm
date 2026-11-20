@@ -26,6 +26,7 @@ import { normalizeErrorForLoop } from '../support/stuckDetector.js';
 import { redactSecrets } from '../support/secretRedaction.js';
 import { coordinationFilePath } from '../coordination/coordinationPaths.js';
 import { defaultAutomationDbPath } from './automationDbPath.js';
+import { transitionWithReason } from './trackerTransition.js';
 
 export type CandidateKind = 'prompt_rule' | 'guard' | 'readiness_check' | 'config_change';
 export type SignalSource = 'attempt' | 'park' | 'question';
@@ -400,7 +401,7 @@ export interface TaxonomyTaskSource {
   updateState(issueId: string, state: 'Backlog'): Promise<boolean>;
   /** Present on real task sources: lets a still-open candidate get this week's evidence instead of a twin. */
   lookupIssueState?(issueId: string): Promise<{ ok: true; issue: { state: string; stateType?: string } | null } | { ok: false; error: string }>;
-  addComment?(issueId: string, body: string, idempotencyKey?: string): Promise<void>;
+  addComment(issueId: string, body: string, idempotencyKey?: string): Promise<void>;
 }
 
 export interface TaxonomyRunResult {
@@ -504,7 +505,7 @@ export async function runFailureTaxonomy(options: {
           && !TERMINAL_STATES.test(lookup.issue.state);
         if (open) {
           const issue = composeCandidateIssue(candidate, { since, until: now });
-          await source.addComment?.(priorIssue, `Seen again (${candidate.signals} signal(s) this window).\n\n${issue.description}`,
+          await source.addComment(priorIssue, `Seen again (${candidate.signals} signal(s) this window).\n\n${issue.description}`,
             `failure-taxonomy:${candidate.id}:${new Date(now).toISOString().slice(0, 10)}`);
           updated.push(priorIssue);
           continue;
@@ -527,7 +528,10 @@ export async function runFailureTaxonomy(options: {
       // none of the Definition of Ready sections, so the readiness gate holds
       // it in Todo instead of dispatching it.
       let moved = false;
-      for (let tries = 0; tries < 3 && !moved; tries++) moved = await source.updateState(created.id, 'Backlog');
+      // The reason is posted once; the retries only repeat the move.
+      for (let tries = 0; tries < 3 && !moved; tries++) {
+        moved = await transitionWithReason(source, created.id, 'Backlog', 'Failure-taxonomy proposal: parked in Backlog until a person approves it.', { reasonAlreadyPosted: tries > 0 });
+      }
       if (!moved) {
         notInBacklog.push(created.identifier ?? created.id);
         console.error(`[FailureTaxonomy] ${created.identifier ?? created.id} could not be moved to Backlog; it is in the tracker's default state. Move it to Backlog or cancel it.`);

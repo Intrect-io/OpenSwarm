@@ -10,6 +10,8 @@ import { scopeDeclineComment } from '../automation/draftGrooming.js';
 import { coordinatorResolutionComment } from '../automation/coordinatorResolution.js';
 import { decideMergedPublication } from '../automation/mergedPublications.js';
 import { isDaemonComment } from '../automation/dispatchFingerprint.js';
+import { ReasonCommentError, transitionWithReason } from '../automation/trackerTransition.js';
+import { LinearTaskSource } from '../automation/taskSource.js';
 
 vi.mock('@linear/sdk', () => ({ LinearClient: vi.fn() }));
 
@@ -117,13 +119,11 @@ describe('state changes in linear.ts come with a companion comment (AGT-4800)', 
   });
 
   // Tracker state changes outside linear.ts: each call needs a comment call shortly before it with
-  // no other state change in between. autonomousRunner.ts is not scanned yet: its stale In Progress
-  // repair (reconcileStalledInProgress) moves state with no comment, and the merge reconciliation
-  // comments after the move; that file is owned by another change. (#853 review)
+  // no other state change in between. src/automation and web.ts go through transitionWithReason
+  // instead (scanned below), so only the issue bridge is checked line by line here. (#853 review)
   const STATE_CHANGE = /\b(?:updateIssueState|updateState|linearClient\.updateIssue)\(/;
   const COMMENT = /\b(?:addComment|logPairComplete)\(/;
-  /** A completion retry whose effect comment already landed reapplies the state only (by design). */
-  const ALLOWED = ['src/automation/trackerEffects.ts: const accepted = await source.updateState(issueId, target);'];
+  const ALLOWED: string[] = [];
   const uncommented = (file: string, source: string): string[] => {
     const lines = source.split('\n');
     return lines.flatMap((line, at) => {
@@ -137,7 +137,7 @@ describe('state changes in linear.ts come with a companion comment (AGT-4800)', 
     });
   };
 
-  it.each(['src/automation/trackerEffects.ts', 'src/issues/linearBridge.ts', 'src/support/web.ts'])(
+  it.each(['src/issues/linearBridge.ts'])(
     'every tracker state change in %s comes after a companion comment',
     (file) => {
       const source = readFileSync(join(__dirname, '..', '..', file), 'utf8');
@@ -156,5 +156,75 @@ describe('state changes in linear.ts come with a companion comment (AGT-4800)', 
     const state = chunk.search(/\bupdateIssueState\(/);
     const comment = chunk.search(/\baddComment\(/);
     expect(comment === -1 || comment > state).toBe(true);
+  });
+});
+
+describe('daemon state changes outside src/linear go through transitionWithReason (AGT-4800)', () => {
+  const source = () => {
+    const calls: string[] = [];
+    return {
+      calls,
+      addComment: vi.fn(async (issueId: string, body: string) => { calls.push(`comment:${issueId}:${body}`); }),
+      updateState: vi.fn(async (issueId: string, state: string) => { calls.push(`state:${issueId}:${state}`); return true; }),
+    };
+  };
+
+  it('transitionWithReason posts the [OpenSwarm] comment before the state change', async () => {
+    // Through the real Linear task source, so the lead is the one that actually reaches Linear.
+    const calls: string[] = [];
+    const client = {
+      createComment: vi.fn(async (input: { issueId: string; body: string }) => { calls.push(`comment:${input.issueId}:${input.body}`); return { success: true }; }),
+      issue: vi.fn(async () => ({ team: Promise.resolve({ id: 'team-1' }) })),
+      team: vi.fn(async () => ({ states: async () => ({ nodes: [{ id: 'state-backlog', name: 'Backlog' }] }) })),
+      updateIssue: vi.fn(async (issueId: string, input: { stateId: string }) => { calls.push(`state:${issueId}:${input.stateId}`); return { success: true }; }),
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return client as never; } as never);
+    initLinear('fake-key', 'team-1');
+    const linearSource = new LinearTaskSource(async () => []);
+    await expect(transitionWithReason(linearSource, 'issue-1', 'Backlog', 'Parked: retries exhausted.')).resolves.toBe(true);
+    expect(calls).toEqual([`comment:issue-1:${DAEMON_COMMENT_LEAD} Parked: retries exhausted.`, 'state:issue-1:state-backlog']);
+    expect(calls[0].slice('comment:issue-1:'.length)).toMatch(STARTS_WITH_OPENSWARM);
+
+    // A failed comment still parks by default (the move is the safety action) ...
+    const failing = source();
+    failing.addComment.mockRejectedValueOnce(new Error('tracker down'));
+    await expect(transitionWithReason(failing, 'issue-2', 'Backlog', 'Parked.')).resolves.toBe(true);
+    expect(failing.updateState).toHaveBeenCalledWith('issue-2', 'Backlog');
+    // ... 'rethrow' still moves, then surfaces the error so an outbox retries the comment ...
+    failing.addComment.mockRejectedValueOnce(new Error('tracker down'));
+    await expect(transitionWithReason(failing, 'issue-3', 'Backlog', 'Parked.', { commentFailure: 'rethrow' })).rejects.toThrow('tracker down');
+    expect(failing.updateState).toHaveBeenCalledWith('issue-3', 'Backlog');
+    // ... and 'abort' leaves the state alone.
+    failing.addComment.mockRejectedValueOnce(new Error('tracker down'));
+    await expect(transitionWithReason(failing, 'issue-4', 'Done', 'Groomed.', { commentFailure: 'abort' })).rejects.toBeInstanceOf(ReasonCommentError);
+    expect(failing.updateState).not.toHaveBeenCalledWith('issue-4', 'Done');
+  });
+
+  it('no file under src/automation or src/support/web.ts calls updateState directly', () => {
+    const root = join(__dirname, '..', '..');
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir)) {
+        const path = join(dir, entry);
+        if (statSync(path).isDirectory()) { walk(path); continue; }
+        if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) files.push(path);
+      }
+    };
+    walk(join(root, 'src', 'automation'));
+    files.push(join(root, 'src', 'support', 'web.ts'));
+    expect(files.length).toBeGreaterThan(50);
+    const offenders = files.flatMap((path) => {
+      const rel = path.slice(root.length + 1);
+      if (rel === 'src/automation/trackerTransition.ts') return [];
+      return readFileSync(path, 'utf8').split('\n').flatMap((line, at) => {
+        if (!/\bupdateState\(/.test(line) || /^\s*(?:\/\/|\*)/.test(line)) return [];
+        // The method itself: interface members and implementations (`updateState(issueId: string, ...)`).
+        if (/^\s*(?:async\s+)?updateState\(\w+: string/.test(line)) return [];
+        // An ITaskSource implementation calling its own method (each one comments first; taskSource.ts).
+        if (rel === 'src/automation/taskSource.ts' && /\bthis\.updateState\(/.test(line)) return [];
+        return [`${rel}:${at + 1}: ${line.trim()}`];
+      });
+    });
+    expect(offenders).toEqual([]);
   });
 });

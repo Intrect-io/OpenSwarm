@@ -251,14 +251,16 @@ describe('AutonomousRunner durable completion race', () => {
 
     await internal.drainDurableOutbox();
     expect(updateState).toHaveBeenCalledTimes(1);
-    expect(addComment).not.toHaveBeenCalled();
+    // AGT-4800: the reason goes first, under the effect key, so the retry converges on the same comment.
+    expect(addComment).toHaveBeenCalledTimes(1);
     expect(internal.durableRuns.getRun('cancel-issue')?.state).toBe('SYNC_PENDING');
     expect(internal.filterAlreadyProcessed([cancelledTask])).toEqual([]);
 
     vi.advanceTimersByTime(11_000);
     await internal.drainDurableOutbox();
     expect(updateState).toHaveBeenCalledTimes(2);
-    expect(addComment).toHaveBeenCalledTimes(1);
+    expect(addComment).toHaveBeenCalledTimes(2);
+    expect(addComment.mock.calls.map((call: unknown[]) => call[2])).toEqual(['cancel:cancel-issue:attempt:1', 'cancel:cancel-issue:attempt:1']);
     expect(addComment).toHaveBeenCalledWith(
       'cancel-issue',
       expect.stringContaining('<!-- openswarm-effect:cancel:cancel-issue:attempt:1 -->'),
