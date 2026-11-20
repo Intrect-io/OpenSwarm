@@ -304,3 +304,30 @@ describe('process substitution is recognised only outside double quotes (#851 + 
     expect(isCommandBlocked(command)).toBe(true);
   });
 });
+
+describe('destructive-command guard closes the remaining run-time program forms (#882 review)', () => {
+  it.each([
+    'X="rm -rf"; sudo $X /x',
+    'X="rm -rf"; timeout 5 $X /x',
+    'X="rm -rf"; command $X /x',
+    'X="rm -rf"; env $X /x',
+    '$"rm" -rf /x',
+    '/bin/r[m] -rf /x',
+    '/bin/r? -rf /x',
+    '/bin/r* -rf /x',
+    'coproc rm -rf /x',
+  ])('refuses %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(true);
+  });
+
+  it.each([
+    'ls *.txt',
+    '[ -f x ] && echo ok',
+    '[[ -n "$a" ]] && echo hi',
+    'echo $"hello"',
+    '/usr/bin/l? -la',
+    'timeout $T npm test',
+  ])('still allows %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(false);
+  });
+});

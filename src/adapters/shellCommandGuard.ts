@@ -80,7 +80,7 @@ const COMMAND_LAUNCHERS: Record<string, true> = {
  * `for f in a; do rm -rf /x; done` runs `rm` from the word after `do`, and
  * `{ rm -rf /x; }` from the word after `{`.
  */
-const COMPOUND_PREFIXES: ReadonlySet<string> = new Set(['do', 'then', 'else', 'if', 'elif', 'while', 'until', '!', '{']);
+const COMPOUND_PREFIXES: ReadonlySet<string> = new Set(['do', 'then', 'else', 'if', 'elif', 'while', 'until', '!', '{', 'coproc']);
 
 /** Characters after `$` that make it a parameter expansion bash fills in (`$X`, `$1`, `$@`, `$$`). */
 const PARAMETER_START = /[A-Za-z_0-9@*#?!$-]/;
@@ -332,6 +332,9 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
       continue;
     }
     if (char === "'" || char === '"') { quote = char; wordStarted = true; atWordStart = false; continue; }
+    // `$"rm"` is a locale-translated string: bash drops the `$` and reads
+    // `"rm"`, so `$"rm" -rf /x` runs `rm`. The `"` is handled next iteration.
+    if (char === '$' && command[i + 1] === '"') continue;
     if (char === '$' && command[i + 1] === "'") {
       const close = closingAnsiCQuote(command, i + 1);
       if (close < 0) return null;
@@ -512,9 +515,54 @@ function unknownFlagIsDestructive(name: string, args: string[], argDynamics: Wor
   return false;
 }
 
-/** Could an unknown program, run with these arguments, be a destructive one? */
-function unknownProgramIsDestructive(args: string[], argDynamics: WordDynamics[]): boolean {
-  return DESTRUCTIVE_PROGRAMS.some((name) => rulesMatch(name, args) || unknownFlagIsDestructive(name, args, argDynamics));
+/**
+ * Could an unknown program, run with these arguments, be a destructive one?
+ * An unquoted program word is split at run time, so it may also carry flags of
+ * its own: `X="rm -rf"; sudo $X /x` runs `rm -rf /x`. A bare-word target
+ * (`sudo $X build`) is not covered: it reads the same as a program name.
+ */
+function unknownProgramIsDestructive(args: string[], argDynamics: WordDynamics[], programUnquoted = false): boolean {
+  return DESTRUCTIVE_PROGRAMS.some((name) => {
+    if (rulesMatch(name, args) || unknownFlagIsDestructive(name, args, argDynamics)) return true;
+    // Only when the next word is a target, not another program: in
+    // `timeout $T npm test` / `nice -n $N npm test` the dynamic word is the
+    // launcher's own value and `npm` is the program, judged on its own.
+    if (!programUnquoted || args.length === 0 || /^[A-Za-z_][\w.+-]*$/.test(args[0])) return false;
+    return FLAG_STAND_INS.some((first) => {
+      const one = [first, ...args];
+      if (rulesMatch(name, one) && hasOperand(one)) return true;
+      return FLAG_STAND_INS.some((second) => {
+        const two = [first, second, ...args];
+        return rulesMatch(name, two) && hasOperand(two);
+      });
+    });
+  });
+}
+
+/**
+ * The destructive programs an unquoted glob in program position may expand to:
+ * `/bin/r[m] -rf /x` and `/bin/r? -rf /x` run `rm`. `[`/`[[` are the test
+ * builtins, not patterns.
+ */
+function globbedPrograms(word: string): string[] {
+  const base = path.basename(word);
+  if (base === '[' || base === '[[' || !/[*?[]/.test(base)) return [];
+  let pattern = '';
+  for (let i = 0; i < base.length; i++) {
+    const c = base[i];
+    if (c === '*') pattern += '.*';
+    else if (c === '?') pattern += '.';
+    else if (c === '[') {
+      const close = base.indexOf(']', i + 2);
+      if (close < 0) { pattern += '\\['; continue; }
+      const body = base.slice(i + 1, close).replace(/^!/, '^').replace(/\\/g, '\\\\');
+      pattern += `[${body}]`;
+      i = close;
+    } else pattern += c.replace(/[.+^${}()|\\]/g, '\\$&');
+  }
+  let re: RegExp;
+  try { re = new RegExp(`^${pattern}$`); } catch { return [...DESTRUCTIVE_PROGRAMS]; }
+  return DESTRUCTIVE_PROGRAMS.filter((name) => re.test(name));
 }
 
 /**
@@ -554,7 +602,11 @@ function resolvedCommandIsBlocked(command: ResolvedCommand, depth: number, asLau
     // only be the program the launcher runs: `command $X`, `timeout 5 $X`,
     // `env $(echo rm -rf /x)`. (`timeout 30 cat $F` has `cat` before it.)
     if (!asLauncherSuffix || (programSlot && args.length === 0)) return true;
-    if (unknownProgramIsDestructive(args, argDynamics)) return true;
+    if (unknownProgramIsDestructive(args, argDynamics, command.dynamics[start].unquoted)) return true;
+  }
+
+  for (const globbed of globbedPrograms(command.words[start] ?? '')) {
+    if (rulesMatch(globbed, args) || unknownFlagIsDestructive(globbed, args, argDynamics)) return true;
   }
 
   if (depth < GUARD_MAX_DEPTH) {
