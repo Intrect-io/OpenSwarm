@@ -154,6 +154,11 @@ export async function readUsageShell(): Promise<Buffer | null> {
   return readShellFile('usage.html');
 }
 
+/** The opt-in web terminal shell (AGT-4002); served only while the terminal is attached (see isWebTerminalActive). */
+export async function readTerminalShell(): Promise<Buffer | null> {
+  return readShellFile('terminal.html');
+}
+
 /** The /app entry document, or null when assets are not present. */
 export async function readAppShell(): Promise<Buffer | null> {
   return readShellFile('app.html');

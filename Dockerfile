@@ -162,8 +162,11 @@ RUN mkdir -p /work /home/openswarm/.openswarm && \
     chown -R openswarm:openswarm /work /home/openswarm
 
 USER openswarm
+# OPENSWARM_CONTAINER marks this image for the opt-in web terminal, which
+# refuses to give out a shell outside a container (AGT-4002).
 ENV HOME=/home/openswarm \
     NODE_ENV=production \
+    OPENSWARM_CONTAINER=1 \
     UV_PYTHON_INSTALL_DIR=/home/openswarm/.local/share/uv/python
 
 # Bake the interpreter in rather than letting uv fetch it on first use: that

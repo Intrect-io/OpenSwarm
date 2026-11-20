@@ -9,6 +9,7 @@
 // handling in a 1650-line file, and the surface most worth reading on its own.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { isAuthorizedTailscalePeer, isLoopbackAddress, isTailscaleLocalEnd } from './tailscaleNetwork.js';
 import { isGraphQLRequest } from '../issues/graphql/server.js';
 import { activeDaemonToken } from './daemonToken.js';
@@ -100,7 +101,14 @@ export function hasValidWebToken(req: IncomingMessage): boolean {
     (Array.isArray(req.headers['x-openswarm-token'])
       ? req.headers['x-openswarm-token'][0]
       : req.headers['x-openswarm-token']);
-  return presentedToken === configuredToken;
+  if (typeof presentedToken !== 'string' || !presentedToken) return false;
+  // Compare fixed-length digests in constant time, so neither the content nor
+  // the length of the configured token leaks through response timing.
+  return timingSafeEqual(sha256(presentedToken), sha256(configuredToken));
+}
+
+function sha256(value: string): Buffer {
+  return createHash('sha256').update(value, 'utf8').digest();
 }
 
 export function getEffectivePort(url: URL): string {

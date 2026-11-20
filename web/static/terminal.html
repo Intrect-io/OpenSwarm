@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>OpenSwarm · Terminal</title>
+<script src="/static/js/themeBoot.js"></script><script src="/static/js/webToken.js"></script>
+<link rel="stylesheet" href="/static/css/tokens.css"><link rel="stylesheet" href="/static/css/shell.css">
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css"><link rel="stylesheet" href="/static/css/terminal.css">
+</head>
+<body class="page-terminal"><header class="topbar" data-shell></header>
+<main>
+  <div class="terminal-bar">
+    <strong>Container shell</strong>
+    <span id="terminal-state" role="status" aria-live="polite">Connecting…</span>
+    <span class="grow"></span>
+    <button id="terminal-reconnect" class="btn btn-secondary btn-sm" type="button" hidden>Reconnect</button>
+  </div>
+  <form id="terminal-token-form" class="terminal-token" hidden>
+    <label for="terminal-token-input">Web token</label>
+    <input id="terminal-token-input" type="password" autocomplete="off" spellcheck="false" required>
+    <button class="btn btn-primary btn-sm" type="submit">Connect</button>
+  </form>
+  <div id="terminal" aria-label="Terminal"></div>
+</main>
+<script src="/static/vendor/xterm/xterm.js"></script>
+<script src="/static/vendor/xterm/addon-fit.js"></script>
+<script src="/static/js/terminal.js"></script>
+<script type="module">
+  import { mountShell } from '/static/js/shell.mjs';
+  mountShell(document);
+</script>
+</body></html>

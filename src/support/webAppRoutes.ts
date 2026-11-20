@@ -11,6 +11,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AutonomousRunner } from '../automation/autonomousRunner.js';
 import { readStaticAsset, StaticAssetError } from './staticAssets.js';
+import { isWebTerminalActive } from './terminalServer.js';
 
 function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
@@ -43,6 +44,13 @@ const PAGE_SHELLS: Record<string, () => Promise<Buffer | null>> = {
   '/settings': async () => (await import('./staticAssets.js')).readSettingsShell(),
   '/threads': async () => (await import('./staticAssets.js')).readThreadBoardShell(),
   '/app': async () => (await import('./staticAssets.js')).readAppShell(),
+  '/terminal': async () => (await import('./staticAssets.js')).readTerminalShell(),
+};
+
+/** Pages that exist only behind an opt-in flag; off, the URL is not routed at all. */
+const GATED_PAGES: Record<string, () => boolean> = {
+  // Attached, not merely requested: a start refused as root or on the host keeps it off.
+  '/terminal': isWebTerminalActive,
 };
 
 /**
@@ -56,6 +64,7 @@ export async function tryServePageShell(res: ServerResponse, url: string): Promi
   // hasOwn, not a bare index: `url` is request input, and this must not
   // depend on the caller's `/`-prefix invariant surviving a future change.
   if (!Object.hasOwn(PAGE_SHELLS, url)) return false;
+  if (Object.hasOwn(GATED_PAGES, url) && !GATED_PAGES[url]()) return false;
   const load = PAGE_SHELLS[url];
   const shell = await load();
   if (!shell) {

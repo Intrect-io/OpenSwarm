@@ -119,6 +119,11 @@ const integrationBoundaryCoverageExcludes = [
   'src/discord/discordPair.ts',
   'src/taskState/store.ts',
 
+  // Pipeline-eval harness (AGT-4811): an operator-run benchmark that drives real
+  // pipeline runs (git, gh, a live adapter) in parent/child processes. Its
+  // grading and evidence helpers are tested in tests/pipelineEval.*.test.ts.
+  'benchmarks/pipelineEval.ts',
+
   // Ink TUI boundaries — alt-screen entry, network SSE, and effect hooks
   // (real TTY / sockets); the pure parser+reducer carry the tested logic. EPIC INT-1813.
   'src/tui/index.tsx',
