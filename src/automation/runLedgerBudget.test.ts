@@ -156,6 +156,10 @@ describe('per-issue budget (AGT-4807)', () => {
       expect(result.operatorPark?.code).toBe(ISSUE_BUDGET_PARK_REASON);
       // The runner posts this reason as the issue's one operator-park comment.
       expect(result.operatorPark?.reason).toContain('[OpenSwarm] This issue has spent $5.50 of its $5.00 budget');
+      // The comment names the resume that actually lifts this park (an explicit
+      // dispatch); a Todo move alone never calls resumeNeedsHuman for it.
+      expect(result.operatorPark?.reason).toContain('dispatch it from the dashboard issue board to resume');
+      expect(result.operatorPark?.reason).not.toContain('move it back to Todo to resume');
       const run = ledger.getRun('x');
       expect(run?.state).toBe('NEEDS_HUMAN');
       expect(run?.lastErrorCode).toBe(ISSUE_BUDGET_PARK_REASON);
@@ -213,8 +217,9 @@ describe('per-issue budget (AGT-4807)', () => {
         expect(issueSpend(db, 'z', Date.now()).totalUsd).toBe(6);
         // A free slot is not more budget: idle fill does not lift the park.
         expect(ledger.resumeNeedsHuman('z', Date.now(), 'idle_fill')).toBeNull();
-        // Resume strictly after the spend was recorded.
-        expect(ledger.resumeNeedsHuman('z', Date.now() + 1)).not.toBeNull();
+        // Resume strictly after the spend was recorded, the way the park comment
+        // tells the operator to: an explicit dispatch.
+        expect(ledger.resumeNeedsHuman('z', Date.now() + 1, 'explicit_dispatch')).not.toBeNull();
         expect(issueSpend(db, 'z', Date.now() + 2).totalUsd).toBe(0);
       } finally {
         db.close();

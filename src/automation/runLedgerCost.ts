@@ -282,7 +282,7 @@ export function issueBudgetPark(
     ? ` — ${usd(spend.knownUsd)} recorded plus ${spend.unknownAttempts} attempt(s) without a recorded cost at ~${usd(spend.estimatePerUnknownUsd)} each`
     : '';
   const reason = `[OpenSwarm] This issue has spent ${usd(spend.totalUsd)} of its ${usd(capUsd)} budget`
-    + ` (autonomous.budget.perIssueUsd)${unknown}. Raise the budget or narrow the issue, then move it back to Todo to resume.`;
+    + ` (autonomous.budget.perIssueUsd)${unknown}. Raise the budget or narrow the issue, then dispatch it from the dashboard issue board to resume; moving it back to Todo alone does not lift a budget park.`;
   return {
     success: false,
     sessionId: `issue-budget-${Date.now()}`,
