@@ -139,6 +139,8 @@ export interface PRProcessorConfig {
   repoMappings?: Record<string, string>; // Custom repo → local path mappings
   /** Inherited autonomous CodeQL policy for every PR remediation pipeline. */
   securityAudit?: SecurityAuditConfig;
+  /** `autonomous.workerSandbox` for the remediation and conflict workers; required, no implicit fence (AGT-4815). */
+  workerSandbox: 'on' | 'off';
   /** Runtime-only wiring to the durable runner; not a user configuration surface. */
   postMergeIntegration?: Pick<IntegrationCoordinatorConfig,
     'getActiveLeaseBranches' | 'getActiveLeaseIdentifiers' | 'withIntegrationReservation' | 'routeConflict'>;
@@ -212,7 +214,7 @@ export class PRProcessor {
   constructor(config: PRProcessorConfig) {
     this.config = config;
     if (config.conflictResolver?.enabled) {
-      this.conflictResolver = new ConflictResolver(config.conflictResolver);
+      this.conflictResolver = new ConflictResolver(config.conflictResolver, config.workerSandbox);
       console.log(`[PRProcessor] ConflictResolver enabled (mode: ${config.conflictResolver.ownershipMode}, maxAttempts: ${config.conflictResolver.maxResolutionAttempts})`);
     }
     if (config.postMergeIntegration) {
@@ -228,20 +230,17 @@ export class PRProcessor {
   /**
    * CI-failure and review-feedback repairs must use the same CodeQL policy as
    * ordinary autonomous work. Keeping the construction in one helper avoids a
-   * future PR remediation path accidentally omitting the final argument.
+   * future PR remediation path accidentally omitting the final argument. The
+   * worker runs under the configured fence (AGT-4815); every pipeline stage
+   * already refuses publication, since this processor pushes the branch itself.
    */
   private createRemediationPipeline() {
     return createPipelineFromConfig(
-      this.config.roles,
-      this.config.maxIterations,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
+      this.config.roles, this.config.maxIterations,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       this.config.securityAudit ?? DEFAULT_SECURITY_AUDIT_CONFIG,
+      undefined, undefined, undefined,
+      this.config.workerSandbox,
     );
   }
 

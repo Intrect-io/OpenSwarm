@@ -159,7 +159,7 @@ describe('PairPipeline coverage extension', () => {
   describe('factory functions', () => {
     it('createDefaultPipeline builds a worker+reviewer pipeline', async () => {
       const { createDefaultPipeline } = await import('./pairPipeline.js');
-      const pipeline = createDefaultPipeline(5);
+      const pipeline = createDefaultPipeline(5, 'off');
       const config = (pipeline as unknown as { config: { stages: string[]; maxIterations: number } }).config;
       expect(config.stages).toEqual(['worker', 'reviewer']);
       expect(config.maxIterations).toBe(5);
@@ -167,7 +167,7 @@ describe('PairPipeline coverage extension', () => {
 
     it('createFullPipeline builds worker+reviewer+tester+documenter with defaults', async () => {
       const { createFullPipeline } = await import('./pairPipeline.js');
-      const pipeline = createFullPipeline();
+      const pipeline = createFullPipeline({ workerSandbox: 'off' });
       const config = (pipeline as unknown as {
         config: { stages: string[]; continueOnTestFail: boolean; skipDocumenterIfNoChange: boolean };
       }).config;
@@ -185,7 +185,7 @@ describe('PairPipeline coverage extension', () => {
         documenter: { enabled: true, timeoutMs: 0 },
         auditor: { enabled: true, timeoutMs: 0 },
         'skill-documenter': { enabled: true, timeoutMs: 0 },
-      });
+      }, 3, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off');
       const config = (pipeline as unknown as { config: { stages: string[] } }).config;
       // worker/reviewer explicitly disabled → excluded; the rest opted in via enabled:true.
       expect(config.stages).toEqual(['tester', 'documenter', 'auditor', 'skill-documenter']);
@@ -193,7 +193,7 @@ describe('PairPipeline coverage extension', () => {
 
     it('createPipelineFromConfig defaults worker/reviewer to enabled when omitted', async () => {
       const { createPipelineFromConfig } = await import('./pairPipeline.js');
-      const pipeline = createPipelineFromConfig(undefined);
+      const pipeline = createPipelineFromConfig(undefined, 3, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off');
       const config = (pipeline as unknown as { config: { stages: string[] } }).config;
       expect(config.stages).toEqual(['worker', 'reviewer']);
     });
@@ -205,7 +205,7 @@ describe('PairPipeline coverage extension', () => {
 
   it('fails immediately without running anything when no worker stage is configured', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['reviewer'],
       maxIterations: 1,
       roles: { reviewer: { enabled: true, timeoutMs: 0 } },
@@ -220,7 +220,7 @@ describe('PairPipeline coverage extension', () => {
 
   it('cancels immediately when the run is started with an already-aborted signal', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 3,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
@@ -239,7 +239,7 @@ describe('PairPipeline coverage extension', () => {
     hasRepoSnapshot.mockReturnValue(false);
     scanAndCache.mockResolvedValueOnce(undefined);
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
@@ -255,7 +255,7 @@ describe('PairPipeline coverage extension', () => {
     hasRepoSnapshot.mockReturnValue(false);
     scanAndCache.mockRejectedValueOnce(new Error('scan crashed'));
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
@@ -284,7 +284,7 @@ describe('PairPipeline coverage extension', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       verbose: true,
@@ -321,7 +321,7 @@ describe('PairPipeline coverage extension', () => {
   it('treats a worker-context collection failure as non-blocking (analyzeIssue throws)', async () => {
     analyzeIssue.mockRejectedValueOnce(new Error('analyzer exploded'));
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
@@ -359,7 +359,7 @@ describe('PairPipeline coverage extension', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 2,
       roles: {
@@ -384,7 +384,7 @@ describe('PairPipeline coverage extension', () => {
     runWorker.mockRejectedValue(new Error('the config loader keeps failing the same schema validation check'));
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 4,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
@@ -418,7 +418,7 @@ describe('PairPipeline coverage extension', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 4,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
@@ -437,7 +437,7 @@ describe('PairPipeline coverage extension', () => {
     runWorker.mockRejectedValue(new Error('the config loader keeps failing the same schema validation check'));
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 4,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
@@ -458,7 +458,7 @@ describe('PairPipeline coverage extension', () => {
     } satisfies GuardsRunResult);
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 5,
       guards: { qualityGate: true },
@@ -499,7 +499,7 @@ describe('PairPipeline coverage extension', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 5,
       guards: { contractEvidenceCheck: true },
@@ -535,7 +535,7 @@ describe('PairPipeline coverage extension', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 5,
       guards: { contractEvidenceCheck: true },
@@ -564,7 +564,7 @@ describe('PairPipeline coverage extension', () => {
     } satisfies GuardsRunResult);
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 5,
       guards: { contractEvidenceCheck: true, qualityGate: true },
@@ -607,7 +607,7 @@ describe('PairPipeline coverage extension', () => {
 
     try {
       const { PairPipeline } = await import('./pairPipeline.js');
-      const pipeline = new PairPipeline({
+      const pipeline = new PairPipeline({ workerSandbox: 'off',
         stages: ['worker'],
         maxIterations: 5,
         guards: { qualityGate: true },
@@ -636,7 +636,7 @@ describe('PairPipeline coverage extension', () => {
     } satisfies GuardsRunResult);
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       guards: { qualityGate: true },
@@ -661,7 +661,7 @@ describe('PairPipeline coverage extension', () => {
     runGuards.mockRejectedValueOnce(new Error('guard evaluation exploded unexpectedly'));
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       guards: { qualityGate: true },
@@ -701,7 +701,7 @@ describe('PairPipeline coverage extension', () => {
       } satisfies TesterResult);
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'tester'],
       maxIterations: 2,
       verbose: true,
@@ -740,7 +740,7 @@ describe('PairPipeline coverage extension', () => {
       } as GuardsRunResult);
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'tester'],
       maxIterations: 2,
       guards: { qualityGate: true },
@@ -772,7 +772,7 @@ describe('PairPipeline coverage extension', () => {
     } satisfies TesterResult);
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'tester'],
       maxIterations: 5,
       roles: {
@@ -807,7 +807,7 @@ describe('PairPipeline coverage extension', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer', 'documenter', 'auditor'],
       maxIterations: 1,
       roles: {
@@ -840,7 +840,7 @@ describe('PairPipeline coverage extension', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer', 'documenter', 'auditor', 'skill-documenter'],
       maxIterations: 1,
       roles: {
@@ -877,7 +877,7 @@ describe('PairPipeline coverage extension', () => {
     runReviewer.mockResolvedValueOnce({ decision: 'reject', feedback: 'This approach is fundamentally unsound.' });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 3,
       roles: {
@@ -901,7 +901,7 @@ describe('PairPipeline coverage extension', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       verbose: true,

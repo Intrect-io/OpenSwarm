@@ -48,7 +48,7 @@ interface CapturedOptions { previousFeedback?: string; scratchpadRunId?: string 
 
 async function runWorkerStage(): Promise<CapturedOptions> {
   const { PairPipeline } = await import('./pairPipeline.js');
-  const pipeline = new PairPipeline({
+  const pipeline = new PairPipeline({ workerSandbox: 'off',
     stages: ['worker'],
     maxIterations: 1,
     roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },

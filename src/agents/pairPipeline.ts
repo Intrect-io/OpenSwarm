@@ -83,6 +83,17 @@ import { computeProtectedFiles } from './protectedFiles.js';
 
 type RunControl = { signal?: AbortSignal; stuck: StuckDetector };
 
+/**
+ * A pipeline is never built with an implicit worker fence: an entry point that
+ * forgot `workerSandbox` used to run its worker unfenced, with open network,
+ * while the config said `on` (AGT-4815). Fails closed instead of defaulting.
+ */
+function assertExplicitWorkerSandbox(mode: unknown): asserts mode is 'on' | 'off' {
+  if (mode !== 'on' && mode !== 'off') {
+    throw new Error(`PairPipeline: workerSandbox must be 'on' or 'off' (got ${String(mode)}); `
+      + 'pass autonomous.workerSandbox, or an explicit \'off\'');
+  }
+}
 
 export class PairPipeline extends EventEmitter {
   private config: PipelineConfig;
@@ -102,6 +113,7 @@ export class PairPipeline extends EventEmitter {
 
   constructor(config: PipelineConfig) {
     super();
+    assertExplicitWorkerSandbox(config.workerSandbox);
     this.config = {
       continueOnTestFail: false,
       skipDocumenterIfNoChange: true,
@@ -881,18 +893,15 @@ export class PairPipeline extends EventEmitter {
 /**
  * Create default pipeline (Worker + Reviewer)
  */
-export function createDefaultPipeline(maxIterations = 3): PairPipeline {
-  return new PairPipeline({
-    stages: ['worker', 'reviewer'],
-    maxIterations,
-  });
+export function createDefaultPipeline(maxIterations: number, workerSandbox: PipelineConfig['workerSandbox']): PairPipeline {
+  return new PairPipeline({ stages: ['worker', 'reviewer'], maxIterations, workerSandbox });
 }
 
 /**
  * Create full pipeline (Worker + Reviewer + Tester + Documenter)
  */
 export function createFullPipeline(
-  config?: Partial<PipelineConfig>
+  config: Partial<PipelineConfig> & Pick<PipelineConfig, 'workerSandbox'>,
 ): PairPipeline {
   return new PairPipeline({
     stages: ['worker', 'reviewer', 'tester', 'documenter'],
@@ -909,18 +918,20 @@ export function createFullPipeline(
 export function createPipelineFromConfig(
   roles: PipelineConfig['roles'],
   maxIterations = 3,
-  guards?: Partial<PipelineGuardsConfig>,
-  jobProfiles?: JobProfile[],
-  draftAnalysis?: PipelineConfig['draftAnalysis'],
-  maxReflections?: number,
-  runMetadata?: PipelineRunMetadata,
-  verify?: PipelineConfig['verify'],
-  resumedTaskFiles?: string[],
-  securityAudit?: PipelineConfig['securityAudit'],
-  instructionCapsule?: PipelineConfig['instructionCapsule'],
-  roleMcpTools?: PipelineConfig['roleMcpTools'],
-  adapterRouting?: PipelineConfig['adapterRouting'],
-  workerSandbox?: PipelineConfig['workerSandbox'],
+  guards: Partial<PipelineGuardsConfig> | undefined,
+  jobProfiles: JobProfile[] | undefined,
+  draftAnalysis: PipelineConfig['draftAnalysis'] | undefined,
+  maxReflections: number | undefined,
+  runMetadata: PipelineRunMetadata | undefined,
+  verify: PipelineConfig['verify'] | undefined,
+  resumedTaskFiles: string[] | undefined,
+  securityAudit: PipelineConfig['securityAudit'] | undefined,
+  instructionCapsule: PipelineConfig['instructionCapsule'] | undefined,
+  roleMcpTools: PipelineConfig['roleMcpTools'] | undefined,
+  adapterRouting: PipelineConfig['adapterRouting'] | undefined,
+  // Required (AGT-4815): the parameters above are `| undefined` rather than
+  // optional only so that this one can be.
+  workerSandbox: PipelineConfig['workerSandbox'],
   taskBudgetMs?: number,
   projectGoal?: string,
   loopAdvisor?: PipelineConfig['loopAdvisor'], advisorRole?: PipelineConfig['advisorRole'],

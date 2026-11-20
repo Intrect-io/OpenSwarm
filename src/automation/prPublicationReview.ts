@@ -26,6 +26,8 @@ export async function reviewPublishedPullRequest(input: {
   projectPath: string;
   roles?: DefaultRolesConfig;
   securityAudit?: SecurityAuditConfig;
+  /** `autonomous.workerSandbox`; the fresh review runs no worker, but the processor takes no implicit fence. */
+  workerSandbox: 'on' | 'off';
 }): Promise<PublicationReviewOutcome> {
   const pr = parsePublishedPullRequest(input.prUrl);
   if (!pr) {
@@ -38,6 +40,7 @@ export async function reviewPublishedPullRequest(input: {
     maxIterations: 1,
     roles: input.roles,
     securityAudit: input.securityAudit,
+    workerSandbox: input.workerSandbox,
   });
   const result = await processor.freshReview(pr as PRInfo, input.projectPath);
   return {

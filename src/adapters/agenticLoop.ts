@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 
 import { TOOL_DEFINITIONS, APPLY_PATCH_TOOL, executeToolCalls, createReadCache, isProtectedPath, validatePath, type ToolCall, type ToolResult, type ToolDefinition } from './tools.js';
 import { DIAGNOSTICS_TOOL } from './diagnosticsTool.js';
-import { WEB_TOOL_DEFINITIONS } from './webTools.js';
+import { WEB_TOOL_DEFINITIONS, webToolsBlockedByNetwork } from './webTools.js';
 import { detectRateLimit, RateLimitError } from './rateLimitError.js';
 import { isInfraError } from './errorClassification.js';
 import { salvageFinalAnswer, repairFinalAnswerFormat, type FinalTurnContext } from './finalAnswerTurns.js';
@@ -498,10 +498,10 @@ async function runAgenticLoopInner(
         ...(filesystemTools && applyPatch && editFormat === 'json' && !readOnly ? [APPLY_PATCH_TOOL] : []),
         // Not in readOnly: it spawns compiler subprocesses, matching bash's exclusion.
         ...(filesystemTools && diagnosticsTool && !readOnly && shellTools ? [DIAGNOSTICS_TOOL] : []),
-        // Also withheld in readOnly: the material under inspection is untrusted,
-        // and a fetch is an outbound channel for anything the agent can read —
-        // the provider credential included. (INT-3189)
-        ...(webTools && !readOnly ? WEB_TOOL_DEFINITIONS : []),
+        // Also withheld in readOnly: the material under inspection is untrusted, and a fetch is an
+        // outbound channel for anything the agent can read, the provider credential included (INT-3189).
+        // Withheld under the loopback worker network too, which tools.ts also enforces (AGT-4815).
+        ...(webTools && !readOnly && !webToolsBlockedByNetwork(sandbox) ? WEB_TOOL_DEFINITIONS : []),
       ]
     : [];
   // MCP and coordination tools keep their own flags; the role list names built-ins.

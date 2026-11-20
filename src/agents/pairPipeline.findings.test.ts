@@ -95,7 +95,7 @@ describe('PairPipeline finding ledger', () => {
   }
 
   const config = (maxIterations: number, maxFindingRounds?: number) => ({
-    stages: ['worker', 'reviewer'] as ('worker' | 'reviewer')[],
+    workerSandbox: 'off' as const, stages: ['worker', 'reviewer'] as ('worker' | 'reviewer')[],
     maxIterations,
     maxFindingRounds,
     roles: {
@@ -215,7 +215,7 @@ describe('PairPipeline finding ledger', () => {
       .mockResolvedValueOnce({ decision: 'revise', feedback: 'bound', issues: ['range() stops one short'] })
       .mockResolvedValue({ decision: 'approve', feedback: 'F1: resolved' });
 
-    const result = await new PairPipeline({ ...config(5), guards: { qualityGate: true } }).run(task(), process.cwd());
+    const result = await new PairPipeline({ workerSandbox: 'off', ...config(5), guards: { qualityGate: true } }).run(task(), process.cwd());
 
     expect(result.finalStatus).toBe('approved');
     expect(runReviewer).toHaveBeenCalledTimes(2);

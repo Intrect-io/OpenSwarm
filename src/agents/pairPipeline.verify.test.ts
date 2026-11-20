@@ -81,7 +81,7 @@ async function runPipeline(options: {
   roles?: { tester?: { enabled?: boolean } };
 } = {}) {
   const { PairPipeline } = await import('./pairPipeline.js');
-  const pipeline = new PairPipeline({
+  const pipeline = new PairPipeline({ workerSandbox: 'off',
     stages: ['worker', 'tester', 'reviewer'],
     maxIterations: 1,
     skipTesterIfNoCodeChange: false,
@@ -473,6 +473,7 @@ describe('PairPipeline deterministic tester (INT-2662)', () => {
       undefined,
       undefined,
       { enabled: true, blockOnNewFailures: true, maxCommands: 4 },
+      undefined, undefined, undefined, undefined, undefined, 'off',
     );
     const result = await pipeline.run(task(), process.cwd());
     expect(result.success).toBe(true);

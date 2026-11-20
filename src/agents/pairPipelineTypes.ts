@@ -71,8 +71,13 @@ export interface PipelineConfig {
   projectGoal?: string;
   roleMcpTools?: { worker?: ToolDefinition[]; reviewer?: ToolDefinition[] };
   adapterRouting?: AdapterRoutePolicy;
-  /** OS fence for the worker's bash tool (autonomous.workerSandbox). Unset = off, as before AGT-4387. */
-  workerSandbox?: 'on' | 'off';
+  /**
+   * OS fence for every stage's bash tool (autonomous.workerSandbox). Required:
+   * an entry point that left it unset used to run its worker unfenced with open
+   * network (AGT-4815). 'off' opts out explicitly; the constructor throws on
+   * anything else, for JavaScript callers the type does not reach.
+   */
+  workerSandbox: 'on' | 'off';
   draftAnalysis?: {
     taskType: string;
     intentSummary: string;

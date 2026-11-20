@@ -12,6 +12,8 @@
 
 import type { ToolDefinition } from './tools.js';
 import { publicFetch } from '../support/outboundUrl.js';
+// Re-exported so agenticLoop.ts (over the size gate) can import it without a new line. (AGT-4815)
+export { webToolsBlockedByNetwork } from './webToolPolicy.js';
 
 export const WEB_TOOL_DEFINITIONS: ToolDefinition[] = [
   {

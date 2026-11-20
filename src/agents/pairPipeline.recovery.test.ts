@@ -17,7 +17,7 @@ vi.mock('../coordination/runCoordination.js', () => ({ publishCoordination: vi.f
 
 let root: string, repo: string, ledger: RunLedger, claim: RunClaim;
 const task = { id: 'recovery-task', source: 'linear' as const, title: 'Change documented behavior', description: 'Keep all required checks', priority: 1, createdAt: 1 };
-const base: PipelineConfig = { stages: ['worker', 'tester', 'reviewer'], maxIterations: 1,
+const base: PipelineConfig = { workerSandbox: 'off', stages: ['worker', 'tester', 'reviewer'], maxIterations: 1,
   roles: { worker: { enabled: true, model: 'worker-model' }, reviewer: { enabled: true, model: 'reviewer-model' }, tester: { enabled: true, model: 'tester-model' } },
   guards: { enabled: false }, loopAdvisor: { mode: 'off' } };
 const advice = { diagnosis: 'Use the observed evidence', action: 'revise_strategy' as const, evidence: ['failure'], condition: 'Same artifact', verification: 'Rerun the required checks' };
@@ -25,7 +25,7 @@ const cost = { costUsd: 0.01, inputTokens: 10, outputTokens: 5, cacheReadTokens:
 const hooks = () => { const lease = claim; return ledger.recovery.forClaim(() => lease); };
 async function run(config: Partial<PipelineConfig> = {}, durable = true) {
   const { PairPipeline } = await import('./pairPipeline.js');
-  return new PairPipeline({ ...base, ...config }).run(task, repo, durable ? { recovery: hooks() } : undefined);
+  return new PairPipeline({ workerSandbox: 'off', ...base, ...config }).run(task, repo, durable ? { recovery: hooks() } : undefined);
 }
 function retry() {
   expect(ledger.transition(claim, 'RETRY_AT', { retryAt: Date.now() - 1 })).toBe(true);

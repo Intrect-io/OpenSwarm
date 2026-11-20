@@ -58,7 +58,7 @@ describe('PairPipeline project goal (AGT-4662)', () => {
   it('hands the project goal to the worker and reviewer, and leaves it unset otherwise', async () => {
     const { PairPipeline, createPipelineFromConfig } = await import('./pairPipeline.js');
 
-    const withGoal = new PairPipeline({
+    const withGoal = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'], maxIterations: 1, roles,
       projectGoal: 'Reconcile ledgers in dependency order.',
     });
@@ -71,14 +71,14 @@ describe('PairPipeline project goal (AGT-4662)', () => {
     }));
 
     runWorker.mockClear();
-    const without = new PairPipeline({ stages: ['worker'], maxIterations: 1, roles });
+    const without = new PairPipeline({ workerSandbox: 'off', stages: ['worker'], maxIterations: 1, roles });
     await without.run(task(), process.cwd());
     expect((runWorker.mock.calls[0][0] as WorkerOptions).projectGoal).toBeUndefined();
 
     // The factory's last argument lands on the pipeline config, which is what the runner calls.
     const built = createPipelineFromConfig(
       roles, 1, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, 'From the factory.',
+      undefined, undefined, undefined, 'off', undefined, 'From the factory.',
     ) as unknown as { config: { projectGoal?: string } };
     expect(built.config.projectGoal).toBe('From the factory.');
   });

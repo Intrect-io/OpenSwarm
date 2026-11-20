@@ -49,7 +49,7 @@ describe('retry after an unbacked completion claim (AGT-4900)', () => {
         success: false, summary: 'stopped', filesChanged: [], commands: [], output: '', error: 'stop',
       });
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'], maxIterations: 2,
       roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },
     } as unknown as ConstructorParameters<typeof PairPipeline>[0]);
@@ -70,7 +70,7 @@ describe('retry after an unbacked completion claim (AGT-4900)', () => {
   });
   const pipelineWith = async (maxIterations: number, maxReflections: number) => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    return new PairPipeline({
+    return new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'], maxIterations, maxReflections,
       roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },
     } as unknown as ConstructorParameters<typeof PairPipeline>[0]);

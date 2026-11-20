@@ -1,5 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ClaudeCliAdapter } from './claude.js';
+import { readUsage } from '../support/usageLedger.js';
 
 describe('ClaudeCliAdapter.buildCommand', () => {
   it('wires the memory MCP server via --mcp-config and keeps bypass permissions', () => {
@@ -205,5 +209,53 @@ describe('ClaudeCliAdapter observed execution evidence (AGT-4900)', () => {
   it('leaves executedCommands unset for plain-text or truncated output', () => {
     expect(parse('All tests pass.').executedCommands).toBeUndefined();
     expect(parse(`[openswarm: 9 earlier characters of output were not retained]\n${final('done')}`).executedCommands).toBeUndefined();
+  });
+});
+
+describe('ClaudeCliAdapter usage ledger attribution (AGT-4444)', () => {
+  let dir: string;
+  const savedDir = process.env.OPENSWARM_USAGE_DIR;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openswarm-claude-usage-'));
+    process.env.OPENSWARM_USAGE_DIR = dir;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    if (savedDir === undefined) delete process.env.OPENSWARM_USAGE_DIR;
+    else process.env.OPENSWARM_USAGE_DIR = savedDir;
+  });
+  const ledger = () => readUsage({ since: 0 }, dir);
+  const resultEvent = JSON.stringify({
+    type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0.0123,
+    usage: { input_tokens: 100, output_tokens: 40, cache_read_input_tokens: 900, cache_creation_input_tokens: 50 },
+    modelUsage: { 'claude-sonnet-4-5': {} },
+  });
+
+  it('records a result event with cost under the given attribution', () => {
+    new ClaudeCliAdapter().recordRunUsage(
+      `{"type":"system"}\n${resultEvent}\n`,
+      { prompt: 'p', cwd: '/work/repo', model: 'sonnet', usageAttribution: { adapter: 'claude', taskId: 'AGT-1', stage: 'worker' } },
+      42,
+    );
+    const [record] = ledger();
+    expect(ledger()).toHaveLength(1);
+    expect(record).toMatchObject({
+      adapter: 'claude', model: 'sonnet', servedModel: 'claude-sonnet-4-5', taskId: 'AGT-1', stage: 'worker',
+      cwd: '/work/repo', promptTokens: 1050, completionTokens: 40, cachedTokens: 900, costUsd: 0.0123, durationMs: 42,
+    });
+    expect(record.unattributed).toBeUndefined();
+  });
+
+  it('tags a CLI run without usage attribution as unattributed', () => {
+    const adapter = new ClaudeCliAdapter();
+    // Usage reported, but no usageAttribution and no processContext.
+    adapter.recordRunUsage(resultEvent, { prompt: 'p', cwd: '/work/repo' }, 1);
+    // No usage reported at all: still a ledger line, never a silent drop.
+    adapter.recordRunUsage('{"type":"system"}\n', { prompt: 'p', cwd: '/work/repo' }, 1);
+    const records = ledger();
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({ adapter: 'claude', model: 'sonnet', costUsd: 0.0123, unattributed: 'no-attribution' });
+    expect(records[0].taskId).toBeUndefined();
+    expect(records[1]).toMatchObject({ adapter: 'claude', promptTokens: 0, completionTokens: 0, costUsd: null, unattributed: 'no-usage' });
   });
 });
