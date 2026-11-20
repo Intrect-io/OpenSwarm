@@ -85,7 +85,7 @@ describe('withFileLock', () => {
   it('leaves a lock taken over by another owner alone on release', async () => {
     await withFileLock(lockPath, async () => {
       // Simulate a steal: someone else replaced the lock while we worked.
-      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 'someone-else' }), 'utf8');
+      writeFileSync(lockPath, JSON.stringify({ pid: process.ppid, token: 'someone-else' }), 'utf8');
     });
 
     expect(existsSync(lockPath)).toBe(true);
@@ -128,7 +128,7 @@ describe('withFileLock stale takeover', () => {
     if (existsSync(lockPath)) {
       const current = JSON.parse(readFileSync(lockPath, 'utf8')) as { token?: string };
       if (current.token === 'dead') {
-        writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 'live-replacement' }), { mode: 0o600 });
+        writeFileSync(lockPath, JSON.stringify({ pid: process.ppid, token: 'live-replacement' }), { mode: 0o600 });
         // Bump mtime so it differs from the judged value when reclaim re-checks.
         const now = new Date(originalStat.mtimeMs + 2_000);
         utimesSync(lockPath, now, now);
@@ -203,5 +203,38 @@ describe('withFileLockSync', () => {
     writeFileSync(lockPath, JSON.stringify({ pid: DEAD_PID, token: 'dead' }), { mode: 0o600 });
     expect(withFileLockSync(lockPath, () => 'taken', { timeoutMs: 500 })).toBe('taken');
     expect(existsSync(lockPath)).toBe(false);
+  });
+});
+
+describe('a lock left by an earlier run with our own pid (#919 review)', () => {
+  // A container restarts node as the same pid, so a lock its previous run left
+  // on the persistent volume names a live pid: ours.
+  it('reclaims a lock that names our pid but a token we do not hold', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'filelock-selfpid-'));
+    const lockPath = join(dir, 'report.lock');
+    try {
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 'previous-run' }), { mode: 0o600 });
+      await expect(withFileLock(lockPath, async () => 'taken', { timeoutMs: 500 })).resolves.toBe('taken');
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: 'previous-run' }), { mode: 0o600 });
+      expect(withFileLockSync(lockPath, () => 'taken', { timeoutMs: 500 })).toBe('taken');
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still waits for a lock this process holds right now', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'filelock-held-'));
+    const lockPath = join(dir, 'report.lock');
+    try {
+      let release!: () => void;
+      const holding = withFileLock(lockPath, () => new Promise<void>((resolve) => { release = resolve; }), { timeoutMs: 500 });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await expect(withFileLock(lockPath, async () => 'second', { timeoutMs: 100 })).rejects.toThrow(/Timed out/);
+      release();
+      await holding;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

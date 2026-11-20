@@ -125,24 +125,86 @@ function readTelemetryLockOwner(lockPath: string): { pid: number; token: string;
   }
 }
 
+/** A reclaim guard older than this was left by a reclaimer that died holding it. */
+const RECLAIM_GUARD_STALE_MS = 10_000;
+
+/**
+ * Remove the exact lock that was judged stale, and nothing else.
+ *
+ * Unlinking the path after judging its owner is a TOCTOU: between the read and
+ * the unlink another reclaimer can remove the stale file and a live process
+ * can take a fresh lock at the same path, which an unlink would then delete
+ * (AGT-4903). Moving the file aside and linking it back narrowed that window
+ * without closing it: while a live lock sat in quarantine the path was free,
+ * and a third process could take it beside the first (#920 review).
+ *
+ * The only processes that ever remove a stale lock are reclaimers — its owner
+ * is dead — so reclaimers are serialized by an exclusive guard file. Under the
+ * guard the lock is judged again (same mtime, same token or still malformed);
+ * no new lock can appear at the path while the stale one is still there, so a
+ * match is safe to unlink.
+ *
+ * @param judgedToken token read from the judged lock, or undefined when its
+ *   content was malformed (then the judged mtime identifies it).
+ */
+function reclaimJudgedTelemetryLock(judgedToken: string | undefined, judgedMtimeMs: number): void {
+  const guard = `${TELEMETRY_LOCK}.reclaim`;
+  let fd: number;
+  try {
+    fd = openSync(guard, 'wx', 0o600);
+  } catch {
+    // Another reclaimer is at work. A guard left by one that died is removed so
+    // a later attempt can proceed; this attempt gives up either way.
+    try {
+      if (Date.now() - statSync(guard).mtimeMs > RECLAIM_GUARD_STALE_MS) unlinkSync(guard);
+    } catch { /* gone already */ }
+    return;
+  }
+  try {
+    closeSync(fd);
+    let stillJudged = false;
+    try {
+      const mtimeMs = statSync(TELEMETRY_LOCK).mtimeMs;
+      const current = readTelemetryLockOwner(TELEMETRY_LOCK);
+      stillJudged = mtimeMs === judgedMtimeMs
+        && (judgedToken !== undefined ? current?.token === judgedToken : current === null);
+    } catch {
+      stillJudged = false; // ENOENT: released or reclaimed already
+    }
+    if (stillJudged) {
+      try {
+        unlinkSync(TELEMETRY_LOCK);
+      } catch { /* ENOENT: nothing to do */ }
+    }
+  } finally {
+    try {
+      unlinkSync(guard);
+    } catch { /* best-effort */ }
+  }
+}
+
 /**
  * Reclaim a crashed telemetry lock without permanently disabling persistence.
- * Namespace-proofed: never free a live owner in another pid space.
+ * Namespace-proofed: never free a live owner in another pid space. The removal
+ * itself is ownership-safe: see reclaimJudgedTelemetryLock.
  */
 function recoverTelemetryLock(): void {
   if (!existsSync(TELEMETRY_LOCK)) return;
-  const owner = readTelemetryLockOwner(TELEMETRY_LOCK);
   try {
-    const age = Date.now() - statSync(TELEMETRY_LOCK).mtimeMs;
+    // Stat before reading the owner: a lock replaced in between then shows a
+    // fresh mtime and a different token, and is never mistaken for the judged one.
+    const judgedMtimeMs = statSync(TELEMETRY_LOCK).mtimeMs;
+    const owner = readTelemetryLockOwner(TELEMETRY_LOCK);
+    const age = Date.now() - judgedMtimeMs;
     if (!owner) {
-      if (age > LOCK_STALE_MS) unlinkSync(TELEMETRY_LOCK);
+      if (age > LOCK_STALE_MS) reclaimJudgedTelemetryLock(undefined, judgedMtimeMs);
       return;
     }
     if (isProofCapableSpace(owner.ns ?? undefined) && sameProcessNamespace(owner.ns ?? undefined)) {
-      if (!processAppearsAlive(owner.pid)) unlinkSync(TELEMETRY_LOCK);
+      if (!processAppearsAlive(owner.pid)) reclaimJudgedTelemetryLock(owner.token, judgedMtimeMs);
       return;
     }
-    if (age > LOCK_ABANDON_MS) unlinkSync(TELEMETRY_LOCK);
+    if (age > LOCK_ABANDON_MS) reclaimJudgedTelemetryLock(owner.token, judgedMtimeMs);
   } catch {
     // Leave the lock; writeState will retry or degrade gracefully.
   }

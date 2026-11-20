@@ -33,6 +33,28 @@ function alive(pid: number): boolean {
   }
 }
 
+/**
+ * Tokens of the locks this process holds right now. Process-wide, not
+ * module-wide: two copies of this module in one process (a bundle, a test's
+ * module reset) must still see each other's live locks as live.
+ */
+const HELD_TOKENS_KEY = Symbol.for('openswarm.fileLock.heldTokens');
+const heldTokens: Set<string> = ((globalThis as Record<symbol, unknown>)[HELD_TOKENS_KEY] as Set<string> | undefined)
+  ?? ((globalThis as Record<symbol, unknown>)[HELD_TOKENS_KEY] = new Set<string>()) as Set<string>;
+
+/**
+ * Is the lock's owner still holding it? A pid alone cannot say when the pid is
+ * our own: a daemon restarted in a container comes back with the same pid
+ * (dumb-init makes node pid N every time) while the lock its previous run left
+ * on the persistent volume says pid N too. That lock was never released and
+ * would never be reclaimed, so the daily report stopped for good (#919
+ * review). For our own pid, only a token this process holds is alive.
+ */
+function ownerAlive(owner: LockOwner): boolean {
+  if (owner.pid === process.pid) return heldTokens.has(owner.token);
+  return alive(owner.pid);
+}
+
 function parseOwner(raw: string): LockOwner | null {
   try {
     const value = JSON.parse(raw) as Partial<LockOwner>;
@@ -89,7 +111,7 @@ function reclaimStaleLockSync(path: string, current: LockOwner | null, malformed
     }
   }
   // Reclaim only the lock we judged — same reasoning as the async path.
-  if (((current !== null && !alive(current.pid)) || malformedAndStale) && judgedMtimeMs !== undefined) {
+  if (((current !== null && !ownerAlive(current)) || malformedAndStale) && judgedMtimeMs !== undefined) {
     const judgedToken = current?.token;
     try {
       const currentOwner = ownerSync(path);
@@ -126,11 +148,13 @@ export async function withFileLock<T>(
   for (;;) {
     try {
       const handle = await open(path, 'wx', 0o600);
+      heldTokens.add(token);
       await handle.writeFile(JSON.stringify({ pid: process.pid, token }), 'utf8');
       await handle.sync();
       await handle.close();
       break;
     } catch (error) {
+      heldTokens.delete(token);  // a failed write after open must not leave the token counted as held
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const current = await owner(path);
       let judgedMtimeMs: number | undefined;
@@ -156,7 +180,7 @@ export async function withFileLock<T>(
       // Reclaim only the lock we judged. Between judgement and unlink the holder
       // can release and a third process can take a fresh lock; deleting THAT one
       // would put two writers on the resource. Re-check mtime+token first.
-      if (((current !== null && !alive(current.pid)) || malformedAndStale) && judgedMtimeMs !== undefined) {
+      if (((current !== null && !ownerAlive(current)) || malformedAndStale) && judgedMtimeMs !== undefined) {
         const judgedToken = current?.token;
         try {
           const currentOwner = await owner(path);
@@ -185,10 +209,14 @@ export async function withFileLock<T>(
     return await operation();
   } finally {
     // Ownership-safe release: only the token that created this lock may unlink.
-    if ((await owner(path))?.token === token) {
-      await unlink(path).catch((error) => {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      });
+    try {
+      if ((await owner(path))?.token === token) {
+        await unlink(path).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        });
+      }
+    } finally {
+      heldTokens.delete(token);
     }
   }
 }
@@ -213,6 +241,7 @@ export function withFileLockSync<T>(
     let fd: number | undefined;
     try {
       fd = openSync(path, 'wx', 0o600);
+      heldTokens.add(token);
       writeFileSync(fd, JSON.stringify({ pid: process.pid, token }), 'utf8');
       fsyncSync(fd);
       closeSync(fd);
@@ -220,6 +249,7 @@ export function withFileLockSync<T>(
       break;
     } catch (error) {
       if (fd !== undefined) closeSync(fd);
+      heldTokens.delete(token);
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       if (reclaimStaleLockSync(path, ownerSync(path), malformedStaleMs)) {
         Atomics.wait(lockWaitBuffer, 0, 0, 10);
@@ -233,12 +263,16 @@ export function withFileLockSync<T>(
   try {
     return operation();
   } finally {
-    if (ownerSync(path)?.token === token) {
-      try {
-        unlinkSync(path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    try {
+      if (ownerSync(path)?.token === token) {
+        try {
+          unlinkSync(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
       }
+    } finally {
+      heldTokens.delete(token);
     }
   }
 }

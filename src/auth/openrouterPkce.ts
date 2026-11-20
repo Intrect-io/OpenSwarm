@@ -8,7 +8,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomBytes, createHash } from 'node:crypto';
 import { AuthProfileStore, type AuthProfile } from './oauthStore.js';
 import { openBrowser } from './openBrowser.js';
-import { PkceSettlement, TOKEN_EXCHANGE_TIMEOUT_MS } from './pkceSettlement.js';
+import { endSupersededCallback, PkceSettlement, TOKEN_EXCHANGE_TIMEOUT_MS } from './pkceSettlement.js';
 
 // ----- Constants -----
 
@@ -164,14 +164,20 @@ export async function runOpenRouterPkceFlow(
           userId: payload.user_id ?? undefined,
         };
 
-        if (!settlement.finish()) return;
+        if (!settlement.finish()) {
+          endSupersededCallback(res);
+          return;
+        }
         clearTimeout(timeout);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(successHtml());
         server.close();
         resolve(result);
       } catch (err) {
-        if (!settlement.finish()) return;
+        if (!settlement.finish()) {
+          endSupersededCallback(res);
+          return;
+        }
         clearTimeout(timeout);
         res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(errorHtml(String(err)));
