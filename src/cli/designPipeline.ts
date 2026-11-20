@@ -7,9 +7,9 @@
 // fs shell. Node is fully supported; Python/Rust/Go are recognized and emit a
 // sensible setup+test template.
 
-import { closeSync, existsSync, openSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { pinChildDirectory, pinNestedDirectory, writeFileInPinnedDirectory } from '../support/containedWrite.js';
 
 export type Ecosystem = 'node' | 'python' | 'rust' | 'go' | 'generic';
 
@@ -119,26 +119,21 @@ export function runDesignPipeline(opts: DesignPipelineOptions = {}): { wrote: bo
   const outPath = join(cwd, '.github', 'workflows', 'ci.yml');
 
   if (opts.dryRun) return { wrote: false, path: outPath, yaml };
-  mkdirSync(dirname(outPath), { recursive: true });
-  if (opts.force) {
-    // A plain writeFileSync follows a symlink at outPath and writes through
-    // it to whatever it points at; atomicWriteFileSync's rename-based swap
-    // replaces the destination itself instead, closing that race regardless
-    // of what got planted there between the mkdir above and this write.
-    atomicWriteFileSync(outPath, yaml);
-  } else {
-    let fd: number | undefined;
-    try {
-      fd = openSync(outPath, 'wx', 0o644);
-      writeFileSync(fd, yaml);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new Error(`${outPath} already exists — pass --force to overwrite`);
-      }
-      throw error;
-    } finally {
-      if (fd !== undefined) closeSync(fd);
+  // Pin .github and then .github/workflows as real directories (lstat +
+  // inode identity, symlinks refused) so a symlinked .github or workflows
+  // cannot redirect the write out of the project (AGT-3431). The file itself
+  // is written through a temporary file: --force renames it over the target
+  // (replacing a symlink rather than following it, AGT-3424); without --force
+  // it is hard-linked into place, which fails if anything already exists there.
+  const github = pinChildDirectory(cwd, '.github');
+  const workflows = pinNestedDirectory(github, 'workflows');
+  try {
+    writeFileInPinnedDirectory(workflows, 'ci.yml', yaml, { exclusive: !opts.force, mode: 0o644 });
+  } catch (error) {
+    if (!opts.force && (error as NodeJS.ErrnoException).code === 'EEXIST') {
+      throw new Error(`${outPath} already exists — pass --force to overwrite`);
     }
+    throw error;
   }
   return { wrote: true, path: outPath, yaml };
 }

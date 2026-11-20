@@ -13,7 +13,7 @@
 
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { constants, existsSync, lstatSync, readlinkSync } from 'node:fs';
+import { constants, existsSync, lstatSync } from 'node:fs';
 import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -295,7 +295,7 @@ describe('runWorkerFanout shared-path handling and sandbox retention', () => {
     // Gitignored so captureBaselinePatch's `git add -A` never stages these —
     // otherwise the dirty-worktree seeding patch would try to re-create
     // node_modules/marker.txt inside a sandbox that already has it from the
-    // shared-path copy/link step, and `git apply` would conflict. Keep the
+    // shared-path copy step, and `git apply` would conflict. Keep the
     // realistic directory-only pattern: Git does not apply `node_modules/` to
     // a symlink, so fanout must exclude the harness-created link explicitly.
     await writeFile(path.join(repo, '.gitignore'), 'node_modules/\nopenswarm.json\n', 'utf8');
@@ -305,7 +305,7 @@ describe('runWorkerFanout shared-path handling and sandbox retention', () => {
     await mkdir(path.join(repo, 'node_modules'), { recursive: true });
     await writeFile(path.join(repo, 'node_modules', 'marker.txt'), 'shared-dep\n', 'utf8');
     // Invalid JSON forces loadRepoMetadata() to throw, exercising the
-    // link/copySharedPaths catch-and-fall-back-to-auto-detect path.
+    // copySharedPaths catch-and-fall-back-to-auto-detect path.
     await writeFile(path.join(repo, 'openswarm.json'), '{ not valid json', 'utf8');
     return repo;
   }
@@ -358,7 +358,9 @@ describe('runWorkerFanout shared-path handling and sandbox retention', () => {
     }
   });
 
-  it('symlinks shared paths into every sandbox when linkSharedPaths is true', async () => {
+  it('copies shared paths even when linkSharedPaths is true', async () => {
+    // AGT-3441: link mode is removed. The deprecated flag is ignored with a
+    // one-time warning, and every sandbox gets an independent copy.
     const repo = await setupRepoWithSharedNodeModules();
 
     runWorker.mockImplementation(async (opts: WorkerOptions) => {
@@ -367,6 +369,8 @@ describe('runWorkerFanout shared-path handling and sandbox retention', () => {
     });
 
     const logs: string[] = [];
+    // Fresh module so the once-per-process deprecation warning is observable.
+    vi.resetModules();
     const { runWorkerFanout } = await import('./workerFanout.js');
     const result = await runWorkerFanout({
       projectPath: repo,
@@ -383,12 +387,56 @@ describe('runWorkerFanout shared-path handling and sandbox retention', () => {
 
     expect(result.fallbackReason).toBeUndefined();
     expect(result.winner?.filesChanged).toEqual(['edited.txt']);
+    expect(logs.filter((l) => l.includes('linkSharedPaths: true is deprecated'))).toHaveLength(1);
     const root = findKeptSandboxRoot(logs);
     cleanupDirs.push(root);
-    const linkedMarker = path.join(root, 'primary', 'node_modules');
-    expect(existsSync(linkedMarker)).toBe(true);
-    expect(lstatSync(linkedMarker).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(linkedMarker)).toBe(path.resolve(repo, 'node_modules'));
+    for (const id of ['primary', 'spark']) {
+      const sharedDir = path.join(root, id, 'node_modules');
+      expect(lstatSync(sharedDir).isSymbolicLink()).toBe(false);
+      const marker = path.join(sharedDir, 'marker.txt');
+      expect(lstatSync(marker).isFile()).toBe(true);
+      expect(await readFile(marker, 'utf8')).toBe('shared-dep\n');
+    }
+  });
+
+  it('a candidate write to a shared path does not change the real project file', async () => {
+    const repo = await setupRepoWithSharedNodeModules();
+    const realMarker = path.join(repo, 'node_modules', 'marker.txt');
+
+    runWorker.mockImplementation(async (opts: WorkerOptions) => {
+      // A misbehaving candidate (e.g. an install step) rewrites a shared dep
+      // and adds a new file inside the shared directory.
+      await writeFile(path.join(opts.projectPath, 'node_modules', 'marker.txt'), 'mutated\n', 'utf8');
+      await writeFile(path.join(opts.projectPath, 'node_modules', 'injected.txt'), 'evil\n', 'utf8');
+      await writeFile(path.join(opts.projectPath, 'edited.txt'), 'x\n', 'utf8');
+      return { success: true, summary: 'ok', filesChanged: ['edited.txt'], commands: [], output: '' };
+    });
+
+    const logs: string[] = [];
+    const { runWorkerFanout } = await import('./workerFanout.js');
+    const result = await runWorkerFanout({
+      projectPath: repo,
+      baseWorkerOptions: { ...baseWorkerOptions, projectPath: repo },
+      candidates: [
+        { id: 'primary', adapter: 'codex-responses', model: 'gpt-5.4-mini' },
+        { id: 'spark', adapter: 'codex-responses', model: 'gpt-5.3-codex-spark' },
+      ],
+      concurrency: 2,
+      // The deprecated link flag must not reopen the write-through path.
+      linkSharedPaths: true,
+      keepSandboxes: true,
+      onLog: (line) => logs.push(line),
+    });
+
+    const root = findKeptSandboxRoot(logs);
+    cleanupDirs.push(root);
+    expect(result.fallbackReason).toBeUndefined();
+    // The candidate really wrote inside its own sandbox...
+    expect(await readFile(path.join(root, 'primary', 'node_modules', 'marker.txt'), 'utf8')).toBe('mutated\n');
+    // ...but the real project's shared path is untouched.
+    expect(lstatSync(path.join(repo, 'node_modules')).isSymbolicLink()).toBe(false);
+    expect(await readFile(realMarker, 'utf8')).toBe('shared-dep\n');
+    expect(existsSync(path.join(repo, 'node_modules', 'injected.txt'))).toBe(false);
   });
 
   it('provides no shared paths when linkSharedPaths is explicitly false', async () => {
@@ -489,7 +537,8 @@ describe('runWorkerFanout shared-path handling and sandbox retention', () => {
     const root = findKeptSandboxRoot(logs);
     cleanupDirs.push(root);
     const nodeModulesPath = path.join(root, 'primary', 'node_modules');
-    // Not a symlink — the git-checked-out real directory was left alone.
+    // Not a symlink — the deprecated link flag is ignored (AGT-3441) and the
+    // git-checked-out real directory was left alone.
     expect(lstatSync(nodeModulesPath).isSymbolicLink()).toBe(false);
     expect(await readFile(path.join(nodeModulesPath, 'marker.txt'), 'utf8')).toBe('tracked-dep\n');
   });

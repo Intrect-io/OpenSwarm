@@ -9,11 +9,18 @@ import { extractCostFromStreamJson, formatCost } from './costTracker.js';
 import { expandPath } from '../core/config.js';
 import { safeInheritedEnv, CLAUDE_CLI_ENV_KEYS } from './spawnEnv.js';
 import { runClaudeTask } from '../adapters/claudeTask.js';
+import { BoundedOutput } from '../adapters/outputRetention.js';
 
 /** Wall-clock ceiling for one dev task; the process group is killed after it. */
 const DEV_TASK_TIMEOUT_MS = 30 * 60_000;
 /** Turn ceiling for one dev task. */
 const DEV_TASK_MAX_TURNS = 50;
+/**
+ * Retained streamed output per dev task (AGT-3423). The report quotes only the
+ * last 3000 characters and completion prefers resultText, so a tail is enough;
+ * a runaway stream must not grow the daemon's memory for the whole run.
+ */
+export const DEV_TASK_OUTPUT_MAX_CHARS = 1024 * 1024;
 
 /**
  * Known repository list (alias -> path)
@@ -38,7 +45,7 @@ type DevTask = {
   path: string;
   task: string;
   controller: AbortController;
-  output: string;
+  output: BoundedOutput;
   startedAt: number;
   requestedBy: string;
 };
@@ -172,7 +179,7 @@ export async function runDevTask(
     path,
     task,
     controller,
-    output: '',
+    output: new BoundedOutput(DEV_TASK_OUTPUT_MAX_CHARS),
     startedAt: Date.now(),
     requestedBy,
   };
@@ -209,7 +216,7 @@ export async function runDevTask(
     // authenticate through) and nothing else.
     baseEnv: safeInheritedEnv(CLAUDE_CLI_ENV_KEYS),
     onLog: (line) => {
-      devTask.output += `${line}\n`;
+      devTask.output.append(`${line}\n`);
       try {
         onProgress?.(`${line}\n`);
       } catch (callbackError) {
@@ -217,7 +224,7 @@ export async function runDevTask(
       }
     },
   }).then((result) => {
-    let resultText = result.resultText || devTask.output;
+    let resultText = result.resultText || devTask.output.toString();
     let code: number | null = result.success ? 0 : 1;
     try {
       const costInfo = extractCostFromStreamJson(result.stdout);
@@ -225,8 +232,8 @@ export async function runDevTask(
         console.log(`[Dev] ${repo} cost: ${formatCost(costInfo)}`);
       }
       if (!result.success) {
-        if (result.error) devTask.output += `\nError: ${result.error}`;
-        if (!result.resultText) resultText = devTask.output;
+        if (result.error) devTask.output.append(`\nError: ${result.error}`);
+        if (!result.resultText) resultText = devTask.output.toString();
         if (!result.stdout) code = -1;
       }
       const duration = Math.floor((Date.now() - devTask.startedAt) / 1000);
@@ -238,8 +245,8 @@ export async function runDevTask(
       finalize(resultText, code);
     }
   }, (error: unknown) => {
-    devTask.output += `\nError: ${error instanceof Error ? error.message : String(error)}`;
-    finalize(devTask.output, -1);
+    devTask.output.append(`\nError: ${error instanceof Error ? error.message : String(error)}`);
+    finalize(devTask.output.toString(), -1);
   });
 
   return { taskId, path };
@@ -302,9 +309,10 @@ function generateReport(task: DevTask, exitCode: number | null, durationSec: num
   }
 
   // Output summary (truncate if too long)
-  const outputSummary = task.output.length > 3000
-    ? task.output.slice(-3000) + '\n\n...(truncated)'
-    : task.output;
+  const retained = task.output.toString();
+  const outputSummary = retained.length > 3000
+    ? retained.slice(-3000) + '\n\n...(truncated)'
+    : retained;
 
   // Status emoji
   const statusEmoji = exitCode === 0 ? '✅' : exitCode === null ? '⚠️' : '❌';

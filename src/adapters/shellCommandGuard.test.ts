@@ -331,3 +331,49 @@ describe('destructive-command guard closes the remaining run-time program forms 
     expect(isCommandBlocked(command)).toBe(false);
   });
 });
+
+describe('launcher program slot (AGT-3436 remainder)', () => {
+  // Each launcher's flags, flag values and fixed operands are known, so the
+  // word that IS the program is known too. A run-time word there can be any
+  // program with any flags (`X="rm -rf"`), even when a bare word follows it.
+  const programSlotVariables = [
+    'X="rm -rf"; sudo $X build',
+    'env $CMD x',
+    'sudo -u root $X build',
+    'timeout 5 $X build',
+    'timeout -s KILL 5 $X build',
+    'nice -n 5 $X build',
+    'env FOO=1 -u BAR $X build',
+    'env -S "$X" build',
+    'xargs $X build',
+    'find . -exec $X {} ;',
+    'sudo env $X build',
+  ];
+  it('blocks a variable in program position after a launcher', () => {
+    for (const command of programSlotVariables) expect(isCommandBlocked(command), command).toBe(true);
+  });
+
+  // A run-time word in a launcher's value slot is the launcher's own argument.
+  const valueSlotVariables = [
+    'timeout $T npm test',
+    'nice -n $N npm test',
+    'sudo -u $USER ls',
+    'sudo -Eu "$USER" npm test',
+    'env -u $VAR npm test',
+    'env NODE_ENV=$MODE npm test',
+    'stdbuf -o $MODE npm test',
+    'xargs -n $N echo',
+    'find . -name "$PAT" -exec cat {} ;',
+  ];
+  it('still allows timeout $T npm test', () => {
+    for (const command of valueSlotVariables) expect(isCommandBlocked(command), command).toBe(false);
+  });
+
+  it('documents piping a destructive string into sh as an accepted residual', () => {
+    // A string handed to a shell on stdin is data until that shell runs it, so
+    // the guard cannot see it as a command. Accepted residual: the control is
+    // the credential-free OS sandbox every stage's bash tool runs under
+    // (AGT-4783), not this guard. See docs/AUDIT_RESIDUALS.md.
+    expect(isCommandBlocked('echo "rm -rf /x" | sh')).toBe(false);
+  });
+});

@@ -2,6 +2,11 @@
 // OpenSwarm - OAuth 2.1 PKCE Flow
 // Browser-based OpenAI OAuth login
 // ============================================
+//
+// Decision (AGT-3467): the PKCE callback listeners (OpenAI, Linear, OpenRouter)
+// bind the IPv4 loopback 127.0.0.1 only and are not extended to IPv6 ::1; the
+// callback host they are built around is 127.0.0.1, and browsers fall back to it
+// when a `localhost` redirect_uri also resolves to ::1.
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { isIP } from 'node:net';

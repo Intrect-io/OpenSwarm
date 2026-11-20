@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { analyzePackageJson, detectStack, generateWorkflow, runDesignPipeline } from './designPipeline.js';
@@ -85,6 +85,39 @@ describe('runDesignPipeline (INT-1956)', () => {
       // was replaced by a fresh regular file, not written through.
       expect(readFileSync(outsideFile, 'utf8')).toBe('do-not-touch\n');
       expect(readFileSync(outPath, 'utf8')).toContain('go test ./...');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses when .github is a symlink outside the project and writes nothing outside', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dp-'));
+    const outsideDir = mkdtempSync(join(tmpdir(), 'dp-outside-'));
+    try {
+      writeFileSync(join(dir, 'go.mod'), 'module x\n');
+      symlinkSync(outsideDir, join(dir, '.github'));
+
+      expect(() => runDesignPipeline({ path: dir })).toThrow(/not a real directory/);
+      expect(() => runDesignPipeline({ path: dir, force: true })).toThrow(/not a real directory/);
+      expect(readdirSync(outsideDir)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses when .github/workflows is a symlink and writes nothing outside', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dp-'));
+    const outsideDir = mkdtempSync(join(tmpdir(), 'dp-outside-'));
+    try {
+      writeFileSync(join(dir, 'go.mod'), 'module x\n');
+      mkdirSync(join(dir, '.github'));
+      symlinkSync(outsideDir, join(dir, '.github', 'workflows'));
+
+      expect(() => runDesignPipeline({ path: dir })).toThrow(/not a real directory/);
+      expect(() => runDesignPipeline({ path: dir, force: true })).toThrow(/not a real directory/);
+      expect(readdirSync(outsideDir)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
       rmSync(outsideDir, { recursive: true, force: true });

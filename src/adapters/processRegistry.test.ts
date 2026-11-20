@@ -79,4 +79,19 @@ describe('killProcess process ownership', () => {
     expect(tree.terminate).toHaveBeenCalledTimes(1);
     expect(kill).not.toHaveBeenCalled();
   });
+
+  it('force kill after soft kill clears the escalation timer so terminate runs once', async () => {
+    register(700004);
+    await expect(killProcess(700004)).resolves.toBe(true);
+    expect(tree.signal).toHaveBeenCalledTimes(1);
+    expect(tree.terminate).not.toHaveBeenCalled();
+
+    await expect(killProcess(700004, true)).resolves.toBe(true);
+    expect(tree.terminate).toHaveBeenCalledTimes(1);
+
+    // Past KILL_ESCALATE_MS (5s): the soft kill's escalation must not fire a second terminate.
+    vi.advanceTimersByTime(10_000);
+    expect(tree.terminate).toHaveBeenCalledTimes(1);
+    expect(kill).not.toHaveBeenCalled();
+  });
 });
