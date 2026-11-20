@@ -436,9 +436,9 @@ export class PairPipeline extends EventEmitter {
           const reflectionPart = buildReflectionFeedback(context.reflection);
           const includeReview =
             context.feedbackSource === 'review' && !!context.reviewResult;
-          const reviewPart = includeReview
-            ? [reviewerAgent.buildRevisionPrompt(context.reviewResult!), buildWorkerFindingsSection(context.findingLedger)].filter(Boolean).join('\n\n')
-            : undefined;
+          // Open finding ids ride along even after an objective failure (guard, tester), so the worker can still answer them.
+          const reviewPart = [includeReview ? reviewerAgent.buildRevisionPrompt(context.reviewResult!) : '', buildWorkerFindingsSection(context.findingLedger)]
+            .filter(Boolean).join('\n\n') || undefined;
           // Cross-SESSION feedback: a re-picked task that failed/was rejected
           // before carries the last reviewer feedback (persisted in task state).
           // Without this the new session starts blind and repeats the exact

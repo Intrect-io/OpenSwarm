@@ -10,7 +10,7 @@ import { discardStagedMemoriesFrom } from './stagedMemory.js';
 import { runGuards } from './pipelineGuards.js';
 import { adjudicateContractEvidenceStagnation } from './guardArbiter.js';
 import { recordReflection, similarReviewFeedback } from './reflection.js';
-import { createFindingLedger, describeLedgerStop, ledgerVerdict, openFindings, recordReviewRound, recordWorkerResponses } from './findingLedger.js';
+import { approveDowngradeNote, createFindingLedger, describeLedgerStop, ledgerVerdict, markPriorSessionIds, openFindings, openIdsRuledOnApprove, recordReviewRound, recordWorkerResponses } from './findingLedger.js';
 import type { ReflectionSource } from './reflection.js';
 import { buildRepeatEscalation, resolveWorkerStageOverrides } from './workerEscalation.js';
 import { emitWorkerFanoutGateDecision, evaluateWorkerFanoutGate } from './workerFanoutGate.js';
@@ -51,6 +51,20 @@ function stopAtExecutionBoundary(host: PipelineLoopHost, context: PipelineContex
 
 /** 단계 정책을 분리해 실행·복구 코드가 같은 반복 루프를 공유한다. */
 export async function runFullIterationLoop(host: PipelineLoopHost, context: PipelineContext, stages: StageResult[]): Promise<{ success: boolean }> {
+  try {
+    return await runIterationLoopBody(host, context, stages);
+  } finally {
+    // `lastReviseFeedback` leaves the session (it becomes the next attempt's
+    // `priorAttemptFeedback`), where a fresh ledger reuses F1. Rename this
+    // ledger's ids once, at every exit, rather than at each assignment: the
+    // in-loop repeat check compares raw texts. (AGT-4535)
+    if (context.lastReviseFeedback) {
+      context.lastReviseFeedback = markPriorSessionIds(context.lastReviseFeedback, context.findingLedger);
+    }
+  }
+}
+
+async function runIterationLoopBody(host: PipelineLoopHost, context: PipelineContext, stages: StageResult[]): Promise<{ success: boolean }> {
     const maxIterations = host.config.maxIterations ?? 3;
     const loopStartedAt = Date.now();
     const hasWorker = host.hasStage('worker');
@@ -524,7 +538,21 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
         stages.push(reviewerResult);
         if (stopAtExecutionBoundary(host, context)) return { success: false };
 
-        const decision = (reviewerResult.result as ReviewResult).decision;
+        let decision = (reviewerResult.result as ReviewResult).decision;
+        // An approve whose own feedback rules a known open id `F<n>: open` is
+        // contradictory: run it as a revise, so the ledger's round cap and the
+        // iteration budget bound it like any other revise. (AGT-4535)
+        const heldOpen = decision === 'approve' ? openIdsRuledOnApprove(context.findingLedger, reviewerResult.result as ReviewResult) : [];
+        if (heldOpen.length > 0) {
+          const review = reviewerResult.result as ReviewResult;
+          // Same object as `context.reviewResult`, so the next worker's
+          // revision prompt sees the revise and the note.
+          review.decision = 'revise';
+          review.feedback = [review.feedback, approveDowngradeNote(heldOpen)].filter(Boolean).join('\n\n');
+          reviewerResult.success = false;
+          decision = 'revise';
+          safeConsole.log(`[${context.taskPrefix}] Approve downgraded to revise: ${heldOpen.join(', ')} ruled open`);
+        }
 
         // Record Reviewer result in stuck detector
         host.getStuck().addEntry({

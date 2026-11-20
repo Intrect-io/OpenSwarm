@@ -54,6 +54,13 @@ vi.mock('../coordination/runCoordination.js', () => ({
   publishCoordination: vi.fn(async (event: Record<string, unknown>) => { boardEvents.list.push(event); }),
 }));
 
+// Guards run only when a test sets `config.guards`; passing by default.
+const runGuards = vi.hoisted(() => vi.fn());
+vi.mock('./pipelineGuards.js', async () => {
+  const actual = await vi.importActual<typeof import('./pipelineGuards.js')>('./pipelineGuards.js');
+  return { ...actual, runGuards };
+});
+
 vi.mock('../adapters/index.js', async () => {
   const actual = await vi.importActual<typeof import('../adapters/index.js')>('../adapters/index.js');
   return { ...actual, getAdapter: () => ({ getDefaultModel }) };
@@ -165,6 +172,56 @@ describe('PairPipeline finding ledger', () => {
     expect(result.finalStatus).toBe('failed');
     expect(runReviewer).toHaveBeenCalledTimes(2);
     expect(result.lastReviewFeedback).toContain('Review loop stopped (round_cap)');
+  });
+
+  it('downgrades an approve that rules a known open id open, bounded by the round cap', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    runWorker.mockResolvedValue(worked('F1: fixed — src/a.ts:12'));
+    runReviewer
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'bound', issues: ['range() stops one short'] })
+      .mockResolvedValue({ decision: 'approve', feedback: 'LGTM\nF1: open — still stops one short' });
+
+    const result = await new PairPipeline(config(10, 3)).run(task(), process.cwd());
+
+    expect(result.finalStatus).toBe('failed');
+    expect(runReviewer).toHaveBeenCalledTimes(3);
+    const third = runWorker.mock.calls[2][0] as WorkerOptions;
+    expect(third.previousFeedback).toContain('downgraded to revise');
+    expect(result.lastReviewFeedback).toContain('Review loop stopped (round_cap)');
+  });
+
+  it('renames this session\'s ids to prev-F<n> in the feedback carried to the next attempt', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    runWorker.mockResolvedValue(worked('tried'));
+    runReviewer
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'a', issues: ['missing null check'] })
+      .mockResolvedValue({ decision: 'revise', feedback: 'F1: open — null check absent', issues: [] });
+
+    const result = await new PairPipeline(config(10, 2)).run(task(), process.cwd());
+
+    expect(result.lastReviewFeedback).toContain('prev-F1: open');
+    expect(result.lastReviewFeedback).toContain('- prev-F1: missing null check');
+    expect(result.lastReviewFeedback).not.toMatch(/(?<![\w-])F1\b/);
+  });
+
+  it('keeps feeding open ids to the worker after a guard failure skips the review', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    runGuards
+      .mockResolvedValueOnce({ allPassed: true, results: [] })
+      .mockResolvedValueOnce({ allPassed: false, results: [{ guard: 'qualityGate', passed: false, blocking: true, issues: ['lint: x'] }] })
+      .mockResolvedValue({ allPassed: true, results: [] });
+    runWorker.mockResolvedValue(worked('F1: fixed — src/a.ts:12'));
+    runReviewer
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'bound', issues: ['range() stops one short'] })
+      .mockResolvedValue({ decision: 'approve', feedback: 'F1: resolved' });
+
+    const result = await new PairPipeline({ ...config(5), guards: { qualityGate: true } }).run(task(), process.cwd());
+
+    expect(result.finalStatus).toBe('approved');
+    expect(runReviewer).toHaveBeenCalledTimes(2);
+    const third = runWorker.mock.calls[2][0] as WorkerOptions;
+    expect(third.previousFeedback).toContain('lint: x');
+    expect(third.previousFeedback).toContain('- F1: range() stops one short');
   });
 
   it('keeps the old free-text path when the reviewer gives no structured issues', async () => {
