@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
-import { DAEMON_PORT } from './daemon.js';
+import { daemonPort } from '../core/daemonPort.js';
 import { daemonAuthHeaders, daemonBaseUrl as baseUrl } from './daemonEndpoint.js';
 
 
@@ -222,7 +222,7 @@ export async function runAttachCommand(
   filepaths: string[],
   opts: RunAttachOptions = {},
 ): Promise<number> {
-  const port = opts.port ?? DAEMON_PORT;
+  const port = opts.port ?? daemonPort();
 
   // Files are optional: the dashboard's chat box can send a bare message, and
   // an operator answering a parked question usually has nothing to upload.

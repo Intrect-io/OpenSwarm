@@ -20,7 +20,7 @@ import type { AdapterName } from '../adapters/types.js';
 import { readProviderOverride, writeProviderOverride } from '../core/providerOverride.js';
 import { loadConfig } from '../core/config.js';
 import { daemonAuthHeaders, daemonBaseUrl as baseUrl } from './daemonEndpoint.js';
-import { DAEMON_PORT } from './daemon.js';
+import { daemonPort } from '../core/daemonPort.js';
 
 /**
  * One-line hints for the interactive picker. Names always come from the live
@@ -96,7 +96,7 @@ function readRoles(adapters: StatsAdapters): RoleSummary[] {
 }
 
 /** Same precedence the CLI boot path uses: live daemon → persisted override → config.yaml. */
-export async function getProviderStatus(port = DAEMON_PORT): Promise<ProviderStatus> {
+export async function getProviderStatus(port = daemonPort()): Promise<ProviderStatus> {
   const adapters = await fetchDaemonAdapters(port);
   const live = adapters?.defaultAdapter;
   if (typeof live === 'string' && isKnownAdapter(live)) {
@@ -128,7 +128,7 @@ export interface ApplyResult {
  * change applies to work already in flight; otherwise the override file alone
  * carries the choice into the next boot.
  */
-export async function applyProvider(next: AdapterName, port = DAEMON_PORT): Promise<ApplyResult> {
+export async function applyProvider(next: AdapterName, port = daemonPort()): Promise<ApplyResult> {
   let reachable = false;
   // Same reason as fetchDaemonAdapters: a configuration error must not read as
   // an absent daemon, or the override file silently disagrees with the daemon.

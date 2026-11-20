@@ -688,6 +688,62 @@ served at `GET /api/usage?since=24h&by=model`.
 
 > **From source / development** (contributors): clone the repo and use the `npm run …` scripts (`npm run dev`, `npm start`, `npm run service:install` for a macOS launchd service, `docker compose up -d`). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+The daemon serves its dashboard and API on port 3847. Set `OPENSWARM_WEB_PORT` to move it. The
+daemon, its duplicate-instance check, and every CLI command that talks to it (`status`, `stop`,
+`board`, `threads`, `dash`, `exec`, `provider`) read the same variable.
+
+### Standalone bundle
+
+A standalone bundle is OpenSwarm with its own Node.js runtime. It runs on a machine with no
+Node.js, npm or Docker. Each bundle targets one platform. Bundles exist for `linux-x64` and
+`darwin-arm64`.
+
+| Path | Contents |
+|------|----------|
+| `bin/openswarm` | The launcher. It runs only the bundled Node.js, never a `node` found on `PATH`. |
+| `node/` | The official Node.js 22 runtime, checked against a pinned SHA-256. |
+| `app/` | The npm package and its production dependencies, with native modules built for that runtime. |
+| `VERSION`, `COMMIT`, `BUILD-INFO.json` | What the bundle was built from. |
+
+To build one for the platform you are on, from a checkout:
+
+```bash
+bash scripts/build-standalone.sh             # dist-standalone/openswarm-<version>-<os>-<arch>/
+bash scripts/build-standalone.sh --tarball   # also a .tar.gz and its .sha256
+```
+
+To check a bundle, use `scripts/smoke-standalone.sh <bundle-dir>`. It checks three things:
+
+1. The launcher prints the version while a decoy `node` sits first on `PATH`.
+2. `better-sqlite3` and `@lancedb/lancedb` load in the bundled runtime.
+3. A daemon started from the bundle answers `/api/health` with that version.
+
+The check isolates the daemon from the operator's setup:
+
+- an empty environment;
+- a temporary `HOME` and working directory;
+- a generated config with no tracker, chat or autonomous section;
+- telemetry off;
+- a free port that is not 3847.
+
+The [Standalone bundles](.github/workflows/standalone.yml) workflow builds and checks both
+platforms on CI. It keeps the tarballs as workflow artifacts and publishes nothing.
+
+To install a bundle on the current machine, run `scripts/deploy-standalone.sh`:
+
+- It builds the bundle, installs it under
+  `~/.local/share/openswarm-standalone/releases/<version>-<commit>`, and points the `current`
+  symlink at it in one atomic step.
+- `OPENSWARM_STANDALONE_HOME` changes the install root.
+- It keeps the three newest releases.
+- It leaves the existing `openswarm` on `PATH` and any running daemon alone.
+
+Inside a bundle, the npm self-update is off. To update, install a newer bundle.
+
+```bash
+~/.local/share/openswarm-standalone/current/bin/openswarm --version
+```
+
 ### Run with Docker
 
 The repository ships a production image for the headless daemon (web dashboard on `:3847`, `openswarm` CLI on `PATH`). Published images live at `ghcr.io/unohee/openswarm` (tagged per release); building locally works the same way:

@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { createServer } from 'node:net';
 import { listAvailableAdapters } from '../adapters/index.js';
 import { findConfigFile } from '../core/config.js';
+import { DEFAULT_DAEMON_PORT, daemonPort } from '../core/daemonPort.js';
 import { banner } from '../support/banner.js';
 import { c } from '../support/colors.js';
 import { track } from '../telemetry/telemetry.js';
@@ -159,8 +160,15 @@ export async function handleDoctor(): Promise<void> {
   }
 
   // 5) Ports (web dashboard + OAuth callbacks)
+  let dashboardPort = DEFAULT_DAEMON_PORT;
+  try {
+    dashboardPort = daemonPort();
+  } catch (error) {
+    line('fail', 'OPENSWARM_WEB_PORT', (error as Error).message);
+    fatal = true;
+  }
   const ports: Array<[number, string]> = [
-    [3847, 'web dashboard'],
+    [dashboardPort, 'web dashboard'],
     [1455, 'codex OAuth callback'],
     [1456, 'openrouter OAuth callback'],
     [1457, 'linear OAuth callback'],

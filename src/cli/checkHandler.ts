@@ -4,6 +4,7 @@
 // Purpose: `openswarm check` 명령어 — 코드 레지스트리 조회
 // ============================================
 
+import { daemonPort } from '../core/daemonPort.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { getRegistryStore, closeRegistryStore, LIST_ENTITIES_MAX_LIMIT } from '../registry/sqliteStore.js';
@@ -495,7 +496,7 @@ export async function handleCheck(
     const stats = store.getStats(summaryProjectId);
     if (stats.total === 0) {
       console.log(`\n${c.bold('Code Registry')}: empty ${c.dim(`(project: ${summaryProjectId})`)}`);
-      console.log(`  ${c.dim('Register entities via GraphQL at :3847/graphql')}`);
+      console.log(`  ${c.dim(`Register entities via GraphQL at :${daemonPort()}/graphql`)}`);
       console.log(`  ${c.dim('or use: openswarm check --help')}\n`);
     } else {
       console.log(`\n${c.bold('Code Registry')}: ${stats.total} entities ${c.dim(`(project: ${summaryProjectId})`)}`);

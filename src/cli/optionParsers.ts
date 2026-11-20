@@ -19,3 +19,6 @@ export function parseTcpPortOption(value: string): number {
   }
   return port;
 }
+
+/** Default for every --port option that names the daemon: OPENSWARM_WEB_PORT, else 3847. */
+export { daemonPort } from '../core/daemonPort.js';

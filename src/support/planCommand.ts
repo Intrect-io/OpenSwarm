@@ -18,8 +18,8 @@
 // still flow through createSubIssuesWithDependencies → registerDecomposition.
 
 import { runPlanner, type SubTask } from './planner.js';
+import { daemonPort } from '../core/daemonPort.js';
 
-const DAEMON_BASE = 'http://127.0.0.1:3847';
 
 export interface PlanIO {
   /** Print one line to the surface (chatLog / stdout). */
@@ -141,7 +141,7 @@ async function dispatch(
   io: PlanIO,
 ): Promise<void> {
   try {
-    const res = await fetch(`${DAEMON_BASE}/api/plan/dispatch`, {
+    const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/plan/dispatch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ goal, projectPath, subTasks }),
@@ -162,6 +162,6 @@ async function dispatch(
       io.print(`✅ Dispatched ${data.taskIds?.length ?? 0} task(s) to the exec pipeline — watch the Tasks tab.`);
     }
   } catch {
-    io.print('✖ Could not reach the daemon at :3847. Start it with `openswarm start`, then retry.');
+    io.print('✖ Could not reach the daemon at :' + daemonPort() + '. Start it with `openswarm start`, then retry.');
   }
 }
