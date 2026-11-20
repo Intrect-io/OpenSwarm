@@ -575,7 +575,7 @@ async function runWorkCommandInner(
     interrupts += 1;
     if (interrupts > 1) forceExit(exitCodeFor(signal));
     interruptSignal = signal;
-    log(`Interrupted (${signal}) — aborting running pipelines. Worktrees holding work are preserved; re-run the same command to resume. (Ctrl-C again to force quit)`);
+    log(`Interrupted (${signal}) — aborting running pipelines. Worktrees holding work are preserved; re-run the same command to resume.${signal === 'SIGINT' ? ' (Ctrl-C again to force quit)' : ''}`);
     sigint.abort(new Error(signal));
   };
   const uninstallSigint = (deps.installSigintHandler ?? ((handler: (signal?: WorkInterruptSignal) => void) => {
