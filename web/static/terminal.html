@@ -12,6 +12,11 @@
     <span class="grow"></span>
     <button id="terminal-reconnect" class="btn btn-secondary btn-sm" type="button" hidden>Reconnect</button>
   </div>
+  <form id="terminal-token-form" class="terminal-token" hidden>
+    <label for="terminal-token-input">Web token</label>
+    <input id="terminal-token-input" type="password" autocomplete="off" spellcheck="false" required>
+    <button class="btn btn-primary btn-sm" type="submit">Connect</button>
+  </form>
   <div id="terminal" aria-label="Terminal"></div>
 </main>
 <script src="/static/vendor/xterm/xterm.js"></script>

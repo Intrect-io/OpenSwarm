@@ -196,6 +196,17 @@ describe('hasValidWebToken', () => {
     expect(hasValidWebToken(req({ token: 'wrong' }))).toBe(false);
     expect(hasValidWebToken(req())).toBe(false);
   });
+
+  // The comparison is constant-time over SHA-256 digests (no early exit on
+  // length or first differing byte); the verdicts must be exactly the old ones.
+  it('compares in constant time without changing any verdict: prefixes, extensions, case and empty all fail', () => {
+    process.env.OPENSWARM_WEB_TOKEN = 'secret';
+    for (const wrong of ['secre', 'secrets', 'Secret', ' secret', 'x'.repeat(4096)]) {
+      expect(hasValidWebToken(req({ token: wrong }))).toBe(false);
+    }
+    expect(hasValidWebToken(req({ auth: 'Bearer ' }))).toBe(false);
+    expect(hasValidWebToken(req({ token: 'secret' }))).toBe(true);
+  });
 });
 
 describe('isMutatingApiRequest', () => {

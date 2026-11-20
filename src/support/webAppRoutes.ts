@@ -11,6 +11,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AutonomousRunner } from '../automation/autonomousRunner.js';
 import { readStaticAsset, StaticAssetError } from './staticAssets.js';
+import { isWebTerminalActive } from './terminalServer.js';
 
 function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
   res.writeHead(statusCode, { 'Content-Type': 'application/json' });
@@ -46,9 +47,10 @@ const PAGE_SHELLS: Record<string, () => Promise<Buffer | null>> = {
   '/terminal': async () => (await import('./staticAssets.js')).readTerminalShell(),
 };
 
-/** Pages that exist only behind an opt-in flag; unset, the URL is not routed at all. */
+/** Pages that exist only behind an opt-in flag; off, the URL is not routed at all. */
 const GATED_PAGES: Record<string, () => boolean> = {
-  '/terminal': () => process.env.OPENSWARM_WEB_TERMINAL === '1',
+  // Attached, not merely requested: a start refused as root or on the host keeps it off.
+  '/terminal': isWebTerminalActive,
 };
 
 /**

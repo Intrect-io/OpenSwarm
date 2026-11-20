@@ -13,3 +13,17 @@
 #terminal-state[data-tone="warn"] { color: var(--warning); }
 #terminal-state[data-tone="danger"] { color: var(--danger); }
 #terminal { flex: 1; min-height: 0; background: var(--bg-code); border-radius: var(--radius-md); padding: var(--space-1); }
+/* Asked for when no web token is stored; the shell always requires one. */
+.terminal-token { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+.terminal-token[hidden] { display: none; }
+.terminal-token input {
+  flex: 1;
+  max-width: 32rem;
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-surface);
+  color: var(--fg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+}
+.terminal-token input:focus { outline: 2px solid var(--focus-ring); outline-offset: 1px; }

@@ -154,7 +154,7 @@ export async function readUsageShell(): Promise<Buffer | null> {
   return readShellFile('usage.html');
 }
 
-/** The opt-in web terminal shell (AGT-4002); routed only when OPENSWARM_WEB_TERMINAL=1. */
+/** The opt-in web terminal shell (AGT-4002); served only while the terminal is attached (see isWebTerminalActive). */
 export async function readTerminalShell(): Promise<Buffer | null> {
   return readShellFile('terminal.html');
 }

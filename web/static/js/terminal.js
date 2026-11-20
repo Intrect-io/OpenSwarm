@@ -16,9 +16,24 @@
     return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
-  function protocols() {
+  // The shell requires the daemon token on every connection, loopback
+  // included. The token is kept where webToken.js keeps it for other pages.
+  var enteredToken = '';
+
+  function readToken() {
     var api = window.OpenSwarmWebToken;
-    var token = api && typeof api.readToken === 'function' ? api.readToken() : '';
+    var stored = api && typeof api.readToken === 'function' ? api.readToken() : '';
+    return stored || enteredToken;
+  }
+
+  function storeToken(token) {
+    enteredToken = token;
+    var api = window.OpenSwarmWebToken;
+    if (api && typeof api.storeToken === 'function') api.storeToken(token);
+  }
+
+  function protocols() {
+    var token = readToken();
     return token ? [PROTOCOL, TOKEN_PREFIX + base64url(token)] : [PROTOCOL];
   }
 
@@ -28,6 +43,15 @@
 
   var stateEl = document.getElementById('terminal-state');
   var reconnectEl = document.getElementById('terminal-reconnect');
+  var tokenForm = document.getElementById('terminal-token-form');
+  var tokenInput = document.getElementById('terminal-token-input');
+
+  function askForToken(message) {
+    setState(message, 'warn');
+    reconnectEl.hidden = true;
+    tokenForm.hidden = false;
+    tokenInput.focus();
+  }
 
   function setState(text, tone) {
     stateEl.textContent = text;
@@ -57,7 +81,9 @@
   var CLOSE_REASONS = { 1013: 'Too many terminal sessions are open.', 1011: 'The shell could not start.' };
 
   function connect() {
+    if (!readToken()) { askForToken('Enter the daemon web token to open a shell.'); return; }
     reconnectEl.hidden = true;
+    tokenForm.hidden = true;
     setState('Connecting…', 'warn');
     socket = new WebSocket(socketUrl(), protocols());
     socket.onopen = function () {
@@ -68,16 +94,31 @@
     socket.onmessage = function (event) {
       if (typeof event.data === 'string') term.write(event.data);
     };
+    var opened = false;
+    socket.addEventListener('open', function () { opened = true; });
     socket.onclose = function (event) {
-      var reason = CLOSE_REASONS[event.code] || event.reason || (event.code === 1006 ? 'Connection refused or lost (check the web token).' : 'Disconnected.');
+      socket = null;
+      // Refused before opening: most likely a missing or wrong token.
+      if (!opened && event.code === 1006) {
+        askForToken('Connection refused: check the web token and connect again.');
+        return;
+      }
+      var reason = CLOSE_REASONS[event.code] || event.reason || (event.code === 1006 ? 'Connection lost.' : 'Disconnected.');
       setState(reason, event.code === 1000 ? 'warn' : 'danger');
       reconnectEl.hidden = false;
-      socket = null;
     };
   }
 
   term.onData(function (data) { send({ type: 'input', data: data }); });
   window.addEventListener('resize', resize);
   reconnectEl.addEventListener('click', connect);
+  tokenForm.addEventListener('submit', function (event) {
+    event.preventDefault();
+    var token = tokenInput.value.trim();
+    if (!token) return;
+    storeToken(token);
+    tokenInput.value = '';
+    connect();
+  });
   connect();
 })();
