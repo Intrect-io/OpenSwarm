@@ -11,7 +11,8 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig } from '../core/types.js';
 import { getAdapter, getDefaultAdapterName, listAvailableAdapters, probeAdapterAvailability } from '../adapters/index.js';
 import { initLocale } from '../locale/index.js';
-import { expandPath } from '../core/config.js';
+import { expandPath, loadConfig } from '../core/config.js';
+import { setWorkerNetworkPolicy } from '../support/osSandbox.js';
 import { startProgressHeartbeat, type ReviewProgress } from '../cli/reviewProgress.js';
 import { status } from '../support/colors.js';
 import { sanitizeTerminalText, sanitizeAndBoundTerminalText, MAX_RENDERED_LINE_LENGTH } from '../tui/sanitize.js';
@@ -87,6 +88,26 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(seconds / 60);
   const remaining = seconds % 60;
   return `${minutes}m ${remaining.toFixed(0)}s`;
+}
+
+/**
+ * The worker fence for `openswarm run`: `autonomous.workerSandbox`, as the
+ * daemon and `openswarm work` use. This entry point used to pass none, so its
+ * worker ran unfenced with open network (AGT-4815). A missing or unreadable
+ * config falls back to `on`, the config default.
+ *
+ * `workerNetwork: open` is honoured too. `loopback` is left as the unconfigured
+ * process default rather than declared: declaring it would make this ad-hoc run
+ * record network denials as factory evidence (AGT-4809).
+ */
+function resolveWorkerFence(): 'on' | 'off' {
+  try {
+    const autonomous = loadConfig().autonomous;
+    if (autonomous?.workerNetwork === 'open') setWorkerNetworkPolicy('open');
+    return autonomous?.workerSandbox ?? 'on';
+  } catch {
+    return 'on';
+  }
 }
 
 // Main Runner
@@ -167,6 +188,7 @@ export async function runCli(options: CliRunOptions): Promise<void> {
     maxIterations,
     roles: Object.keys(roles).length > 0 ? roles as any : undefined,
     verbose: options.verbose,
+    workerSandbox: resolveWorkerFence(),
   });
 
   // 7. Print header

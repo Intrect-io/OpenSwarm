@@ -45,6 +45,8 @@ export interface PublicationReviewHookInput {
   result: PublishableResult & { success?: boolean; finalStatus?: string; prUrl?: string };
   roles?: DefaultRolesConfig;
   securityAudit?: SecurityAuditConfig;
+  /** `autonomous.workerSandbox`, handed to the review's PR processor (AGT-4815). */
+  workerSandbox: 'on' | 'off';
   /**
    * Durable memory of reviews this deployment already paid for.
    *
@@ -113,7 +115,7 @@ export function buildPublicationReviewHook(
   headSha: string;
   worktreeInfo: { originalPath: string; worktreePath?: string };
 }) => Promise<void> {
-  const { task, result, roles, securityAudit, rollbackOnRejection, verdictStore } = input;
+  const { task, result, roles, securityAudit, workerSandbox, rollbackOnRejection, verdictStore } = input;
   return async ({ prUrl, headSha, worktreeInfo }) => {
     // Only the park path may skip on the in-process key. The approved path's
     // whole job is to ACT on the verdict, and this cache remembers "seen", not
@@ -154,7 +156,7 @@ export function buildPublicationReviewHook(
       try {
         const { reviewPublishedPullRequest } = await import('./prPublicationReview.js');
         review = await reviewPublishedPullRequest({
-          prUrl, projectPath: worktreeInfo.originalPath, roles, securityAudit,
+          prUrl, projectPath: worktreeInfo.originalPath, roles, securityAudit, workerSandbox,
         });
       } catch (err) {
         // The key goes in before the review so concurrent callers collapse; a

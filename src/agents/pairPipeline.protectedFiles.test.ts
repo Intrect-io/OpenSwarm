@@ -70,7 +70,7 @@ const GRADER = ['pkg/x_test.go', 'src/a.test.ts', 'src/legacy/b.spec.js', 'tests
 describe('protected files by default', () => {
   it('passes base test files and verify config as protected files to the worker', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    await new PairPipeline({ stages: ['worker'], maxIterations: 1, roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } } })
+    await new PairPipeline({ workerSandbox: 'off', stages: ['worker'], maxIterations: 1, roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } } })
       .run(task(), repo);
 
     const options = runWorker.mock.calls.at(-1)?.[0] as { protectedFiles?: string[] };

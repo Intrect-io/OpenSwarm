@@ -71,7 +71,7 @@ vi.mock('../support/gitTracker.js', async () => {
 // the tree the run started from, so earlier iterations' edits still count.
 describe('PairPipeline run-start snapshot', () => {
   const pipelineConfig = {
-    stages: ['worker', 'reviewer'] as ('worker' | 'reviewer')[],
+    workerSandbox: 'off' as const, stages: ['worker', 'reviewer'] as ('worker' | 'reviewer')[],
     maxIterations: 3,
     roles: {
       worker: { enabled: true, model: 'w', timeoutMs: 0 },

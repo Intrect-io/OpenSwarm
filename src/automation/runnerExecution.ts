@@ -205,7 +205,7 @@ export interface ExecutionContext {
   getActiveWorkerIssues?: (projectPath: string) => string[] | undefined;
   mcpPolicies?: import('../automation/runnerTypes.js').AutonomousConfig['mcpPolicies'];
   adapterRouting?: import('../automation/runnerTypes.js').AutonomousConfig['adapterRouting'];
-  /** OS fence for the worker's bash tool (AGT-4387). */
+  /** OS fence for the worker's bash tool (AGT-4387). Unset means `on`, the config default, as for setup (AGT-4815). */
   workerSandbox?: 'on' | 'off';
 }
 
@@ -1004,7 +1004,7 @@ export async function executePipeline(
       instructionCapsule,
       roleMcpTools,
       normalizeAdapterRouting(ctx.adapterRouting),
-      ctx.workerSandbox,
+      ctx.workerSandbox ?? 'on',
       // The same wall-clock budget the scheduler's watchdog was given, so the
       // loop stops on its own terms instead of being killed mid-iteration
       // (AGT-4430).
@@ -1254,7 +1254,7 @@ export async function executePipeline(
     // either before the approved publish or during it, and the earlier side is
     // the one that carries the 42-commit outcomes.
     const reviewHook = (rollbackOnRejection: boolean) => freshReview
-      ? buildPublicationReviewHook({ task, result, roles, securityAudit: ctx.securityAudit, rollbackOnRejection })
+      ? buildPublicationReviewHook({ task, result, roles, securityAudit: ctx.securityAudit, workerSandbox: ctx.workerSandbox ?? 'on', rollbackOnRejection })
       : undefined;
 
     await publishFinishedRun(worktreeInfo, task, result, ctx.durability, reviewHook, ctx.verify);

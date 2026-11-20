@@ -23,6 +23,7 @@ import { extractSummary, withExecutionEvidence } from './resultParsing.js';
 import { writeClaudeMcpConfig } from './memoryMcp.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { buildClaudeEnvOverlay, inheritsUserSettings } from './claudeEnv.js';
+import { extractClaudeRunUsage, recordCliRunUsage } from './cliUsageAttribution.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -126,6 +127,17 @@ export class ClaudeCliAdapter implements CliAdapter {
 
   async getDefaultModel(): Promise<string> {
     return CLAUDE_DEFAULT_MODEL;
+  }
+
+  /** Ledger line from the final stream-json `result` event (AGT-4444). */
+  recordRunUsage(stdout: string, options: CliRunOptions, durationMs: number): void {
+    recordCliRunUsage({
+      adapterName: this.name,
+      fallbackModel: CLAUDE_DEFAULT_MODEL,
+      options,
+      usage: extractClaudeRunUsage(stdout),
+      durationMs,
+    });
   }
 
   parseWorkerOutput(raw: CliRunResult): WorkerResult {

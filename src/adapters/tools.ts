@@ -12,15 +12,13 @@ import { StringDecoder } from 'node:string_decoder';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { webFetch, webSearch } from './webTools.js';
+import { webToolNetworkDenial } from './webToolPolicy.js';
 import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 import { applyV4APatch } from './applyPatch.js';
 import { atomicWriteFile } from '../support/atomicFile.js';
 import { preserveTrailingNewline, pythonSyntaxError, wholeFileRewriteVerdict } from './writeGuards.js';
 import { COORDINATION_TOOL_NAMES, executeCoordinationTool, type CoordinationToolContext } from '../coordination/coordinationTools.js';
-import {
-  humanSurfaceShellWriteReason,
-  isHumanSurfaceReadOnlyEnabled,
-} from '../mcp/humanSurfacePolicy.js';
+import { humanSurfaceShellWriteReason, isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { SandboxOutcomeUnknownError, type SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import { getWorkerNetworkPolicy, noteSandboxDenial, workerWritableRoots, wrapForSandbox } from '../support/osSandbox.js';
 import { listNotes, readNote, writeNote } from '../support/scratchpad.js';
@@ -784,6 +782,7 @@ export async function executeTool(
         is_error: true,
       };
     }
+    const networkDenied = webToolNetworkDenial(name, callId, execOptions?.sandbox); if (networkDenied) return networkDenied; // AGT-4815
 
     const MAX_READ_FILE_LIMIT = 2000;
     const MAX_READ_FILE_OFFSET = 1_000_000;

@@ -628,6 +628,37 @@ describe('delegated-CLI capability guards', () => {
     expect(text).toContain('the publication fence');
   });
 
+  it('hands every exited CLI run to the adapter usage hook, failed runs included (AGT-4444)', async () => {
+    const fakeProc = (stdout: string, code: number) => {
+      const proc = Object.assign(new EventEmitter(), {
+        pid: 313,
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        stdin: Object.assign(new EventEmitter(), { end: vi.fn() }),
+        kill: vi.fn(),
+      });
+      queueMicrotask(() => {
+        proc.stdout.end(stdout);
+        proc.emit('close', code);
+      });
+      return proc;
+    };
+    const recordRunUsage = vi.fn(() => { throw new Error('ledger exploded'); });
+    const adapter = { ...delegated(), recordRunUsage } satisfies CliAdapter;
+    const options = { prompt: 'p', cwd: process.cwd(), usageAttribution: { adapter: 'fixture-cli', taskId: 'T-1', stage: 'worker' } };
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    spawnMock.mockImplementationOnce(() => fakeProc('ok-stream', 0));
+    // A throwing hook must not change the run's outcome.
+    await expect(spawnCli(adapter, options)).resolves.toMatchObject({ stdout: 'ok-stream' });
+    spawnMock.mockImplementationOnce(() => fakeProc('failed-stream', 1));
+    await expect(spawnCli(adapter, options)).rejects.toThrow(/fixture-cli CLI failed with code 1/);
+
+    expect(recordRunUsage).toHaveBeenCalledTimes(2);
+    expect(recordRunUsage).toHaveBeenNthCalledWith(1, 'ok-stream', expect.objectContaining({ usageAttribution: options.usageAttribution }), expect.any(Number));
+    expect(recordRunUsage).toHaveBeenNthCalledWith(2, 'failed-stream', expect.anything(), expect.any(Number));
+  });
+
   it('does not construct or spawn a delegated fake CLI in strict mode, even with HOME credentials', async () => {
     const buildCommand = vi.fn(() => ({ command: 'fake-codex', args: [] }));
     const adapter = { ...delegated(), name: 'fake-codex', buildCommand } satisfies CliAdapter;

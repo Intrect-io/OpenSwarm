@@ -1,5 +1,9 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CodexCliAdapter, coerceCodexModel } from './codex.js';
+import { readUsage } from '../support/usageLedger.js';
 
 describe('CodexCliAdapter', () => {
   const adapter = new CodexCliAdapter(async () => []);
@@ -336,5 +340,47 @@ describe('CodexCliAdapter observed execution evidence (AGT-4900)', () => {
     expect(run('All tests pass.').executedCommands).toBeUndefined();
     expect(run(`[openswarm: 100 earlier characters of output were not retained]\n${exec('npm test', 0)}\n${message('done')}`).executedCommands)
       .toBeUndefined();
+  });
+});
+
+describe('CodexCliAdapter usage ledger attribution (AGT-4444)', () => {
+  let dir: string;
+  const savedDir = process.env.OPENSWARM_USAGE_DIR;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'openswarm-codex-usage-'));
+    process.env.OPENSWARM_USAGE_DIR = dir;
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    if (savedDir === undefined) delete process.env.OPENSWARM_USAGE_DIR;
+    else process.env.OPENSWARM_USAGE_DIR = savedDir;
+  });
+  const adapter = new CodexCliAdapter(async () => []);
+  const turn = (input: number, cached: number, output: number) =>
+    JSON.stringify({ type: 'turn.completed', usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output } });
+
+  it('sums turn.completed usage into one unmetered record under the processContext attribution', () => {
+    adapter.recordRunUsage(
+      ['{"type":"thread.started"}', turn(1000, 800, 50), turn(500, 400, 25)].join('\n'),
+      { prompt: 'p', cwd: '/work/repo', model: 'gpt-5-codex', processContext: { taskId: 'AGT-2', stage: 'reviewer' } },
+      7,
+    );
+    const records = readUsage({ since: 0 }, dir);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      adapter: 'codex', model: 'gpt-5-codex', taskId: 'AGT-2', stage: 'reviewer',
+      promptTokens: 1500, cachedTokens: 1200, completionTokens: 75, costUsd: null, durationMs: 7,
+    });
+    expect(records[0].unattributed).toBeUndefined();
+  });
+
+  it('tags a run with no usage events or no attribution as unattributed', () => {
+    adapter.recordRunUsage('{"type":"turn.completed"}', { prompt: 'p', cwd: '/work/repo', processContext: { taskId: 'AGT-3', stage: 'worker' } }, 1);
+    adapter.recordRunUsage(turn(10, 0, 5), { prompt: 'p', cwd: '/work/repo', model: 'claude-sonnet-4' }, 1);
+    const records = readUsage({ since: 0 }, dir);
+    expect(records).toHaveLength(2);
+    expect(records[0]).toMatchObject({ model: 'codex-cli-default', taskId: 'AGT-3', promptTokens: 0, costUsd: null, unattributed: 'no-usage' });
+    // The recorded model is the coerced one codex actually ran.
+    expect(records[1]).toMatchObject({ model: 'gpt-5-codex', promptTokens: 10, unattributed: 'no-attribution' });
   });
 });

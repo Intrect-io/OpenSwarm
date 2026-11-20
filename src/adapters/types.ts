@@ -319,6 +319,14 @@ export interface CliAdapter {
    */
   run?(options: CliRunOptions): Promise<CliRunResult>;
 
+  /**
+   * Record the usage a delegated CLI reported for one spawned run in the
+   * usage ledger, under the run's usageAttribution. Called once by spawnCli
+   * after the process exits (also on a non-zero exit, since a failed run still
+   * spent tokens). Adapters with their own `run` record per call instead.
+   */
+  recordRunUsage?(stdout: string, options: CliRunOptions, durationMs: number): void;
+
   /** Parse raw CLI output into a WorkerResult */
   parseWorkerOutput(raw: CliRunResult): WorkerResult;
 

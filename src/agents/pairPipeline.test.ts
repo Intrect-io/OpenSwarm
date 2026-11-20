@@ -109,7 +109,7 @@ describe('PairPipeline model selection', () => {
     // `12a014e9-…`, so a task's transcripts landed in two directories and its
     // cost in two ledger keys — $0.0775 under one, the rest under the other.
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },
@@ -140,7 +140,7 @@ describe('PairPipeline model selection', () => {
     boardEvents.list = [];
     runWorker.mockRejectedValueOnce(new Error('adapter exploded'));
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       roles: {
@@ -168,7 +168,7 @@ describe('PairPipeline model selection', () => {
 
   it('passes matched jobProfile models to worker and reviewer calls', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       roles: {
@@ -210,7 +210,7 @@ describe('PairPipeline model selection', () => {
       haltReason: 'Blocked on an operator decision (ask_human posted to Discord)',
     });
 
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 3,
       roles: {
@@ -233,7 +233,7 @@ describe('PairPipeline model selection', () => {
   it('names the worker and the reviewer distinctly, and keeps the name across a retry', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
     const config = {
-      stages: ['worker', 'reviewer'] as const,
+      workerSandbox: 'off' as const, stages: ['worker', 'reviewer'] as const,
       maxIterations: 1,
       roles: {
         worker: { enabled: true, model: 'w', timeoutMs: 0 },
@@ -241,7 +241,7 @@ describe('PairPipeline model selection', () => {
       },
     };
 
-    await new PairPipeline({ ...config, stages: [...config.stages] }).run(task(), process.cwd());
+    await new PairPipeline({ workerSandbox: 'off', ...config, stages: [...config.stages] }).run(task(), process.cwd());
     const firstWorker = runWorker.mock.calls[0][0].coordinationContext;
     const reviewerContext = runReviewer.mock.calls[0][0].coordinationContext;
 
@@ -252,13 +252,13 @@ describe('PairPipeline model selection', () => {
 
     // A retry gets a fresh session but must keep the name, or an answer
     // addressed to the first attempt is stranded in an inbox nobody reads.
-    await new PairPipeline({ ...config, stages: [...config.stages] }).run(task(), process.cwd());
+    await new PairPipeline({ workerSandbox: 'off', ...config, stages: [...config.stages] }).run(task(), process.cwd());
     expect(runWorker.mock.calls.at(-1)?.[0].coordinationContext.actor).toBe(firstWorker.actor);
   });
 
   it('drops incompatible profile and escalation models at the Claude execution boundary', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 2,
       roles: {
@@ -297,7 +297,7 @@ describe('PairPipeline model selection', () => {
     runReviewer.mockResolvedValue({ decision: 'approve', feedback: 'ok' });
     runAuditor.mockResolvedValue({ passed: true, findings: [], summary: 'ok' });
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer', 'auditor'],
       maxIterations: 1,
       // The worker mock reports one changed file; the default threshold is 3,
@@ -328,7 +328,7 @@ describe('PairPipeline model selection', () => {
       .mockResolvedValueOnce({ decision: 'approve', feedback: 'ok' });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 4,
       roles: {
@@ -363,7 +363,7 @@ describe('PairPipeline model selection', () => {
       .mockResolvedValueOnce({ decision: 'approve', feedback: 'ok' });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 4,
       roles: {
@@ -399,7 +399,7 @@ describe('PairPipeline model selection', () => {
     // Once-only so the rejection can't leak into later tests (clearAllMocks keeps impls).
     runDocumenter.mockRejectedValueOnce(new RateLimitError(1782824950, 'Codex usage limit reached'));
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer', 'documenter'],
       maxIterations: 1,
       roles: {
@@ -423,7 +423,7 @@ describe('PairPipeline model selection', () => {
       success: true, summary: 'done', filesChanged: [], commands: [], output: '', confidencePercent: 90,
     });
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       roles: { worker: { enabled: true, timeoutMs: 0 }, reviewer: { enabled: true, timeoutMs: 0 } },
@@ -447,7 +447,7 @@ describe('PairPipeline model selection', () => {
       error: 'worker-scope: changed files outside declared fileScope: docs/X.md',
     });
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 5,
       // Smaller than the wrap-up reserve, so iteration 2 can never fit.
@@ -472,7 +472,7 @@ describe('PairPipeline model selection', () => {
       error: 'temporary worker failure',
     });
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 3,
       taskBudgetMs: 90 * 60_000,
@@ -487,7 +487,7 @@ describe('PairPipeline model selection', () => {
 
   it('passes planner fileScope to the worker enforcement boundary', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'], maxIterations: 1,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
     });
@@ -499,7 +499,7 @@ describe('PairPipeline model selection', () => {
 
   it('does not enforce knowledge-graph inferred scope at the worker boundary', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'], maxIterations: 1,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
     });
@@ -514,7 +514,7 @@ describe('PairPipeline model selection', () => {
 
   it('enforces a canonical drafted scope at the worker boundary', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'], maxIterations: 1,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
     });
@@ -529,7 +529,7 @@ describe('PairPipeline model selection', () => {
 
   it('passes preserved WIP files to the worker Git authority boundary', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'], maxIterations: 1,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
       resumedTaskFiles: ['src/preserved.ts'],
@@ -544,7 +544,7 @@ describe('PairPipeline model selection', () => {
 
   it('falls back to role models when no jobProfile matches', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       roles: {
@@ -575,7 +575,7 @@ describe('PairPipeline model selection', () => {
   it('emits rate-limit reset timestamps on failed stage events', async () => {
     runWorker.mockRejectedValueOnce(new RateLimitError(1770000000, 'rate limited'));
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: {
@@ -614,7 +614,7 @@ describe('PairPipeline model selection', () => {
       success: true, summary: 'did it', codename: 'Atlas 3', filesChanged: [], commands: [],
     });
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: { worker: { enabled: true, model: 'm', timeoutMs: 0 } },
@@ -637,7 +637,7 @@ describe('PairPipeline model selection', () => {
   it('classifies a worker CLI/infra failure as infra_error, not a plain failure', async () => {
     runWorker.mockRejectedValueOnce(new Error('codex CLI failed with code 1: Reading prompt from stdin...'));
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: {
@@ -660,7 +660,7 @@ describe('PairPipeline model selection', () => {
   // data access. The stage now refuses before spawning, as infra.
   it('reports a missing working directory as infra_error before the worker ever runs', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: { worker: { enabled: true, model: 'fallback-worker', timeoutMs: 0 } },
@@ -678,7 +678,7 @@ describe('PairPipeline model selection', () => {
   it('classifies a raw string infra rejection as infra_error, not a plain failure', async () => {
     runWorker.mockRejectedValueOnce('getaddrinfo ENOTFOUND api.openai.com');
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: {
@@ -699,7 +699,7 @@ describe('PairPipeline model selection', () => {
     ['getaddrinfo ENOTFOUND api.openai.com', 'infra_error', 'getaddrinfo ENOTFOUND api.openai.com'],
   ])('preserves an exception before a stage result exists: %s', async (error, status, message) => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({ stages: ['worker'], maxIterations: 1 });
+    const pipeline = new PairPipeline({ workerSandbox: 'off', stages: ['worker'], maxIterations: 1 });
     pipeline.on('stage:start', () => { throw error; });
     const result = await pipeline.run(task(), process.cwd());
     expect(result.finalStatus).toBe(status);
@@ -718,7 +718,7 @@ describe('PairPipeline model selection', () => {
 
   it('resolves the adapter default model when role model is omitted, and caches it', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       roles: {
@@ -738,7 +738,7 @@ describe('PairPipeline model selection', () => {
 
   it('prefers an explicit role model over the adapter default (no getDefaultModel call)', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: { worker: { enabled: true, model: 'explicit-worker', timeoutMs: 0 } },
@@ -770,7 +770,7 @@ describe('PairPipeline model selection', () => {
       });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 2,
       roles: {
@@ -791,7 +791,7 @@ describe('PairPipeline model selection', () => {
 
   it('injects prior-session failure feedback into the first worker iteration', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       roles: {
@@ -817,7 +817,7 @@ describe('PairPipeline model selection', () => {
       .mockResolvedValueOnce({ decision: 'revise', feedback: 'Use the stale due_date rule from the issue.' })
       .mockResolvedValueOnce({ decision: 'approve', feedback: 'monthly_cutoff contract preserved.' });
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 2,
       roles: {
@@ -853,7 +853,7 @@ describe('PairPipeline model selection', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 6,
       roles: {
@@ -880,7 +880,7 @@ describe('PairPipeline model selection', () => {
       .mockResolvedValueOnce({ decision: 'revise', feedback: 'Second: the tenant scoping on cache invalidation is still missing entirely.' });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 2,
       roles: {
@@ -913,7 +913,7 @@ describe('PairPipeline model selection', () => {
     runReviewer.mockResolvedValue({ decision: 'approve', feedback: 'ok' });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 3,
       roles: {
@@ -938,7 +938,7 @@ describe('PairPipeline model selection', () => {
       .mockResolvedValueOnce({ decision: 'approve', feedback: 'fixed' });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 6,
       roles: {
@@ -961,7 +961,7 @@ describe('PairPipeline model selection', () => {
       .mockResolvedValueOnce({ decision: 'approve', feedback: 'ok' });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 6,
       roles: {
@@ -995,7 +995,7 @@ describe('PairPipeline model selection', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 4,
       roles: {
@@ -1031,7 +1031,7 @@ describe('PairPipeline model selection', () => {
       });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 2,
       roles: {
@@ -1070,7 +1070,7 @@ describe('PairPipeline model selection', () => {
       });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 2,
       roles: {
@@ -1109,7 +1109,7 @@ describe('PairPipeline model selection', () => {
       });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'tester', 'reviewer'],
       maxIterations: 2,
       roles: {
@@ -1140,7 +1140,7 @@ describe('PairPipeline model selection', () => {
     });
 
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       roles: {
@@ -1159,7 +1159,7 @@ describe('PairPipeline model selection', () => {
   it('degrades to an undefined model when getDefaultModel fails', async () => {
     getDefaultModel.mockRejectedValue(new Error('no auth'));
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: { worker: { enabled: true, timeoutMs: 0 } },
@@ -1195,7 +1195,7 @@ describe('PairPipeline model selection', () => {
     expect(decision.shouldFanOut).toBe(true);
     expect(decision.signals.map((s) => s.code)).toContain('core-orchestration-scope');
 
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: {
@@ -1250,7 +1250,7 @@ describe('PairPipeline model selection', () => {
       });
 
       const { PairPipeline } = await import('./pairPipeline.js');
-      const pipeline = new PairPipeline({
+      const pipeline = new PairPipeline({ workerSandbox: 'off',
         stages: ['worker'],
         maxIterations: 1,
         roles: {
@@ -1311,7 +1311,7 @@ describe('PairPipeline model selection', () => {
       });
 
       const { PairPipeline } = await import('./pairPipeline.js');
-      const pipeline = new PairPipeline({
+      const pipeline = new PairPipeline({ workerSandbox: 'off',
         stages: ['worker'],
         maxIterations: 1,
         guards: { dependencyAntiPatternCheck: true },
@@ -1370,7 +1370,7 @@ describe('PairPipeline model selection', () => {
       });
 
       const { PairPipeline } = await import('./pairPipeline.js');
-      const pipeline = new PairPipeline({
+      const pipeline = new PairPipeline({ workerSandbox: 'off',
         stages: ['worker'],
         maxIterations: 1,
         roles: {
@@ -1427,7 +1427,7 @@ describe('PairPipeline model selection', () => {
       });
 
       const { PairPipeline } = await import('./pairPipeline.js');
-      const pipeline = new PairPipeline({
+      const pipeline = new PairPipeline({ workerSandbox: 'off',
         stages: ['worker'],
         maxIterations: 1,
         roles: {
@@ -1457,7 +1457,7 @@ describe('PairPipeline model selection', () => {
 
   it('keeps the adaptive fan-out gate disabled when configured off', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: {

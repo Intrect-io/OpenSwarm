@@ -9,6 +9,13 @@ const mocks = vi.hoisted(() => ({
   isAvailable: vi.fn(async () => true),
   availableAdapters: vi.fn(async () => ['test']),
   recordTaskOutcome: vi.fn(async () => {}),
+  loadConfig: vi.fn(),
+}));
+
+// The worker fence comes from config.yaml; never read the developer's real one. (AGT-4815)
+vi.mock('../core/config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../core/config.js')>()),
+  loadConfig: mocks.loadConfig,
 }));
 
 vi.mock('../adapters/index.js', () => ({
@@ -80,6 +87,7 @@ describe('runCli', () => {
     mocks.isAvailable.mockReset().mockResolvedValue(true);
     mocks.availableAdapters.mockReset().mockResolvedValue(['test']);
     mocks.recordTaskOutcome.mockReset().mockResolvedValue(undefined);
+    mocks.loadConfig.mockReset().mockImplementation(() => { throw new Error('no config file'); });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -133,6 +141,26 @@ describe('runCli', () => {
   });
 
   describe('pipeline shape', () => {
+    it('passes the worker sandbox to the pipeline for openswarm run', async () => {
+      const { getWorkerNetworkPolicy, resetWorkerNetworkPolicyForTests } = await import('../support/osSandbox.js');
+      try {
+        // No readable config: the config default, `on`, never an unfenced worker.
+        await expectExitCode(0, runCli({ task: 't', projectPath: process.cwd() }));
+        expect(mocks.constructed[0]).toMatchObject({ workerSandbox: 'on' });
+
+        mocks.loadConfig.mockReturnValue({ autonomous: { workerSandbox: 'off', workerNetwork: 'open' } });
+        await expectExitCode(0, runCli({ task: 't', projectPath: process.cwd() }));
+        expect(mocks.constructed[1]).toMatchObject({ workerSandbox: 'off' });
+        expect(getWorkerNetworkPolicy()).toBe('open');
+
+        mocks.loadConfig.mockReturnValue({ autonomous: { workerSandbox: 'on' } });
+        await expectExitCode(0, runCli({ task: 't', projectPath: process.cwd() }));
+        expect(mocks.constructed[2]).toMatchObject({ workerSandbox: 'on' });
+      } finally {
+        resetWorkerNetworkPolicyForTests();
+      }
+    });
+
     it('runs worker + reviewer by default', async () => {
       await expectExitCode(0, runCli({ task: 't', projectPath: process.cwd() }));
 

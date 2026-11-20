@@ -499,6 +499,8 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       // PR remediation is an autonomous editing path; inherit the same
       // baseline-diff CodeQL policy as heartbeat-dispatched work.
       securityAudit: config.autonomous?.securityAudit,
+      // Its CI, review and conflict workers get the same fence (AGT-4815).
+      workerSandbox: config.autonomous?.workerSandbox ?? 'on',
     });
     prProcessor.start();
     const resolverStatus = config.prProcessor.conflictResolver?.enabled ? ', conflictResolver: ON' : '';

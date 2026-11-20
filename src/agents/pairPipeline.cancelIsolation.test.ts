@@ -55,7 +55,7 @@ describe('PairPipeline concurrent run isolation', () => {
 
   it('does not cancel a run just because a concurrent run on the same instance is aborted', async () => {
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 2,
       roles: { worker: { enabled: true, timeoutMs: 0 } },

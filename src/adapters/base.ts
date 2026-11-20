@@ -316,6 +316,12 @@ export async function spawnCli(
           exitCode: code,
           durationMs,
         });
+        // Before the non-zero-exit branch: a failed run still spent tokens.
+        try {
+          adapter.recordRunUsage?.(stdout, options, durationMs);
+        } catch {
+          // Ledger accounting must never change the run's outcome.
+        }
 
         if (code !== 0 && code !== null) {
           // The retained body, not toString(): once stderr was truncated the

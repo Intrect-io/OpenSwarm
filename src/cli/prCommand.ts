@@ -110,10 +110,24 @@ export function loadSecurityAuditBestEffort(): SecurityAuditConfig {
   }
 }
 
+/**
+ * `autonomous.workerSandbox` for the PR remediation and conflict workers. A
+ * missing or unreadable config falls back to `on`, the config default: these
+ * workers used to run with no fence at all (AGT-4815).
+ */
+export function loadWorkerSandboxBestEffort(): 'on' | 'off' {
+  try {
+    return loadConfig().autonomous?.workerSandbox ?? 'on';
+  } catch {
+    return 'on';
+  }
+}
+
 export function buildProcessorConfig(
   opts: PrCommandOptions,
   roles?: DefaultRolesConfig,
   securityAudit: SecurityAuditConfig = DEFAULT_SECURITY_AUDIT_CONFIG,
+  workerSandbox: 'on' | 'off' = loadWorkerSandboxBestEffort(),
 ): PRProcessorConfig {
   const conflictResolver: ConflictResolverConfig | undefined = opts.noConflicts
     ? undefined
@@ -133,6 +147,7 @@ export function buildProcessorConfig(
     roles,
     conflictResolver,
     securityAudit,
+    workerSandbox,
   };
 }
 

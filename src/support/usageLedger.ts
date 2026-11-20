@@ -46,6 +46,13 @@ export interface UsageRecord {
   /** Upstream provider charge when routed through a proxy (OpenRouter BYOK). */
   upstreamCostUsd?: number;
   durationMs?: number;
+  /**
+   * Set when the record cannot be fully attributed: `no-attribution` when the
+   * run carried no task/stage identity, `no-usage` when a delegated CLI run
+   * reported no token usage or cost (the record then holds zeros and a null
+   * cost). Absent on a normally attributed record. (AGT-4444)
+   */
+  unattributed?: 'no-attribution' | 'no-usage';
 }
 
 /** Attribution the agentic loop stamps on every record it writes. */

@@ -98,7 +98,7 @@ describe('PairPipeline per-role tool scope and effort', () => {
     // travel the same path maxTurns does — otherwise a role that denies `bash`
     // still runs with it, and a documented field is silently inert.
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker', 'reviewer'],
       maxIterations: 1,
       roles: {
@@ -137,7 +137,7 @@ describe('PairPipeline per-role tool scope and effort', () => {
     // Same precedence as model resolution in pipelineRoleSelection: the
     // task-shaped profile is more specific than the role default.
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'],
       maxIterations: 1,
       roles: {

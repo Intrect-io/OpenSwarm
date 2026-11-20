@@ -22,6 +22,13 @@ import { codexMcpConfigArgs } from './memoryMcp.js';
 import { codexUserMcpDisableArgs } from './codexUserMcp.js';
 import { extractSummary, isExplicitFailure, parseReviewerResult, withExecutionEvidence } from './resultParsing.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
+import { extractCodexRunUsage, recordCliRunUsage } from './cliUsageAttribution.js';
+
+/**
+ * Model recorded in the usage ledger when a run pinned none: codex then uses
+ * the operator's own configured default, which OpenSwarm cannot see.
+ */
+const CODEX_UNPINNED_MODEL = 'codex-cli-default';
 
 const execFileAsync = promisify(execFile);
 
@@ -127,6 +134,18 @@ export class CodexCliAdapter implements CliAdapter {
     }
 
     return remainder;
+  }
+
+  /** Ledger line summed from `turn.completed` usage events (AGT-4444). */
+  recordRunUsage(stdout: string, options: CliRunOptions, durationMs: number): void {
+    recordCliRunUsage({
+      adapterName: this.name,
+      fallbackModel: CODEX_UNPINNED_MODEL,
+      // The model actually requested, after the same coercion buildCommand applies.
+      options: { ...options, model: options.model ? coerceCodexModel(options.model) : undefined },
+      usage: extractCodexRunUsage(stdout),
+      durationMs,
+    });
   }
 
   parseWorkerOutput(raw: CliRunResult): WorkerResult {

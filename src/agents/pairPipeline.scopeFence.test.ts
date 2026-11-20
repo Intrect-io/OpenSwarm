@@ -44,7 +44,7 @@ function task(): TaskItem {
 
 async function runWorkerStage(): Promise<string> {
   const { PairPipeline } = await import('./pairPipeline.js');
-  const pipeline = new PairPipeline({
+  const pipeline = new PairPipeline({ workerSandbox: 'off',
     stages: ['worker'],
     maxIterations: 1,
     roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },
@@ -106,7 +106,7 @@ describe('the worker is told what the write-scope fence already refused (AGT-445
       error: 'worker-scope: changed files outside declared fileScope: docs/DATA-CATALOG.md',
     });
     const { PairPipeline } = await import('./pairPipeline.js');
-    const pipeline = new PairPipeline({
+    const pipeline = new PairPipeline({ workerSandbox: 'off',
       stages: ['worker'], maxIterations: 3,
       roles: { worker: { enabled: true, model: 'w', timeoutMs: 0 } },
     } as unknown as ConstructorParameters<typeof PairPipeline>[0]);

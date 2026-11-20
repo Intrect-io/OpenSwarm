@@ -37,7 +37,15 @@ export class ConflictResolver {
   private config: ConflictResolverConfig;
   private attempts = new Map<string, ResolutionAttempt>();
 
-  constructor(config: ConflictResolverConfig) {
+  /**
+   * `workerSandbox` is `autonomous.workerSandbox`: the resolving worker gets the
+   * same OS fence as every other worker. It used to get none, so it ran with the
+   * daemon's privileges and open network (AGT-4815). It must be explicit.
+   */
+  constructor(config: ConflictResolverConfig, private readonly workerSandbox: 'on' | 'off') {
+    if (workerSandbox !== 'on' && workerSandbox !== 'off') {
+      throw new Error(`ConflictResolver: workerSandbox must be 'on' or 'off' (got ${String(workerSandbox)})`);
+    }
     this.config = config;
   }
 
@@ -186,6 +194,9 @@ export class ConflictResolver {
           projectPath,
           model: this.config.workerModel,
           timeoutMs: this.config.workerTimeoutMs || 300_000,
+          // runWorker always refuses publication (git commit/push, gh pr): this
+          // resolver commits and pushes the merge itself after checking it.
+          sandbox: this.workerSandbox,
         });
 
         if (!workerResult.success) {

@@ -224,12 +224,12 @@ describe('PRProcessor.getStatus', () => {
 describe('PRProcessor.fixOne (INT-3282)', () => {
   it('passes the CodeQL policy to every CI-remediation pipeline', async () => {
     const securityAudit = { enabled: true, maxThreads: 1 };
-    const result = await newProcessor({ securityAudit }).fixOne(pr, '/tmp/proj');
+    const result = await newProcessor({ securityAudit, workerSandbox: 'on' }).fixOne(pr, '/tmp/proj');
 
     expect(result.success).toBe(true);
     const args = createPipelineFromConfigImpl.mock.calls.at(-1);
-    expect(args).toHaveLength(10);
-    expect(args?.[9]).toBe(securityAudit);
+    expect(args).toHaveLength(14);
+    expect([args?.[9], args?.[13]]).toEqual([securityAudit, 'on']); // securityAudit, workerSandbox (AGT-4815)
   });
 
   it('leaves CodeQL off when no autonomous configuration exists', async () => {

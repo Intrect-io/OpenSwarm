@@ -112,7 +112,7 @@ describe('PairPipeline worker blocker claims', () => {
       haltReason: 'DoD unsatisfiable: test/interval.test.mjs:7 and :11 contradict each other',
     };
     const pipelineConfig = {
-      stages: ['worker', 'reviewer'] as ('worker' | 'reviewer')[],
+      workerSandbox: 'off' as const, stages: ['worker', 'reviewer'] as ('worker' | 'reviewer')[],
       maxIterations: 3,
       roles: {
         worker: { enabled: true, model: 'w', timeoutMs: 0 },

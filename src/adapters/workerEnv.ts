@@ -20,8 +20,12 @@
 //     and git over ssh gets no identity.
 //
 // This removes the credentials tools pick up on their own. A command that
-// deliberately reads a token file by absolute path is still possible while the
-// worker sandbox allows the network; network-off (S6 W1) closes that.
+// deliberately reads a token file by absolute path can still read it; what
+// stops it leaving the host is the network fence. With `workerSandbox: on` and
+// `workerNetwork: loopback` (the defaults, AGT-4798) the shell reaches only
+// 127.0.0.1/::1, and the in-process web_fetch/web_search tools, which run
+// outside that fence, are withheld and refused (adapters/webToolPolicy.ts,
+// AGT-4815). With `workerSandbox: off` or `workerNetwork: open` neither holds.
 
 import { mkdirSync, mkdtempSync, existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
