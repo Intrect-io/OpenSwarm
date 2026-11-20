@@ -50,3 +50,13 @@ describe('boundStreamRemainder (#900 review)', () => {
     expect(MAX_STREAM_REMAINDER_CHARS).toBe(1024 * 1024);
   });
 });
+
+describe('BoundedOutput.body (#900 review)', () => {
+  it('has the retained text without the truncation marker', () => {
+    const out = new BoundedOutput(8);
+    out.append('0123456789abcdef');
+    expect(out.toString()).toMatch(/^\[openswarm: \d+ earlier characters/);
+    expect(out.body).not.toMatch(/openswarm:/);
+    expect(out.toString().endsWith(out.body)).toBe(true);
+  });
+});

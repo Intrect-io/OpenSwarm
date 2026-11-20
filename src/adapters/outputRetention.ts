@@ -42,6 +42,11 @@ export class BoundedOutput {
     return this.dropped;
   }
 
+  /** The retained text without the truncation marker, for messages that quote it. */
+  get body(): string {
+    return this.text;
+  }
+
   toString(): string {
     return this.dropped > 0
       ? `[openswarm: ${this.dropped} earlier characters of output were not retained]\n${this.text}`

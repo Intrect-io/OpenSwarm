@@ -312,7 +312,10 @@ export async function spawnCli(
         });
 
         if (code !== 0 && code !== null) {
-          const stderrSnippet = stderr.slice(0, 500);
+          // The retained body, not toString(): once stderr was truncated the
+          // latter starts with the retention marker, which would become the
+          // error message and hide extractStreamJsonError's fallback. (#900 review)
+          const stderrSnippet = stderrBuf.body.slice(0, 500);
           const stdoutSnippet = stdout.slice(0, 300);
           console.error(`[${adapter.name}] CLI exited with code ${code}`);
           console.error(`[${adapter.name}] stderr: ${stderrSnippet || '(empty)'}`);
