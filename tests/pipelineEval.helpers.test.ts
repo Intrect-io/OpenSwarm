@@ -1,4 +1,4 @@
-// The pipeline-eval harness's pure helpers (AGT-4811). The harness entrypoint
+// The eval harness's pure helpers (AGT-4811). The harness entrypoint
 // itself drives real pipeline runs and is a coverage boundary (vitest.config.ts);
 // these are the parts that decide where evidence lives and whether a run counts.
 import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
