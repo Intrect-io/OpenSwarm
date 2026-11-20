@@ -401,6 +401,8 @@ const AutonomousConfigSchema = z.object({
   reviewerTimeoutMs: z.number().min(0).default(0),
   /** Operator-controlled global task capacity. Safety comes from scopes and leases, not a hidden low cap. */
   maxConcurrentTasks: z.number().int().min(1).max(256).default(64),
+  /** Cold-start ramp: max new claims per heartbeat for the first heartbeats after daemon start (AGT-4799). */
+  dispatchRampClaims: z.number().int().min(1).max(256).default(2),
   /** Retire stale tracker claims so In Progress means a worker actually owns the task. */
   stalledInProgressHours: z.number().min(1).max(168).default(6),
   /** Issues the heartbeat must not pick because a person owns them (AGT-4682). */
@@ -840,13 +842,11 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       maxAttempts: raw.autonomous.maxAttempts,
       allowedProjects: raw.autonomous.allowedProjects,
       includeBacklog: raw.autonomous.includeBacklog,
-      models: raw.autonomous.models ? {
-        worker: raw.autonomous.models.worker,
-        reviewer: raw.autonomous.models.reviewer,
-      } : undefined,
+      models: raw.autonomous.models ? { worker: raw.autonomous.models.worker, reviewer: raw.autonomous.models.reviewer } : undefined,
       workerTimeoutMs: raw.autonomous.workerTimeoutMs,
       reviewerTimeoutMs: raw.autonomous.reviewerTimeoutMs,
       maxConcurrentTasks: raw.autonomous.maxConcurrentTasks,
+      dispatchRampClaims: raw.autonomous.dispatchRampClaims,
       stalledInProgressHours: raw.autonomous.stalledInProgressHours,
       skip: raw.autonomous.skip,
       maxConcurrentPerProject: raw.autonomous.maxConcurrentPerProject,
