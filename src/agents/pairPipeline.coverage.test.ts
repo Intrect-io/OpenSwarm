@@ -76,6 +76,7 @@ vi.mock('./guardArbiter.js', async () => {
 
 vi.mock('../knowledge/index.js', () => ({
   hasRepoSnapshot,
+  repoSnapshotDirRefused: () => false,
   scanAndCache,
   analyzeIssue,
 }));
