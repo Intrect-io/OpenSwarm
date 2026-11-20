@@ -36,6 +36,7 @@ import {
   isHumanSurfaceReadOnlyEnabled,
 } from '../mcp/humanSurfacePolicy.js';
 import { wireSandboxExecutorIfEnabled } from '../sandboxExecutor/runtime.js';
+import { registerRepoCommandCoverageProvider } from '../automation/coverageCommandProvider.js';
 
 let state: ServiceState = {
   running: false,
@@ -358,6 +359,9 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     });
     autonomous.setNotifier(notifier);
     console.log(`[Service] Notifier registered (${config.notifications?.channel ?? 'discord'})`);
+    // Coverage ratchet (AGT-4898): measure repositories that declare a
+    // `coverage` command in openswarm.json; the rest are recorded as skipped.
+    registerRepoCommandCoverageProvider();
 
     const runnerInstance = await autonomous.startAutonomous({
       defaultAdapter: config.adapter,

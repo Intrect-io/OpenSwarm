@@ -123,6 +123,13 @@ const RepoMetadataSchema = z.object({
       mediumMaxLines: z.number().int().min(0).optional(),
     }).optional(),
   }).optional(),
+  /**
+   * Coverage ratchet command (AGT-4898). Kept as written here so a rewrite by
+   * `openswarm add` does not drop it; automation/coverageCommandProvider.ts
+   * validates it, and a malformed block there only skips the ratchet instead of
+   * failing this whole file.
+   */
+  coverage: z.unknown().optional(),
   /** Free-form notes the swarm should keep in mind. */
   notes: z.string().optional(),
 });

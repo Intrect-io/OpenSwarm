@@ -314,7 +314,7 @@ export async function publishStuckWork(
   }
 }
 
-type HoldableResult = Pick<PipelineResult, 'failureDetail' | 'operatorPark'> & { success?: boolean; finalStatus?: string };
+type HoldableResult = Pick<PipelineResult, 'failureDetail' | 'operatorPark' | 'guardWarnings'> & { success?: boolean; finalStatus?: string };
 
 /**
  * The pre-publication gates of an approved run: fewer active tests
@@ -341,6 +341,8 @@ async function holdBeforePublication(worktreePath: string, task: PublishableTask
     // failure it exists to catch.
     broadcastEvent({ type: 'log', data: { taskId, stage: 'pr', line: `Coverage ratchet skipped: ${coverage.reason}` } });
     console.log(`[Runner] Coverage ratchet skipped for ${task.issueIdentifier}: ${coverage.reason}`);
+    // Durable too: guardWarnings is stored in the attempt's result_json.
+    result.guardWarnings = [...(result.guardWarnings ?? []), { guard: 'coverageRatchet', issues: [`skipped: ${coverage.reason}`], omitted: 0 }];
   }
   return false;
 }

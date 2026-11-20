@@ -619,4 +619,22 @@ describe('coverage ratchet before publication (AGT-4898)', () => {
       expect(result.prUrl).toBe('https://github.com/o/r/pull/1');
     }
   });
+
+  it('records a skipped ratchet in guardWarnings, which the ledger stores', async () => {
+    commitAndCreatePRWithHead.mockReset().mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/2', headSha: 'h' });
+    coverageRatchetHold.mockResolvedValue({ status: 'skipped', reason: 'openswarm.json declares no `coverage` command' });
+    const result: { success: boolean; finalStatus: string; prUrl?: string; guardWarnings?: Array<{ guard: string; issues: string[]; omitted: number }> } = {
+      success: true,
+      finalStatus: 'approved',
+      guardWarnings: [{ guard: 'bsDetector', issues: ['x'], omitted: 0 }],
+    };
+
+    await publishApprovedWork(info, task, result, undefined);
+
+    expect(result.prUrl).toBe('https://github.com/o/r/pull/2');
+    expect(result.guardWarnings).toEqual([
+      { guard: 'bsDetector', issues: ['x'], omitted: 0 },
+      { guard: 'coverageRatchet', issues: ['skipped: openswarm.json declares no `coverage` command'], omitted: 0 },
+    ]);
+  });
 });

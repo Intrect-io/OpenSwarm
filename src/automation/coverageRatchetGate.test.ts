@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -157,6 +157,89 @@ describe('coverageRatchetHold (AGT-4898)', () => {
   });
 });
 
+describe('coverageRatchetHold baseline handling (AGT-4898 review)', () => {
+  it('keys the baseline by provider identity, so another command does not reuse it', async () => {
+    const store = memoryStore({ [`git@github.com:o/r.git@${BASE_SHA}`]: 99 });
+    const p = { ...provider(measured(70), measured(71)), identity: vi.fn(async () => 'repo-command:abc') };
+    const result = await coverageRatchetHold(worktree, { provider: p, store, resolveBase, git: fakeGit() });
+
+    expect(result).toEqual({ status: 'pass', baseline: 70, head: 71 });
+    expect(store.data[`git@github.com:o/r.git@${BASE_SHA}#repo-command:abc`]).toBe(70);
+    expect(p.identity).toHaveBeenCalledWith(worktree, BASE_SHA);
+  });
+
+  it('passes the base commit to measureHead', async () => {
+    const p = provider(measured(70), measured(71));
+    await coverageRatchetHold(worktree, { provider: p, store: memoryStore(), resolveBase, git: fakeGit() });
+    expect(p.measureHead).toHaveBeenCalledWith(worktree, BASE_SHA);
+  });
+
+  it('re-measures a cached base once before holding and uses a lower fresh value', async () => {
+    const key = `git@github.com:o/r.git@${BASE_SHA}`;
+    const store = memoryStore({ [key]: 85 });
+    const p = provider(measured(79), measured(80));
+    const result = await coverageRatchetHold(worktree, { provider: p, store, resolveBase, git: fakeGit() });
+
+    expect(result).toEqual({ status: 'pass', baseline: 79, head: 80 });
+    expect(p.measureBase).toHaveBeenCalledTimes(1);
+    expect(store.data[key]).toBe(79);
+  });
+
+  it('still holds when the fresh base is not lower, and does not re-measure a fresh baseline', async () => {
+    const cached = provider(measured(90), measured(80));
+    const held = await coverageRatchetHold(worktree, { provider: cached, store: memoryStore({ [`git@github.com:o/r.git@${BASE_SHA}`]: 85 }), resolveBase, git: fakeGit() });
+    expect(held).toMatchObject({ status: 'hold', baseline: 85, head: 80 });
+    expect(cached.measureBase).toHaveBeenCalledTimes(1);
+
+    const fresh = provider(measured(85), measured(80));
+    const heldFresh = await coverageRatchetHold(worktree, { provider: fresh, store: memoryStore(), resolveBase, git: fakeGit() });
+    expect(heldFresh.status).toBe('hold');
+    expect(fresh.measureBase).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the hold when re-measuring the base throws', async () => {
+    const p: CoverageProvider = {
+      measureBase: async () => { throw new Error('base run crashed'); },
+      measureHead: async () => measured(80),
+    };
+    const result = await coverageRatchetHold(worktree, { provider: p, store: memoryStore({ [`git@github.com:o/r.git@${BASE_SHA}`]: 85 }), resolveBase, git: fakeGit() });
+    expect(result).toMatchObject({ status: 'hold', baseline: 85 });
+  });
+
+  it('skips, not holds, when the baseline cannot be established', async () => {
+    const throwingBase: CoverageProvider = { measureBase: async () => { throw new Error('base run crashed'); }, measureHead: async () => measured(1) };
+    const cases: Array<Parameters<typeof coverageRatchetHold>[1]> = [
+      { provider: provider(measured(80), measured(1)), store: memoryStore(), resolveBase: async () => { throw new Error('no origin'); }, git: fakeGit() },
+      {
+        provider: provider(measured(80), measured(1)),
+        store: memoryStore(),
+        resolveBase,
+        git: async (args) => {
+          if (args[0] === 'merge-base') return `${BASE_SHA}\n`;
+          throw new Error('git config exploded');
+        },
+      },
+      { provider: throwingBase, store: memoryStore(), resolveBase, git: fakeGit() },
+    ];
+    for (const deps of cases) {
+      const result = await coverageRatchetHold(worktree, deps);
+      expect(result.status).toBe('skipped');
+      if (result.status === 'skipped') expect(result.reason).toMatch(/no origin|git config exploded|base run crashed/);
+    }
+  });
+
+  it('does not change the verdict when storing the baseline fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store: CoverageBaselineStore = { get: () => undefined, set: async () => { throw new Error('disk full'); } };
+    const pass = await coverageRatchetHold(worktree, { provider: provider(measured(70), measured(71)), store, resolveBase, git: fakeGit() });
+    const hold = await coverageRatchetHold(worktree, { provider: provider(measured(70), measured(60)), store, resolveBase, git: fakeGit() });
+    expect(pass.status).toBe('pass');
+    expect(hold.status).toBe('hold');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('disk full'));
+    warn.mockRestore();
+  });
+});
+
 describe('fileBaselineStore', () => {
   it('round-trips baselines through a JSON file and treats a missing file as empty', async () => {
     const path = join(mkdtempSync(join(tmpdir(), 'openswarm-cov-store-')), 'nested', 'baselines.json');
@@ -166,5 +249,27 @@ describe('fileBaselineStore', () => {
     await store.set('r@y', 50);
     expect(fileBaselineStore(path).get('r@x')).toBe(81.25);
     expect(fileBaselineStore(path).get('r@y')).toBe(50);
+  });
+
+  it('prunes entries older than the max age on write and reads legacy numbers', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'openswarm-cov-store-')), 'baselines.json');
+    const day = 24 * 60 * 60 * 1000;
+    writeFileSync(path, JSON.stringify({ legacy: 42, old: { percent: 10, at: 0 }, recent: { percent: 20, at: 95 * day } }));
+    const store = fileBaselineStore(path, { now: () => 100 * day, maxAgeMs: 90 * day });
+    expect(store.get('legacy')).toBe(42);
+    expect(store.get('old')).toBe(10);
+
+    await store.set('new', 30);
+
+    const stored = JSON.parse(readFileSync(path, 'utf8')) as Record<string, { percent: number }>;
+    expect(Object.keys(stored).sort()).toEqual(['legacy', 'new', 'recent']);
+    expect(stored.new.percent).toBe(30);
+  });
+
+  it('keeps every entry when separate stores write at once', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'openswarm-cov-store-')), 'baselines.json');
+    await Promise.all(Array.from({ length: 12 }, (_, i) => fileBaselineStore(path).set(`r@${i}`, i)));
+    const store = fileBaselineStore(path);
+    for (let i = 0; i < 12; i += 1) expect(store.get(`r@${i}`)).toBe(i);
   });
 });
