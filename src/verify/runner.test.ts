@@ -1,14 +1,17 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync } from 'node:fs';
 import type { VerifyCommand } from './manifest.js';
+import { makeBwrapOverlayProbe } from './verifySandbox.js';
 import {
   buildVerifyToolchainPath,
   CLONE_TIMEOUT_MS,
   gitTimeoutMsFor,
   runVerify,
+  uvCacheOverlay,
   VERIFY_ALLOWED_DEPENDENCY_DIRS,
   VERIFY_TOOLCHAIN_PATH_PREFIXES,
 } from './runner.js';
@@ -25,6 +28,19 @@ function verify(run: string, timeoutMs = 2_000): VerifyCommand {
 }
 
 const uvAvailable = spawnSync('uv', ['--version'], { stdio: 'ignore' }).status === 0;
+const bwrapPath = ['/usr/bin/bwrap', '/usr/local/bin/bwrap'].find((path) => existsSync(path));
+/** Whether this host's bwrap can overlay `cache` and write through it, probed the way the runner does. */
+async function bwrapOverlayFor(cache: string): Promise<boolean> {
+  if (process.platform !== 'linux' || !bwrapPath) return false;
+  const scratch = await mkdtemp(join(tmpdir(), 'osw-overlay-probe-'));
+  try {
+    return makeBwrapOverlayProbe((executable, args) => spawnSync(executable, args, { encoding: 'utf8', timeout: 10_000 }))(
+      bwrapPath, { cache, upper: join(scratch, 'upper'), work: join(scratch, 'work') },
+    );
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'openswarm-verify-runner-'));
@@ -47,8 +63,10 @@ describe('runVerify', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     try {
       await runVerify({ projectPath: repo, commands: [verify('true')], baseRef: 'HEAD', sandboxScratchRoot: root });
-      const lines = log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('[Verify] sandbox usage'));
-      expect(lines).toHaveLength(2);
+      // The lines are fire-and-forget (AGT-4801): verification never waits for a measurement.
+      const usageLines = () => log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('[Verify] sandbox usage'));
+      await vi.waitFor(() => expect(usageLines()).toHaveLength(2), { timeout: 10_000 });
+      const lines = usageLines();
       expect(lines[0]).toMatch(/phase=create bytes=\d+ live=1/);
       expect(lines[1]).toMatch(/phase=remove bytes=\d+ live=1/);
     } finally {
@@ -105,25 +123,62 @@ describe('runVerify', () => {
   });
 
   it('uses the host uv cache in offline mode inside the sandbox', async () => {
+    // Real OS sandbox: the host cache is readable through a throwaway overlay with
+    // offline copy mode set, and nothing written to it reaches the host (#817 review).
     const originalHome = process.env.HOME;
     const cacheHome = join(root, 'cache-home');
     const uvCache = join(cacheHome, '.cache', 'uv');
     await mkdir(uvCache, { recursive: true });
+    await writeFile(join(uvCache, 'seed'), 'host-wheel\n');
+    const realCache = await realpath(uvCache);
     process.env.HOME = cacheHome;
-    const execute = vi.fn(async () => ({
+    try {
+      const [evidence] = await runVerify({
+        projectPath: repo,
+        commands: [verify([
+          'printf "cache=%s offline=%s link=%s\\n" "$UV_CACHE_DIR" "$UV_OFFLINE" "$UV_LINK_MODE"',
+          'cat "$UV_CACHE_DIR/seed" 2>/dev/null',
+          'echo planted > "$UV_CACHE_DIR/planted" 2>/dev/null',
+          'echo poisoned > "$UV_CACHE_DIR/seed" 2>/dev/null',
+          'exit 0',
+        ].join('; '), 10_000)],
+        baseRef: 'HEAD',
+      });
+      if (await bwrapOverlayFor(realCache)) {
+        expect(evidence.headStatus, evidence.rawOutputTail).toBe('pass');
+        expect(evidence.rawOutputTail).toContain(`cache=${realCache} offline=1 link=copy`);
+        expect(evidence.rawOutputTail).toContain('host-wheel');
+      } else if (evidence.headStatus === 'pass') {
+        // No overlay: the host cache is not exposed at all and uv keeps its isolated empty cache.
+        expect(evidence.rawOutputTail).toContain('cache= offline= link=');
+      }
+      expect(await readFile(join(uvCache, 'seed'), 'utf8')).toBe('host-wheel\n');
+      expect(existsSync(join(uvCache, 'planted'))).toBe(false);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
+  });
+
+  it('does not point the strict executor at the host uv cache', async () => {
+    const originalHome = process.env.HOME;
+    const cacheHome = join(root, 'cache-home');
+    await mkdir(join(cacheHome, '.cache', 'uv'), { recursive: true });
+    process.env.HOME = cacheHome;
+    const execute = vi.fn(async (_script: string) => ({
       output: 'head: 2 passed', exitCode: 0, signal: null, timedOut: false,
       truncated: false, outputLimitExceeded: false,
     }));
     try {
-      const [evidence] = await runVerify({
+      await runVerify({
         projectPath: repo,
         commands: [verify('uv run --frozen python -m pytest -q')],
         baseRef: 'HEAD',
         sandboxExecutorSessionFactory: async () => ({ execute }),
         sandboxScratchRoot: root,
       });
-      expect(evidence.headStatus).toBe('pass');
-      expect(execute).toHaveBeenCalledWith(expect.stringContaining(`export UV_CACHE_DIR='${uvCache}' && export UV_OFFLINE=1`), 2_000);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(execute.mock.calls[0][0]).not.toMatch(/UV_CACHE_DIR|UV_OFFLINE/);
     } finally {
       if (originalHome === undefined) delete process.env.HOME;
       else process.env.HOME = originalHome;
@@ -284,6 +339,58 @@ describe('runVerify', () => {
     expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
     const [baseTail, headTail] = evidence.rawOutputTail.split('[head]');
     expect(baseTail).not.toBe(headTail);
+  });
+
+  it('recognises the uv offline cache-miss banner as an environment failure', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf "  \\303\\227 Failed to download \\`pygments==2.21.0\\`\\n"; exit 2')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
+  });
+
+  it('recognises a colourised uv error line as an environment failure', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf "\\033[1m\\033[31merror\\033[0m: Failed to fetch: https://pypi.org/simple/x\\n"; exit 2')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
+  });
+
+  it('never mounts a uv cache overlay through a pre-existing entry in the sandbox root', async () => {
+    const cacheHome = join(root, 'cache-home');
+    await mkdir(join(cacheHome, '.cache', 'uv'), { recursive: true });
+    const sandboxRoot = join(root, 'sandbox');
+    const outside = join(root, 'outside');
+    await mkdir(join(sandboxRoot, 'uv-cache'), { recursive: true });
+    await mkdir(outside);
+    await symlink(outside, join(sandboxRoot, 'uv-cache', 'upper'));
+    expect(await uvCacheOverlay({ HOME: cacheHome }, sandboxRoot)).toBeUndefined();
+    expect(await readdir(outside)).toEqual([]);
+
+    const fresh = join(root, 'fresh');
+    await mkdir(fresh);
+    const overlay = await uvCacheOverlay({ HOME: cacheHome }, fresh);
+    if (process.platform === 'linux') {
+      expect(overlay).toEqual({
+        cache: await realpath(join(cacheHome, '.cache', 'uv')),
+        upper: join(fresh, 'uv-cache', 'upper'), work: join(fresh, 'uv-cache', 'work'),
+      });
+    } else {
+      expect(overlay).toBeUndefined();
+    }
+  });
+
+  it('does not read a test failure that mentions "Failed to fetch" as a uv environment failure', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf "TypeError: Failed to fetch\\nError: Failed to download report\\nAssertionError: Failed to sync\\n"; exit 1')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false });
+    expect(evidence.environmentFailure).toBeUndefined();
   });
 
   it('does not mark an ordinary head failure as an environment failure', async () => {

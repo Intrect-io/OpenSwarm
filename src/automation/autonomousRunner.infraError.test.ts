@@ -111,7 +111,8 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
   it('parks dispatch on ENOSPC without scheduling a retry', async () => {
     const source = mockTaskSource();
     runnerExecution.setTaskSource(source);
-    const runner = new AutonomousRunner(cfg());
+    // The report pauses only when a re-measurement confirms it, so the floor is set above any real volume.
+    const runner = new AutonomousRunner(cfg({ minFreeDiskGiB: Number.MAX_SAFE_INTEGER / 1024 ** 3 }));
     const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
     const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -122,9 +123,9 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
 
     expect((runner as unknown as { failedTaskRetryTimes: Map<string, number> }).failedTaskRetryTimes.has('ISSUE-1')).toBe(false);
     expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('stopped dispatch after a host resource failure'));
-    // The runner's own gate holds dispatch even though the disk now measures fine.
+    // The runner's own gate holds dispatch while the disk measures below the floor.
     expect((runner as unknown as { diskGate: HostDiskGate }).diskGate.evaluate().pause).toBe(true);
-    const gate = new HostDiskGate(() => []);
+    const gate = new HostDiskGate(() => [tmpdir()], () => Number.MAX_SAFE_INTEGER);
     expect(gate.resourceFailure('No space left on device').notice).toBeDefined();
     expect(gate.resourceFailure('No space left on device').notice).toBeUndefined();
   });

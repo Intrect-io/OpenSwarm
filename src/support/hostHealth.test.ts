@@ -172,16 +172,36 @@ describe('HostDiskGate', () => {
     expect(g.evaluate()).toEqual({ pause: false });
   });
 
-  it('holds dispatch after a reported ENOSPC even though the disk measures fine, then resumes once', () => {
-    let clock = 1_000;
-    const g = new HostDiskGate(() => [tmpdir()], () => UNDER, () => clock, 60_000);
-    expect(g.resourceFailure('No space left on device').notice).toContain('Dispatch paused');
-    expect(g.resourceFailure('No space left on device').notice).toBeUndefined();
-    clock += 30_000;
-    expect(g.evaluate()).toEqual({ pause: true, line: 'Host resource failure: No space left on device' });
-    clock += 30_001;
-    expect(g.evaluate()).toMatchObject({ pause: false, notice: expect.stringContaining('recovered') });
+  it('does not pause on a reported ENOSPC when the disk measures fine, and says so once', () => {
+    const lines: string[] = [];
+    const g = new HostDiskGate(() => [tmpdir()], () => UNDER, (line) => lines.push(line));
+    expect(g.resourceFailure('No space left on device')).toEqual({ pause: false });
+    expect(g.resourceFailure('No space left on device')).toEqual({ pause: false });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('not confirmed by a free-space measurement');
     expect(g.evaluate()).toEqual({ pause: false });
+  });
+
+  it('pauses on a reported ENOSPC only when the re-measurement is below the floor', () => {
+    const lines: string[] = [];
+    const floor = { value: OVER };
+    const g = new HostDiskGate(() => [tmpdir()], () => floor.value, (line) => lines.push(line));
+    expect(g.resourceFailure('No space left on device')).toMatchObject({ pause: true, notice: expect.stringContaining('Dispatch paused') });
+    // Further reports and heartbeats while low stay quiet; no timed hold outlives the measurement.
+    expect(g.resourceFailure('No space left on device').notice).toBeUndefined();
+    expect(g.evaluate()).toMatchObject({ pause: true });
+    floor.value = UNDER;
+    expect(g.evaluate()).toMatchObject({ pause: false, notice: expect.stringContaining('auto:disk') });
+    expect(lines).toEqual([]);
+  });
+
+  it('leaves the recovery notice to the heartbeat when a report arrives after the disk was freed', () => {
+    const floor = { value: OVER };
+    const g = new HostDiskGate(() => [tmpdir()], () => floor.value, () => undefined);
+    expect(g.evaluate().pause).toBe(true);
+    floor.value = UNDER;
+    expect(g.resourceFailure('No space left on device')).toEqual({ pause: false });
+    expect(g.evaluate()).toMatchObject({ pause: false, notice: expect.stringContaining('recovered') });
   });
 
   it('names the scarcest volume and the floor in the pause line', () => {

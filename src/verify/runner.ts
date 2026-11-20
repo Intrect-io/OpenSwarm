@@ -1,13 +1,13 @@
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, cp, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
+import { access, cp, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, rmdir } from 'node:fs/promises';
 import { constants, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { describeLinuxSandbox, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
-import { selectOsSandbox } from './verifySandbox.js';
+import { makeBwrapOverlayProbe, selectOsSandbox, type UvCacheOverlay } from './verifySandbox.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { symlinkTargetEscapes } from '../support/escapingSymlink.js';
 import { isPrivateConfigurationFile, isPrivateWorkspaceFile } from '../support/environmentFiles.js';
@@ -21,7 +21,7 @@ import type { VerifyCommand } from './manifest.js';
 import { rebasePythonEnvironment } from './pythonEnvironment.js';
 import { pinTrustedTestConfig } from './trustedConfig.js';
 import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
-import { logPeriodicDiskUsage, logVerifySandboxUsage } from './diskUsage.js';
+import { logVerifySandboxUsage } from './diskUsage.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
 const FINGERPRINT_BYTES = 4 * 1024 * 1024;
@@ -269,7 +269,10 @@ function isEnvironmentFailure(output: string): boolean {
     // uv / pip driven from inside the network-less verification sandbox: the
     // environment cannot be built, so neither run is a verdict. (AGT-4407)
     /Failed to initialize cache at/i,
-    /(?:error: )?Failed to (?:download|fetch|prepare|sync)/i,
+    // uv prints `error: Failed to ...` or `  × Failed to download ...` at the start
+    // of a line, lowercase; `TypeError: Failed to fetch` from a test is not uv.
+    /^[ \t]*(?:\x1b\[[0-9;]*m)*(?:error|×)(?:\x1b\[[0-9;]*m)*:?(?:\x1b\[[0-9;]*m)*[ \t]+Failed to (?:download|fetch|prepare|sync)\b/m,
+    /Network connectivity is disabled, but the\s+requested data wasn't found in the cache/,
     /No solution found when resolving dependencies/i,
     /(?:Network is unreachable|Temporary failure in name resolution|Could not resolve host|nodename nor servname provided)/i,
     /No virtual environment found/i,
@@ -302,6 +305,28 @@ const linuxSandbox = makeSandboxCache(() => describeLinuxSandbox(makeSystemProbe
   readFile: (path) => readFileSync(path, 'utf8'),
   spawn: (executable, args) => spawnSync(executable, args, { encoding: 'utf8', timeout: 10_000 }),
 })));
+
+/** Memoized per bwrap and cache path: does a throwaway overlay of the host uv cache mount here? */
+const bwrapOverlaySupported = makeBwrapOverlayProbe(
+  (executable, args) => spawnSync(executable, args, { encoding: 'utf8', timeout: 10_000 }),
+);
+
+/** The host uv cache as an overlay lower layer, with fresh upper/work dirs in the sandbox root. */
+export async function uvCacheOverlay(env: NodeJS.ProcessEnv, sandboxRoot: string): Promise<UvCacheOverlay | undefined> {
+  if (process.platform !== 'linux' || !env.HOME) return undefined;
+  const cache = await realpath(join(env.HOME, '.cache', 'uv')).catch(() => undefined);
+  if (!cache) return undefined;
+  const base = join(sandboxRoot, 'uv-cache');
+  const overlay = { cache, upper: join(base, 'upper'), work: join(base, 'work') };
+  try {
+    // Exclusive creation: an existing entry (say a link verified code planted) means no overlay,
+    // never an overlay whose writes land wherever that entry points.
+    for (const dir of [base, overlay.upper, overlay.work]) await mkdir(dir);
+  } catch {
+    return undefined;
+  }
+  return overlay;
+}
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -339,7 +364,6 @@ async function runWithSandboxExecutor(
     const result = await session.execute([
       `cd -- ${shellQuote(relativeCwd)}`,
       `export PATH=${shellQuote(toolchainPath)}`,
-      ...(env.UV_CACHE_DIR ? [`export UV_CACHE_DIR=${shellQuote(env.UV_CACHE_DIR)}`, 'export UV_OFFLINE=1'] : []),
       ...(vegaWorkspace ? [`export VEGA_EXTRA_PATHS=${shellQuote(vegaWorkspace)}`] : []),
       // Bundled VEGA toolsets intentionally use the narrower headless-workspace
       // contract instead of VEGA_EXTRA_PATHS.  Both settings name this same
@@ -429,12 +453,6 @@ async function runCommand(
     CMAKE_BUILD_PARALLEL_LEVEL: env.CMAKE_BUILD_PARALLEL_LEVEL,
     GOMAXPROCS: env.GOMAXPROCS,
     UV_CONCURRENT_BUILDS: env.UV_CONCURRENT_BUILDS,
-    // uv needs to create lock and temporary files in its cache even in offline
-    // mode, so bind only this cache writable. Network access remains disabled.
-    // Offline mode makes a missing artifact an explicit environment failure.
-    ...(env.HOME && existsSync(join(env.HOME, '.cache', 'uv'))
-      ? { UV_CACHE_DIR: join(env.HOME, '.cache', 'uv'), UV_OFFLINE: '1' }
-      : {}),
   }, undefined);
   for (const key of ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'CI', 'TZ', 'SystemRoot', 'ComSpec', 'PATHEXT']) {
     if (env[key] !== undefined) safeEnv[key] = env[key];
@@ -450,15 +468,18 @@ async function runCommand(
       boundedCommand, root, cwd, isolatedHome, isolatedTmp, safeEnv, sandboxExecutorSessionFactory,
     );
   }
+  const overlay = await uvCacheOverlay(env, dirname(root));
   // Fails closed on every host without an OS sandbox (AGT-3447, INT-3103).
   const sandbox = await selectOsSandbox(root, process.env.SHELL || '/bin/sh', boundedCommand.run, {
     platform: process.platform, exists: existsSync, realpath, linuxSandbox,
-    // uv must write locks/temp files in its cache even offline; only that cache is writable. (#817)
-    extraWritable: safeEnv.UV_CACHE_DIR ? [safeEnv.UV_CACHE_DIR] : [],
+    // #817: the host uv cache as a throwaway overlay (Linux bwrap >= 0.9, probed), with
+    // UV_CACHE_DIR/UV_OFFLINE/UV_LINK_MODE=copy set inside. Never writable on the host;
+    // without an overlay uv gets the empty isolated cache and a miss is an environment failure.
+    uvCacheOverlay: overlay, overlaySupported: bwrapOverlaySupported,
   });
   if (!sandbox.ok) return { status: 'fail', output: sandbox.output };
   const { executable, args: invocationArgs } = sandbox;
-  return await new Promise((resolveResult) => {
+  const result = await new Promise<CommandResult>((resolveResult) => {
     let output: Buffer = Buffer.alloc(0);
     // Fingerprint bytes are kept per stream and concatenated in a fixed order at
     // the end (stdout, then stderr, then any synthetic trailer). Recording both
@@ -556,6 +577,10 @@ async function runCommand(
       })();
     });
   });
+  // overlayfs leaves an empty `work/work` at mode 000, which a recursive rm cannot enter; rmdir
+  // removes it without following a link the sandboxed code may have planted there.
+  if (overlay) await rmdir(join(overlay.work, 'work')).catch(() => undefined);
+  return result;
 }
 
 async function runTrustedCommand(
@@ -722,10 +747,10 @@ async function createHeadSandbox(
     // Close the copy race first (no escaping link is left to write through), then pin config.
     await validateSandboxSymlinks(project, sharedPaths);
     if (baseRef) await pinTrustedTestConfig(projectPath, project, baseRef);
-    await logVerifySandboxUsage(root, 'create');
+    logVerifySandboxUsage(root, 'create'); // fire-and-forget (AGT-4801)
     return { root, project };
   } catch (error) {
-    await logVerifySandboxUsage(root, 'remove');
+    logVerifySandboxUsage(root, 'remove');
     await rm(root, { recursive: true, force: true });
     throw error;
   }
@@ -817,14 +842,6 @@ async function runVerifyInSlot(options: RunVerifyOptions): Promise<VerifyEvidenc
       throw new Error('[security] strict verification scratch root must contain, but not equal, the project checkout');
     }
   }
-  await logPeriodicDiskUsage(options.projectPath, scratchRoot);
-  const usageTimer = setInterval(() => {
-    void logPeriodicDiskUsage(options.projectPath, scratchRoot).catch((error) => {
-      console.warn(`[Verify] disk usage sample failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
-  }, 5 * 60_000);
-  usageTimer.unref();
-  try {
   for (const command of options.commands) {
     const started = Date.now();
     let sandbox: Awaited<ReturnType<typeof createHeadSandbox>>;
@@ -911,12 +928,9 @@ async function runVerifyInSlot(options: RunVerifyOptions): Promise<VerifyEvidenc
         durationMs: Date.now() - started,
       });
     } finally {
-      await logVerifySandboxUsage(sandbox.root, 'remove');
+      logVerifySandboxUsage(sandbox.root, 'remove');
       await rm(sandbox.root, { recursive: true, force: true });
     }
   }
   return evidence;
-  } finally {
-    clearInterval(usageTimer);
-  }
 }

@@ -32,14 +32,6 @@ const GiB = 1024 ** 3;
  */
 export const DEFAULT_MIN_FREE_BYTES = 10 * GiB;
 
-/**
- * How long a reported host-resource failure (ENOSPC) holds dispatch regardless of
- * what the next free-space reading says. The failing verify clone is deleted on
- * exit, so the disk usually measures fine again a moment later; without a hold
- * the very next heartbeat would re-dispatch into the same failure.
- */
-export const DEFAULT_RESOURCE_FAILURE_HOLD_MS = 15 * 60_000;
-
 export type DiskVerdict = 'ok' | 'low';
 
 /** `low` strictly below the floor, `ok` at or above it. */
@@ -80,10 +72,12 @@ export function dispatchWritePaths(projectPaths: readonly string[], extra: reado
 }
 
 /**
- * True for a failure that means the host is out of a resource rather than that
- * the task was wrong: ENOSPC, by code or by the text git and node print.
- * Deliberately narrow — "no space left for the label" in prose must not match,
- * and neither must a network failure.
+ * True for a failure that means the host may be out of a resource rather than
+ * that the task was wrong: ENOSPC, by structured error code first, else by the
+ * text git and node print. Deliberately narrow — "no space left for the label"
+ * in prose must not match, and neither must a network failure. Text from worker
+ * or test output is only a reason to re-measure (see
+ * {@link HostDiskGate.resourceFailure}), never a verdict on its own.
  */
 export function isHostResourceError(error: unknown): boolean {
   if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'ENOSPC') return true;
@@ -127,36 +121,40 @@ export type DispatchGateDecision =
  */
 export class HostDiskGate {
   private low = false;
-  private failureHold: { until: number; line: string } | null = null;
+  /** One "not confirmed" line per run of unconfirmed reports, not one per failing task. */
+  private unconfirmedLogged = false;
 
   constructor(
     private readonly paths: () => readonly string[],
     private readonly minFreeBytes: () => number = () => DEFAULT_MIN_FREE_BYTES,
-    private readonly now: () => number = Date.now,
-    private readonly failureHoldMs: number = DEFAULT_RESOURCE_FAILURE_HOLD_MS,
+    private readonly log: (line: string) => void = (line) => console.warn(line),
   ) {}
 
   /**
-   * A run failed on a host resource (ENOSPC). Pause dispatch for `failureHoldMs`
-   * through the same one-notice path as a low-space reading; after the hold the
-   * gate goes back to measuring. A repeat failure extends the hold silently.
+   * A run reported a host-resource failure (ENOSPC, usually as text in worker or
+   * test output). That is a reason to measure, not a verdict: one test that
+   * prints "No space left on device" must not drain the whole factory. The free
+   * space is measured right away and the gate pauses only when the measurement
+   * is below the floor — exactly as {@link evaluate} would, so the low reading
+   * then leads to the operator-lifted `auto:disk` factory pause like any other.
+   * When the disk measures fine nothing pauses and one line says so.
    */
   resourceFailure(detail: string): DispatchGateDecision {
-    const first = !this.low;
-    this.low = true;
-    const line = `Host resource failure: ${detail}`;
-    this.failureHold = { until: this.now() + this.failureHoldMs, line };
-    return first
-      ? { pause: true, line, notice: `Dispatch paused: ${line}. New work waits until host resources recover.` }
-      : { pause: true, line };
+    const floor = this.minFreeBytes();
+    if (floor > 0 && checkHostHealth(this.paths(), floor).verdict === 'low') {
+      this.unconfirmedLogged = false;
+      return this.evaluate(); // the low transition and its one notice
+    }
+    // Fine: leave the low/recovered state alone so the heartbeat still announces a recovery.
+    if (!this.unconfirmedLogged) {
+      this.unconfirmedLogged = true;
+      this.log(`[HostHealth] ENOSPC report not confirmed by a free-space measurement; dispatch continues: ${detail}`);
+    }
+    return { pause: false };
   }
 
   /** Measure now and decide. A floor of zero or less switches the check off. */
   evaluate(): DispatchGateDecision {
-    if (this.failureHold) {
-      if (this.now() < this.failureHold.until) return { pause: true, line: this.failureHold.line };
-      this.failureHold = null;
-    }
     const floor = this.minFreeBytes();
     if (floor <= 0) {
       const recovered = this.low;
