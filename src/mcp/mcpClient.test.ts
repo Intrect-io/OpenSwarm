@@ -13,6 +13,8 @@ import {
   withDeadline,
   withMcpSessionScope,
   sanitizeInputSchema,
+  MAX_DISCOVERED_TOOLS,
+  MAX_DISCOVERED_TOOLS_PER_SERVER,
 } from './mcpClient.js';
 import type { ToolDefinition } from '../adapters/tools.js';
 
@@ -564,5 +566,62 @@ describe('session: scope servers (AGT-4663)', () => {
     expect(registryFromConfigServers({ b: { command: 'ssh', args: ['vela'], session: 'scope' } }).b).toMatchObject({ session: 'scope' });
     expect(registryFromConfigServers({ b: { command: 'ssh', args: ['vela'] } }).b).not.toHaveProperty('session');
     expect(registryFromConfigServers({ b: { command: 'ssh', session: 'forever' } })).toEqual({});
+  });
+});
+
+// AGT-4873 — a remote server's tool list is capped and de-duplicated before it
+// is cached or exposed.
+describe('discovery tool-count bounds', () => {
+  it('keeps the first of each duplicate name and caps each server', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const many = Array.from({ length: MAX_DISCOVERED_TOOLS_PER_SERVER + 50 }, (_, i) => ({
+      name: `t${i}`,
+      description: `tool ${i}`,
+      inputSchema: { type: 'object', properties: {} },
+    }));
+    clientMock.listTools.mockResolvedValue({
+      tools: [
+        { name: 't0', description: 'first t0', inputSchema: { type: 'object', properties: {} } },
+        { name: 't0', description: 'second t0', inputSchema: { type: 'object', properties: {} } },
+        ...many,
+      ],
+    });
+
+    const defs = await initMcpTools({ big: { transport: 'stdio', command: 'mock-mcp' } });
+    const names = defs.map((d) => d.function.name);
+
+    expect(defs.length).toBe(MAX_DISCOVERED_TOOLS_PER_SERVER);
+    expect(new Set(names).size).toBe(names.length);
+    expect(defs.find((d) => d.function.name === 'big__t0')?.function.description).toBe('first t0');
+    expect(warn.mock.calls.some(([msg]) => String(msg).includes("2 duplicate"))).toBe(true);
+    expect(warn.mock.calls.some(([msg]) => String(msg).includes("dropped 50"))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('caps the total across servers, trimming in registry order', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const full = Array.from({ length: MAX_DISCOVERED_TOOLS_PER_SERVER }, (_, i) => ({
+      name: `t${i}`,
+      inputSchema: { type: 'object', properties: {} },
+    }));
+    clientMock.listTools.mockResolvedValue({ tools: full });
+    const serverCount = Math.ceil(MAX_DISCOVERED_TOOLS / MAX_DISCOVERED_TOOLS_PER_SERVER) + 2;
+    const registry = Object.fromEntries(
+      Array.from({ length: serverCount }, (_, i) => [`s${i}`, { transport: 'stdio' as const, command: 'mock-mcp' }]),
+    );
+
+    const defs = await initMcpTools(registry);
+    const names = defs.map((d) => d.function.name);
+
+    expect(defs.length).toBe(MAX_DISCOVERED_TOOLS);
+    expect(new Set(names).size).toBe(names.length);
+    // The last server is the one trimmed, regardless of response order.
+    expect(names.some((n) => n.startsWith(`s${serverCount - 1}__`))).toBe(false);
+    expect(await callMcpTool(`s${serverCount - 1}__t0`, {})).toEqual({
+      content: `MCP tool not registered: s${serverCount - 1}__t0`,
+      isError: true,
+    });
+    expect(warn.mock.calls.some(([msg]) => String(msg).includes(`exceeded ${MAX_DISCOVERED_TOOLS}`))).toBe(true);
+    warn.mockRestore();
   });
 });
