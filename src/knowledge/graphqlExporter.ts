@@ -465,7 +465,9 @@ function plainSnapshotPath(projectPath: string): string | null {
  * keeps a file that grows after `fstat` from being read whole.
  */
 function readSnapshotBounded(snapshotPath: string): string | null {
-  const fd = openSync(snapshotPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  // O_NONBLOCK: a FIFO swapped in after the lstat check would otherwise block
+  // this open forever; fstat below then rejects it as not a regular file.
+  const fd = openSync(snapshotPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = fstatSync(fd);
     if (!info.isFile() || info.size > MAX_REPO_SNAPSHOT_BYTES) return null;
