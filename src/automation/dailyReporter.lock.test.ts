@@ -96,7 +96,7 @@ describe('daily reporter cross-process serialization', () => {
   it('skips the run without publishing while a live instance holds the lock', async () => {
     mkdirSync(stateDir, { recursive: true });
     // This process is alive, so the lock is not stale.
-    writeFileSync(lockFile, JSON.stringify({ pid: process.pid, token: 'other-instance' }), 'utf8');
+    writeFileSync(lockFile, JSON.stringify({ pid: process.ppid, token: 'other-instance' }), 'utf8');
     testState.postStatusUpdate.mockResolvedValue(undefined);
     const reporter = await daemonInstance();
 
