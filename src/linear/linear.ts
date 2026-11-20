@@ -5,7 +5,7 @@
 import { LinearClient } from '@linear/sdk';
 import { createHash } from 'node:crypto';
 import type { LinearIssueInfo, LinearProjectInfo } from '../core/types.js';
-import { formatAutomationComment, formatPairDialogue, type CommentSection } from './format.js';
+import { formatAutomationComment, formatPairDialogue, signDaemonComment, type CommentSection } from './format.js';
 import { completionTargetState, type PairCompleteStats } from '../automation/taskSource.js';
 import { setLinearClient } from './projectUpdater.js';
 import { withRateLimit } from '../support/rateLimiter.js';
@@ -1041,7 +1041,7 @@ export async function addComment(
     await linear.createComment({
       id: commentId,
       issueId,
-      body,
+      body: signDaemonComment(body), // every daemon comment starts with [OpenSwarm] (AGT-4800)
     });
   } catch (error) {
     if (commentId) {

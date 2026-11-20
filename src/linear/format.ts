@@ -133,12 +133,30 @@ export interface AutomationCommentInput {
 }
 
 /**
+ * The daemon writes with the operator's credential, so every comment it posts carries this lead to
+ * tell it apart from the person on the issue page (AGT-4800). `formatAutomationComment` and the
+ * task-state / merged-publication builders already open with it; `signDaemonComment` adds it to
+ * anything else at the one place comments leave the process (`linear.addComment`).
+ */
+export const DAEMON_COMMENT_LEAD = '🧭 **[OpenSwarm]**';
+
+/** Already signed: the lead (with or without a bold heading after it), or a bare `[OpenSwarm]`. */
+export function isSignedDaemonComment(body: string): boolean {
+  return /^(?:🧭 )?\*\*\[OpenSwarm\]|^\[OpenSwarm\]/.test(body.trimStart());
+}
+
+/** Prefix an unsigned body with the lead. Signed bodies are returned unchanged. */
+export function signDaemonComment(body: string): string {
+  return isSignedDaemonComment(body) ? body : `${DAEMON_COMMENT_LEAD} ${body.trimStart()}`;
+}
+
+/**
  * Build a comment that reads like a person wrote it: bold lead, a plain-language
  * summary, a few supporting details, and a single muted (italic) sign-off line
  * carrying just enough trace to find the run later.
  */
 export function formatAutomationComment(input: AutomationCommentInput): string {
-  const parts: string[] = [`**${input.heading}**`];
+  const parts: string[] = [`🧭 **[OpenSwarm] ${input.heading}**`];
 
   if (input.summary?.trim()) parts.push(input.summary.trim());
 
