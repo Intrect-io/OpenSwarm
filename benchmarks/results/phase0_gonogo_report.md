@@ -53,7 +53,7 @@
 
 ## GO / NoGo Decision
 
-**→ NoGo for epic INT-1674 ("non-Claude 모델을 Claude Code 수준 하네스로 끌어올리기")**
+**→ NoGo for epic INT-1674 ("lift non-Claude models to a Claude Code-level harness")**
 
 **Reason: harness gap = 0 pp.** The OpenSwarm agentic loop is not losing any quality vs
 claude -p when the same model (claude-sonnet-4) is used (④b = 100% = ④a/③ = 100%).
