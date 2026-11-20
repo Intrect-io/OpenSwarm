@@ -302,6 +302,16 @@ autonomous:
   # primary/fallbacks, orchestrator, loopAdvisor. true accepts that on purpose.
   # allowDelegatedAdapters: false
 
+  # A reviewer from the worker's own model family shares its blind spots, so
+  # the daemon refuses to start when defaultRoles, a projectAgents override or
+  # a jobProfile resolves worker and reviewer to the same family, or to a
+  # family it cannot name (AGT-4806). The fix is a reviewer from another
+  # vendor, e.g.:
+  #   defaultRoles.reviewer: { adapter: openrouter, model: deepseek/deepseek-v4-flash }
+  # This example uses one provider (GPT-5.6 for both roles), so it accepts the
+  # same-family review explicitly. Remove this line once the reviewer differs.
+  allowSameFamilyReview: true
+
   # Deterministic baseline-diff verification (enabled by default).
   # Define repo-specific commands in .openswarm/verify.yaml; see templates/verify.example.yaml.
   verify:

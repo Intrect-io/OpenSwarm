@@ -10,6 +10,10 @@
 import { broadcastEvent } from '../core/eventHub.js';
 import { getDiffText } from '../support/gitTracker.js';
 import { refusedUntrackedPaths } from '../support/worktreeEphemeralOps.js';
+import { isEphemeralWorktreeArtifact } from '../support/worktreeEphemeral.js';
+import { enforcedFileScope, filesOutsideWriteScope } from '../orchestration/writeScope.js';
+import { withoutBookkeeping } from './siblingWorkFormat.js';
+import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { taskAttributionKey, taskEventKey } from '../orchestration/decisionEngine.js';
 import { coordinationContextFor } from './pipelineCoordination.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
@@ -44,7 +48,7 @@ export const REVIEWER_DIFF_MAX_BYTES = 16_000;
  * branch is not in this diff. `workerResult.filesChanged` still names those
  * files, and the reviewer can read them. (AGT-4443)
  */
-async function reviewerDiff(projectPath: string): Promise<string | undefined> {
+async function reviewerDiff(projectPath: string, excludePaths: string[]): Promise<string | undefined> {
   try {
     const diff = await getDiffText(projectPath, undefined, REVIEWER_DIFF_MAX_BYTES, {
       includeUntracked: true,
@@ -52,13 +56,46 @@ async function reviewerDiff(projectPath: string): Promise<string | undefined> {
       // the worker wrote: a worktree mount leaves a machine-local `node_modules`
       // symlink behind, and a live reviewer spent turns judging it. Refuse here
       // exactly what the commit path refuses. (AGT-4447)
-      excludePaths: await refusedUntrackedPaths(projectPath),
+      excludePaths,
     });
     return diff.trim() ? diff : undefined;
   } catch {
     // A review with no diff is weaker; a review that never runs is worse.
     return undefined;
   }
+}
+
+/**
+ * What the publisher would actually commit, out of what the worker touched
+ * (AGT-4806). A reviewer shown a file the commit drops raises findings about
+ * work that will never ship — one such phantom finding cost a worker iteration
+ * $3.35. Each rule below is the publisher's own predicate, not a copy:
+ *
+ *   - untracked material the staging step refuses (`refusedUntrackedPaths`);
+ *   - ephemeral artifacts the commit path purges (`isEphemeralWorktreeArtifact`);
+ *   - files outside the reserved write scope, which the publication fence
+ *     (`assertBranchWithinWriteScope`) refuses to push, judged on the same
+ *     `enforcedFileScope` / `withoutBookkeeping` / `filesOutsideWriteScope` it uses.
+ *
+ * Protected files need no rule here: the worker's tools refuse to write them,
+ * and a protected file that did change is committed, so it is reviewed.
+ */
+export async function publishableReviewView(
+  projectPath: string,
+  task: Pick<TaskItem, 'fileScope' | 'fileScopeSource'>,
+  filesChanged: readonly string[],
+): Promise<{ files: string[]; excludeFromDiff: string[]; outsideScope: number }> {
+  const refused = await refusedUntrackedPaths(projectPath).catch(() => [] as string[]);
+  const refusedSet = new Set(refused);
+  const committable = filesChanged.filter((file) => !refusedSet.has(file) && !isEphemeralWorktreeArtifact(file));
+  const scope = enforcedFileScope(task);
+  const outside = scope ? filesOutsideWriteScope(withoutBookkeeping(committable), scope) : [];
+  const outsideSet = new Set(outside);
+  return {
+    files: committable.filter((file) => !outsideSet.has(file)),
+    excludeFromDiff: [...refused, ...filesChanged.filter((file) => isEphemeralWorktreeArtifact(file)), ...outside],
+    outsideScope: outside.length,
+  };
 }
 
 export async function buildReviewerStageOptions(input: {
@@ -70,6 +107,10 @@ export async function buildReviewerStageOptions(input: {
 }): Promise<ReviewerOptions> {
   const { config, context, prefix, overrides } = input;
   if (!context.workerResult) throw new Error('Worker result required for reviewer');
+  const view = await publishableReviewView(context.projectPath, context.task, context.workerResult.filesChanged);
+  const scopeWarning = view.outsideScope > 0
+    ? [`${view.outsideScope} changed file(s) outside the reserved write scope are not shown: the publication fence refuses to push the branch while they remain`]
+    : [];
   return {
     // A judgement, not an execution. The pipeline reviewer used to inherit the
     // default-off `readOnly` of the local `openswarm review` path, which left it
@@ -79,11 +120,12 @@ export async function buildReviewerStageOptions(input: {
     // (AX-1556, 2026-09-18); a reviewer that can do the same is that failure one
     // layer up with nothing below it to catch it. (AGT-4443)
     readOnly: true,
-    diff: await reviewerDiff(context.projectPath),
+    diff: await reviewerDiff(context.projectPath, view.excludeFromDiff),
     taskTitle: context.task.title,
     taskDescription: context.task.description || '',
     authoritativeOperatorFeedback: context.task.authoritativeOperatorFeedback,
-    workerResult: context.workerResult,
+    // Only what the commit would carry (AGT-4806), so no finding is about a file that never ships.
+    workerResult: { ...context.workerResult, filesChanged: view.files },
     projectPath: context.projectPath,
     timeoutMs: stageTimeoutMs('reviewer', config.roles?.reviewer?.timeoutMs),
     // jobProfile model precedence (see the worker stage). (INT-1599)
@@ -106,9 +148,12 @@ export async function buildReviewerStageOptions(input: {
     priorReviewContext: context.recovery?.feedback || undefined,
     // Surface non-blocking guard warnings (dead-module, reformat/scope) so the
     // reviewer verifies them instead of them dying in a log. (INT-2388)
-    guardWarnings: context.guardsResult?.results
-      .filter((r) => !r.passed && !r.blocking)
-      .flatMap((r) => r.issues),
+    guardWarnings: [
+      ...(context.guardsResult?.results
+        .filter((r) => !r.passed && !r.blocking)
+        .flatMap((r) => r.issues) ?? []),
+      ...scopeWarning,
+    ],
     processContext: { taskId: taskAttributionKey(context.task), stage: 'reviewer' },
     // runReviewer has always accepted onLog; nothing passed one, so the
     // reviewer's turns never reached the dashboard/desktop console the way the

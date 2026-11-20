@@ -299,6 +299,8 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     // loop has none of OpenSwarm's fences. (AGT-4444)
     const { assertUnattendedAdapters, providerSwitchViolation } = await import('../adapters/unattendedPolicy.js');
     assertUnattendedAdapters(config);
+    // A reviewer from the worker's model family shares its blind spots. (AGT-4806)
+    (await import('../adapters/reviewerIndependence.js')).assertIndependentReviewer(config);
     const heartbeatEnabled = config.autonomous.enabled === true;
     console.log(heartbeatEnabled
       ? '[Service] Autonomous mode auto-start enabled'

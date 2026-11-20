@@ -749,6 +749,12 @@ export type AutonomousStartupConfig = {
    * start when such an adapter is configured.
    */
   allowDelegatedAdapters?: boolean;
+  /**
+   * Accept a reviewer from the worker's own model family (AGT-4806). Default
+   * false: the daemon refuses to start when the reviewer's resolved model
+   * family is the worker's, or cannot be shown to differ.
+   */
+  allowSameFamilyReview?: boolean;
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Explicit high-capability project supervisor. */
   orchestrator?: OrchestratorConfig;
