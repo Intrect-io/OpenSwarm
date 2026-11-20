@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { REVIEWER_DIFF_MAX_BYTES, buildReviewerStageOptions } from './reviewerStageOptions.js';
 import { buildReviewerPrompt } from './reviewer.js';
+import { clearWorktreeGitignoredGaps, recordWorktreeGitignoredGaps } from '../support/worktreeMissingPaths.js';
 import type { PipelineConfig, PipelineContext } from './pairPipelineTypes.js';
 import type { WorkerResult } from './worker.js';
 
@@ -72,6 +73,18 @@ function context(projectPath: string): PipelineContext {
 const config = { roles: { reviewer: { enabled: true } } } as unknown as PipelineConfig;
 
 describe('the in-loop reviewer stage (AGT-4443)', () => {
+  it('tells the reviewer which gitignored source paths the worktree cannot see (AGT-4041)', async () => {
+    const repo = repoWithWorkerEdits();
+    recordWorktreeGitignoredGaps(repo, { missing: ['docs/CGF_data'], unreadable: ['private'] });
+    try {
+      const options = await buildReviewerStageOptions({ config, context: context(repo), prefix: 'p' });
+      expect(options.worktreeGapSection).toContain('docs/CGF_data');
+      expect(buildReviewerPrompt({ ...options, mode: 'blocker', blockerClaim: 'no data' })).toContain('Shared but unreadable by the sandbox user');
+    } finally { clearWorktreeGitignoredGaps(repo); }
+    const without = await buildReviewerStageOptions({ config, context: context(repo), prefix: 'p' });
+    expect(without.worktreeGapSection).toBeUndefined();
+  });
+
   it('is read-only, so it cannot repair the diff it is judging', async () => {
     const repo = repoWithWorkerEdits();
     const options = await buildReviewerStageOptions({ config, context: context(repo), prefix: 'p' });

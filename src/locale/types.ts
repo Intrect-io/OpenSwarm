@@ -481,6 +481,8 @@ export interface WorkerContext {
     verificationCommands: string[];
     sharedPaths: string[];
     missingGitignoredPaths?: string[];
+    /** Shared into the worktree but unreadable by the sandbox identity (AGT-4041). */
+    unreadableGitignoredPaths?: string[];
     dependencyGraphAvailable: boolean;
   };
   /** Knowledge Graph 기반 영향 분석 */

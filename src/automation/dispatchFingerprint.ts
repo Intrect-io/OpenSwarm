@@ -35,6 +35,7 @@ import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { defaultAutomationDbPath } from './automationDbPath.js';
 import { EXECUTION_COMMENT_CONTEXT_HEADING } from './executionTaskContext.js';
+import { isSignedDaemonComment } from '../linear/format.js';
 
 export interface FingerprintInput {
   title: string;
@@ -42,19 +43,16 @@ export interface FingerprintInput {
   comments?: ReadonlyArray<{ body: string }>;
 }
 
-/** The two shapes the daemon signs its comments with: task-state sync headings and `formatAutomationComment`'s tail. */
-const DAEMON_SIGNATURES: readonly RegExp[] = [
-  /^🧭 \*\*\[OpenSwarm\] /,
-  /^\*\*\[OpenSwarm\]/,
-  /^🧭 \*\*\[OpenSwarm\]\*\*/,
-  /^\[OpenSwarm\]/,
-  /_via OpenSwarm(?: ·[^_]*)?_\s*$/,
-];
+/** The daemon's `_via OpenSwarm_` sign-off tail (`formatAutomationComment`, Definition of Ready). */
+const DAEMON_SIGN_OFF = /_via OpenSwarm(?: ·[^_]*)?_\s*$/;
 
-/** True for a comment the daemon wrote, by its signature. */
+/**
+ * True for a comment the daemon wrote: the lead `signDaemonComment` writes (one shared helper, so
+ * a human comment that merely starts with `[OpenSwarm]` still counts as human), or the sign-off tail.
+ */
 export function isDaemonComment(body: string): boolean {
   const text = body.trim();
-  return DAEMON_SIGNATURES.some((pattern) => pattern.test(text));
+  return isSignedDaemonComment(text) || DAEMON_SIGN_OFF.test(text);
 }
 
 /**

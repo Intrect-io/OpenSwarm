@@ -5,6 +5,12 @@ import { createServer } from 'node:net';
 const loadConfigMock = vi.hoisted(() => vi.fn());
 const getTaskSourceMock = vi.hoisted(() => vi.fn());
 const createSubIssuesWithDependenciesMock = vi.hoisted(() => vi.fn());
+const linearCalls = vi.hoisted(() => ({ addComment: vi.fn(async () => undefined), updateIssueState: vi.fn(async () => true) }));
+
+vi.mock('../linear/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../linear/index.js')>('../linear/index.js');
+  return { ...actual, addComment: linearCalls.addComment, updateIssueState: linearCalls.updateIssueState };
+});
 
 vi.mock('../core/config.js', async () => {
   const actual = await vi.importActual<typeof import('../core/config.js')>('../core/config.js');
@@ -52,10 +58,12 @@ describe('POST /api/plan/dispatch decomposition limits (AGT-4123)', () => {
   let port = 0;
   const createTask = vi.fn();
   const updateState = vi.fn();
+  const addComment = vi.fn(async () => undefined);
   const source = {
     kind: 'local',
     createTask,
     updateState,
+    addComment,
   };
 
   beforeEach(async () => {
@@ -64,6 +72,9 @@ describe('POST /api/plan/dispatch decomposition limits (AGT-4123)', () => {
     createSubIssuesWithDependenciesMock.mockReset();
     createTask.mockReset();
     updateState.mockReset();
+    addComment.mockClear();
+    linearCalls.addComment.mockClear();
+    linearCalls.updateIssueState.mockClear();
 
     // dailyLimit: 1 would block the autonomous path for a 3-child plan;
     // /plan must still admit because it does not reserve against dailyLimit.
@@ -123,5 +134,27 @@ describe('POST /api/plan/dispatch decomposition limits (AGT-4123)', () => {
     expect(call[2]).toHaveLength(3);
     // 7th arg is dailyLimit for logging only — still passed, never reserved.
     expect(call[6]).toBe(1);
+  });
+
+  // AGT-4800 (#853 review): a state change the dashboard makes comes with a comment saying why.
+  it('posts a companion comment before moving a plan with no sub-tasks to Todo', async () => {
+    updateState.mockResolvedValue(true);
+    const res = await dispatch([]);
+    expect(res.status).toBe(200);
+    expect(addComment).toHaveBeenCalledWith('parent-1', expect.stringContaining('moved to Todo'));
+    expect(updateState).toHaveBeenCalledWith('parent-1', 'Todo');
+    expect(addComment.mock.invocationCallOrder[0]).toBeLessThan(updateState.mock.invocationCallOrder[0]);
+  });
+
+  it('posts a companion comment before the dashboard moves an issue to Todo', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/api/issue/move-to-todo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...AUTH },
+      body: JSON.stringify({ issueId: 'issue-7' }),
+    });
+    expect(res.status).toBe(200);
+    expect(linearCalls.addComment).toHaveBeenCalledWith('issue-7', expect.stringContaining('Moved to Todo from the OpenSwarm dashboard'));
+    expect(linearCalls.updateIssueState).toHaveBeenCalledWith('issue-7', 'Todo');
+    expect(linearCalls.addComment.mock.invocationCallOrder[0]).toBeLessThan(linearCalls.updateIssueState.mock.invocationCallOrder[0]);
   });
 });

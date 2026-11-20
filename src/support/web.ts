@@ -681,8 +681,8 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             return;
           }
 
-          // Import linear dynamically to avoid circular deps
-          const linearModule = await import('../linear/index.js');
+          const linearModule = await import('../linear/index.js'); // dynamic: avoids circular deps
+          await linearModule.addComment(issueId, 'Moved to Todo from the OpenSwarm dashboard by the operator.'); // AGT-4800: say why
           await linearModule.updateIssueState(issueId, 'Todo');
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1310,7 +1310,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             }
 
             if (tasks.length === 0) {
-              // Planner saw no decomposition — run the goal itself as one task.
+              await source.addComment(parent.id, 'The planner proposed no sub-tasks, so this goal runs as one task: moved to Todo.').catch(() => {}); // AGT-4800
               await source.updateState(parent.id, 'Todo').catch(() => {});
               triggerHeartbeat();
               res.writeHead(200, { 'Content-Type': 'application/json' });

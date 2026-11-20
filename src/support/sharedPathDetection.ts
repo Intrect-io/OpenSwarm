@@ -57,22 +57,89 @@ export function secretSharedPathsWarning(paths: string[]): string | null {
     + 'Remove these entries from openswarm.json sandbox.sharedPaths to keep them out of worktrees.';
 }
 
+/** Gitignored source paths a worktree will not see, split by why. (AGT-4041) */
+export interface GitignoredPathGaps {
+  /** Ignored and not covered by `sharedPaths`: the worktree has no such path at all. */
+  missing: string[];
+  /** Shared into the worktree, but the sandbox identity cannot read it: a name with no content. */
+  unreadable: string[];
+}
+
+/**
+ * The identity that reads shared paths inside the worker sandbox. The bubblewrap
+ * sandbox runs as the daemon uid, so by default that is this process. A container
+ * that maps the worker to another uid sets `OPENSWARM_SANDBOX_UID` (and optionally
+ * `OPENSWARM_SANDBOX_GID`); nothing in OpenSwarm sets them today.
+ */
+export interface SandboxReader { uid?: number; gid?: number }
+
+function envId(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  return Number(raw);
+}
+
+export { recordWorktreeGitignoredGaps } from './worktreeMissingPaths.js';
+
+export function configuredSandboxReader(): SandboxReader {
+  return { uid: envId('OPENSWARM_SANDBOX_UID'), gid: envId('OPENSWARM_SANDBOX_GID') };
+}
+
+/**
+ * Whether `reader` can read `path` by its Unix mode. The owner bit applies only when the
+ * reader is the owner and the group bit only when its gid matches; anyone else needs the
+ * "other" bit. A reader that is this process also gets the real `access(2)` check (which
+ * catches ACLs and parent-dir denials); root is still judged by the mode, since root in a
+ * container is not root on the host. (#855 review: the incident was a daemon-owned
+ * drwx------ dir read from a container running as another uid.)
+ */
+function readableBy(path: string, reader: SandboxReader): boolean {
+  const stat = statSync(path);
+  const processUid = process.getuid?.();
+  const uid = reader.uid ?? processUid;
+  const sameProcess = uid === processUid && reader.gid === undefined;
+  if (sameProcess) accessSync(path, constants.R_OK);
+  const groups = sameProcess
+    ? new Set([process.getgid?.(), ...(process.getgroups?.() ?? [])])
+    : new Set(reader.gid === undefined ? [] : [reader.gid]);
+  const readBit = uid === stat.uid ? 0o400 : groups.has(stat.gid) ? 0o040 : 0o004;
+  return (stat.mode & readBit) !== 0;
+}
+
+/**
+ * An ignored dir that is another checkout, or a container of parked checkouts only
+ * (`worktrees/<id>/.git`). A dir mixing a clone with real data is still data.
+ */
+function holdsNestedCheckout(path: string): boolean {
+  if (existsSync(join(path, '.git'))) return true;
+  try {
+    const children = readdirSync(path, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+    return children.length > 0 && children.every((entry) => existsSync(join(path, entry.name, '.git')));
+  } catch { return false; }
+}
+
 /**
  * Gitignored paths in the source checkout that a worktree will not see: ignored and not covered by
  * `sharedPaths` (a shared ancestor covers it; sharing only a child leaves the rest missing), or
- * shared but unreadable. Each ignored directory is reported once at its topmost ignored level, so
+ * shared but unreadable by the sandbox identity. Each ignored directory is reported once at its
+ * topmost ignored level (git also lists its files under some patterns; those are dropped), so
  * `docs/CGF_data` under a tracked `docs/` is found, and a large `node_modules` is not walked.
+ * A directory holding nested checkouts (parked worktrees) is not this repository's data.
  */
-export function unsharedGitignoredPaths(repoPath: string, sharedPaths: string[] = []): string[] {
+export function unsharedGitignoredPaths(
+  repoPath: string,
+  sharedPaths: string[] = [],
+  reader: SandboxReader = configuredSandboxReader(),
+): GitignoredPathGaps {
+  const gaps: GitignoredPathGaps = { missing: [], unreadable: [] };
   let listing: string;
   try {
     listing = execFileSync(
       'git', ['-C', repoPath, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 16 * 1024 * 1024 },
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 16 * 1024 * 1024, timeout: 10_000 },
     );
-  } catch { return []; }
+  } catch { return gaps; }
   const shared = sharedPaths.map((entry) => entry.replace(/\/+$/, '')).filter(Boolean);
-  const missing: string[] = [];
   const directories = new Set<string>();
   const nestedRepo = new Map<string, boolean>();
   // A nested checkout (another worktree parked inside this one) is not this repository's data.
@@ -89,34 +156,62 @@ export function unsharedGitignoredPaths(repoPath: string, sharedPaths: string[] 
     }
     return false;
   };
-  for (const raw of listing.split('\0')) {
+  const entries = listing.split('\0').filter(Boolean);
+  for (const raw of entries) if (raw.endsWith('/')) directories.add(raw.replace(/\/+$/, ''));
+  const underListedDirectory = (name: string): boolean => {
+    for (let at = name.indexOf('/'); at !== -1; at = name.indexOf('/', at + 1)) {
+      if (directories.has(name.slice(0, at))) return true;
+    }
+    return false;
+  };
+  for (const raw of entries) {
     const name = raw.replace(/\/+$/, '');
-    if (raw.endsWith('/')) directories.add(name);
-    if (!name || name === '.git' || name.startsWith('.git/') || insideNestedRepo(name)) continue;
+    if (!name || name === '.git' || name.startsWith('.git/') || underListedDirectory(name) || insideNestedRepo(name)) continue;
     const covered = shared.some((entry) => name === entry || name.startsWith(`${entry}/`));
-    if (!covered) { missing.push(name); continue; }
+    if (!covered) {
+      if (!(directories.has(name) && holdsNestedCheckout(join(repoPath, name)))) gaps.missing.push(name);
+      continue;
+    }
     try {
-      const path = join(repoPath, name);
-      const stat = statSync(path);
-      accessSync(path, constants.R_OK);
-      // Root bypasses Unix mode checks, so also read the mode for the worker identity.
-      const uid = process.getuid?.();
-      const groups = new Set([process.getgid?.(), ...(process.getgroups?.() ?? [])]);
-      const readBit = uid === stat.uid ? 0o400 : groups.has(stat.gid) ? 0o040 : 0o004;
-      if ((stat.mode & readBit) === 0) missing.push(name);
-    } catch { missing.push(name); }
+      if (!readableBy(join(repoPath, name), reader)) gaps.unreadable.push(name);
+    } catch { gaps.unreadable.push(name); }
   }
   // Directories first: they hold data; loose ignored files (.env, notes) rarely change a conclusion.
-  return missing.sort((a, b) => Number(directories.has(b)) - Number(directories.has(a)) || a.localeCompare(b));
+  const order = (a: string, b: string) => Number(directories.has(b)) - Number(directories.has(a)) || a.localeCompare(b);
+  gaps.missing.sort(order);
+  gaps.unreadable.sort(order);
+  return gaps;
 }
 
 const WARNING_LISTED = 20;
 
-export function gitignoredPathsWarning(paths: string[]): string | null {
-  if (!paths.length) return null;
+function listed(paths: string[]): string {
   const shown = paths.slice(0, WARNING_LISTED).join(', ');
-  const more = paths.length > WARNING_LISTED ? ` +${paths.length - WARNING_LISTED} more` : '';
-  return `[Worktree] ${paths.length} gitignored path(s) from the source are absent from this worktree (${shown}${more}); expose them through sandbox.sharedPaths or do not use their absence as a conclusion.`;
+  return paths.length > WARNING_LISTED ? `${shown} +${paths.length - WARNING_LISTED} more` : shown;
+}
+
+export function gitignoredPathsWarning(gaps: GitignoredPathGaps): string | null {
+  const parts: string[] = [];
+  if (gaps.missing.length) {
+    parts.push(`${gaps.missing.length} gitignored path(s) from the source are absent from this worktree (${listed(gaps.missing)})`);
+  }
+  if (gaps.unreadable.length) {
+    parts.push(`${gaps.unreadable.length} shared gitignored path(s) are unreadable by the sandbox identity (${listed(gaps.unreadable)})`);
+  }
+  if (!parts.length) return null;
+  return `[Worktree] ${parts.join('; ')}; expose them through sandbox.sharedPaths (readable by the sandbox user) or do not use their absence as a conclusion.`;
+}
+
+const warnedGitignoredPaths = new Set<string>();
+
+/** Warn once per repository and gap list, like the secret-path warning: every worktree creation recomputes it. */
+export function warnGitignoredPathsOnce(repoPath: string, gaps: GitignoredPathGaps): void {
+  const warning = gitignoredPathsWarning(gaps);
+  if (!warning) return;
+  const key = `${repoPath}\0${warning}`;
+  if (warnedGitignoredPaths.has(key)) return;
+  warnedGitignoredPaths.add(key);
+  console.warn(warning);
 }
 
 export interface SharedPathDetection {

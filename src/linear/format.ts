@@ -140,14 +140,32 @@ export interface AutomationCommentInput {
  */
 export const DAEMON_COMMENT_LEAD = '🧭 **[OpenSwarm]**';
 
-/** Already signed: the lead (with or without a bold heading after it), or a bare `[OpenSwarm]`. */
+/**
+ * The daemon's own signature: the lead (`🧭 **[OpenSwarm]**`), or the lead's emoji fused with a bold
+ * heading (`🧭 **[OpenSwarm] Task complete**`). A bare `[OpenSwarm]` is NOT a signature: a person can
+ * type it ("[OpenSwarm] please retry"), and `dispatchFingerprint` must still count that as theirs.
+ * Shared by `signDaemonComment` and `isDaemonComment` so the two cannot drift (#853 review).
+ */
+const DAEMON_SIGNATURE = /^🧭 \*\*\[OpenSwarm\](?:\*\*| )/;
+
+/** Already signed with the lead the daemon writes. */
 export function isSignedDaemonComment(body: string): boolean {
-  return /^(?:🧭 )?\*\*\[OpenSwarm\]|^\[OpenSwarm\]/.test(body.trimStart());
+  return DAEMON_SIGNATURE.test(body.trimStart());
 }
 
-/** Prefix an unsigned body with the lead. Signed bodies are returned unchanged. */
+/** A body opening with a Markdown block (heading, list, table, fence, quote, HTML, ordered list). */
+const OPENS_WITH_BLOCK = /^(?:#|-|\*|\||```|>|<|\d+\.)/;
+
+/**
+ * Prefix an unsigned body with the lead. Signed bodies are returned unchanged; a bare leading
+ * `[OpenSwarm]` is replaced by the lead rather than doubled. A body that opens with a Markdown
+ * block gets a blank line after the lead, or the lead would fuse into its first line (a heading
+ * stops being a heading, a table loses its header row).
+ */
 export function signDaemonComment(body: string): string {
-  return isSignedDaemonComment(body) ? body : `${DAEMON_COMMENT_LEAD} ${body.trimStart()}`;
+  if (isSignedDaemonComment(body)) return body;
+  const text = body.trimStart().replace(/^\[OpenSwarm\]\s*/, '');
+  return OPENS_WITH_BLOCK.test(text) ? `${DAEMON_COMMENT_LEAD}\n\n${text}` : `${DAEMON_COMMENT_LEAD} ${text}`;
 }
 
 /**

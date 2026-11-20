@@ -49,7 +49,12 @@ afterEach(() => {
 });
 
 describe('RunLedger recoverPublishedRun idempotency (AGT-4518)', () => {
-  it('does not throw when the run already enqueued its own completion effect', () => {
+  // Both outcomes of the crash window: the process died before the tracker write (effect still
+  // pending) or after it but before the ack (effect applied). Recovery must keep the original either way.
+  it.each([
+    { title: 'does not throw when the run already enqueued its own completion effect (effect still pending)', applied: false },
+    { title: 'does not throw when the run already enqueued its own completion effect', applied: true },
+  ])('$title', ({ applied }) => {
     // The recovery path recomputes a completion effect for the SAME issue and
     // attempt the run enqueued when it published. The dedupe key is
     // `complete:<issueId>:attempt:<N>`, so the two effects share a key; the
@@ -72,13 +77,15 @@ describe('RunLedger recoverPublishedRun idempotency (AGT-4518)', () => {
     expect(ledger.enqueueEffect(runClaim, published, 2_250)).not.toBeNull();
     const effect = ledger.getEffectByDedupeKey('complete:AGT-4518:attempt:1');
     expect(effect).not.toBeNull();
-    // Model a tracker write that succeeded before the process recorded its
-    // acknowledgement. The recovery path must preserve this applied payload.
-    (ledger as unknown as { db: { prepare(sql: string): { run(...values: unknown[]): void } } }).db
-      .prepare("UPDATE automation_effects SET status = 'applied', applied_at = 2_260 WHERE id = ?")
-      .run(effect!.id);
-    // The tracker write succeeded, but the process died before the run state
-    // advanced. The row is reclaimed as NEEDS_RECONCILE by the next owner.
+    // applied: model a tracker write that succeeded before the process recorded
+    // its acknowledgement. pending: the process died before the tracker write.
+    if (applied) {
+      (ledger as unknown as { db: { prepare(sql: string): { run(...values: unknown[]): void } } }).db
+        .prepare("UPDATE automation_effects SET status = 'applied', applied_at = 2_260 WHERE id = ?")
+        .run(effect!.id);
+    }
+    // Either way the run state never advanced. The row is reclaimed as
+    // NEEDS_RECONCILE by the next owner and the PR is found on GitHub.
     expect(ledger.reconcileExpiredLeases(3_001)).toHaveLength(1);
     expect(ledger.confirmExecutorExit(runClaim, 3_002)).toBe(true);
     expect(ledger.getRun('AGT-4518')?.state).toBe('NEEDS_RECONCILE');
@@ -105,9 +112,10 @@ describe('RunLedger recoverPublishedRun idempotency (AGT-4518)', () => {
     expect(ledger.getRun('AGT-4518')).toMatchObject({
       state: 'SYNC_PENDING', prUrl: 'https://github.test/pull/918', headSha: 'abc918',
     });
-    // The applied effect originally enqueued is the one that survives.
+    // The effect originally enqueued is the one that survives, in its own status —
+    // recovery must not overwrite the real stats with its synthetic ones.
     expect(ledger.getEffectByDedupeKey('complete:AGT-4518:attempt:1')).toMatchObject({
-      status: 'applied', payload: { stats: { real: true } },
+      status: applied ? 'applied' : 'pending', payload: { stats: { real: true } },
     });
     ledger.close();
   });

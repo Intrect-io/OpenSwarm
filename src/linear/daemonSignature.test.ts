@@ -13,14 +13,15 @@ import { isDaemonComment } from '../automation/dispatchFingerprint.js';
 
 vi.mock('@linear/sdk', () => ({ LinearClient: vi.fn() }));
 
-const STARTS_WITH_OPENSWARM = /^(?:🧭 )?\*\*\[OpenSwarm\]|^\[OpenSwarm\]/;
+const STARTS_WITH_OPENSWARM = /^🧭 \*\*\[OpenSwarm\]/;
 
 describe('signDaemonComment (AGT-4800)', () => {
   it('prefixes an unsigned body and leaves a signed one alone', () => {
     expect(signDaemonComment('Draft grooming did not start a worker.')).toBe(`${DAEMON_COMMENT_LEAD} Draft grooming did not start a worker.`);
     const signed = formatAutomationComment({ heading: 'Task complete' });
     expect(signDaemonComment(signed)).toBe(signed);
-    expect(signDaemonComment('[OpenSwarm] proposal')).toBe('[OpenSwarm] proposal');
+    // A bare tag is not the daemon's signature: it is replaced by the lead, not doubled. (#853 review)
+    expect(signDaemonComment('[OpenSwarm] proposal')).toBe(`${DAEMON_COMMENT_LEAD} proposal`);
     expect(signDaemonComment(signDaemonComment('x'))).toBe(`${DAEMON_COMMENT_LEAD} x`);
   });
 
@@ -45,6 +46,28 @@ describe('signDaemonComment (AGT-4800)', () => {
       expect(isSignedDaemonComment(posted)).toBe(true);
       expect(isDaemonComment(posted)).toBe(true);
     }
+  });
+});
+
+describe('signDaemonComment keeps a leading Markdown block intact (#853 review)', () => {
+  it.each(['# Heading', '- item', '* item', '| a | b |', '```ts\ncode\n```', '> quote', '<details>', '1. first', '12. twelfth'])(
+    'puts a blank line between the lead and a body opening with %j',
+    (body) => {
+      expect(signDaemonComment(body)).toBe(`${DAEMON_COMMENT_LEAD}\n\n${body}`);
+    },
+  );
+
+  it('keeps an inline body on the lead line', () => {
+    expect(signDaemonComment('Draft grooming did not start a worker.')).toBe(`${DAEMON_COMMENT_LEAD} Draft grooming did not start a worker.`);
+    expect(signDaemonComment('2026 plan is ready')).toBe(`${DAEMON_COMMENT_LEAD} 2026 plan is ready`);
+  });
+});
+
+describe('only the full lead marks a comment as the daemon\'s (#853 review)', () => {
+  it('counts a human comment that starts with [OpenSwarm] as human', () => {
+    expect(isDaemonComment('[OpenSwarm] please retry')).toBe(false);
+    expect(isSignedDaemonComment('[OpenSwarm] please retry')).toBe(false);
+    expect(isDaemonComment(signDaemonComment('please retry'))).toBe(true);
   });
 });
 
@@ -91,6 +114,41 @@ describe('state changes in linear.ts come with a companion comment (AGT-4800)', 
       })
       .map(chunk => chunk.match(/function (\w+)/)?.[1] ?? '?');
     expect(missing).toEqual([]);
+  });
+
+  // Tracker state changes outside linear.ts: each call needs a comment call shortly before it with
+  // no other state change in between. autonomousRunner.ts is not scanned yet: its stale In Progress
+  // repair (reconcileStalledInProgress) moves state with no comment, and the merge reconciliation
+  // comments after the move; that file is owned by another change. (#853 review)
+  const STATE_CHANGE = /\b(?:updateIssueState|updateState|linearClient\.updateIssue)\(/;
+  const COMMENT = /\b(?:addComment|logPairComplete)\(/;
+  /** A completion retry whose effect comment already landed reapplies the state only (by design). */
+  const ALLOWED = ['src/automation/trackerEffects.ts: const accepted = await source.updateState(issueId, target);'];
+  const uncommented = (file: string, source: string): string[] => {
+    const lines = source.split('\n');
+    return lines.flatMap((line, at) => {
+      if (!STATE_CHANGE.test(line) || /^\s*(?:\/\/|\*)/.test(line) || /^\s*(?:export )?(?:async )?\w+\(.*\): Promise/.test(line)) return [];
+      for (let back = at - 1; back >= Math.max(0, at - 30); back--) {
+        if (COMMENT.test(lines[back])) return [];
+        if (STATE_CHANGE.test(lines[back])) break;
+      }
+      const site = `${file}: ${line.trim()}`;
+      return ALLOWED.includes(site) ? [] : [site];
+    });
+  };
+
+  it.each(['src/automation/trackerEffects.ts', 'src/issues/linearBridge.ts', 'src/support/web.ts'])(
+    'every tracker state change in %s comes after a companion comment',
+    (file) => {
+      const source = readFileSync(join(__dirname, '..', '..', file), 'utf8');
+      expect(STATE_CHANGE.test(source)).toBe(true);
+      expect(uncommented(file, source)).toEqual([]);
+    },
+  );
+
+  it('the widened check fails for a state change without its comment', () => {
+    expect(uncommented('x.ts', "  await addComment(id, 'a');\n  await source.updateState(id, 'Todo');\n  await source.updateState(id, 'Done');"))
+      .toEqual(["x.ts: await source.updateState(id, 'Done');"]);
   });
 
   it('the check fails for a state change without its comment', () => {

@@ -4,7 +4,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteIssueStore } from './sqliteStore.js';
-import { __setLinearBridgeClientForTests, drainLinearIssuesToStore, LINEAR_SYNC_MAX_PAGES, syncFromLinear, type LinearIssuePage } from './linearBridge.js';
+import { __setLinearBridgeClientForTests, drainLinearIssuesToStore, LINEAR_SYNC_MAX_PAGES, mapStatusToLinear, syncFromLinear, syncStatusToLinear, type LinearIssuePage } from './linearBridge.js';
+
+const linearAddComment = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock('../linear/linear.js', () => ({ addComment: linearAddComment }));
 
 function linearNode(id: string, priority = 3): Record<string, unknown> {
   return {
@@ -181,5 +184,22 @@ describe('drainLinearIssuesToStore', () => {
     const progress = await drainLinearIssuesToStore(store, 'proj', fetchPage, 50);
 
     expect(progress).toEqual({ created: 1, updated: 0, truncated: false });
+  });
+});
+
+describe('syncStatusToLinear companion comment (AGT-4800, #853 review)', () => {
+  it('posts a comment through linear.addComment before it changes the Linear state', async () => {
+    const updateIssue = vi.fn(async () => ({ success: true }));
+    const stateName = mapStatusToLinear('done')[0];
+    __setLinearBridgeClientForTests({
+      team: async () => ({ states: async () => ({ nodes: [{ id: 'state-done', name: stateName }] }) }),
+      updateIssue,
+    });
+    const store = { getIssue: () => ({ id: 'local-1', linearId: 'lin-1', linearIdentifier: 'AGT-1' }) };
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await syncStatusToLinear(store as never, 'local-1', 'done')).toBe(true);
+    expect(linearAddComment).toHaveBeenCalledWith('lin-1', expect.stringContaining('Status synced from the local issue store: done'));
+    expect(updateIssue).toHaveBeenCalledWith('lin-1', { stateId: 'state-done' });
+    expect(linearAddComment.mock.invocationCallOrder[0]).toBeLessThan(updateIssue.mock.invocationCallOrder[0]);
   });
 });

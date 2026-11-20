@@ -21,6 +21,7 @@
 
 import type Database from 'better-sqlite3';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
+import { DAEMON_COMMENT_LEAD } from '../linear/format.js';
 
 /** Estimate per cost-less attempt when there is no recent known cost to average. */
 export const DEFAULT_UNKNOWN_ATTEMPT_COST_USD = 0.1;
@@ -206,7 +207,7 @@ function alertOncePerDay(db: Database.Database, scope: string, reason: string, n
   if (inserted.changes !== 1) return;
   const sink = budgetAlertSink;
   setImmediate(() => {
-    Promise.resolve(sink(`[OpenSwarm] ${reason} — dispatch for ${scope} is paused until 00:00 UTC.`))
+    Promise.resolve(sink(`${DAEMON_COMMENT_LEAD} ${reason} — dispatch for ${scope} is paused until 00:00 UTC.`))
       .catch((err) => console.warn('[Budget] Alert delivery failed:', err instanceof Error ? err.message : err));
   });
 }
@@ -281,7 +282,7 @@ export function issueBudgetPark(
   const unknown = spend.unknownAttempts > 0
     ? ` — ${usd(spend.knownUsd)} recorded plus ${spend.unknownAttempts} attempt(s) without a recorded cost at ~${usd(spend.estimatePerUnknownUsd)} each`
     : '';
-  const reason = `[OpenSwarm] This issue has spent ${usd(spend.totalUsd)} of its ${usd(capUsd)} budget`
+  const reason = `${DAEMON_COMMENT_LEAD} This issue has spent ${usd(spend.totalUsd)} of its ${usd(capUsd)} budget`
     + ` (autonomous.budget.perIssueUsd)${unknown}. Raise the budget or narrow the issue, then dispatch it from the dashboard issue board to resume; moving it back to Todo alone does not lift a budget park.`;
   return {
     success: false,

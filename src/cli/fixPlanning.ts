@@ -26,6 +26,8 @@ export interface FixRepositoryContext {
   verificationCommands: string[];
   sharedPaths: string[];
   missingGitignoredPaths: string[];
+  /** Shared but unreadable by the sandbox identity (AGT-4041). */
+  unreadableGitignoredPaths?: string[];
   repoMemories: RepoMemoryBrief[];
   dependencyGraphAvailable: boolean;
   /**
@@ -219,13 +221,17 @@ export async function buildFixRepositoryContext(
     verificationCommands: (plan?.commands ?? []).map((command) =>
       `${command.cwd ? `(${command.cwd}) ` : ''}${command.run}`),
     sharedPaths: sharedPaths.map((path) => toRelative(canonicalRoot, join(canonicalRoot, path))),
-    missingGitignoredPaths: unsharedGitignoredPaths(canonicalRoot, sharedPaths),
+    ...gitignoredGapFields(unsharedGitignoredPaths(canonicalRoot, sharedPaths)),
     repoMemories,
     dependencyGraphAvailable,
     dependencyGraphIncomplete,
     dependencyMap,
     preflight: { ready: issues.length === 0, issues },
   };
+}
+
+function gitignoredGapFields(gaps: { missing: string[]; unreadable: string[] }): Pick<FixRepositoryContext, 'missingGitignoredPaths' | 'unreadableGitignoredPaths'> {
+  return { missingGitignoredPaths: gaps.missing, unreadableGitignoredPaths: gaps.unreadable };
 }
 
 class DisjointSet {
@@ -376,6 +382,7 @@ export function workerContextForFixUnit(unit: FixUnit, context: FixRepositoryCon
       verificationCommands: context.verificationCommands,
       sharedPaths: context.sharedPaths,
       missingGitignoredPaths: context.missingGitignoredPaths,
+      unreadableGitignoredPaths: context.unreadableGitignoredPaths,
       dependencyGraphAvailable: unit.dependencyGraphBacked,
       dependencyGraphIncomplete: context.dependencyGraphIncomplete === true,
     },

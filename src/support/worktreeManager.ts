@@ -25,7 +25,7 @@ import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFresh
 import { publicationClaimEvidence } from './publicationClaimEvidence.js';
 import { ensureVersionLabel, versionLabelFor } from './publicationVersionLabel.js';
 import { loadRepoMetadata } from './repoMetadata.js';
-import { detectSharedPaths, emptyDetectionWarning, gitignoredPathsWarning, resolveSharedPaths, unsharedGitignoredPaths, type SandboxConfig } from './sharedPathDetection.js';
+import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, unsharedGitignoredPaths, warnGitignoredPathsOnce, recordWorktreeGitignoredGaps, type SandboxConfig } from './sharedPathDetection.js';
 import { copyIsolatedPath } from './isolatedPath.js';
 import { hasEditableInstallInto, rebasePythonEnvironment } from '../verify/pythonEnvironment.js';
 import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
@@ -194,7 +194,7 @@ async function linkSharedPaths(repoPath: string, worktreePath: string): Promise<
   }
 
   const shared = resolveSharedPaths(repoPath, meta); // warns on secret-like entries itself
-  const missingIgnored = gitignoredPathsWarning(unsharedGitignoredPaths(repoPath, shared)); if (missingIgnored) console.warn(missingIgnored); // AGT-4041
+  const gaps = unsharedGitignoredPaths(repoPath, shared); recordWorktreeGitignoredGaps(worktreePath, gaps, shared); warnGitignoredPathsOnce(repoPath, gaps); // AGT-4041: prompts read it back
   if (shared.length === 0 && !(meta?.sandbox?.sharedPaths?.length)) {
     const warning = emptyDetectionWarning(repoPath, detectSharedPaths(repoPath));
     if (warning) console.warn(warning);
