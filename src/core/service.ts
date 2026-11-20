@@ -50,6 +50,7 @@ let prProcessor: PRProcessor | null = null;
 let memoryCompactionJob: Cron | null = null;
 let failureTaxonomyJob: Cron | null = null;
 let factoryDigestStop: (() => void) | null = null;
+let diskUsageStop: (() => void) | null = null; // AGT-4801 daemon-level usage sampler
 let serviceInstanceLock: ServiceInstanceLock | null = null;
 
 /**
@@ -574,6 +575,11 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     }
   })();
 
+  // One daemon-level disk usage line every 5 minutes, in bytes per category:
+  // verify sandboxes, worker worktrees, package caches, session logs (AGT-4801).
+  const { startDiskUsageMonitor } = await import('../verify/diskUsage.js');
+  diskUsageStop = startDiskUsageMonitor({ projectPaths: () => config.autonomous?.allowedProjects ?? [] });
+
   // Memory compaction scheduler (daily at 2 AM)
   console.log('[Service] Scheduling memory compaction (daily at 2 AM)...');
   memoryCompactionJob = Cron('0 2 * * *', async () => {
@@ -805,6 +811,8 @@ async function stopServiceLocked(): Promise<void> {
   failureTaxonomyJob = null;
   factoryDigestStop?.();
   factoryDigestStop = null;
+  diskUsageStop?.();
+  diskUsageStop = null;
 
   // Stop memory compaction scheduler
   if (memoryCompactionJob) {

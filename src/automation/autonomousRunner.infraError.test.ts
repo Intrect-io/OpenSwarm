@@ -130,6 +130,25 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
     expect(gate.resourceFailure('No space left on device').notice).toBeUndefined();
   });
 
+  // #849 review: an ENOSPC string the free-space measurement does not confirm (a test's own
+  // tmpfs filling, quoted output) must not stop dispatch; it is an ordinary infra backoff.
+  it('backs an unconfirmed ENOSPC report off like any infra error and keeps dispatching', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg({ minFreeDiskGiB: 0.000001 }));
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    errorLog.mockClear(); // the spy may carry calls from an earlier test
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    scheduler.startTask(task(), '/repo', async () => result('infra_error', 'tester: write failed: No space left on device'));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect((runner as unknown as { failedTaskRetryTimes: Map<string, number> }).failedTaskRetryTimes.has('ISSUE-1')).toBe(true);
+    expect(errorLog).not.toHaveBeenCalledWith(expect.stringContaining('stopped dispatch'));
+    expect((runner as unknown as { diskGate: HostDiskGate }).diskGate.evaluate().pause).toBe(false);
+  });
+
   it('retries a pair-level stuck result with fresh outer context before requiring a human', async () => {
     const source = mockTaskSource();
     runnerExecution.setTaskSource(source);

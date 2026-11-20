@@ -941,11 +941,10 @@ export class AutonomousRunner {
         const detail = pickPipelineFailureDetail(result) || 'infra/CLI execution error';
         // Host resource failures (ENOSPC) pause all dispatch through the disk gate with one
         // notice instead of a per-task backoff that fails the same way next time (AGT-4785).
-        if (isHostResourceError(detail)) {
-          const { notice } = this.diskGate.resourceFailure(detail);
+        const resource = isHostResourceError(detail) ? this.diskGate.resourceFailure(detail) : undefined;
+        if (resource?.pause) { // confirmed by measurement; the heartbeat's auto:disk pause sends the one alert (#849 review)
           console.error(`[Scheduler] ${taskCtx} stopped dispatch after a host resource failure: ${detail}`);
-          if (notice) await reportToDiscord(`⚠️ ${notice}`);
-        } else if (task.issueId) {
+        } else if (task.issueId) { // includes an ENOSPC report the measurement did not confirm: ordinary infra backoff
           // Fixed mid-range backoff — we intentionally don't bump failure counts,
           // so there's no attempt number to scale by.
           const nextRetryTime = setRetryTime(task.issueId, 3, this.failedTaskRetryTimes);
