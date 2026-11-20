@@ -181,6 +181,21 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
           return { success: false };
         }
         if (detail?.startsWith('worker-scope:')) context.repeatedScopeRejection = detail;
+        // An unbacked "tests pass" never reaches the next prompt as a bare
+        // failure: record it so the retry sees what was missing (AGT-4900). A
+        // report-format rejection is not a self-repair attempt, so it does not
+        // spend the reflection budget (maxIterations bounds it); the same
+        // rejection twice in a row is stuck.
+        if (failedWorker.unverifiedCompletionClaim && failedWorker.error) {
+          const reflectionCount = context.reflection.reflectionCount;
+          const { progressed } = recordReflection(context.reflection, {
+            iteration: context.currentIteration,
+            source: 'validation',
+            errors: [failedWorker.error.replace(/^worker-evidence:\s*/, '')],
+          });
+          context.reflection.reflectionCount = reflectionCount;
+          if (!progressed && host.shouldAbortSelfRepair(context, false, 'validation')) return { success: false };
+        }
         // A no-edit stop with a stated reason is a claim about the task: put it
         // to the reviewer once instead of retrying blind (AGT-4535).
         const blocker = await reviewWorkerBlocker(host.config, context, failedWorker, context.abortSignal);

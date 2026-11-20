@@ -783,6 +783,63 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
       expect(issues.length).toBe(0);
     });
 
+    describe('reformat mixed with substantive changes (AGT-4899)', () => {
+      beforeEach(() => {
+        writeFileSync(join(repo, 'other.ts'), 'export const other = 2;\n');
+        execFileSync('git', ['add', 'other.ts'], { cwd: repo });
+        execFileSync('git', ['commit', '-m', 'add other'], { cwd: repo });
+      });
+
+      it('holds publication when one change carries a reformat-only file and a substantive one', async () => {
+        writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n'); // reformat only
+        writeFileSync(join(repo, 'other.ts'), 'export const other = 3;\n'); // real change
+        const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
+        const result = res.results.find(r => r.guard === 'reformatScope')!;
+        expect(result.blocking).toBe(true);
+        expect(result.passed).toBe(false);
+        expect(res.allPassed).toBe(false);
+        const mixed = result.issues.find(i => i.startsWith('Reformat mixed'))!;
+        expect(mixed).toContain('reformat-only base.ts');
+        expect(mixed).toContain('substantive other.ts');
+        expect(mixed).toContain('revert the formatting-only changes in base.ts');
+        expect(mixed).toContain('`REFORMAT: <path>`');
+        expect(mixed).not.toContain('commit');
+      });
+
+      it('treats a new file as a substantive change next to a reformat', async () => {
+        writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n');
+        writeFileSync(join(repo, 'fresh.ts'), 'export const fresh = 1;\n');
+        const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
+        expect(res.allPassed).toBe(false);
+      });
+
+      it('passes a formatting-only change (advisory flag only)', async () => {
+        writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n');
+        writeFileSync(join(repo, 'other.ts'), 'export  const  other = 2;\n');
+        const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
+        const result = res.results.find(r => r.guard === 'reformatScope')!;
+        expect(result.blocking).toBe(false);
+        expect(res.allPassed).toBe(true);
+      });
+
+      it('passes a substantive-only change', async () => {
+        writeFileSync(join(repo, 'base.ts'), 'export const base = 2;\n');
+        writeFileSync(join(repo, 'other.ts'), 'export const other = 3;\n');
+        const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
+        expect(guardIssues(res, 'reformatScope')).toEqual([]);
+        expect(res.allPassed).toBe(true);
+      });
+
+      it('passes once the formatting is committed separately', async () => {
+        writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n');
+        execFileSync('git', ['commit', '-am', 'style: reindent'], { cwd: repo });
+        writeFileSync(join(repo, 'other.ts'), 'export const other = 3;\n');
+        const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
+        expect(guardIssues(res, 'reformatScope')).toEqual([]);
+        expect(res.allPassed).toBe(true);
+      });
+    });
+
     it('flags an oversized diff (tracked-line count)', async () => {
       // Large-diff uses tracked numstat; rewrite a committed file so the added
       // lines register (untracked new files count as 0 added — see guard note).
@@ -799,6 +856,45 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
     const res = await runGuards(mockWorker(), repo, {});
     expect(res.results.find(r => r.guard === 'deadModule')).toBeUndefined();
     expect(res.results.find(r => r.guard === 'reformatScope')).toBeUndefined();
+  });
+
+  describe('callerCheck', () => {
+    it('blocks a removed public symbol with a surviving caller', async () => {
+      writeFileSync(join(repo, 'api.ts'), 'export function read_bank_accounts() {}\n');
+      writeFileSync(join(repo, 'consumer.ts'), "import { read_bank_accounts } from './api';\nread_bank_accounts();\n");
+      execFileSync('git', ['add', 'api.ts', 'consumer.ts'], { cwd: repo });
+      execFileSync('git', ['commit', '-m', 'add api'], { cwd: repo });
+      writeFileSync(join(repo, 'api.ts'), 'export function fetch_bank_accounts() {}\n');
+      const res = await runGuards(mockWorker(['api.ts']), repo, { callerCheck: true });
+      expect(guardIssues(res, 'callerCheck').join('\n')).toContain('[consumer.ts:1]');
+      expect(res.allPassed).toBe(false);
+    });
+
+    it('fails closed when git inspection errors', async () => {
+      const originalPath = process.env.PATH;
+      try {
+        process.env.PATH = '';
+        const res = await runGuards(mockWorker(), repo, { callerCheck: true });
+        expect(guardIssues(res, 'callerCheck').join(' ')).toContain('Unable to verify surviving callers:');
+        expect(res.allPassed).toBe(false);
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+      }
+    });
+
+    it('does not report when callers are updated, and is disabled by default', async () => {
+      writeFileSync(join(repo, 'api.ts'), 'export function read_bank_accounts() {}\n');
+      writeFileSync(join(repo, 'consumer.ts'), "import { read_bank_accounts } from './api';\nread_bank_accounts();\n");
+      execFileSync('git', ['add', 'api.ts', 'consumer.ts'], { cwd: repo });
+      execFileSync('git', ['commit', '-m', 'add api'], { cwd: repo });
+      writeFileSync(join(repo, 'api.ts'), 'export function fetch_bank_accounts() {}\n');
+      writeFileSync(join(repo, 'consumer.ts'), "import { fetch_bank_accounts } from './api';\nfetch_bank_accounts();\n");
+      const enabled = await runGuards(mockWorker(['api.ts', 'consumer.ts']), repo, { callerCheck: true });
+      expect(guardIssues(enabled, 'callerCheck')).toEqual([]);
+      const disabled = await runGuards(mockWorker(['api.ts']), repo, { callerCheck: false });
+      expect(disabled.results.some(r => r.guard === 'callerCheck')).toBe(false);
+    });
   });
 
   // A worker can close a "diagnose root cause" task while its own report admits

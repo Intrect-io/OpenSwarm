@@ -28,7 +28,12 @@ export interface IssuePullRequest {
  * no PR. (INT-2321)
  */
 export async function gh(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('gh', args, { cwd, timeout: GH_TIMEOUT_MS });
+  return ghWithTimeout(cwd, GH_TIMEOUT_MS, ...args);
+}
+
+/** `gh` with an explicit timeout, for best-effort lookups that must not stall a publication. */
+export async function ghWithTimeout(cwd: string, timeoutMs: number, ...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('gh', args, { cwd, timeout: timeoutMs });
   return stdout;
 }
 

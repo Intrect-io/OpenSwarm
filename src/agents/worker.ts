@@ -30,6 +30,7 @@ import { getCoordinationStore } from '../coordination/coordinationStore.js';
 import { filesOutsideWriteScope } from '../orchestration/writeScope.js';
 import { acceptWorkerPaths, noteRejectedWorkerPaths, rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 import { formatProjectGoalSection } from '../support/projectGoal.js';
+import { completionReportEvidenceIssues } from './completionReportEvidence.js';
 
 // Types
 
@@ -546,6 +547,20 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
           parsedResult.zeroDiffWithoutReason = true;
           parsedResult.error = 'Worker reported success with no changed files and no explicit noChangesReason.';
         }
+      }
+    }
+
+    // A report that claims a check passed must show what ran: command, exit
+    // code and, for test runners, counts. Documents written in this same diff
+    // are not evidence. Runs after git promotion so it cannot be flipped back,
+    // and against the git-derived filesChanged, not the model's list. (AGT-4900)
+    if (parsedResult.success) {
+      const evidenceIssues = completionReportEvidenceIssues(parsedResult);
+      if (evidenceIssues.length > 0) {
+        parsedResult.success = false;
+        parsedResult.unverifiedCompletionClaim = true;
+        parsedResult.error = `worker-evidence: ${evidenceIssues.join(' ')}`;
+        emitWorkerStatus(options, `[Worker] Completion claim without execution evidence: ${evidenceIssues[0].slice(0, 300)}`);
       }
     }
 

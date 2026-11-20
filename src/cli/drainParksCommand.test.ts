@@ -88,4 +88,32 @@ describe('runDrainParksCommand', () => {
     expect(result.failed).toEqual([{ issueId: 'AX-1', branchName: 'swarm/AX-1', reason: 'park changed while attaching its PR' }]);
     expect(result.attached).toEqual([]);
   });
+
+  it('opens the backfilled draft with the version label mapped from the title', async () => {
+    const d = deps(parked({ title: '[BUG] crash on empty input' }));
+    const gh = vi.fn(async (_path: string, ...args: string[]) => {
+      if (args[0] === 'label') return 'version:patch\nversion:skip\n';
+      return args[1] === 'list' ? '' : 'https://github.com/org/repo/pull/12\n';
+    });
+
+    await runDrainParksCommand({ path: '/repo' }, { ...d, createLedger: () => d.ledger, gh });
+
+    const create = gh.mock.calls.find((c) => c[2] === 'create')!;
+    expect(create.slice(1)).toContain('--label');
+    expect(create[create.indexOf('--label') + 1]).toBe('version:patch');
+  });
+
+  it('notes a failed label lookup in the draft body and still creates the PR', async () => {
+    const d = deps(parked());
+    const gh = vi.fn(async (_path: string, ...args: string[]) => {
+      if (args[0] === 'label') throw new Error('HTTP 401: bad credentials');
+      return args[1] === 'list' ? '' : 'https://github.com/org/repo/pull/12\n';
+    });
+
+    const result = await runDrainParksCommand({ path: '/repo' }, { ...d, createLedger: () => d.ledger, gh });
+
+    expect(result.attached).toHaveLength(1);
+    const create = gh.mock.calls.find((c) => c[2] === 'create')!;
+    expect(create[create.indexOf('--body') + 1]).toContain('Version label: lookup failed: HTTP 401');
+  });
 });

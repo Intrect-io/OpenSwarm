@@ -14,6 +14,7 @@ import type { RunRecord, RunState } from '../automation/runLedger.js';
 import { attachParkedPublication, recordParkedPublicationSkip } from '../automation/runLedgerParkedPublication.js';
 import { resolveBaseRef } from '../support/worktreeManager.js';
 import { gh } from '../support/ghPullRequests.js';
+import { versionLabelFor } from '../support/publicationVersionLabel.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -75,14 +76,17 @@ async function findOrCreateDraft(
   base: { branch: string },
   run: RunRecord,
   invokeGh: (repoPath: string, ...args: string[]) => Promise<string>,
+  labelGh?: (repoPath: string, ...args: string[]) => Promise<string>,
 ): Promise<string> {
   const branchName = run.branchName!;
   const existing = (await invokeGh(repoPath, 'pr', 'list', '--head', branchName, '--state', 'open', '--json', 'url', '--jq', '.[0].url')).trim();
   if (existing) return existing;
+  const title = run.title ?? branchName;
+  const label = await versionLabelFor(repoPath, title, labelGh);
   try {
     return (await invokeGh(
       repoPath, 'pr', 'create', '--head', branchName, '--base', base.branch,
-      '--title', run.title ?? branchName, '--body', draftBody(run), '--draft',
+      '--title', title, '--body', [draftBody(run), label.bodySection].filter(Boolean).join('\n\n'), '--draft', ...label.createArgs,
     )).trim();
   } catch (error) {
     // A concurrent operator can win after our first list. Artifact truth wins.
@@ -132,7 +136,7 @@ export async function runDrainParksCommand(
         const headSha = (await invokeGit(repoPath, 'rev-parse', branchRef)).trim();
         const prUrl = opts.dryRun
           ? `would-create-draft-for:${branchName}`
-          : await findOrCreateDraft(repoPath, base, run, invokeGh);
+          : await findOrCreateDraft(repoPath, base, run, invokeGh, deps.gh);
         if (!opts.dryRun && !ledger.attachParkedPublication(run, { prUrl, headSha })) {
           summary.failed.push({ issueId: run.issueId, branchName, reason: 'park changed while attaching its PR' });
           continue;

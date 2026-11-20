@@ -36,6 +36,7 @@ import { pipelineExecutionBoundary, type StageBoundaryResults } from '../agents/
 
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { TEST_REMOVAL_PARK_REASON, testRemovalHold } from './testRemovalGate.js';
+import { COVERAGE_DROP_PARK_REASON, coverageRatchetHold } from './coverageRatchetGate.js';
 import { recordFactorySignal } from './anomalyPause.js';
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
 
@@ -313,6 +314,39 @@ export async function publishStuckWork(
   }
 }
 
+type HoldableResult = Pick<PipelineResult, 'failureDetail' | 'operatorPark' | 'guardWarnings'> & { success?: boolean; finalStatus?: string };
+
+/**
+ * The pre-publication gates of an approved run: fewer active tests
+ * (testRemovalGate) and lower coverage than its main (coverageRatchetGate).
+ * Returns true when the run was parked for a person instead of published.
+ */
+async function holdBeforePublication(worktreePath: string, task: PublishableTask, result: HoldableResult): Promise<boolean> {
+  const taskId = task.issueId || task.id;
+  const park = (code: string, reason: string): true => {
+    result.success = false;
+    result.finalStatus = 'failed';
+    result.failureDetail = `publication: ${reason}`;
+    result.operatorPark = { code, reason };
+    broadcastEvent({ type: 'log', data: { taskId, stage: 'pr', line: `Publication held: ${reason}` } });
+    console.warn(`[Runner] Publication held for ${task.issueIdentifier}: ${reason}`);
+    return true;
+  };
+  const removal = await testRemovalHold(worktreePath, task.description);
+  if (removal) return park(TEST_REMOVAL_PARK_REASON, removal.reason);
+  const coverage = await coverageRatchetHold(worktreePath);
+  if (coverage.status === 'hold') return park(COVERAGE_DROP_PARK_REASON, coverage.reason);
+  if (coverage.status === 'skipped') {
+    // Recorded, not silent: a ratchet that quietly stops measuring is the
+    // failure it exists to catch.
+    broadcastEvent({ type: 'log', data: { taskId, stage: 'pr', line: `Coverage ratchet skipped: ${coverage.reason}` } });
+    console.log(`[Runner] Coverage ratchet skipped for ${task.issueIdentifier}: ${coverage.reason}`);
+    // Durable too: guardWarnings is stored in the attempt's result_json.
+    result.guardWarnings = [...(result.guardWarnings ?? []), { guard: 'coverageRatchet', issues: [`skipped: ${coverage.reason}`], omitted: 0 }];
+  }
+  return false;
+}
+
 /**
  * Publish the branch of a run that passed review.
  *
@@ -334,16 +368,7 @@ export async function publishApprovedWork(
   if (worktreeInfo && result.success && result.finalStatus === 'approved') {
     // Before the lease fence: `beforePublish` moves the run to PUBLISHING, and a
     // held run must park from where it is, not from a publication it never made.
-    const removal = await testRemovalHold(worktreeInfo.worktreePath, task.description);
-    if (removal) {
-      result.success = false;
-      result.finalStatus = 'failed';
-      result.failureDetail = `publication: ${removal.reason}`;
-      result.operatorPark = { code: TEST_REMOVAL_PARK_REASON, reason: removal.reason };
-      broadcastEvent({ type: 'log', data: { taskId: task.issueId || task.id, stage: 'pr', line: `Publication held: ${removal.reason}` } });
-      console.warn(`[Runner] Publication held for ${task.issueIdentifier}: ${removal.reason}`);
-      return;
-    }
+    if (await holdBeforePublication(worktreeInfo.worktreePath, task, result)) return;
     const publishAllowed = await durability?.beforePublish() ?? true;
     if (!publishAllowed) {
       result.success = false;

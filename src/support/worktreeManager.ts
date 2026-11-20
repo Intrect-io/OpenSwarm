@@ -22,6 +22,7 @@ import { publicationCommitSubject } from './publicationCommitMessage.js';
 import { changeRiskSection, changeShapeSection, publicationRisk, type ChangeRisk } from './publicationChangeShape.js';
 import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFreshness.js';
 import { publicationClaimEvidence } from './publicationClaimEvidence.js';
+import { ensureVersionLabel, versionLabelFor } from './publicationVersionLabel.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, type SandboxConfig } from './sharedPathDetection.js';
 import { copyIsolatedPath } from './isolatedPath.js';
@@ -1188,7 +1189,7 @@ export async function commitAndCreatePRWithHead(
       const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
       await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
     }
-    await upsertPullRequestRiskSection(worktreePath, existing, changeRiskSection(risk)); return { prUrl: existing, headSha, risk }; // #884 review
+    await upsertPullRequestRiskSection(worktreePath, existing, changeRiskSection(risk)); await ensureVersionLabel(worktreePath, existing, title); return { prUrl: existing, headSha, risk }; // #884 review
   }
 
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
@@ -1213,15 +1214,14 @@ export async function commitAndCreatePRWithHead(
   }
 
   const freshnessSection = baseFreshnessSection(freshness, base.branch);
+  // vega-agent-style repos gate every PR on one version:* label (AGT-4269).
+  const versionLabel = await versionLabelFor(worktreePath, title);
 
   // Create PR
   const basePrBody = [
     '## Summary',
     description || `${issueIdentifier}: ${title}`,
-    ...(shapeSection ? ['', shapeSection] : []), '', changeRiskSection(risk),
-    ...(freshnessSection ? ['', freshnessSection] : []),
-    ...(overlapSection ? ['', overlapSection] : []),
-    ...(duplicateSection ? ['', duplicateSection] : []),
+    ...[shapeSection, changeRiskSection(risk), freshnessSection, overlapSection, duplicateSection, versionLabel.bodySection].filter(Boolean).flatMap((s) => ['', s]),
     '',
     '## Linear',
     `Closes ${issueIdentifier}`,
@@ -1232,7 +1232,7 @@ export async function commitAndCreatePRWithHead(
   const claimEvidence = publicationClaimEvidence(basePrBody, headSha);
   const prBody = claimEvidence.section ? `${basePrBody}\n\n${claimEvidence.section}` : basePrBody;
 
-  const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody];
+  const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody, ...versionLabel.createArgs];
   // Draft when the work never earned a review: a duplicate implementation must
   // not masquerade as the sole one, and work published because a run parked
   // (AGT-4076) never reached a reviewer at all.
@@ -1257,7 +1257,7 @@ export async function commitAndCreatePRWithHead(
     // was computed above too, before this branch knew whether it would create or reuse a PR — a merged-result regression (AGT-4465) must block
     // promotion here exactly as it does on the non-raced path.
     if (!options.draft && !conflicting && !regressed && claimEvidence.ready) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
-    await upsertPullRequestRiskSection(worktreePath, url, changeRiskSection(risk)); // #884 review: the raced PR lacks the risk section too
+    await upsertPullRequestRiskSection(worktreePath, url, changeRiskSection(risk)); await ensureVersionLabel(worktreePath, url, title); // #884 review: the raced PR lacks the risk section too
   }
 
   // Register PR ownership for conflict auto-resolution
@@ -1364,14 +1364,14 @@ export async function commitAndCreateAuditPR(info: WorktreeInfo, req: AuditPRReq
 
   await git(worktreePath, 'push', '-u', base.remote, branchName, '--force-with-lease');
 
-  const existing = await gh(worktreePath, 'pr', 'list', '--head', branchName, '--state', 'open', '--json', 'url', '--jq', '.[0].url')
-    .catch(() => '');
-  if (existing.trim()) return existing.trim();
+  const existing = await gh(worktreePath, 'pr', 'list', '--head', branchName, '--state', 'open', '--json', 'url', '--jq', '.[0].url').catch(() => '');
+  if (existing.trim()) { await ensureVersionLabel(worktreePath, existing.trim(), req.title); return existing.trim(); }
 
+  const vl = await versionLabelFor(worktreePath, req.title);
   const url = (await gh(
     worktreePath, 'pr', 'create',
     '--head', branchName, '--base', baseBranch,
-    '--title', req.title, '--body', req.body,
+    '--title', req.title, '--body', [req.body, vl.bodySection].filter(Boolean).join('\n\n'), ...vl.createArgs,
   )).trim();
   console.log(`[Worktree] Audit PR created: ${url}`);
   return url;

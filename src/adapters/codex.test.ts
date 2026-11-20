@@ -307,3 +307,34 @@ describe('CodexCliAdapter reviewer verdict loss (INT-3914)', () => {
     expect(result.decision).toBe('approve');
   });
 });
+
+describe('CodexCliAdapter observed execution evidence (AGT-4900)', () => {
+  const adapter = new CodexCliAdapter(async () => []);
+  const exec = (command: string, exitCode?: number) => JSON.stringify({
+    type: 'item.completed',
+    item: { type: 'command_execution', command: `/bin/zsh -lc '${command}'`, ...(exitCode === undefined ? {} : { exit_code: exitCode }), status: 'completed' },
+  });
+  const message = (text: string) => JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } });
+  const run = (stdout: string) => adapter.parseWorkerOutput({ exitCode: 0, stdout, stderr: '', durationMs: 1 });
+
+  it('sets executedCommands with exit status, latest run last', () => {
+    const result = run([
+      exec('npm test', 1),
+      exec('git diff', 0),
+      exec('npm test', 0),
+      exec('npm run lint'),
+      message('All tests pass.\nRan: npm test -> exit 0, 3 passed, 0 failed'),
+    ].join('\n'));
+    expect(result.executedCommands).toEqual(['npm test [exit 1]', 'git diff', 'npm test', 'npm run lint [exit ?]']);
+  });
+
+  it('records an empty observed list for a stream that ran nothing', () => {
+    expect(run(message('Renamed the helper.')).executedCommands).toEqual([]);
+  });
+
+  it('leaves executedCommands unset for plain-text output or a truncated stream', () => {
+    expect(run('All tests pass.').executedCommands).toBeUndefined();
+    expect(run(`[openswarm: 100 earlier characters of output were not retained]\n${exec('npm test', 0)}\n${message('done')}`).executedCommands)
+      .toBeUndefined();
+  });
+});

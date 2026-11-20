@@ -19,7 +19,7 @@ import type { ReviewDecision } from '../agents/agentPair.js';
 import { extractCostFromStreamJson, formatCost } from '../support/costTracker.js';
 import { extractResultFromStreamJson } from '../agents/cliStreamParser.js';
 import { t } from '../locale/index.js';
-import { extractSummary } from './resultParsing.js';
+import { extractSummary, withExecutionEvidence } from './resultParsing.js';
 import { writeClaudeMcpConfig } from './memoryMcp.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { buildClaudeEnvOverlay, inheritsUserSettings } from './claudeEnv.js';
@@ -137,15 +137,12 @@ export class ClaudeCliAdapter implements CliAdapter {
       }
 
       const resultText = extractResultFromStreamJson(raw.stdout);
-      if (!resultText) {
-        const result = extractWorkerFromText(raw.stdout);
-        result.costInfo = costInfo;
-        return result;
-      }
-
-      const result = extractWorkerResultJson(resultText) || extractWorkerFromText(resultText);
+      const result = resultText
+        ? extractWorkerResultJson(resultText) || extractWorkerFromText(resultText)
+        : extractWorkerFromText(raw.stdout);
       result.costInfo = costInfo;
-      return result;
+      const observed = extractClaudeObservedRuns(raw.stdout);
+      return observed ? withExecutionEvidence(result, { executedCommands: observed }) : result;
     } catch (error) {
       console.error('[Worker] Parse error:', error);
       return extractWorkerFromText(raw.stdout);
@@ -188,6 +185,80 @@ export class ClaudeCliAdapter implements CliAdapter {
 }
 
 // Worker Output Parsing (extracted from worker.ts)
+
+type StreamPart = { type?: unknown; id?: unknown; name?: unknown; input?: { command?: unknown; run_in_background?: unknown }; tool_use_id?: unknown; content?: unknown; is_error?: unknown };
+
+function toolResultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.map((c) => (c && typeof c.text === 'string' ? c.text : '')).join('\n');
+}
+
+/**
+ * What a Bash tool_result says about its run, in the observed-command form
+ * the completion-evidence gate reads (AGT-4900): '' for exit 0, ` [exit N]`
+ * for a non-zero exit, ` [exit ?]` when it ran but its status is unknown, and
+ * undefined when the command never ran.
+ *
+ * Claude Code reports a non-zero exit as `is_error: true` with content
+ * starting `Exit code N`; a clean exit as `is_error: false`. An `is_error`
+ * result without that prefix is a refusal (`<tool_use_error>`, a permission
+ * denial), so nothing ran. A background command returns before it finishes.
+ * Checked against recorded Claude Code transcripts, 2026-11.
+ */
+function bashRunSuffix(part: StreamPart, background: boolean): string | undefined {
+  const text = toolResultText(part.content);
+  const exit = text.match(/^Exit code (\d+)/);
+  if (exit) return Number(exit[1]) === 0 ? '' : ` [exit ${exit[1]}]`;
+  if (part.is_error === true) {
+    return /^\s*(?:<tool_use_error>|Permission\b|.*\bdenied\b)/i.test(text) ? undefined : ' [exit ?]';
+  }
+  return background ? ' [exit ?]' : '';
+}
+
+/**
+ * Bash commands the claude CLI ran, from its stream-json tool_use/tool_result
+ * pairs; re-runs move to the end so the last entry is the latest run. A
+ * tool_use with no result is not counted: it may never have run. Undefined
+ * when stdout is not a complete stream (plain text, or its head dropped), so
+ * the gate falls back to the self-report instead of an incomplete record.
+ */
+export function extractClaudeObservedRuns(stdout: string): string[] | undefined {
+  if (stdout.startsWith('[openswarm:')) return undefined;
+  const calls = new Map<string, { command: string; background: boolean }>();
+  const observed: string[] = [];
+  let sawStructuredEvent = false;
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) continue;
+    let event: { type?: unknown; message?: { content?: unknown } };
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof event?.type === 'string') sawStructuredEvent = true;
+    const content = event.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content as StreamPart[]) {
+      if (part?.type === 'tool_use' && part.name === 'Bash' && typeof part.id === 'string' && typeof part.input?.command === 'string') {
+        calls.set(part.id, { command: part.input.command.trim(), background: part.input.run_in_background === true });
+        continue;
+      }
+      if (part?.type !== 'tool_result' || typeof part.tool_use_id !== 'string') continue;
+      const call = calls.get(part.tool_use_id);
+      if (!call) continue;
+      calls.delete(part.tool_use_id);
+      const suffix = bashRunSuffix(part, call.background);
+      if (suffix === undefined || !call.command) continue;
+      const entry = call.command + suffix;
+      const previous = observed.indexOf(entry);
+      if (previous !== -1) observed.splice(previous, 1);
+      observed.push(entry);
+    }
+  }
+  return sawStructuredEvent ? observed : undefined;
+}
 
 function extractWorkerResultJson(text: string): WorkerResult | null {
   const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);

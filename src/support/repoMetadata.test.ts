@@ -19,6 +19,17 @@ describe('loadRepoMetadata', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // #916 review: the schema stripped unknown keys, so `openswarm add` rewriting
+  // the file silently dropped the coverage ratchet command (AGT-4898).
+  it('keeps the coverage block through a load and save round trip, even when malformed', async () => {
+    const coverage = { command: 'npm run cov', summary: 'coverage/coverage-summary.json', timeoutMs: 0 };
+    writeFileSync(join(dir, REPO_METADATA_FILENAME), JSON.stringify({ schemaVersion: 1, projectName: 'P', coverage }));
+    const meta = await loadRepoMetadata(dir);
+    expect(meta?.coverage).toEqual(coverage);
+    await saveRepoMetadata(dir, meta!);
+    expect((await loadRepoMetadata(dir))?.coverage).toEqual(coverage);
+  });
+
   it('returns null when openswarm.json does not exist', async () => {
     await expect(loadRepoMetadata(dir)).resolves.toBeNull();
   });
