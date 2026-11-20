@@ -297,7 +297,9 @@ function resolveCommands(command: string): ResolvedCommand[] | null {
         else word += char;
         continue;
       }
-      const span = substitutionSpanAt(command, i);
+      // Inside double quotes bash expands only `$` and backticks; `<(`/`>(`
+      // there is literal text (`"Map<(K,V)>"`), not process substitution.
+      const span = char === '<' || char === '>' ? 'none' : substitutionSpanAt(command, i);
       if (span === 'unclosed') return null;
       if (span !== 'none') {
         // `r"$(true)"m` is `rm` once the quotes come off: a splice is refused

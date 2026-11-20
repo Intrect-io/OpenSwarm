@@ -285,3 +285,22 @@ describe('destructive-command guard refuses run-time words it cannot see (AGT-34
     expect(isCommandBlocked(command)).toBe(false);
   });
 });
+
+describe('process substitution is recognised only outside double quotes (#851 + #882)', () => {
+  it.each([
+    'git commit -m "support Map<(K,V)> types"',
+    'echo "List<(int)>"',
+    'echo "a =>(b"',
+    'grep -n "x<(y" file.ts',
+  ])('allows the literal <( / >( inside double quotes: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(false);
+  });
+
+  it.each([
+    'cat <(rm -rf /foo)',
+    'echo hi > >(rm -rf /foo)',
+    'cat < <(rm -rf /foo)',
+  ])('still refuses a destructive process substitution: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(true);
+  });
+});
