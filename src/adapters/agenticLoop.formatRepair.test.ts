@@ -127,6 +127,34 @@ describe('agentic loop final-answer format repair', () => {
     expect(parseReviewerResult(result.text).issues).toHaveLength(2);
   });
 
+  // AGT-4413 DoD: the PR 521 run ended its forced final turn with NO text. The
+  // empty-final retry (AGT-4450) and the format repair together must still end
+  // with a readable decision when the reviewer can give one.
+  it('turns an empty forced final message into a decision via the retry and one repair', async () => {
+    const finals: string[] = [];
+    const result = await runReview(async (_messages, tools) => {
+      if (tools.length > 0) return toolCallResp('c1', 'read_file', { path: 'package.json' });
+      const answer = finals.length === 0 ? '' : finals.length === 1 ? PROSE : REPAIRED;
+      finals.push(answer);
+      return finalResp(answer);
+    }, { maxTurns: 1 });
+
+    expect(finals).toEqual(['', PROSE, REPAIRED]);
+    expect(parseReviewerResult(result.text).decision).toBe('revise');
+  });
+
+  it('turns an empty forced final message straight into a decision when the retry already has one', async () => {
+    let finals = 0;
+    const result = await runReview(async (_messages, tools) => {
+      if (tools.length > 0) return toolCallResp('c1', 'read_file', { path: 'package.json' });
+      finals++;
+      return finalResp(finals === 1 ? '' : 'Decision: REVISE\n- src/a.ts:42 swallows the error');
+    }, { maxTurns: 1 });
+
+    expect(finals).toBe(2);
+    expect(parseReviewerResult(result.text).decision).toBe('revise');
+  });
+
   it('attempts the repair exactly once and keeps the original answer when it does not help', async () => {
     const logs: string[] = [];
     const { state, callApi } = scripted(PROSE, 'Still thinking about it, the code looks mostly fine.');

@@ -64,7 +64,7 @@ export interface PrCommandDeps {
     pr: { repo: string; number: number; title: string; branch: string; url: string },
     projectPath: string,
     opts: PrCommandOptions,
-  ) => Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean }>;
+  ) => Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean; partialFindingsPosted?: boolean }>;
   waitCI?: (
     repo: string,
     prNumber: number,
@@ -166,7 +166,7 @@ async function defaultFreshReviewOne(
   projectPath: string,
   opts: PrCommandOptions,
   loadRoles: () => DefaultRolesConfig | undefined,
-): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean }> {
+): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean; partialFindingsPosted?: boolean }> {
   const roles = loadRoles();
   const processor = new PRProcessor(buildProcessorConfig(opts, roles, loadSecurityAuditBestEffort()));
   return processor.freshReview(toPRInfo({ ...pr, author: undefined }), projectPath);
@@ -290,6 +290,7 @@ export async function runPrCommand(
           const verdict = opts.fresh
             ? (result.success ? 'approved' : prGateNotRun
               ? `review did NOT run: ${result.error ?? 'no verdict produced'}`
+                + ('partialFindingsPosted' in result && result.partialFindingsPosted ? ' (partial notes posted)' : '')
               : (result.error ?? 'changes requested'))
             : (result.success ? `feedback addressed (${result.iterations} iteration(s))` : (result.error ?? 'failed'));
           lines.push(`${result.success ? '✓' : '✗'} #${pr.number} (${pr.title}): ${verdict}`);
@@ -330,7 +331,10 @@ export async function runPrCommand(
         const gateNotRun = result.gateRan === false;
         return {
           message: gateNotRun
-            ? `PR ${resolved.repo}#${resolved.number} fresh review did NOT run: ${result.error ?? 'no verdict produced'}\n${resolved.url}`
+            ? `PR ${resolved.repo}#${resolved.number} fresh review did NOT run: ${result.error ?? 'no verdict produced'}\n`
+              + 'Decision: NONE'
+              + (result.partialFindingsPosted ? ' (partial reviewer notes posted on the PR under a "no decision" header)' : '')
+              + `\n${resolved.url}`
             : `PR ${resolved.repo}#${resolved.number} fresh review: ${result.error ?? 'changes requested'}\n${resolved.url}`,
           exitCode: gateNotRun ? REVIEW_EXIT_GATE_NOT_RUN : 1,
         };
