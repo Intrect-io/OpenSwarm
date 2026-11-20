@@ -166,8 +166,10 @@ export interface DraftAnalysis {
   duplicateConfidence?: number;
   duplicateReason?: string;
   duplicateEvidence?: string[];
-  /** Present only when the drafter declined the task against the project goal (AGT-4662). */
+  /** Present only when the drafter declined the task (AGT-4662); asked of every project by the pre-claim draft (AGT-4784). */
   scope?: DraftScopeVerdict;
+  /** Every adapter failed, so nothing here was analysed; the pre-claim hold does not start a worker on it (AGT-4784). */
+  failed?: boolean;
 }
 
 export interface DraftPeerIssue {
@@ -209,6 +211,8 @@ export interface DraftAnalyzerOptions {
   peerIssues?: DraftPeerIssue[];
   /** The project's standing goal (AGT-4662). Unset leaves the prompt exactly as it was. */
   projectGoal?: string;
+  /** Ask for the scope verdict even without a goal: the pre-claim hold reads it for every project (AGT-4784). */
+  askScopeVerdict?: boolean;
 }
 
 // ============ 코드베이스 상태 수집 (로컬, LLM 불필요) ============
@@ -372,7 +376,7 @@ the hard parts.`);
   // Project-stable like the stats above, so it stays in the shared cacheable prefix.
   const goalSection = formatProjectGoalSection(options.projectGoal);
   if (goalSection) parts.push(goalSection.trimEnd());
-  const scopeParts = scopePromptParts(options.projectGoal);
+  const scopeParts = scopePromptParts(options.projectGoal, options.askScopeVerdict === true);
 
   if (options.peerIssues?.length) {
     const peers = options.peerIssues.slice(0, 40).map((peer) => ({
@@ -864,5 +868,7 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
     duplicateReason: haikuResult.duplicateReason,
     duplicateEvidence: haikuResult.duplicateEvidence,
     scope: haikuResult.scope,
+    // No adapter answered: the fields above are placeholders, not an analysis. (AGT-4784)
+    ...(succeeded ? {} : { failed: true }),
   };
 }

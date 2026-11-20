@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { evaluateReadiness, formatReadinessSummary, partitionByReadiness, verdictFromDraft } from './readinessGate.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { evaluateReadiness, formatReadinessSummary, partitionByReadiness, projectSkipLabelsHook, verdictFromDraft } from './readinessGate.js';
+import { holdBeforeClaim, recordDraftOutcome, resetPreClaimHoldMemo } from './preClaimHold.js';
+import { partitionByDefinitionOfReady } from './definitionOfReady.js';
+import { scopePromptParts } from '../agents/draftScope.js';
 
 const task = (over: Partial<Parameters<typeof evaluateReadiness>[0]> = {}) => ({
   issueIdentifier: 'T-1', linearState: 'Todo', labels: [] as string[], title: 'Fix the thing', ...over,
@@ -102,5 +105,95 @@ describe('verdictFromDraft', () => {
     expect(verdictFromDraft({ scope: scope({ evidence: ['one'] }) }, true)).toBeUndefined();
     expect(verdictFromDraft({}, true)).toBeUndefined();
     expect(verdictFromDraft(undefined, true)).toBeUndefined();
+  });
+});
+
+describe('pre-claim hold for every project (AGT-4784)', () => {
+  const decline = {
+    applicable: false as const, kind: 'decision_pending' as const, confidence: 0.95,
+    reason: 'the title asks for a decision', evidence: ['title says decide', 'no code deliverable'],
+  };
+  const candidate = (id: string, over: Record<string, unknown> = {}) => ({
+    task: { id, issueId: `uuid-${id}`, issueIdentifier: id, linearState: 'Todo', title: `Task ${id}`, ...over },
+  });
+
+  beforeEach(() => resetPreClaimHoldMemo());
+
+  it('computes the scope verdict for a project without a goal', async () => {
+    // The drafter is asked for the verdict with no goal set: only the goal-free kinds are offered.
+    const { field, rules } = scopePromptParts(undefined, true);
+    expect(field).toContain('"scope"');
+    for (const kind of ['wrong_repository', 'human_action_only', 'decision_pending']) expect(field).toContain(kind);
+    expect(field).not.toContain('out_of_goal');
+    expect(rules).not.toContain('blocked_by_dependency');
+    // The goal prompt is unchanged, and so is the goal-less one when nobody asks for the verdict.
+    expect(scopePromptParts(undefined)).toEqual({ field: '', rules: '' });
+    expect(scopePromptParts('Ship usable work.', true)).toEqual(scopePromptParts('Ship usable work.'));
+
+    // ...and the hold acts on it with no project goal anywhere in sight.
+    const comment = vi.fn(async () => undefined);
+    const log = vi.fn();
+    const held = candidate('AX-2148', { preAdmissionDraft: { scope: decline } });
+    const clean = candidate('AX-1', { preAdmissionDraft: {} });
+    const kept = await holdBeforeClaim([held, clean], new Set(), { log, label: (t) => t.issueIdentifier ?? t.id, comment });
+    expect(kept).toEqual([clean]);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('verdict:decision_pending'));
+    expect(comment).toHaveBeenCalledTimes(1);
+    expect(comment.mock.calls[0][2]).toMatch(/^draft-scope:/); // the worker-start gate's marker
+    // One comment per marker: a second heartbeat does not post again.
+    await holdBeforeClaim([held], new Set(), { log, label: (t) => t.id, comment });
+    expect(comment).toHaveBeenCalledTimes(1);
+    // ...but another issue declined for the same reason (same marker) still gets its own.
+    await holdBeforeClaim([candidate('AX-2145', { preAdmissionDraft: { scope: decline } })], new Set(), { log, label: (t) => t.id, comment });
+    expect(comment).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not start a worker when the draft call fails', async () => {
+    const failed = new Set<string>();
+    await expect(recordDraftOutcome(failed, 'A', async () => { throw new Error('provider down'); })).rejects.toThrow('provider down');
+    await recordDraftOutcome(failed, 'B', async () => ({ failed: true }));
+    await recordDraftOutcome(failed, 'C', async () => ({ sufficient: true }));
+    await recordDraftOutcome(failed, 'D', async () => undefined); // drafting disabled: not a failure
+    expect([...failed].sort()).toEqual(['A', 'B']);
+
+    const log = vi.fn();
+    const comment = vi.fn(async () => undefined);
+    const group = [candidate('A'), candidate('B'), candidate('C', { preAdmissionDraft: {} }), candidate('D'),
+      candidate('E', { explicitDispatch: true })];
+    failed.add('E');
+    const kept = await holdBeforeClaim(group, failed, { log, label: (t) => t.id, comment });
+    expect(kept.map((c) => c.task.id)).toEqual(['C', 'D', 'E']);
+    expect(comment).not.toHaveBeenCalled(); // no verdict, nothing to say on the issue
+    expect(log).toHaveBeenCalledTimes(2);
+    // Logged once: the next heartbeat with the same failure holds silently.
+    await holdBeforeClaim(group, failed, { log, label: (t) => t.id, comment });
+    expect(log).toHaveBeenCalledTimes(2);
+    // A draft that succeeds releases the issue.
+    failed.delete('A');
+    expect((await holdBeforeClaim([candidate('A', { preAdmissionDraft: {} })], failed, { log, label: (t) => t.id })).length).toBe(1);
+  });
+
+  it('honours a per-project exclusion label', async () => {
+    const agents = [
+      { projectPath: '/repos/cgf-portal', linearProjectId: 'proj-ax', skipLabels: ['추가 유지보수'] },
+      { projectPath: '/repos/other' },
+    ];
+    const hook = projectSkipLabelsHook(agents, async (t: { title: string }) => (t.title === 'by path' ? '/repos/cgf-portal/sub' : null));
+    expect(hook).toBeDefined();
+    const tasks = [
+      { id: 'a', issueIdentifier: 'AX-2005', title: 't', linearState: 'Todo', labels: ['추가 유지보수'], linearProject: { id: 'proj-ax' } },
+      { id: 'b', issueIdentifier: 'OT-1', title: 't', linearState: 'Todo', labels: ['추가 유지보수'], linearProject: { id: 'proj-other' } },
+      { id: 'c', issueIdentifier: 'AX-9', title: 'by path', linearState: 'Todo', labels: ['추가 유지보수'] },
+      { id: 'd', issueIdentifier: 'AX-10', title: 't', linearState: 'Todo', labels: ['global-skip'], linearProject: { id: 'proj-ax' } },
+      { id: 'e', issueIdentifier: 'AX-11', title: 't', linearState: 'Todo', labels: [], linearProject: { id: 'proj-ax' } },
+    ];
+    const { ready, held } = await partitionByDefinitionOfReady(tasks, {
+      exclusionLabels: ['global-skip'], projectExclusionLabels: hook,
+    });
+    expect(ready.map((t) => t.id)).toEqual(['b', 'e']); // another project's issue keeps the label harmlessly
+    expect(held.get('label:추가 유지보수')).toEqual(['AX-2005', 'AX-9']);
+    expect(held.get('label:global-skip')).toEqual(['AX-10']);
+    // No project sets any: no hook, no per-task lookup.
+    expect(projectSkipLabelsHook([{ projectPath: '/repos/other' }])).toBeUndefined();
   });
 });

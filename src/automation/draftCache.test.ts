@@ -17,8 +17,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { cachedDraftReusable, currentDraftActivity, draftActivityStamp } from './preClaimHold.js';
 import {
-  DRAFT_CACHE_TTL_MS, draftFingerprint, pruneDraftCache, readDraftCache, resetDraftCacheForTests, writeDraftCache,
+  DRAFT_CACHE_TTL_MS, DRAFT_SCOPE_KEY_VERSION, draftFingerprint, pruneDraftCache, readDraftCache, resetDraftCacheForTests, writeDraftCache,
 } from './draftCache.js';
 
 let dir: string;
@@ -185,5 +186,62 @@ describe('draftFingerprint goal awareness (AGT-4669)', () => {
 
     expect(readDraftCache('issue-1', draftFingerprint('Title', 'Body', 'ship usable PRs'))).toBeUndefined();
     expect(readDraftCache('issue-1', draftFingerprint('Title', 'Body'))).toBeDefined();
+  });
+});
+
+// A held issue is released by an answer, and the answer usually comes as a comment, which changes
+// neither title nor description. A declined draft also carries the issue activity. (AGT-4784)
+describe('declined draft activity key (AGT-4784)', () => {
+  const declined = {
+    ...DRAFT, scope: {
+      applicable: false as const, kind: 'decision_pending' as const, confidence: 0.95,
+      reason: 'waiting for a choice', evidence: ['title says choose', 'no code deliverable'],
+    },
+  };
+  const task = { issueId: 'issue-9', trackerUpdatedAt: 1_000 };
+  const signed = (createdAt: string) => ({ body: '🧭 **[OpenSwarm]** Draft grooming did not start a worker for this issue.', createdAt });
+  const human = (body: string) => ({ body, createdAt: '1970-01-01T00:00:00.500Z' });
+  const stampOf = async (t: typeof task, comments: Array<{ body: string; createdAt: string }>) =>
+    draftActivityStamp((await currentDraftActivity(t, async () => comments))!);
+
+  it('invalidates the cached verdict when the comment count changes', async () => {
+    const before = [human('please look at this')];
+    const key = draftFingerprint('T', 'B', undefined, DRAFT_SCOPE_KEY_VERSION);
+    writeDraftCache('issue-9', { ...entry(key), draft: declined, activity: await stampOf(task, before) });
+    const stored = () => readDraftCache<typeof declined>('issue-9', key)!;
+    const reusable = (t: typeof task, comments: Array<{ body: string; createdAt: string }>) =>
+      cachedDraftReusable(stored(), () => currentDraftActivity(t, async () => comments));
+
+    // Same comments: the cached decline is reused, no re-draft.
+    expect(await reusable(task, before)).toBe(true);
+    // A person answers in a comment: the decline is judged again.
+    expect(await reusable(task, [...before, human('Decided: rotate the key.')])).toBe(false);
+    // Other activity a person caused (updatedAt moved, no daemon comment since) releases it too.
+    expect(await reusable({ ...task, trackerUpdatedAt: 2_000 }, before)).toBe(false);
+    // Comments unreadable right now: keep the hold rather than pay for a draft.
+    expect(await cachedDraftReusable(stored(), async () => undefined)).toBe(true);
+    // A decline stored before the stamp existed is never reused.
+    expect(await cachedDraftReusable({ draft: declined }, async () => ({ updatedAt: 1 }))).toBe(false);
+    // A draft that holds nothing keeps the text-only key: activity never re-drafts it (AGT-4300).
+    expect(await cachedDraftReusable({ draft: DRAFT }, async () => ({ updatedAt: 99, humanComments: 9 }))).toBe(true);
+  });
+
+  it('absorbs the updatedAt bump its own decline comment caused, so the hold stays without a re-draft', async () => {
+    const held = { draft: declined, activity: '1000:0' };
+    const persist = vi.fn();
+    // The daemon commented at t=1500 (after the stamp) and that moved updatedAt to 1500.
+    const ok = await cachedDraftReusable(held, () => currentDraftActivity({ ...task, trackerUpdatedAt: 1_500 },
+      async () => [signed('1970-01-01T00:00:01.500Z')]), persist);
+    expect(ok).toBe(true);
+    expect(held.activity).toBe('1500:0');
+    expect(persist).toHaveBeenCalledWith('1500:0');
+    // A later move with no new daemon comment is a person's change: released.
+    expect(await cachedDraftReusable(held, () => currentDraftActivity({ ...task, trackerUpdatedAt: 3_000 },
+      async () => [signed('1970-01-01T00:00:01.500Z')]))).toBe(false);
+  });
+
+  it('keys drafts made with the every-project scope prompt apart from older ones', () => {
+    expect(draftFingerprint('T', 'B', undefined, DRAFT_SCOPE_KEY_VERSION)).not.toBe(draftFingerprint('T', 'B'));
+    expect(draftFingerprint('T', 'B', 'goal', DRAFT_SCOPE_KEY_VERSION)).not.toBe(draftFingerprint('T', 'B', 'goal'));
   });
 });

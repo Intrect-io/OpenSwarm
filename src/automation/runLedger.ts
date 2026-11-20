@@ -1,6 +1,6 @@
 import { reconcileExpiredRowsInDb } from './runLedgerExpired.js';
 import Database from 'better-sqlite3';
-import { ISSUE_BUDGET_PARK_REASON, costCeilingReasonWithAlert, issueBudgetPark, issueSpend, recordUnfencedAttemptCost } from './runLedgerCost.js';
+import { costCeilingReasonWithAlert, isBudgetPark, issueBudgetsPark, recordUnfencedAttemptCost } from './runLedgerCost.js';
 import { RunRecoveryStore } from './runRecoveryStore.js';
 import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
@@ -118,7 +118,7 @@ export class RunLedger {
       throw error;
     }
   }
-  issueBudgetPark(task: Parameters<typeof issueBudgetPark>[2], projectPath: string, capUsd: number | undefined, claim: RunClaim, unknownAttemptCostUsd?: number): ReturnType<typeof issueBudgetPark> { return capUsd == null ? null : issueBudgetPark(issueSpend(this.db, claim.issueId, Date.now(), { excludeAttemptNo: claim.attemptNo, unknownAttemptCostUsd }), capUsd, task, projectPath); } // NEEDS_HUMAN park past autonomous.budget.perIssueUsd (AGT-4807)
+  issueBudgetPark(task: Parameters<typeof issueBudgetsPark>[2], projectPath: string, capUsd: number | undefined, claim: RunClaim, unknownAttemptCostUsd?: number, maxAttemptsPerDay?: number): ReturnType<typeof issueBudgetsPark> { return issueBudgetsPark(this.db, claim, task, projectPath, { capUsd, maxAttemptsPerDay, unknownAttemptCostUsd }); } // NEEDS_HUMAN park past autonomous.budget.perIssueUsd (AGT-4807) / perIssueAttemptsPerDay (AGT-4787)
 
   registerRun(input: RegisterRunInput, now = Date.now()): RunRecord {
     if (!input.issueId.trim()) throw new Error('issueId is required');
@@ -378,7 +378,7 @@ export class RunLedger {
     const resume = this.db.transaction((): RunState | null => {
       const row = this.db.prepare('SELECT * FROM automation_runs WHERE issue_id = ?').get(issueId) as RunRow | undefined;
       if (!row || row.state !== 'NEEDS_HUMAN') return null;
-      if ((row.last_error_code === RECOVERY_ADVISOR_PARK_REASON || row.last_error_code === ISSUE_BUDGET_PARK_REASON) && trigger === 'idle_fill') return null; // a free slot is not more budget (AGT-4807)
+      if ((row.last_error_code === RECOVERY_ADVISOR_PARK_REASON || isBudgetPark(row.last_error_code)) && trigger === 'idle_fill') return null; // a free slot is not more budget (AGT-4807, AGT-4787)
       if (row.last_error_code === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON
           && trigger !== 'explicit_dispatch' && trigger !== 'sandbox_quarantine_dispatch') return null;
       // An ask_human park carries its own exact-correlation resume contract.

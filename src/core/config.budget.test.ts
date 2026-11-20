@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import { existsSync, readFileSync } from 'node:fs';
 import { loadConfig } from './config.js';
+import { resolvePerIssueAttemptsPerDay } from '../automation/runLedgerCost.js';
 
 vi.mock('node:fs', async () => {
   const actual = await vi.importActual<typeof fs>('node:fs');
@@ -32,6 +33,22 @@ describe('autonomous.budget (AGT-4807)', () => {
   it('is optional', () => {
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: {} }));
     expect(loadConfig('/tmp/config.json').autonomous?.budget).toBeUndefined();
+  });
+
+  it('carries perIssueAttemptsPerDay, which defaults to 3 at admission when unset (AGT-4787)', () => {
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { budget: { perIssueAttemptsPerDay: 5 } } }));
+    expect(loadConfig('/tmp/config.json').autonomous?.budget).toEqual({ perIssueAttemptsPerDay: 5 });
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { budget: { perIssueUsd: 4 } } }));
+    expect(resolvePerIssueAttemptsPerDay(loadConfig('/tmp/config.json').autonomous?.budget)).toBe(3);
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: {} }));
+    expect(resolvePerIssueAttemptsPerDay(loadConfig('/tmp/config.json').autonomous?.budget)).toBe(3);
+  });
+
+  it('rejects a zero, negative or fractional perIssueAttemptsPerDay', () => {
+    for (const perIssueAttemptsPerDay of [0, -1, 2.5, '3']) {
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { budget: { perIssueAttemptsPerDay } } }));
+      expect(() => loadConfig('/tmp/config.json')).toThrow();
+    }
   });
 
   it('rejects a zero or negative budget, which would park everything', () => {

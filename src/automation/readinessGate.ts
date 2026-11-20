@@ -6,6 +6,7 @@
 import { isActionableLinearState } from '../orchestration/decisionEngine.js';
 import { isScopeDeclined, type DraftScopeVerdict } from '../agents/draftScope.js';
 import { humanOwnedReason } from './agentEligibility.js';
+import { resolveOwningProject } from '../support/projectGoal.js';
 
 // On 2026-10-20 the daemon opened sessions on 52 cgf-portal issues in one night. Nine carried the
 // label that marks them out of the paid scope, four said in their own title that a decision was
@@ -28,6 +29,14 @@ export type ReadinessTask = {
 export interface ReadinessOptions {
   /** Labels that mark work outside what the daemon may do for this project. */
   exclusionLabels?: readonly string[];
+  /**
+   * The owning project's own exclusion labels (`projectAgents[].skipLabels`), merged with
+   * `exclusionLabels`. Async because owning a task can take a path lookup, so the async partitions
+   * resolve it (`resolveProjectExclusionLabels`) and hand the sync gate `exclusionLabelsFor`.
+   */
+  projectExclusionLabels?: (task: ReadinessTask) => Promise<readonly string[]>;
+  /** Per-task extra exclusion labels, already resolved. */
+  exclusionLabelsFor?: (task: ReadinessTask) => readonly string[] | undefined;
   /**
    * A grooming verdict for the issue, when one exists. `actionable` clears it; anything else
    * (`human_action_only`, `decision_pending`, ...) blocks. Injected so the gate is tested for
@@ -61,7 +70,7 @@ export function evaluateReadiness(task: ReadinessTask, options: ReadinessOptions
 
   const labelReason = humanOwnedReason(
     { title: task.title, labels: [...(task.labels ?? [])], hasChildren: false },
-    { labels: [...(options.exclusionLabels ?? [])], titleTags: [], epics: false },
+    { labels: [...(options.exclusionLabels ?? []), ...(options.exclusionLabelsFor?.(task) ?? [])], titleTags: [], epics: false },
   );
   if (labelReason) return { claim: false, reason: labelReason };
 
@@ -106,10 +115,10 @@ export function formatReadinessSummary(held: ReadonlyMap<string, string[]>, maxL
 }
 
 /**
- * The verdict a draft analysis carries, in the gate's vocabulary: the declined scope kind, or
- * undefined when the draft says nothing against the issue. Only a project with a standing goal
- * asks the drafter for a scope verdict (`scopePromptParts`), and only a confident, evidenced one
- * counts (`isScopeDeclined`) — without both, nothing here can block.
+ * The verdict a draft analysis carries, in the gate's vocabulary, for a project with a standing goal:
+ * the declined scope kind, or undefined when the draft says nothing against the issue. Only a
+ * confident, evidenced verdict counts (`isScopeDeclined`). The pre-claim hold asks every project
+ * for a verdict and reads it through `draftScopeVerdict` (preClaimHold.ts) instead (AGT-4784).
  */
 export function verdictFromDraft(
   draft: { scope?: DraftScopeVerdict } | undefined,
@@ -117,4 +126,44 @@ export function verdictFromDraft(
 ): string | undefined {
   if (!projectHasGoal || !draft) return undefined;
   return isScopeDeclined(draft.scope) ? draft.scope.kind : undefined;
+}
+
+type ProjectSkipLike = { projectPath: string; linearProjectId?: string; skipLabels?: string[] };
+type OwnedTask = ReadinessTask & { projectPath?: string; linearProject?: { id: string } };
+
+/**
+ * The per-project exclusion labels hook (`projectAgents[].skipLabels`), or undefined when no project
+ * sets any. A fetched Linear task carries no `projectPath`, so the owning project is found by its
+ * `linearProjectId` first and then by the runner's own path resolution, as `definitionOfReadyHooks` does.
+ */
+export function projectSkipLabelsHook<T extends OwnedTask>(
+  projectAgents: ReadonlyArray<ProjectSkipLike> | undefined,
+  resolveProjectPath?: (task: T) => Promise<string | null | undefined>,
+): ((task: ReadinessTask) => Promise<readonly string[]>) | undefined {
+  if (!projectAgents?.some((agent) => agent.skipLabels?.length)) return undefined;
+  const norm = (label: string) => label.trim().toLowerCase();
+  const listed = new Set(projectAgents.flatMap((agent) => agent.skipLabels ?? []).map(norm));
+  return async (readinessTask) => {
+    const task = readinessTask as T;
+    // Owning a task can read openswarm.json per project: only look when one of its labels is listed somewhere.
+    if (!(task.labels ?? []).some((label) => listed.has(norm(label)))) return [];
+    const byLinearId = task.linearProject?.id
+      ? projectAgents.find((agent) => agent.linearProjectId === task.linearProject?.id)
+      : undefined;
+    if (byLinearId) return byLinearId.skipLabels ?? [];
+    const path = task.projectPath ?? (await resolveProjectPath?.(task).catch(() => null)) ?? '';
+    return path ? resolveOwningProject(projectAgents, path)?.skipLabels ?? [] : [];
+  };
+}
+
+/** Resolve `projectExclusionLabels` once per task into the sync `exclusionLabelsFor` the gate reads. */
+export async function resolveProjectExclusionLabels<T extends ReadinessTask>(
+  tasks: readonly T[],
+  options: ReadinessOptions,
+): Promise<ReadinessOptions> {
+  const hook = options.projectExclusionLabels;
+  if (!hook) return options;
+  const byTask = new Map<ReadinessTask, readonly string[]>();
+  for (const task of tasks) byTask.set(task, await hook(task));
+  return { ...options, exclusionLabelsFor: (task) => [...(options.exclusionLabelsFor?.(task) ?? []), ...(byTask.get(task) ?? [])] };
 }

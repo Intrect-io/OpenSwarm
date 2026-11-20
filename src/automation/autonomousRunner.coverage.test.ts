@@ -372,7 +372,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
         expect(marker).toMatch(/^draft-scope:[0-9a-f]{24}$/);
       });
 
-      it('changes nothing for a project with no goal: the drafter never asked for a verdict there', async () => {
+      it('holds a declined issue in a project with no goal too: every project gets a verdict', async () => { // was 'changes nothing for a project with no goal' before AGT-4784
         const addComment = vi.fn(async () => {});
         runnerExecution.setTaskSource({ kind: 'linear', addComment } as unknown as ITaskSource);
         const internal = new AutonomousRunner(goalCfg()) as unknown as Internal;
@@ -381,8 +381,8 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
 
         const safe = await internal.detectSafeCandidateIds([{ task: candidate, projectPath: '/repo' }]);
 
-        expect(safe).toEqual(new Set(['nogoal']));
-        expect(addComment).not.toHaveBeenCalled();
+        expect(safe).toEqual(new Set());
+        expect(addComment).toHaveBeenCalledTimes(1);
       });
 
       it('does not hold on a weak verdict: confidence under the bar is a hunch, not a decline', async () => {

@@ -4,7 +4,7 @@
 // Dependencies: readinessGate (state/label/verdict rules), projectGoal (owning project lookup)
 // Test Status: definitionOfReady.test.ts
 
-import { partitionByReadiness, type ReadinessOptions, type ReadinessPartition, type ReadinessTask } from './readinessGate.js';
+import { partitionByReadiness, resolveProjectExclusionLabels, type ReadinessOptions, type ReadinessPartition, type ReadinessTask } from './readinessGate.js';
 import { resolveOwningProject } from '../support/projectGoal.js';
 import { DAEMON_COMMENT_LEAD } from '../linear/format.js';
 
@@ -162,7 +162,7 @@ export async function partitionByDefinitionOfReady<T extends DefinitionOfReadyTa
   tasks: readonly T[],
   options: ReadinessOptions & { definitionOfReady?: DefinitionOfReadyHooks<T> },
 ): Promise<ReadinessPartition<T>> {
-  const base = partitionByReadiness(tasks, options);
+  const base = partitionByReadiness(tasks, await resolveProjectExclusionLabels(tasks, options));
   const hooks = options.definitionOfReady;
   if (!hooks) return base;
   const ready: T[] = [];

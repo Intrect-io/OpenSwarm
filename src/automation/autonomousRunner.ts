@@ -57,7 +57,7 @@ import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import { dispatchBudget, recordDispatchClaims } from './dispatchRamp.js';
 import { pipelineExecutionBoundary } from '../agents/stageExecutionBoundary.js';
 import * as execution from './runnerExecution.js';
-import { draftFingerprint, pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
+import { DRAFT_SCOPE_KEY_VERSION, draftFingerprint, pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
 import { pruneSessionLogs } from '../support/sessionLog.js';
 import { pruneScratchpads } from '../support/scratchpad.js';
 import { pruneSnapshots } from '../support/worktreeSnapshot.js';
@@ -108,11 +108,11 @@ import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelComp
 import type { ModelRole } from '../adapters/modelCompat.js';
 import { isTimeoutError } from '../adapters/errorClassification.js';
 import {
-  applyBacklogGrooming,
-  filterGroomableTasks,
-  runBacklogGroomingPlanner,
+  applyBacklogGrooming, DEFAULT_GROOMING_MUTATION_CAP,
+  filterGroomableTasks, runBacklogGroomingPlanner,
   summarizeGroomingDecision,
 } from './backlogGrooming.js';
+import { resolvePerIssueAttemptsPerDay } from './runLedgerCost.js';
 import {
   DurableRunCoordinator,
   RETRY_RAMP_FROM_ATTEMPT,
@@ -131,8 +131,8 @@ import {
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
-import { scopeDeclineComment, scopeDeclineMarker } from './draftGrooming.js';
-import { evaluateReadiness, formatReadinessSummary, verdictFromDraft } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
+import { cachedDraftReusable, currentDraftActivity, draftActivityStamp, holdBeforeClaim, recordDraftOutcome, type IssueActivity } from './preClaimHold.js';
+import { formatReadinessSummary, projectSkipLabelsHook } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
 import { isScopeDeclined } from '../agents/draftScope.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
 import { completeParentIfChildrenDone as completeParentLocally, buildTaskStateSyncComment } from '../taskState/store.js';
@@ -174,7 +174,7 @@ type CachedDraftScope = {
   fileScope: string[];
   draft: NonNullable<TaskItem['preAdmissionDraft']>;
   description?: string;
-  executionCommentsLoaded?: boolean;
+  executionCommentsLoaded?: boolean; activity?: string; // issue activity for a declined draft (AGT-4784)
 };
 
 // The completion/cancellation effect payload contract (and its delivery) lives
@@ -1688,7 +1688,7 @@ export class AutonomousRunner {
         // independent safety boundaries.
         maxAttemptsPerHour: metadata?.automation?.maxAttemptsPerHour,
         maxFailuresPerHour: metadata?.automation?.maxFailuresPerHour ?? 6,
-        maxCostUsdPerDay: metadata?.automation?.maxCostUsdPerDay ?? this.config.budget?.perProjectDailyUsd, globalMaxCostUsdPerDay: this.config.spend?.maxCostUsdPerDay, unknownAttemptCostUsd: this.config.spend?.unknownAttemptCostUsd, maxCostUsdPerIssue: this.config.budget?.perIssueUsd, // budget: AGT-4807
+        maxCostUsdPerDay: metadata?.automation?.maxCostUsdPerDay ?? this.config.budget?.perProjectDailyUsd, globalMaxCostUsdPerDay: this.config.spend?.maxCostUsdPerDay, unknownAttemptCostUsd: this.config.spend?.unknownAttemptCostUsd, maxCostUsdPerIssue: this.config.budget?.perIssueUsd, maxAttemptsPerIssuePerDay: resolvePerIssueAttemptsPerDay(this.config.budget), // budget: AGT-4807, AGT-4787
         circuitCooldownMs: (metadata?.automation?.circuitCooldownMinutes ?? 60) * 60_000,
       };
     } catch (error) {
@@ -2506,7 +2506,7 @@ export class AutonomousRunner {
       return tasks;
     }
 
-    let successfulPlannerRuns = 0;
+    let successfulPlannerRuns = 0; const mutationBudget = { remaining: DEFAULT_GROOMING_MUTATION_CAP }; // AGT-4603: one cap per grooming run
     for (const [projectPath, groupTasks] of groups) {
       this.syslog(`⟳ Backlog grooming: ${groupTasks.length} issue(s) in ${projectPath.split('/').pop()}`);
       const result = await runBacklogGroomingPlanner({
@@ -2524,9 +2524,9 @@ export class AutonomousRunner {
       }
       successfulPlannerRuns++;
       const validIssueIds = new Set(groupTasks.map(task => task.issueId || task.id));
-      const applied = await applyBacklogGrooming(source, result, mode, validIssueIds);
+      const applied = await applyBacklogGrooming(source, result, mode, validIssueIds, { mutationBudget });
       for (const issueId of applied.movedIssueIds) moved.add(issueId);
-      this.syslog(`✓ Backlog grooming: ${result.decisions.length} decision(s), ${applied.commented} comment(s), ${applied.failedComments} comment failure(s), ${applied.updatedDescriptions} description update(s), ${applied.moved} moved, ${applied.skippedUnknown} unknown skipped`);
+      this.syslog(`✓ Backlog grooming: ${result.decisions.length} decision(s), ${applied.commented} comment(s), ${applied.failedComments} comment failure(s), ${applied.updatedDescriptions} description update(s), ${applied.moved} moved, ${applied.skippedUnknown} unknown skipped, ${applied.skippedOpenPr} open-PR skipped, ${applied.skippedByCap} over the cap`);
       for (const decision of result.decisions.slice(0, 5)) {
         this.syslog(`  ${summarizeGroomingDecision(decision)}`);
       }
@@ -2890,7 +2890,7 @@ export class AutonomousRunner {
       // a park on it. (AGT-4784)
       const skipConfig = this.config.skip ?? DEFAULT_AGENT_SKIP;
       const { ready: readyTasks, held: notReady } = await partitionByDefinitionOfReady(tasks, {
-        exclusionLabels: skipConfig.labels, includeBacklog: this.config.includeBacklog ?? false,
+        exclusionLabels: skipConfig.labels, includeBacklog: this.config.includeBacklog ?? false, projectExclusionLabels: projectSkipLabelsHook(this.config.projectAgents, (t: TaskItem) => this.resolveProjectPath(t)),
         definitionOfReady: definitionOfReadyHooks(this.config.projectAgents, getTaskSource(), (t) => this.resolveProjectPath(t)), // AGT-4805
       });
       for (const line of formatReadinessSummary(notReady)) this.syslog(line);
@@ -3151,33 +3151,15 @@ export class AutonomousRunner {
   }
 
   /**
-   * Drop the candidates whose pre-admission draft carries a confident decline (the issue needs a
-   * person: `human_action_only`, `decision_pending`, ...) and say so on the issue once. Only a
-   * project with a standing goal asks the drafter for the verdict, and only a verdict with the
-   * confidence and evidence `isScopeDeclined` requires counts, so a project without a goal sees
-   * no change. The draft is cached by title and description, so a held issue costs no model call
-   * on later heartbeats; editing either field makes a new draft and a new verdict.
+   * Hold, before any claim, every candidate whose draft declined it (`human_action_only`,
+   * `decision_pending`, ...) or could not be made, for every project (AGT-4784): see preClaimHold.ts.
    */
-  private async holdDeclinedBeforeClaim(group: RunnableCandidate[], projPath: string): Promise<RunnableCandidate[]> {
-    const hasGoal = !!resolveProjectGoal(this.config.projectAgents, projPath);
-    if (!hasGoal) return group;
-    const kept: RunnableCandidate[] = [];
-    for (const candidate of group) {
-      const draft = candidate.task.preAdmissionDraft;
-      const verdict = verdictFromDraft(draft, hasGoal);
-      const decision = evaluateReadiness(candidate.task, { verdict, includeBacklog: true });
-      if (decision.claim || !draft?.scope) {
-        kept.push(candidate);
-        continue;
-      }
-      this.syslog(`⏭ Not claimed: ${taskLabel(candidate.task)} — ${decision.reason}: ${draft.scope.reason}`);
-      const source = getTaskSource();
-      if (candidate.task.issueId && source?.kind === 'linear') {
-        await source.addComment(candidate.task.issueId, scopeDeclineComment(draft.scope), scopeDeclineMarker(draft.scope))
-          .catch((err) => console.warn('[AutonomousRunner] Readiness comment failed:', err instanceof Error ? err.message : err));
-      }
-    }
-    return kept;
+  private async holdDeclinedBeforeClaim(group: RunnableCandidate[], draftFailed: ReadonlySet<string>): Promise<RunnableCandidate[]> {
+    const source = getTaskSource();
+    return holdBeforeClaim(group, draftFailed, {
+      log: (line) => this.syslog(line), label: taskLabel,
+      comment: source?.kind === 'linear' ? (issueId, body, marker) => source.addComment(issueId, body, marker) : undefined,
+    });
   }
 
   private async detectSafeCandidateIds(candidates: RunnableCandidate[]): Promise<Set<string>> {
@@ -3198,23 +3180,17 @@ export class AutonomousRunner {
       // What survives the pre-claim hold. The fail-closed fallback below must pick from this, not
       // from `group`, or an analysis failure would admit the very issue the hold just refused.
       let claimable: RunnableCandidate[] = group;
+      const draftFailed = new Set<string>(); // drafts that threw or got no answer this heartbeat (AGT-4784)
+      const source = getTaskSource(); const comments = source?.getExecutionComments?.bind(source);
       try {
         await Promise.all(group.map(async c => {
           const cacheKey = `${projPath}\0${c.task.id}`;
-          // title + description ONLY. trackerUpdatedAt used to ride along here
-          // too, but it bumps on every tracker mutation — including the
-          // daemon's own progress comments and state transitions, neither of
-          // which changes anything the draft actually reads. One issue
-          // (AUD-1070, measured 2026-09-10) transitioned state 7 times in a
-          // day with an unchanged description and recomputed its draft on
-          // every single scheduling pass — attempt_no reached 40, and the
-          // in-memory + durable cache (AGT-4286) both had a correct, unused
-          // entry the whole time. Title and description are the only inputs
-          // that change the draft's CONTENT (see buildDraftPrompt), and both
-          // are already separate elements of this array, so an operator edit
-          // to either still invalidates — trackerUpdatedAt added no coverage
-          // beyond that, only self-inflicted misses. (AGT-4300)
-          const fingerprint = draftFingerprint(c.task.title, c.task.description, resolveProjectGoal(this.config.projectAgents, projPath));
+          // Title, description, goal and prompt version only: trackerUpdatedAt bumps on the daemon's own
+          // writes and drove one unchanged issue to 40 re-drafts (AGT-4300). A declined draft is the one
+          // exception — it also carries the issue activity (cachedDraftReusable) so an answer given as a
+          // comment releases the held issue (AGT-4784).
+          const fingerprint = draftFingerprint(c.task.title, c.task.description, resolveProjectGoal(this.config.projectAgents, projPath), DRAFT_SCOPE_KEY_VERSION);
+          let read: Promise<IssueActivity | undefined> | undefined; const activity = () => (read ??= currentDraftActivity(c.task, comments));
           const wanted = (c.task.fileScope?.length ?? 0) === 0;
           const apply = (entry: {
             fileScope: string[]; draft: NonNullable<TaskItem['preAdmissionDraft']>;
@@ -3232,7 +3208,8 @@ export class AutonomousRunner {
           };
 
           const cached = this.preAdmissionScopeCache.get(cacheKey);
-          if (wanted && cached?.fingerprint === fingerprint) {
+          const persist = (stamp: string) => { const durable = readDraftCache<NonNullable<TaskItem['preAdmissionDraft']>>(c.task.id, fingerprint); if (durable) writeDraftCache(c.task.id, { ...durable, activity: stamp }); };
+          if (wanted && cached?.fingerprint === fingerprint && await cachedDraftReusable(cached, activity, persist)) {
             apply(cached);
             return;
           }
@@ -3245,18 +3222,18 @@ export class AutonomousRunner {
             const durable = readDraftCache<NonNullable<TaskItem['preAdmissionDraft']>>(
               c.task.id, fingerprint,
             );
-            if (durable) {
+            if (durable && await cachedDraftReusable(durable, activity, persist)) {
               apply(durable);
               this.preAdmissionScopeCache.set(cacheKey, {
                 fingerprint, fileScope: [...durable.fileScope], draft: durable.draft,
-                description: durable.description,
+                description: durable.description, activity: durable.activity,
                 executionCommentsLoaded: durable.executionCommentsLoaded,
               });
               return;
             }
           }
           await resolveTaskFileScope(c.task, projPath, {
-            draftTask: () => execution.runPreAdmissionDraft(this.getExecCtx(), c.task, projPath),
+            draftTask: () => recordDraftOutcome(draftFailed, c.task.id, () => execution.runPreAdmissionDraft(this.getExecCtx(), c.task, projPath)),
             generatedOutputRules: this.config.projectAgents?.find(
               pa => projPath.includes(pa.projectPath.replace('~', '')),
             )?.generatedOutputRules,
@@ -3270,6 +3247,7 @@ export class AutonomousRunner {
               fingerprint, fileScope: [...(c.task.fileScope ?? [])], draft: c.task.preAdmissionDraft,
               description: c.task.description,
               executionCommentsLoaded: c.task.executionCommentsLoaded,
+              activity: declinedDraft ? await activity().then((a) => (a ? draftActivityStamp(a) : undefined)) : undefined,
             };
             this.preAdmissionScopeCache.delete(cacheKey);
             this.preAdmissionScopeCache.set(cacheKey, entry);
@@ -3283,7 +3261,7 @@ export class AutonomousRunner {
         // The drafts above are the first look at what an issue asks for, and they are
         // available before anything is claimed. A confident "a person has to do or decide
         // this" verdict stops the claim here instead of after a worker has started. (AGT-4784)
-        claimable = await this.holdDeclinedBeforeClaim(group, projPath);
+        claimable = await this.holdDeclinedBeforeClaim(group, draftFailed);
 
         // A later heartbeat must compare new candidates with workers that are
         // already editing another worktree. Candidate-vs-candidate detection
