@@ -107,9 +107,19 @@ describe('protocol parsing', () => {
 });
 
 describe('upgrade authorization', () => {
+  // Like the mutation gate since AGT-4814: loopback alone is no credential, so the
+  // daemon token comes along; with it, no Origin and a same-host Origin are both fine.
   it('allows loopback with no Origin or a same-host Origin, like the mutation gate', () => {
-    expect(authorizeTerminalUpgrade(fakeReq({ remote: '127.0.0.1' }))).toBe(true);
-    expect(authorizeTerminalUpgrade(fakeReq({ remote: '127.0.0.1', origin: 'http://127.0.0.1:3847' }))).toBe(true);
+    process.env.OPENSWARM_WEB_TOKEN = 's3cret';
+    const protocols = [TERMINAL_PROTOCOL, tokenProtocol('s3cret')];
+    expect(authorizeTerminalUpgrade(fakeReq({ remote: '127.0.0.1', protocols }))).toBe(true);
+    expect(authorizeTerminalUpgrade(fakeReq({ remote: '127.0.0.1', origin: 'http://127.0.0.1:3847', protocols }))).toBe(true);
+  });
+
+  it('refuses a loopback upgrade that carries no daemon token (AGT-4814: a shell is the most powerful mutation)', () => {
+    process.env.OPENSWARM_WEB_TOKEN = 's3cret';
+    expect(authorizeTerminalUpgrade(fakeReq({ remote: '127.0.0.1' }))).toBe(false);
+    expect(authorizeTerminalUpgrade(fakeReq({ remote: '127.0.0.1', origin: 'http://127.0.0.1:3847' }))).toBe(false);
   });
 
   it('refuses a foreign Origin even from loopback (cross-site WebSocket hijack)', () => {
@@ -173,6 +183,7 @@ describe('sessions', () => {
   let limiter: SessionLimiter;
 
   async function start(opts: { max?: number; idleMs?: number } = {}) {
+    process.env.OPENSWARM_WEB_TOKEN = 'session-token'; // the upgrade needs the daemon token (AGT-4814)
     ptys = [];
     limiter = new SessionLimiter(opts.max ?? 4);
     server = createServer((_req, res) => { res.writeHead(404); res.end(); });
@@ -192,7 +203,7 @@ describe('sessions', () => {
   });
 
   const open = (headers: Record<string, string> = {}, path = TERMINAL_WS_PATH) =>
-    new WebSocket(`ws://127.0.0.1:${port}${path}`, [TERMINAL_PROTOCOL], { headers });
+    new WebSocket(`ws://127.0.0.1:${port}${path}`, [TERMINAL_PROTOCOL, tokenProtocol('session-token')], { headers });
 
   const closed = (ws: WebSocket) => new Promise<number>((r) => ws.on('close', (code) => r(code)));
   const rejected = (ws: WebSocket) => new Promise<number>((r) => {
