@@ -19,7 +19,7 @@ import type { CliRunResult, FinalAnswerRepair, FinishValidation } from './types.
 import type { ChatUsage } from './chatStream.js';
 import { recordUsage, type UsageAttribution } from '../support/usageLedger.js';
 import { createSessionRecorder, type SessionRecorder } from '../support/sessionLog.js';
-import { COORDINATION_TOOL_DEFINITIONS, type CoordinationToolContext } from '../coordination/coordinationTools.js';
+import { coordinationToolDefinitionsFor, type CoordinationToolContext } from '../coordination/coordinationTools.js';
 import { filterHumanSurfaceMcpTools, isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { localDataNote } from './localDataNote.js';
 import { SandboxExecutorClient } from '../sandboxExecutor/client.js';
@@ -510,7 +510,7 @@ async function runAgenticLoopInner(
   const externalTools = enableTools
     ? [
         ...(readOnly ? [] : humanSurfaceFilteredMcp.tools),
-        ...(readOnly || !coordinationContext ? [] : COORDINATION_TOOL_DEFINITIONS),
+        ...(readOnly || !coordinationContext ? [] : coordinationToolDefinitionsFor(coordinationContext)),
       ]
     : [];
   // The role's declared scope goes LAST, over the built-ins every rule above has

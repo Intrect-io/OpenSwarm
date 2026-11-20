@@ -119,3 +119,33 @@ describe('!pair run wiring (AGT-4055)', () => {
     expect(runReviewer.mock.calls[0][0].coordinationContext).toBeUndefined();
   });
 });
+
+// AGT-4055 review follow-ups.
+describe('pairCoordinationContext review fixes (AGT-4055)', () => {
+  it('withholds ask_human: nothing resumes a /pair run after the operator answers', async () => {
+    const { coordinationToolDefinitionsFor, executeCoordinationTool } = await import('../coordination/coordinationTools.js');
+    const ctx = pairCoordinationContext({ taskId: 'AGT-4', linearIssueId: 'uuid-agt-4', projectPath: '/tmp/agt4055-proj' }, 'worker')!;
+    expect(ctx.humanQuestions).toBe(false);
+    const names = coordinationToolDefinitionsFor(ctx).map((d) => d.function.name);
+    expect(names).not.toContain('ask_human');
+    expect(names).toContain('coordination_read');
+    const refused = await executeCoordinationTool('ask_human', { question: 'which key?' }, ctx);
+    expect(refused.isError).toBe(true);
+    expect(refused.content).toMatch(/not available in this session/);
+  });
+
+  it('expands ~ in the project path, so the board names the checkout the agent runs in', () => {
+    const home = process.env.HOME ?? '';
+    const ctx = pairCoordinationContext({ taskId: 'AGT-5', linearIssueId: 'uuid-agt-5', projectPath: '~/dev' }, 'worker');
+    expect(ctx?.repository).not.toContain('~');
+    expect(ctx?.repository.startsWith(home)).toBe(true);
+  });
+
+  it('labels the board with the issue identifier when the session was started with the UUID', async () => {
+    getIssue.mockResolvedValue({ id: 'uuid-agt-6', identifier: 'AGT-6', title: 'T', description: 'D' });
+    const { msg } = fakeMessage();
+    await handlePair(msg as never, ['run', 'uuid-agt-6', 'proj']);
+    await vi.waitFor(() => expect(runReviewer).toHaveBeenCalled());
+    expect(runWorker.mock.calls[0][0].coordinationContext?.taskLabel).toBe('AGT-6');
+  });
+});

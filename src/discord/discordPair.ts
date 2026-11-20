@@ -18,6 +18,7 @@ import * as reviewer from '../agents/reviewer.js';
 import * as pairMetrics from '../agents/pairMetrics.js';
 import * as pairWebhook from '../agents/pairWebhook.js';
 import { coordinationContextFor } from '../agents/pipelineCoordination.js';
+import { expandPath } from '../core/config.js';
 import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
 
 import {
@@ -48,16 +49,24 @@ const DISCORD_CONTENT_LIMIT = 1900;
  *
  * v1 visibility: what these agents publish lands on the coordination board
  * (dashboard / CLI) only. It is not echoed into the Discord thread.
+ *
+ * Review follow-up: `ask_human` is withheld (a /pair session has no run-ledger
+ * row, so nothing would resume it after the operator answered), and the
+ * project path is expanded so the board's repository cell names the checkout
+ * the agent actually runs in. Known limit: a /pair run and a daemon run on the
+ * same issue share one inbox, and `coordination_read` consumes messages, so the
+ * two should not run at the same time.
  */
 export function pairCoordinationContext(
   session: Pick<agentPair.PairSession, 'taskId' | 'linearIssueId' | 'projectPath'>,
   role: 'worker' | 'reviewer',
 ): CoordinationToolContext | undefined {
   if (!session.linearIssueId) return undefined;
-  return coordinationContextFor({
+  const context = coordinationContextFor({
     task: { id: session.linearIssueId, issueId: session.linearIssueId, issueIdentifier: session.taskId },
-    projectPath: session.projectPath,
+    projectPath: expandPath(session.projectPath),
   }, role);
+  return context ? { ...context, humanQuestions: false } : undefined;
 }
 
 /** Bound and neutralize untrusted text before Discord thread posting. */
@@ -290,6 +299,7 @@ async function handlePairRun(msg: Message, taskId: string, project: string): Pro
       taskTitle = issue.title;
       taskDescription = issue.description || '';
       linearIssueId = issue.id;
+      if (issue.identifier) taskId = issue.identifier; // a UUID typed in still labels the board AGT-n
     }
   } catch {
     // Continue even if Linear lookup fails (use taskId as title)
