@@ -10,6 +10,7 @@ import { sanitizeTerminalText } from '../sanitize.js';
 import { inputDebugEnabled, appendInputDebug } from '../inputDebug.js';
 import { dedupeDoubledGrapheme } from '../chatModel.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { displayWidth, tailToWidth } from '../displayWidth.js';
 
 // Read once at module load — toggling mid-session isn't a use case. (INT-1964)
 const INPUT_DEBUG = inputDebugEnabled();
@@ -29,48 +30,34 @@ export function deleteLastGrapheme(value: string): string {
 /** Columns the input box uses besides the text: prompt icon (2) + cursor (1) + paddingX (2) + border (2). */
 export const CHAT_INPUT_DISPLAY_OVERHEAD = 2 + 1 + 2 + 2;
 
-const WIDE_RANGES: ReadonlyArray<readonly [number, number]> = [
-  [0x1100, 0x115f], [0x2e80, 0xa4cf], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe4f],
-  [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1faff], [0x20000, 0x3fffd],
-];
-
-/** Terminal columns one code point takes: 2 for East Asian wide and emoji, else 1. */
-function charColumns(ch: string): number {
-  const cp = ch.codePointAt(0) ?? 0;
-  return WIDE_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi) ? 2 : 1;
-}
-
 /**
  * The part of the input that fits the terminal width. Only the rendered text is
- * clipped; the controlled value the user edits and submits stays whole. Keeps
- * the tail, where the cursor is, and marks the cut with a leading ellipsis.
- * Hangul and other wide characters count as two columns.
+ * clipped; the controlled value the user edits and submits stays whole. The
+ * value is sanitised and flattened to one line first, so the measured text is
+ * exactly the rendered text. Keeps the tail, where the cursor is, and marks the
+ * cut with a leading ellipsis. Width comes from the shared displayWidth helper
+ * (Hangul, emoji and U+2600–U+27BF symbols are two columns) and the cut falls
+ * between graphemes, so a ZWJ emoji sequence is never split.
  */
 export function clipChatInputDisplay(value: string, columns: number): string {
   const budget = Math.max(10, columns - CHAT_INPUT_DISPLAY_OVERHEAD);
-  const chars = Array.from(value);
-  let width = 0;
-  for (const ch of chars) width += charColumns(ch);
-  if (width <= budget) return value;
-  const kept: string[] = [];
-  let used = 1; // the ellipsis
-  for (let i = chars.length - 1; i >= 0; i--) {
-    const w = charColumns(chars[i]);
-    if (used + w > budget) break;
-    kept.push(chars[i]);
-    used += w;
-  }
-  return `…${kept.reverse().join('')}`;
+  const text = toSingleLineChatInput(sanitizeTerminalText(value));
+  if (displayWidth(text) <= budget) return text;
+  return `…${tailToWidth(text, budget - 1)}`;
 }
 
 /**
  * The input box is one row and a submit is one message, so a pasted chunk's
- * line breaks become single spaces instead of reaching the value. A terminal
- * that delivers a paste as one chunk would otherwise put raw newlines into the
- * controlled value and the submitted prompt.
+ * line breaks become single spaces instead of reaching the value, and a tab
+ * becomes a space. A terminal that delivers a paste as one chunk would
+ * otherwise put raw newlines into the controlled value and the submitted prompt.
+ *
+ * Known limitation: this works per input event. Under bracketed paste a lone
+ * `\r` in the middle of a paste can arrive as its own Enter keystroke and
+ * submit the text typed so far; that is not handled here.
  */
 export function toSingleLineChatInput(value: string): string {
-  return value.replace(/[\r\n\u2028\u2029]+/g, ' ');
+  return value.replace(/[\r\n\u2028\u2029]+/g, ' ').replace(/\t/g, ' ');
 }
 
 export interface ChatInputProps {
@@ -136,7 +123,7 @@ export function ChatInput({
       ) : (
         <Box>
           <Text color={theme.accent}>{`${ICON.prompt} `}</Text>
-          {value ? <Text>{sanitizeTerminalText(clipChatInputDisplay(value, columns))}</Text> : <Text color={theme.dim}>{'type a message…   / for commands'}</Text>}
+          {value ? <Text>{clipChatInputDisplay(value, columns)}</Text> : <Text color={theme.dim}>{'type a message…   / for commands'}</Text>}
           {active ? <Text inverse> </Text> : null}
         </Box>
       )}

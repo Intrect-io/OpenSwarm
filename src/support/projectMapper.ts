@@ -37,8 +37,8 @@ export const MAX_LOCAL_PROJECTS_CACHE_ENTRIES = 32;
 
 /**
  * Insert into a bounded TTL cache. Expired entries are evicted first, then the
- * oldest-inserted ones (Map keeps insertion order; re-setting moves a key to
- * the end) until the map is within `maxEntries`.
+ * least recently used ones (Map keeps insertion order; re-setting a key, as a
+ * cache hit does, moves it to the end) until the map is within `maxEntries`.
  */
 function setBounded<V>(
   cache: Map<string, V>,
@@ -293,6 +293,10 @@ export async function mapLinearProject(
   const cacheKey = mappingCacheKey(linearProjectId, basePaths);
   const cached = mappingCache.get(cacheKey);
   if (cached && Date.now() - cached.lastVerified < CACHE_TTL) {
+    // LRU: a hit moves the key to the newest end so eviction takes the least
+    // recently used mapping. lastVerified is left alone: reads must not extend the TTL.
+    mappingCache.delete(cacheKey);
+    mappingCache.set(cacheKey, cached);
     console.log(`[ProjectMapper] Cache hit: ${linearProjectName} → ${cached.localPath}`);
     return cached.localPath;
   }
@@ -368,10 +372,13 @@ export function clearMappingCache(): void {
 }
 
 /**
- * Invalidate local projects cache (force re-scan on next call)
+ * Invalidate the local projects cache and the mappings derived from it (force
+ * a re-scan on the next call). A mapping cached before a scan path was added or
+ * removed could otherwise keep pointing at a stale or removed directory.
  */
 export function invalidateProjectCache(): void {
   localProjectsCache.clear();
+  mappingCache.clear();
 }
 
 // Utilities

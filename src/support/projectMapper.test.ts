@@ -14,6 +14,8 @@ import {
   mapLinearProject,
   scanLocalProjects,
   clearMappingCache,
+  invalidateProjectCache,
+  getAllMappings,
   getMappingCacheSizes,
   MAX_LOCAL_PROJECTS_CACHE_ENTRIES,
   MAX_MAPPING_CACHE_ENTRIES,
@@ -183,5 +185,32 @@ describe('projectMapper cache bounds', () => {
     rmSync(join(base, 'alpha-service'), { recursive: true, force: true });
     expect(await mapLinearProject('p', 'alpha-service', [base])).toBeNull();
     expect(getMappingCacheSizes().mappings).toBe(1);
+  });
+
+  it('evicts the least recently used mapping, not the oldest inserted (LRU on hit)', async () => {
+    makeRepo(base, 'alpha-service');
+    for (let i = 0; i < MAX_MAPPING_CACHE_ENTRIES; i++) {
+      await mapLinearProject(`project-${i}`, 'alpha-service', [base]);
+    }
+    const before = getAllMappings().find((m) => m.linearProjectId === 'project-0')!.lastVerified;
+    // touch the oldest entry, then overflow the cap by one
+    await mapLinearProject('project-0', 'alpha-service', [base]);
+    await mapLinearProject('overflow', 'alpha-service', [base]);
+    const ids = getAllMappings().map((m) => m.linearProjectId);
+    expect(ids).toContain('project-0');
+    expect(ids).not.toContain('project-1');
+    expect(ids).toHaveLength(MAX_MAPPING_CACHE_ENTRIES);
+    // a hit does not refresh the TTL stamp
+    expect(getAllMappings().find((m) => m.linearProjectId === 'project-0')!.lastVerified).toBe(before);
+  });
+
+  it('invalidateProjectCache clears cached mappings along with the scans', async () => {
+    const first = makeRepo(base, 'alpha-service');
+    expect(await mapLinearProject('p', 'alpha-service', [base])).toBe(first);
+    expect(getMappingCacheSizes().mappings).toBe(1);
+    invalidateProjectCache();
+    expect(getMappingCacheSizes()).toEqual({ mappings: 0, localProjects: 0 });
+    rmSync(first, { recursive: true, force: true });
+    expect(await mapLinearProject('p', 'alpha-service', [base])).toBeNull();
   });
 });

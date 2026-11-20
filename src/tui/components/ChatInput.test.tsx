@@ -36,7 +36,35 @@ describe('clipChatInputDisplay', () => {
   });
 });
 
+describe('clipChatInputDisplay measures what it renders', () => {
+  it('sanitises before clipping, so escape sequences neither count nor survive', () => {
+    const esc = '\x1b[31m'.repeat(20);
+    // 12 visible chars fit a 40-column budget; the escapes must not force a clip
+    expect(clipChatInputDisplay(`${esc}hello world!`, 40)).toBe('hello world!');
+  });
+
+  it('counts U+2600–U+27BF symbols and emoji as two columns', () => {
+    const columns = 20; // budget 13: ellipsis + 6 two-column symbols
+    expect(clipChatInputDisplay('☀☀☀☀☀☀☀☀☀☀', columns)).toBe('…☀☀☀☀☀☀');
+    expect(clipChatInputDisplay('😀😀😀😀😀😀😀😀😀😀', columns)).toBe('…😀😀😀😀😀😀');
+  });
+
+  it('never cuts a ZWJ emoji sequence', () => {
+    const family = '👨‍👩‍👧';
+    const clipped = clipChatInputDisplay(`${'a'.repeat(30)}${family}${'b'.repeat(10)}`, 20);
+    // budget 13 = ellipsis + family (2) + 10 b
+    expect(clipped).toBe(`…${family}${'b'.repeat(10)}`);
+    const tight = clipChatInputDisplay(`${'a'.repeat(30)}${family}${'b'.repeat(11)}`, 20);
+    expect(tight).toBe(`…${'b'.repeat(11)}`);
+    expect(tight).not.toContain('\u200d');
+  });
+});
+
 describe('ChatInput single-line contract', () => {
+  it('turns tabs into spaces', () => {
+    expect(toSingleLineChatInput('a\tb\t\tc')).toBe('a b  c');
+  });
+
   it('turns pasted line breaks into single spaces', () => {
     expect(toSingleLineChatInput('first line\nsecond\r\n\r\nthird')).toBe('first line second third');
   });

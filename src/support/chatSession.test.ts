@@ -34,6 +34,8 @@ import {
   listSessions,
   latestSession,
   callChatModel,
+  appendSessionArchive,
+  sessionArchivePath,
   type Session,
 } from './chatSession.js';
 
@@ -163,6 +165,28 @@ describe('saveSession / loadSession (injectable dir)', () => {
     expect(loaded!.provider).toBe('codex'); // inferred from the gpt- model
     expect(loaded!.model).toBe('default-codex'); // provider changed → default model
     expect(loaded!.totalCost).toBe(0); // missing fields defaulted
+  });
+});
+
+describe('appendSessionArchive (resume trim archive)', () => {
+  let dir: string;
+  beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chatarch-')); });
+  afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('appends messages as JSON lines next to the session file and stays out of listSessions', async () => {
+    appendSessionArchive('s1', [{ role: 'user', content: 'q1' }, { role: 'assistant', content: 'a1' }], dir);
+    appendSessionArchive('s1', [{ role: 'user', content: 'q2' }], dir);
+    appendSessionArchive('s1', [], dir);
+    const file = sessionArchivePath('s1', dir);
+    expect(file).toBe(path.join(dir, 's1.archive.jsonl'));
+    const lines = (await fs.readFile(file, 'utf-8')).trim().split('\n').map((l) => JSON.parse(l));
+    expect(lines.map((m) => m.content)).toEqual(['q1', 'a1', 'q2']);
+    expect(await listSessions(dir)).toEqual([]);
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+  });
+
+  it('rejects an id that would escape the chat directory', () => {
+    expect(() => appendSessionArchive('../evil', [{ role: 'user', content: 'x' }], dir)).toThrow();
   });
 });
 

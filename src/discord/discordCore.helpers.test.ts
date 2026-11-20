@@ -132,4 +132,20 @@ describe('Discord chat history prompt budget', () => {
     // newest past entry survives
     expect(out).toContain('u: q29');
   });
+
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  it('clips an oversized entry on a grapheme boundary, never inside an emoji', () => {
+    // budget 100 leaves 89 units before the ' …[clipped]' suffix
+    const pair = fitHistoryToBudget([`${'a'.repeat(88)}😀${'z'.repeat(50)}`], 100);
+    expect(pair).not.toMatch(LONE_SURROGATE);
+    expect(pair.length).toBeLessThanOrEqual(100);
+    expect(pair.startsWith(`${'a'.repeat(88)} …[clipped]`)).toBe(true);
+
+    const family = '👨‍👩‍👧'; // 8 UTF-16 units, one grapheme
+    const zwj = fitHistoryToBudget([`${'a'.repeat(85)}${family}${'z'.repeat(50)}`], 100);
+    expect(zwj).not.toMatch(LONE_SURROGATE);
+    expect(zwj).not.toContain('\u200d');
+    expect(zwj.startsWith(`${'a'.repeat(85)} …[clipped]`)).toBe(true);
+  });
 });

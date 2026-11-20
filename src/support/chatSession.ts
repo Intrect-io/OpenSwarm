@@ -10,7 +10,7 @@
 import { homedir } from 'node:os';
 import { resolve, relative, isAbsolute } from 'node:path';
 import { readFile, mkdir, readdir, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, appendFileSync, mkdirSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
 import { readProviderOverride } from '../core/providerOverride.js';
 import { getDefaultAdapterName, isKnownAdapter, type AdapterName } from '../adapters/index.js';
@@ -98,6 +98,28 @@ export async function saveSession(session: Session, dir: string = getChatDir()):
   } finally {
     if (sessionWriteQueues.get(path) === write) sessionWriteQueues.delete(path);
   }
+}
+
+/** Path of the append-only archive that sits next to a session file. */
+export function sessionArchivePath(id: string, dir: string = getChatDir()): string {
+  return resolveSessionPath(id, dir).replace(/\.json$/, '.archive.jsonl');
+}
+
+/**
+ * Append messages that are about to leave a session file to its archive
+ * (`<id>.archive.jsonl`, one JSON message per line). Synchronous on purpose:
+ * callers run it right before saveSession(), whose newest-snapshot ordering
+ * depends on saves being issued in call order, so nothing may be awaited in
+ * between. Throws on failure; the caller must then skip the save so the
+ * messages stay in the session file. `listSessions` ignores the archive since
+ * it does not end in `.json`.
+ */
+export function appendSessionArchive(id: string, messages: Message[], dir: string = getChatDir()): void {
+  if (messages.length === 0) return;
+  const path = sessionArchivePath(id, dir);
+  mkdirSync(dir, { recursive: true });
+  // Owner-only, like the session snapshots it is split from.
+  appendFileSync(path, messages.map((m) => `${JSON.stringify(m)}\n`).join(''), { encoding: 'utf-8', mode: 0o600 });
 }
 
 export async function loadSession(id: string, dir: string = getChatDir()): Promise<Session | null> {
