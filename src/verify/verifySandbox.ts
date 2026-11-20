@@ -18,6 +18,8 @@ export interface OsSandboxDeps {
   exists: (path: string) => boolean;
   realpath: (path: string) => Promise<string>;
   linuxSandbox: () => SandboxAvailability;
+  /** Extra paths the sandboxed command may write (e.g. the host uv cache, used offline). */
+  extraWritable?: readonly string[];
 }
 
 /**
@@ -44,7 +46,8 @@ export async function selectOsSandbox(
         };
       }
       const writableRoot = (await deps.realpath(dirname(root))).replaceAll('\\', '\\\\').replaceAll('"', '\\"');
-      const profile = `(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (subpath "${writableRoot}") (literal "/dev/null") (literal "/dev/tty"))`;
+      const extra = await Promise.all((deps.extraWritable ?? []).map(async (path) => ` (subpath "${(await deps.realpath(path)).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}")`));
+      const profile = `(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (subpath "${writableRoot}")${extra.join('')} (literal "/dev/null") (literal "/dev/tty"))`;
       return { ok: true, executable: DARWIN_SANDBOX_EXEC, args: ['-p', profile, shell, '-lc', run] };
     }
     case 'linux': {
@@ -56,7 +59,7 @@ export async function selectOsSandbox(
       return {
         ok: true,
         executable: sandbox.executable,
-        args: ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', run],
+        args: ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, ...(deps.extraWritable ?? []).flatMap((path) => ['--bind', path, path]), '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', run],
       };
     }
     case 'win32':

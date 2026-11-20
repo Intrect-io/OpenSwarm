@@ -58,3 +58,31 @@ describe('selectOsSandbox (AGT-3447)', () => {
     if (!missing.ok) expect(missing.output).toContain('bwrap missing');
   });
 });
+
+// #817 moved onto selectOsSandbox: the host uv cache is the only extra writable path.
+describe('selectOsSandbox extraWritable (#817, offline uv cache)', () => {
+  it('binds each extra path writable in bwrap, before the namespace flags', async () => {
+    const choice = await selectOsSandbox('/scratch/x/repo', '/bin/sh', 'uv run pytest', deps({ extraWritable: ['/home/u/.cache/uv'] }));
+    expect(choice.ok).toBe(true);
+    if (choice.ok) {
+      const at = choice.args.indexOf('/home/u/.cache/uv');
+      expect(choice.args.slice(at - 1, at + 2)).toEqual(['--bind', '/home/u/.cache/uv', '/home/u/.cache/uv']);
+      expect(at).toBeLessThan(choice.args.indexOf('--unshare-net'));
+    }
+  });
+
+  it('adds each extra path to the macOS write allowlist, resolved', async () => {
+    const choice = await selectOsSandbox('/scratch/x/repo', '/bin/zsh', 'uv run pytest', deps({
+      platform: 'darwin',
+      realpath: async (path) => (path === '/Users/u/.cache/uv' ? '/private/u/.cache/uv' : '/private/scratch/x'),
+      extraWritable: ['/Users/u/.cache/uv'],
+    }));
+    expect(choice.ok).toBe(true);
+    if (choice.ok) expect(choice.args[1]).toContain('(subpath "/private/u/.cache/uv")');
+  });
+
+  it('adds nothing without extra paths', async () => {
+    const choice = await selectOsSandbox('/scratch/x/repo', '/bin/sh', 'make test', deps({}));
+    if (choice.ok) expect(choice.args.filter((a) => a === '--bind')).toHaveLength(1);
+  });
+});
