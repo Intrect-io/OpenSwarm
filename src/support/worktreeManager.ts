@@ -25,7 +25,7 @@ import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFresh
 import { publicationClaimEvidence } from './publicationClaimEvidence.js';
 import { ensureVersionLabel, versionLabelFor } from './publicationVersionLabel.js';
 import { loadRepoMetadata } from './repoMetadata.js';
-import { detectSharedPaths, emptyDetectionWarning, resolveSharedPaths, type SandboxConfig } from './sharedPathDetection.js';
+import { detectSharedPaths, emptyDetectionWarning, gitignoredPathsWarning, resolveSharedPaths, unsharedGitignoredPaths, type SandboxConfig } from './sharedPathDetection.js';
 import { copyIsolatedPath } from './isolatedPath.js';
 import { hasEditableInstallInto, rebasePythonEnvironment } from '../verify/pythonEnvironment.js';
 import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
@@ -190,11 +190,11 @@ async function linkSharedPaths(repoPath: string, worktreePath: string): Promise<
   try {
     meta = await loadRepoMetadata(repoPath);
   } catch (err) {
-    // Malformed openswarm.json must not break worktree creation. (INT-2415)
-    console.warn(`[Worktree] openswarm.json unreadable; skipping sharedPaths config:`, err);
+    console.warn(`[Worktree] openswarm.json unreadable; skipping sharedPaths config:`, err); // malformed must not break creation (INT-2415)
   }
 
   const shared = resolveSharedPaths(repoPath, meta); // warns on secret-like entries itself
+  const missingIgnored = gitignoredPathsWarning(unsharedGitignoredPaths(repoPath, shared)); if (missingIgnored) console.warn(missingIgnored); // AGT-4041
   if (shared.length === 0 && !(meta?.sandbox?.sharedPaths?.length)) {
     const warning = emptyDetectionWarning(repoPath, detectSharedPaths(repoPath));
     if (warning) console.warn(warning);

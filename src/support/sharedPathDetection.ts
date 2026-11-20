@@ -14,7 +14,8 @@
 // also walks the workspace tree — bounded, and only into directories that carry
 // a workspace manifest, so a stray `venv` folder in a fixture is never linked.
 
-import { existsSync, readdirSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { isAbsolute, join, relative, sep } from 'node:path';
 
 /** Always-gitignored dependency dirs safe to auto-link without a config. */
@@ -54,6 +55,68 @@ export function secretSharedPathsWarning(paths: string[]): string | null {
   if (matches.length === 0) return null;
   return `[Worktree] sharedPaths may expose secret files to the worker: ${matches.join(', ')}. `
     + 'Remove these entries from openswarm.json sandbox.sharedPaths to keep them out of worktrees.';
+}
+
+/**
+ * Gitignored paths in the source checkout that a worktree will not see: ignored and not covered by
+ * `sharedPaths` (a shared ancestor covers it; sharing only a child leaves the rest missing), or
+ * shared but unreadable. Each ignored directory is reported once at its topmost ignored level, so
+ * `docs/CGF_data` under a tracked `docs/` is found, and a large `node_modules` is not walked.
+ */
+export function unsharedGitignoredPaths(repoPath: string, sharedPaths: string[] = []): string[] {
+  let listing: string;
+  try {
+    listing = execFileSync(
+      'git', ['-C', repoPath, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 16 * 1024 * 1024 },
+    );
+  } catch { return []; }
+  const shared = sharedPaths.map((entry) => entry.replace(/\/+$/, '')).filter(Boolean);
+  const missing: string[] = [];
+  const directories = new Set<string>();
+  const nestedRepo = new Map<string, boolean>();
+  // A nested checkout (another worktree parked inside this one) is not this repository's data.
+  const insideNestedRepo = (name: string): boolean => {
+    const parts = name.split('/');
+    for (let depth = 1; depth < parts.length; depth++) {
+      const dir = parts.slice(0, depth).join('/');
+      let nested = nestedRepo.get(dir);
+      if (nested === undefined) {
+        nested = existsSync(join(repoPath, dir, '.git'));
+        nestedRepo.set(dir, nested);
+      }
+      if (nested) return true;
+    }
+    return false;
+  };
+  for (const raw of listing.split('\0')) {
+    const name = raw.replace(/\/+$/, '');
+    if (raw.endsWith('/')) directories.add(name);
+    if (!name || name === '.git' || name.startsWith('.git/') || insideNestedRepo(name)) continue;
+    const covered = shared.some((entry) => name === entry || name.startsWith(`${entry}/`));
+    if (!covered) { missing.push(name); continue; }
+    try {
+      const path = join(repoPath, name);
+      const stat = statSync(path);
+      accessSync(path, constants.R_OK);
+      // Root bypasses Unix mode checks, so also read the mode for the worker identity.
+      const uid = process.getuid?.();
+      const groups = new Set([process.getgid?.(), ...(process.getgroups?.() ?? [])]);
+      const readBit = uid === stat.uid ? 0o400 : groups.has(stat.gid) ? 0o040 : 0o004;
+      if ((stat.mode & readBit) === 0) missing.push(name);
+    } catch { missing.push(name); }
+  }
+  // Directories first: they hold data; loose ignored files (.env, notes) rarely change a conclusion.
+  return missing.sort((a, b) => Number(directories.has(b)) - Number(directories.has(a)) || a.localeCompare(b));
+}
+
+const WARNING_LISTED = 20;
+
+export function gitignoredPathsWarning(paths: string[]): string | null {
+  if (!paths.length) return null;
+  const shown = paths.slice(0, WARNING_LISTED).join(', ');
+  const more = paths.length > WARNING_LISTED ? ` +${paths.length - WARNING_LISTED} more` : '';
+  return `[Worktree] ${paths.length} gitignored path(s) from the source are absent from this worktree (${shown}${more}); expose them through sandbox.sharedPaths or do not use their absence as a conclusion.`;
 }
 
 export interface SharedPathDetection {
