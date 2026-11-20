@@ -240,6 +240,12 @@ when it cannot** — running a worker's code unsandboxed to decide whether to
 trust it defeats the point. On macOS it uses the platform sandbox and needs no
 setup.
 
+Worktrees can share repository paths through `openswarm.json`'s
+`sandbox.sharedPaths`. Do not list `.env*`, `*.pem`, `*.key`, or
+`credentials*` paths there. OpenSwarm warns when a shared path matches one of
+these names. To keep a path out of worker worktrees, remove it from
+`sandbox.sharedPaths` and make sure it is not an auto-detected dependency path.
+
 Installing the package is not always enough, and CI is where that bites:
 
 | Environment | What it takes |

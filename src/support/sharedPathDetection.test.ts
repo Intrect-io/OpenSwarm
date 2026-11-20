@@ -7,6 +7,8 @@ import {
   detectSharedPaths,
   emptyDetectionWarning,
   resolveSharedPaths,
+  secretSharedPathComponents,
+  secretSharedPathsWarning,
 } from './sharedPathDetection.js';
 
 describe('detectSharedPaths (AGT-4043)', () => {
@@ -134,5 +136,17 @@ describe('resolveSharedPaths configured list (INT-2415)', () => {
 
   it('drops absolute and parent-escaping entries', () => {
     expect(resolveSharedPaths(repo, { sandbox: { sharedPaths: ['/etc', '../secrets', 'a/../../x', ''] } })).toEqual([]);
+  });
+});
+
+describe('secretSharedPathComponents (AGT-4813)', () => {
+  it('flags paths with secret-like components and leaves ordinary dependencies alone', () => {
+    expect(secretSharedPathComponents(['.env', '.env.local', 'certs/client.pem', 'keys/app.key', 'credentials.json', 'node_modules']))
+      .toEqual(['.env', '.env.local', 'certs/client.pem', 'keys/app.key', 'credentials.json']);
+  });
+
+  it('returns an actionable warning when a secret-like shared path is configured', () => {
+    expect(secretSharedPathsWarning(['.env'])).toContain('Remove these entries from openswarm.json sandbox.sharedPaths');
+    expect(secretSharedPathsWarning(['node_modules'])).toBeNull();
   });
 });

@@ -170,8 +170,6 @@ export function defaultWorkerWritableRoots(
     join(home, '.cache'),
     join(home, '.npm'),
     join(home, 'Library', 'Caches'),
-    join(home, 'Library', 'Preferences', '.wrangler'),
-    join(home, '.wrangler'),
     join(home, '.cargo', 'registry'),
   ];
   const roots: string[] = [];
