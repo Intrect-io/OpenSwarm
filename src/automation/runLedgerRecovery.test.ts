@@ -70,9 +70,15 @@ describe('RunLedger recoverPublishedRun idempotency (AGT-4518)', () => {
       payload: { stats: { real: true } },
     };
     expect(ledger.enqueueEffect(runClaim, published, 2_250)).not.toBeNull();
-
-    // The process dies before the tracker write; the row is reclaimed as
-    // NEEDS_RECONCILE by the next owner and the PR is found on GitHub.
+    const effect = ledger.getEffectByDedupeKey('complete:AGT-4518:attempt:1');
+    expect(effect).not.toBeNull();
+    // Model a tracker write that succeeded before the process recorded its
+    // acknowledgement. The recovery path must preserve this applied payload.
+    (ledger as unknown as { db: { prepare(sql: string): { run(...values: unknown[]): void } } }).db
+      .prepare("UPDATE automation_effects SET status = 'applied', applied_at = 2_260 WHERE id = ?")
+      .run(effect!.id);
+    // The tracker write succeeded, but the process died before the run state
+    // advanced. The row is reclaimed as NEEDS_RECONCILE by the next owner.
     expect(ledger.reconcileExpiredLeases(3_001)).toHaveLength(1);
     expect(ledger.confirmExecutorExit(runClaim, 3_002)).toBe(true);
     expect(ledger.getRun('AGT-4518')?.state).toBe('NEEDS_RECONCILE');
@@ -99,9 +105,10 @@ describe('RunLedger recoverPublishedRun idempotency (AGT-4518)', () => {
     expect(ledger.getRun('AGT-4518')).toMatchObject({
       state: 'SYNC_PENDING', prUrl: 'https://github.test/pull/918', headSha: 'abc918',
     });
-    // The effect originally enqueued is the one that survives — recovery must
-    // not overwrite the real stats with its synthetic ones.
-    expect(ledger.getEffectByDedupeKey('complete:AGT-4518:attempt:1')?.payload).toEqual({ stats: { real: true } });
+    // The applied effect originally enqueued is the one that survives.
+    expect(ledger.getEffectByDedupeKey('complete:AGT-4518:attempt:1')).toMatchObject({
+      status: 'applied', payload: { stats: { real: true } },
+    });
     ledger.close();
   });
 
