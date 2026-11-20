@@ -9,6 +9,16 @@ import { formatAutomationComment, formatPairDialogue, type CommentSection } from
 import { completionTargetState, type PairCompleteStats } from '../automation/taskSource.js';
 import { setLinearClient } from './projectUpdater.js';
 import { withRateLimit } from '../support/rateLimiter.js';
+import {
+  drainLinearConnection,
+  LINEAR_ACTIVE_ENRICH_CAP,
+  LINEAR_ACTIVE_MAX_PAGES,
+  LINEAR_ACTIVE_PAGE_SIZE,
+  LINEAR_BACKLOG_MAX_CANDIDATES,
+  LINEAR_BACKLOG_MAX_PAGES,
+  LINEAR_BACKLOG_PAGE_SIZE,
+  LINEAR_RELATED_PAGE_SIZE,
+} from './linearPagination.js';
 import { c, status } from '../support/colors.js';
 import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
@@ -392,40 +402,16 @@ export async function listTeams(cred?: LinearCredential): Promise<LinearTeamInfo
   return (await drainLinearConnection(res)).map((t: any) => ({ id: t.id, key: t.key, name: t.name }));
 }
 
-/** Soft page guard for SDK connection drains (teams/projects pickers). */
-const DRAIN_PAGE_GUARD = 40;
-
-/**
- * Hard caps for direct active/backlog SDK list paths. These paths still do
- * per-issue enrichment, so both page count and aggregate enrichment work must
- * be bounded (unlike the nested GraphQL fetchIssuesForStates path).
- */
-export const LINEAR_ACTIVE_PAGE_SIZE = 50;
-export const LINEAR_ACTIVE_MAX_PAGES = 4;
-export const LINEAR_ACTIVE_ENRICH_CAP = LINEAR_ACTIVE_PAGE_SIZE * LINEAR_ACTIVE_MAX_PAGES;
-export const LINEAR_BACKLOG_PAGE_SIZE = 10;
-export const LINEAR_RELATED_PAGE_SIZE = 50;
-
-/**
- * Follow a Linear SDK connection to its last page and return every node.
- * The SDK's fetchNext() appends each fetched page onto the same connection,
- * so a single `first: N` read silently truncates larger workspaces. The page
- * guard only bounds a misbehaving pagination cursor, not real data.
- */
-export async function drainLinearConnection(
-  connection: any, // cxt-ignore: type_safety — SDK connection
-  maxPages = DRAIN_PAGE_GUARD,
-): Promise<any[]> {
-  let conn: any = connection;
-  // `maxPages` counts the page already present on the connection.
-  let pages = 1;
-  const pageCap = Math.max(1, Math.min(DRAIN_PAGE_GUARD, Math.trunc(maxPages) || DRAIN_PAGE_GUARD));
-  while (conn?.pageInfo?.hasNextPage && typeof conn.fetchNext === 'function' && pages < pageCap) {
-    conn = await withRateLimit('linear', () => conn.fetchNext());
-    pages += 1;
-  }
-  return conn?.nodes ?? [];
-}
+export {
+  drainLinearConnection,
+  LINEAR_ACTIVE_ENRICH_CAP,
+  LINEAR_ACTIVE_MAX_PAGES,
+  LINEAR_ACTIVE_PAGE_SIZE,
+  LINEAR_BACKLOG_MAX_CANDIDATES,
+  LINEAR_BACKLOG_MAX_PAGES,
+  LINEAR_BACKLOG_PAGE_SIZE,
+  LINEAR_RELATED_PAGE_SIZE,
+} from './linearPagination.js';
 
 /**
  * List projects within a team — for the `openswarm init` picker. Accepts an
@@ -534,11 +520,16 @@ export async function getNextBacklogIssue(
       state: { name: { in: ['Backlog', 'Todo'] } },
       labels: { name: { eq: agentLabel } },
     },
-    first: LINEAR_BACKLOG_PAGE_SIZE, // Fetch a bounded window and sort by priority
+    first: LINEAR_BACKLOG_PAGE_SIZE, // page size — the pick ranks over every drained page
   }));
 
+  // Rank over ALL pages (bounded): the first page alone can hold only low
+  // priority fillers while the true next issue sits pages deep.
+  const candidates = (await drainLinearConnection(issues, LINEAR_BACKLOG_MAX_PAGES))
+    .slice(0, LINEAR_BACKLOG_MAX_CANDIDATES);
+
   // Sort by priority (lower = higher priority: 1=Urgent, 4=Low, 0=None)
-  const sorted = [...issues.nodes].slice(0, LINEAR_BACKLOG_PAGE_SIZE).sort((a, b) => {
+  const sorted = [...candidates].sort((a, b) => {
     // Push priority 0 (None) to the end
     const pa = a.priority === 0 ? 999 : a.priority;
     const pb = b.priority === 0 ? 999 : b.priority;
@@ -563,8 +554,8 @@ export async function getNextBacklogIssue(
     description: issue.description ?? undefined,
     state: state?.name ?? 'Unknown',
     priority: issue.priority,
-    labels: labels.nodes.map((l) => l.name),
-    comments: comments.nodes.map((c) => ({
+    labels: labels.nodes.map((l: { name: string }) => l.name),
+    comments: comments.nodes.map((c: { id: string; body: string; createdAt: Date }) => ({
       id: c.id,
       body: c.body,
       createdAt: c.createdAt.toISOString(),
@@ -886,9 +877,11 @@ async function fetchIssue(issueIdOrIdentifier: string): Promise<LinearIssueInfo 
 
     if (!issue) return null;
 
+    // Bounded related-field reads (AGT-3421): a single issue with a huge
+    // comment thread or label set must not hydrate without limit.
     const [comments, labels, project] = await Promise.all([
-      issue.comments(),
-      issue.labels(),
+      issue.comments({ first: LINEAR_RELATED_PAGE_SIZE }),
+      issue.labels({ first: LINEAR_RELATED_PAGE_SIZE }),
       getProjectInfo(issue),
     ]);
 

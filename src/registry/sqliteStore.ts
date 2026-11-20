@@ -24,15 +24,35 @@ import {
 } from './sqliteRows.js';
 
 export type { EntitySyncRow } from './sqliteRows.js';
+import {
+  rowToEntity as mapRowToEntity,
+  rowToEvent as mapRowToEvent,
+  rowToWarning as mapRowToWarning,
+  rowsToEntities as mapRowsToEntities,
+} from './sqliteStoreRows.js';
 
 const DEFAULT_DB_PATH = resolve(homedir(), '.openswarm', 'registry.db');
-const SQLITE_IN_CHUNK_SIZE = 500;
 
 /** Store-level page cap for listEntities — callers must paginate with this size. */
 export const LIST_ENTITIES_MAX_LIMIT = 5_000;
 export const LIST_ENTITIES_DEFAULT_LIMIT = 50;
 /** Default cap on entities returned for one issue (explicit links + relevant files). */
 export const ISSUE_ENTITIES_DEFAULT_LIMIT = 500;
+
+/**
+ * Store-level page cap for the risk/status helper queries (deprecated,
+ * untested, high-risk). These were unbounded full-table scans; callers that
+ * need more must paginate with limit/offset (the GraphQL resolvers route
+ * through the bounded listEntities instead). (AGT-3421)
+ */
+export const HELPER_QUERY_MAX_LIMIT = 200;
+
+/**
+ * Cap on entities loaded per issue-id lookup. A scanner that links every
+ * entity to one issue must not drag the whole registry (with its tags,
+ * warnings, and links) into memory; callers needing more must chunk by issue.
+ */
+export const ISSUE_LINK_MAX_ENTITIES = 200;
 
 function clampInteger(value: number, fallback: number, maximum = Number.MAX_SAFE_INTEGER): number {
   if (!Number.isFinite(value)) return fallback;
@@ -684,10 +704,11 @@ export class SqliteRegistryStore {
    * Entities linked to an issue (reverse lookup), at most `limit` of them in
    * link order. One JOIN plus batch hydration instead of one getEntity per link,
    * and the bound is applied in SQL so a heavily linked issue never loads every
-   * row.
+   * row. No limit means ISSUE_LINK_MAX_ENTITIES (AGT-3421); an explicit one is
+   * still capped at ISSUE_ENTITIES_DEFAULT_LIMIT (AGT-3470).
    */
-  getEntitiesByIssueId(issueId: string, projectId?: string, limit = ISSUE_ENTITIES_DEFAULT_LIMIT): CodeEntity[] {
-    const size = Math.max(0, Number.isFinite(limit) ? Math.trunc(limit) : ISSUE_ENTITIES_DEFAULT_LIMIT);
+  getEntitiesByIssueId(issueId: string, projectId?: string, limit = ISSUE_LINK_MAX_ENTITIES): CodeEntity[] {
+    const size = Math.min(ISSUE_ENTITIES_DEFAULT_LIMIT, Math.max(0, Number.isFinite(limit) ? Math.trunc(limit) : ISSUE_LINK_MAX_ENTITIES));
     if (size === 0) return [];
     const rows = this.db.prepare(
       `SELECT e.* FROM code_entity_issue_links l
@@ -782,19 +803,27 @@ export class SqliteRegistryStore {
     };
   }
 
-  deprecatedEntities(projectId?: string): CodeEntity[] {
+  deprecatedEntities(
+    projectId?: string,
+    limit = HELPER_QUERY_MAX_LIMIT,
+    offset = 0,
+  ): CodeEntity[] {
     const where = projectId
       ? "WHERE status = 'deprecated' AND project_id = ?"
       : "WHERE status = 'deprecated'";
     const params = projectId ? [projectId] : [];
 
     const rows = this.db.prepare(
-      `SELECT * FROM code_entities ${where} ORDER BY deprecated_at DESC`
-    ).all(...params) as EntityRow[];
+      `SELECT * FROM code_entities ${where} ORDER BY deprecated_at DESC LIMIT ? OFFSET ?`
+    ).all(...params, clampInteger(limit, HELPER_QUERY_MAX_LIMIT, HELPER_QUERY_MAX_LIMIT), clampInteger(offset, 0)) as EntityRow[];
     return this.rowsToEntities(rows);
   }
 
-  untestedEntities(projectId?: string): CodeEntity[] {
+  untestedEntities(
+    projectId?: string,
+    limit = HELPER_QUERY_MAX_LIMIT,
+    offset = 0,
+  ): CodeEntity[] {
     const where = projectId
       ? "WHERE has_tests = 0 AND status = 'active' AND project_id = ?"
       : "WHERE has_tests = 0 AND status = 'active'";
@@ -803,20 +832,25 @@ export class SqliteRegistryStore {
     const rows = this.db.prepare(
       `SELECT * FROM code_entities ${where} ORDER BY
         CASE risk_level WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
-        complexity_score DESC NULLS LAST`
-    ).all(...params) as EntityRow[];
+        complexity_score DESC NULLS LAST
+      LIMIT ? OFFSET ?`
+    ).all(...params, clampInteger(limit, HELPER_QUERY_MAX_LIMIT, HELPER_QUERY_MAX_LIMIT), clampInteger(offset, 0)) as EntityRow[];
     return this.rowsToEntities(rows);
   }
 
-  highRiskEntities(projectId?: string): CodeEntity[] {
+  highRiskEntities(
+    projectId?: string,
+    limit = HELPER_QUERY_MAX_LIMIT,
+    offset = 0,
+  ): CodeEntity[] {
     const where = projectId
       ? "WHERE risk_level = 'high' AND project_id = ?"
       : "WHERE risk_level = 'high'";
     const params = projectId ? [projectId] : [];
 
     const rows = this.db.prepare(
-      `SELECT * FROM code_entities ${where} ORDER BY complexity_score DESC NULLS LAST`
-    ).all(...params) as EntityRow[];
+      `SELECT * FROM code_entities ${where} ORDER BY complexity_score DESC NULLS LAST LIMIT ? OFFSET ?`
+    ).all(...params, clampInteger(limit, HELPER_QUERY_MAX_LIMIT, HELPER_QUERY_MAX_LIMIT), clampInteger(offset, 0)) as EntityRow[];
     return this.rowsToEntities(rows);
   }
 
@@ -957,143 +991,12 @@ export class SqliteRegistryStore {
     this.db.close();
   }
 
-  /** 단일 엔티티 변환 (개별 서브쿼리 — 단건 조회용) */
-  private rowToEntity(row: EntityRow): CodeEntity {
-    const id = row.id;
-    return this.buildEntity(row, this.getTags(id), this.getWarnings(id), this.getLinkedIssues(id), this.getLinkedMemories(id));
-  }
-
-  /** 배치 엔티티 변환 (N+1 방지 — 리스트 조회용) */
-  private rowsToEntities(rows: EntityRow[]): CodeEntity[] {
-    if (rows.length === 0) return [];
-
-    const ids = rows.map(r => r.id);
-    const loadByIds = <T>(sqlForPlaceholders: (placeholders: string) => string): T[] => {
-      const loaded: T[] = [];
-      for (let i = 0; i < ids.length; i += SQLITE_IN_CHUNK_SIZE) {
-        const chunk = ids.slice(i, i + SQLITE_IN_CHUNK_SIZE);
-        const placeholders = chunk.map(() => '?').join(',');
-        loaded.push(...this.db.prepare(sqlForPlaceholders(placeholders)).all(...chunk) as T[]);
-      }
-      return loaded;
-    };
-
-    // 배치 태그 로딩
-    const tagRows = loadByIds<TagRow & { entity_id: string }>(
-      placeholders => `SELECT entity_id, tag, value FROM code_entity_tags WHERE entity_id IN (${placeholders})`
-    );
-    const tagsByEntity = new Map<string, EntityTag[]>();
-    for (const r of tagRows) {
-      const list = tagsByEntity.get(r.entity_id) ?? [];
-      list.push({ tag: r.tag, value: r.value ?? undefined });
-      tagsByEntity.set(r.entity_id, list);
-    }
-
-    // 배치 경고 로딩
-    const warningRows = loadByIds<WarningRow>(
-      placeholders => `SELECT * FROM code_entity_warnings WHERE entity_id IN (${placeholders}) ORDER BY created_at DESC`
-    );
-    const warningsByEntity = new Map<string, EntityWarning[]>();
-    for (const r of warningRows) {
-      const list = warningsByEntity.get(r.entity_id) ?? [];
-      list.push(this.rowToWarning(r));
-      warningsByEntity.set(r.entity_id, list);
-    }
-
-    // 배치 이슈 링크 로딩
-    const issueRows = loadByIds<IssueLinkRow>(
-      placeholders => `SELECT entity_id, issue_id FROM code_entity_issue_links WHERE entity_id IN (${placeholders}) ORDER BY linked_at`
-    );
-    const issuesByEntity = new Map<string, string[]>();
-    for (const r of issueRows) {
-      const list = issuesByEntity.get(r.entity_id) ?? [];
-      list.push(r.issue_id);
-      issuesByEntity.set(r.entity_id, list);
-    }
-
-    // 배치 메모리 링크 로딩
-    const memoryRows = loadByIds<MemoryLinkRow>(
-      placeholders => `SELECT entity_id, memory_id FROM code_entity_memory_links WHERE entity_id IN (${placeholders}) ORDER BY linked_at`
-    );
-    const memorysByEntity = new Map<string, string[]>();
-    for (const r of memoryRows) {
-      const list = memorysByEntity.get(r.entity_id) ?? [];
-      list.push(r.memory_id);
-      memorysByEntity.set(r.entity_id, list);
-    }
-
-    return rows.map(row => this.buildEntity(
-      row,
-      tagsByEntity.get(row.id) ?? [],
-      warningsByEntity.get(row.id) ?? [],
-      issuesByEntity.get(row.id) ?? [],
-      memorysByEntity.get(row.id) ?? [],
-    ));
-  }
-
-  private buildEntity(
-    row: EntityRow,
-    tags: EntityTag[],
-    warnings: EntityWarning[],
-    linkedIssueIds: string[],
-    linkedMemoryIds: string[],
-  ): CodeEntity {
-    return {
-      id: row.id,
-      projectId: row.project_id,
-      kind: row.kind as EntityKind,
-      name: row.name,
-      qualifiedName: row.qualified_name,
-      filePath: row.file_path,
-      lineStart: row.line_start ?? undefined,
-      lineEnd: row.line_end ?? undefined,
-      signature: row.signature ?? undefined,
-      status: row.status as EntityStatus,
-      deprecatedAt: row.deprecated_at ?? undefined,
-      deprecatedReason: row.deprecated_reason ?? undefined,
-      hasTests: row.has_tests === 1,
-      testFile: row.test_file ?? undefined,
-      author: row.author ?? undefined,
-      maintainer: row.maintainer ?? undefined,
-      complexityScore: row.complexity_score ?? undefined,
-      riskLevel: row.risk_level as RiskLevel,
-      description: row.description ?? '',
-      notes: row.notes ?? '',
-      knowledgeNodeId: row.knowledge_node_id ?? undefined,
-      tags,
-      warnings,
-      linkedIssueIds,
-      linkedMemoryIds,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
-  }
-
-  private rowToWarning(row: WarningRow): EntityWarning {
-    return {
-      id: row.id,
-      entityId: row.entity_id,
-      severity: row.severity as WarningSeverity,
-      category: row.category as WarningCategory,
-      message: row.message,
-      resolved: row.resolved === 1,
-      resolvedAt: row.resolved_at ?? undefined,
-      createdAt: row.created_at,
-    };
-  }
-
-  private rowToEvent(row: EventRow): EntityEvent {
-    return {
-      id: row.id,
-      entityId: row.entity_id,
-      type: row.type as EntityEventType,
-      oldValue: row.old_value ?? undefined,
-      newValue: row.new_value ?? undefined,
-      content: row.content ?? undefined,
-      actor: row.actor,
-      createdAt: row.created_at,
-    };
-  }
+  // Row conversion lives in sqliteStoreRows.ts (AGT-3421 LOC split); these
+  // delegators keep the class call sites unchanged.
+  private rowToEntity(row: EntityRow): CodeEntity { return mapRowToEntity(this.db, row, this); }
+  private rowsToEntities(rows: EntityRow[]): CodeEntity[] { return mapRowsToEntities(this.db, rows); }
+  private rowToWarning(row: WarningRow) { return mapRowToWarning(row); }
+  private rowToEvent(row: EventRow) { return mapRowToEvent(row); }
 }
 
 // 싱글톤
