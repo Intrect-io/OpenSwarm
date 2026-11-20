@@ -452,6 +452,7 @@ export class CodexResponsesAdapter implements CliAdapter {
       onLog: options.onLog,
       enableTools: options.enableTools ?? true,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
+      finalAnswerRepair: options.finalAnswerRepair,
       protectedFiles: options.protectedFiles,
       scratchpadRunId: options.scratchpadRunId,
       memoryContext: options.memoryContext,

@@ -11,6 +11,7 @@
 
 import type { CliRunResult, WorkerResult, ReviewResult } from './types.js';
 import { t } from '../locale/index.js';
+import { DECISION_PHRASE, DECLARED_NON_APPROVAL, NON_APPROVAL_SIGNAL, declaredVerdict } from './reviewerDeclarations.js';
 
 /** JSON-first worker parse: fenced ```json block, else a `"success"`-anchored object. */
 function extractWorkerResultJson(text: string): WorkerResult | null {
@@ -125,14 +126,12 @@ function extractReviewerFromText(text: string): { result: ReviewResult; explicit
   // (STO-1451 was rejected on feedback that literally started "Decision: revise").
   // With no explicit verdict, default to the SAFE, retryable 'revise' rather than
   // the terminal 'reject' or an unearned 'approve'. (INT-2485)
-  const explicit = text.match(
-    /\bdecision\b\s*[:=-]?\s*["'`]?\s*(approve[d]?|reject(?:ed)?|revis(?:e|ion)|request[- ]?changes)/i,
-  );
-  let decision: ReviewResult['decision'] = 'revise';
-  if (explicit) {
-    const verdict = explicit[1].toLowerCase();
-    decision = verdict.startsWith('approv') ? 'approve' : verdict.startsWith('reject') ? 'reject' : 'revise';
-  }
+  // The declaration shapes (`**Decision:** X`, `__Decision__: X`, `Verdict — X`,
+  // `Recommendation: request changes`, …) live in reviewerDeclarations.ts; the
+  // most severe one declared wins. (AGT-4313 review)
+  const declared = declaredVerdict(text);
+  const explicit = declared !== null;
+  const decision: ReviewResult['decision'] = declared ?? 'revise';
   return {
     result: {
       decision,
@@ -140,7 +139,7 @@ function extractReviewerFromText(text: string): { result: ReviewResult; explicit
       issues: extractBulletsAfter(text, /issues?:/i),
       suggestions: extractBulletsAfter(text, /suggestions?:/i),
     },
-    explicit: explicit !== null,
+    explicit,
   };
 }
 
@@ -376,20 +375,70 @@ export function parseReviewerResult(text: string, opts: { jsonOnly?: boolean } =
     // Distinguish the two failures, because they point at different fixes: the
     // reviewer declared a verdict but gave nothing to act on, versus the stream
     // never carried a verdict at all and this text is some other utterance.
+    if (explicit) {
+      throw new ReviewerVerdictWithoutFindingsError(
+        `Reviewer returned "${result.decision}" with no findings, feedback or suggestions — treating as a failed review`,
+      );
+    }
     throw new Error(
-      explicit
-        ? `Reviewer returned "${result.decision}" with no findings, feedback or suggestions — treating as a failed review`
-        : 'Reviewer output carried no verdict: no JSON result and no explicit decision — '
-          + 'the final message was not a review conclusion',
+      'Reviewer output carried no verdict: no JSON result and no explicit decision — '
+        + 'the final message was not a review conclusion',
     );
   }
 
   return result;
 }
 
-/** The decision declaration itself, which carries no information beyond the verdict. */
-const DECISION_PHRASE =
-  /\bdecision\b\s*[:=-]?\s*["'`]?\s*(?:approve[d]?|reject(?:ed)?|revis(?:e|ion)|request[- ]?changes)["'`]?/gi;
+/**
+ * The reviewer DID declare a non-approving verdict, but gave nothing to act on.
+ * A distinct type so a format repair can tell "no verdict at all" (repairable:
+ * ask for the verdict) from "a real reject/revise with no findings" (not
+ * repairable: asking again could turn that verdict into an approval). (AGT-4313)
+ */
+export class ReviewerVerdictWithoutFindingsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReviewerVerdictWithoutFindingsError';
+  }
+}
+
+/**
+ * Should a reviewer's final answer get one tool-less format-repair turn?
+ *
+ * Only when the text is non-empty and `parseReviewerResult` rejects it for
+ * carrying no verdict at all — prose with no JSON block and no `Decision:`
+ * line, or provider control tokens. A readable verdict needs no repair, and a
+ * declared reject/revise with no findings is NOT repaired: that reviewer
+ * reached a conclusion, and a second ask must not be able to flip it into an
+ * approval. Empty text is the salvage turn's job, not this one's. (AGT-4313)
+ */
+/**
+ * Accept a format repair unless it turns a non-approving answer into an
+ * approval. The repair exists to recover a verdict the reviewer never emitted,
+ * not to give it a second chance at a different one: a repaired `approve` is
+ * taken only when the original carries no sign of non-approval at all — no
+ * declared reject/revise in any shape (DECLARED_NON_APPROVAL, which also reads a
+ * malformed JSON block) and no reject/revise/blocking/must-fix wording
+ * (NON_APPROVAL_SIGNAL). (AGT-4313)
+ */
+export function reviewerFormatRepairIsConsistent(original: string, repaired: string): boolean {
+  if (!DECLARED_NON_APPROVAL.test(original) && !NON_APPROVAL_SIGNAL.test(original)) return true;
+  try {
+    return parseReviewerResult(repaired).decision !== 'approve';
+  } catch {
+    return false;
+  }
+}
+
+export function reviewerOutputNeedsFormatRepair(text: string): boolean {
+  if (!text.trim()) return false;
+  try {
+    parseReviewerResult(text);
+    return false;
+  } catch (err) {
+    return !(err instanceof ReviewerVerdictWithoutFindingsError);
+  }
+}
 
 /**
  * Did the reviewer say anything beyond the verdict?

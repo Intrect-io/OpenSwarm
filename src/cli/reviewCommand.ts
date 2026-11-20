@@ -29,31 +29,8 @@ import {
   type ReviewHistoryRecord,
 } from './reviewHistory.js';
 
-/**
- * `openswarm review` had no way to raise the reviewer's turn/time budget, so it
- * inherited the agentic loop's hardcoded defaults (20 turns, 5 min) regardless
- * of diff size — a 29-file/+2200-line diff hit the turn ceiling deterministically
- * on two separate runs, salvaged an empty or truncated verdict, and a third run
- * (raised nothing, same defaults) got cut by the 5-minute wall clock mid-analysis,
- * having already found the real defects. Small diffs are unaffected (thresholds
- * below the current defaults are no-ops); large ones now get proportionally more
- * room, and `--max-turns`/`--timeout` remain available to override either.
- * Unvalidated heuristic, not a measured optimum — widen the caps if it's still
- * not enough for some diff shape.
- */
-const REVIEW_BUDGET_FREE_FILES = 10;
-const REVIEW_BUDGET_MAX_TURNS_CAP = 60;
-const REVIEW_BUDGET_TIMEOUT_CAP_MS = 900_000; // 15 min
-
-export function scaledReviewMaxTurns(changedFileCount: number, base = 20): number {
-  if (changedFileCount <= REVIEW_BUDGET_FREE_FILES) return base;
-  return Math.min(REVIEW_BUDGET_MAX_TURNS_CAP, base + Math.ceil((changedFileCount - REVIEW_BUDGET_FREE_FILES) / 2));
-}
-
-export function scaledReviewTimeoutMs(changedFileCount: number, base = 300_000): number {
-  if (changedFileCount <= REVIEW_BUDGET_FREE_FILES) return base;
-  return Math.min(REVIEW_BUDGET_TIMEOUT_CAP_MS, base + (changedFileCount - REVIEW_BUDGET_FREE_FILES) * 15_000);
-}
+export { scaledReviewMaxTurns, scaledReviewTimeoutMs } from './reviewBudget.js';
+import { scaledReviewMaxTurns, scaledReviewTimeoutMs } from './reviewBudget.js';
 
 /** Synthesize a WorkerResult describing the working-tree changes for the reviewer. */
 /**
@@ -556,6 +533,11 @@ export async function runReviewCommand(
     deps.review ??
     (async (wr: WorkerResult, c: string, onLog?: (line: string) => void) => {
       const { runReviewer } = await import('../agents/reviewer.js');
+      // No flag, env or config: the reviewer runs on the registry default, which a
+      // provider override may have set to OpenRouter — budget for that adapter,
+      // not for "unknown". (AGT-4313 review)
+      const { getDefaultAdapterName } = await import('../adapters/index.js');
+      const budgetAdapter = adapterChoice.name ?? getDefaultAdapterName();
       return runReviewer({
         taskTitle: opts.base ? `CLI committed-diff review (vs ${opts.base})` : 'CLI working-tree review',
         taskDescription: opts.base
@@ -568,7 +550,7 @@ export async function runReviewCommand(
         priorReviewContext: history.context,
         readOnly: opts.readOnly,
         maxTurns: opts.maxTurns ?? scaledReviewMaxTurns(changed.length),
-        timeoutMs: opts.timeoutMs ?? scaledReviewTimeoutMs(changed.length),
+        timeoutMs: opts.timeoutMs ?? scaledReviewTimeoutMs(changed.length, undefined, budgetAdapter),
         model: opts.model,
         processContext: opts.processContext,
         diff: await deps.getDiff?.(c, opts.base) ?? await defaultGetDiff(c, opts.base),

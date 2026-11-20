@@ -45,5 +45,6 @@ export async function reviewPublishedPullRequest(input: {
     error: result.error,
     gateRan: result.gateRan,
     changesRequested: result.changesRequested,
+    ...(result.partialFindingsPosted ? { partialFindingsPosted: true } : {}),
   };
 }

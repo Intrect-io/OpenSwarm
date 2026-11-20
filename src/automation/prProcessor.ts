@@ -123,6 +123,7 @@ import {
 } from './integrationCoordinator.js';
 import { getOwnedPRsForRepo } from './prOwnership.js';
 import { publicationReviewBudget } from './publicationReviewBudget.js';
+import { postNoDecisionNotes } from './freshReviewNoDecision.js';
 
 // Types
 
@@ -368,7 +369,7 @@ export class PRProcessor {
   async freshReview(
     pr: PRInfo,
     projectPath: string,
-  ): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean; changesRequested?: boolean }> {
+  ): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean; changesRequested?: boolean; partialFindingsPosted?: boolean }> {
     const key = `${pr.repo}#${pr.number}`;
     this.currentPR = key;
 
@@ -378,6 +379,7 @@ export class PRProcessor {
     let verdictProduced = false;
     let changesRequested = false;
     let worktreePath: string | null = null;
+    let reviewedShaForNote: string | null = null; // for the no-decision note in the catch (AGT-4413)
     let prHeadRef: string | null = null;
     let baseRef: string | null = null;
     try {
@@ -441,6 +443,7 @@ export class PRProcessor {
       // changes too. Same reasoning as review-gate.yml's `Resolve the PR
       // base` step.
       worktreePath = scratchWorktree;
+      reviewedShaForNote = reviewedSha;
       const review = await runReviewCommand({
         path: scratchWorktree,
         base: mergeBase,
@@ -503,17 +506,14 @@ export class PRProcessor {
         ].join('\n')
       );
 
-      return {
-        success: review.decision === 'approve',
-        error: review.decision === 'approve' ? undefined : (review.feedback || 'Reviewer requested changes'),
-        iterations: 0,
-        gateRan: true,
-        changesRequested,
-      };
+      const approved = review.decision === 'approve';
+      return { success: approved, error: approved ? undefined : (review.feedback || 'Reviewer requested changes'), iterations: 0, gateRan: true, changesRequested };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[PRProcessor] ${key} fresh review error:`, errorMsg);
-      return { success: false, error: errorMsg, iterations: 0, gateRan: verdictProduced, changesRequested };
+      // No verdict but some text: post it as "no decision" notes; still gate-not-run. (AGT-4413)
+      const partialFindingsPosted = await postNoDecisionNotes(pr, reviewedShaForNote, err, errorMsg);
+      return { success: false, error: errorMsg, iterations: 0, gateRan: verdictProduced, changesRequested, ...(partialFindingsPosted ? { partialFindingsPosted } : {}) };
     } finally {
       if (worktreePath) {
         try {

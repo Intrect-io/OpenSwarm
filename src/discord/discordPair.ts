@@ -17,6 +17,9 @@ import * as worker from '../agents/worker.js';
 import * as reviewer from '../agents/reviewer.js';
 import * as pairMetrics from '../agents/pairMetrics.js';
 import * as pairWebhook from '../agents/pairWebhook.js';
+import { coordinationContextFor } from '../agents/pipelineCoordination.js';
+import { expandPath } from '../core/config.js';
+import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
 
 import {
   pairModeConfig,
@@ -34,6 +37,37 @@ import { safeConsole as console } from '../support/safeLog.js';
 import { sanitizeAndBoundTerminalText, sanitizeTerminalText } from '../tui/sanitize.js';
 
 const DISCORD_CONTENT_LIMIT = 1900;
+
+/**
+ * Coordination-board identity for a Discord /pair agent (AGT-4055).
+ *
+ * Only sessions backed by a Linear issue get one. The board is keyed by the
+ * issue UUID, the same key the daemon pipeline uses, so a Discord run and a
+ * daemon run on one issue are the same participants and their messages meet.
+ * A session typed in by hand has no issue behind it; it gets no coordination
+ * tools rather than a synthetic id nobody else would ever address.
+ *
+ * v1 visibility: what these agents publish lands on the coordination board
+ * (dashboard / CLI) only. It is not echoed into the Discord thread.
+ *
+ * Review follow-up: `ask_human` is withheld (a /pair session has no run-ledger
+ * row, so nothing would resume it after the operator answered), and the
+ * project path is expanded so the board's repository cell names the checkout
+ * the agent actually runs in. Known limit: a /pair run and a daemon run on the
+ * same issue share one inbox, and `coordination_read` consumes messages, so the
+ * two should not run at the same time.
+ */
+export function pairCoordinationContext(
+  session: Pick<agentPair.PairSession, 'taskId' | 'linearIssueId' | 'projectPath'>,
+  role: 'worker' | 'reviewer',
+): CoordinationToolContext | undefined {
+  if (!session.linearIssueId) return undefined;
+  const context = coordinationContextFor({
+    task: { id: session.linearIssueId, issueId: session.linearIssueId, issueIdentifier: session.taskId },
+    projectPath: expandPath(session.projectPath),
+  }, role);
+  return context ? { ...context, humanQuestions: false } : undefined;
+}
 
 /** Bound and neutralize untrusted text before Discord thread posting. */
 function neutralizeForDiscord(text: string, max = DISCORD_CONTENT_LIMIT): string {
@@ -235,6 +269,7 @@ async function handlePairStart(msg: Message, taskId?: string): Promise<void> {
 
   await startPairSession(msg, {
     taskId: task.identifier || task.id,
+    linearIssueId: typeof task.id === 'string' ? task.id : undefined,
     taskTitle: task.title,
     taskDescription: task.description || '',
     projectPath,
@@ -256,12 +291,15 @@ async function handlePairRun(msg: Message, taskId: string, project: string): Pro
   // Fetch issue info from Linear
   let taskTitle = taskId;
   let taskDescription = '';
+  let linearIssueId: string | undefined;
 
   try {
     const issue = await linear.getIssue(taskId);
     if (issue) {
       taskTitle = issue.title;
       taskDescription = issue.description || '';
+      linearIssueId = issue.id;
+      if (issue.identifier) taskId = issue.identifier; // a UUID typed in still labels the board AGT-n
     }
   } catch {
     // Continue even if Linear lookup fails (use taskId as title)
@@ -269,6 +307,7 @@ async function handlePairRun(msg: Message, taskId: string, project: string): Pro
 
   await startPairSession(msg, {
     taskId,
+    linearIssueId,
     taskTitle,
     taskDescription,
     projectPath,
@@ -385,6 +424,7 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       previousFeedback,
       timeoutMs: 300000, // 5 minutes
       issueIdentifier: session.taskId,
+      coordinationContext: pairCoordinationContext(session, 'worker'),
     });
 
     session = agentPair.getPairSession(sessionId);
@@ -437,6 +477,7 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       workerResult,
       projectPath: session.projectPath,
       timeoutMs: 300000, // 5 minutes
+      coordinationContext: pairCoordinationContext(session, 'reviewer'),
     });
 
     session = agentPair.getPairSession(sessionId);

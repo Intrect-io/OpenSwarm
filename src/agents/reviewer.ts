@@ -3,6 +3,7 @@
 // Code review agent (CLI adapter based)
 // ============================================
 
+import { ReviewerNoVerdictError, partialReviewerText, transcriptNotes } from './reviewerNoVerdict.js';
 import { formatCommandEvidence } from './workerValidationEvidence.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import { t, getPrompts } from '../locale/index.js';
@@ -12,6 +13,8 @@ import { getAdapter, spawnCli } from '../adapters/index.js';
 import { expandPath } from '../core/config.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
+import { reviewerFormatRepairIsConsistent, reviewerOutputNeedsFormatRepair } from '../adapters/resultParsing.js';
+import { NoFinalAnswerError, type TranscriptAwareRepair } from '../adapters/finalAnswerTurns.js';
 import type { VerifyEvidence } from '../verify/runner.js';
 import { renderVerifyEvidence } from './verificationEvidence.js';
 import type { InstructionCapsule } from './instructionCapsule.js';
@@ -50,6 +53,8 @@ export interface ReviewerOptions {
    * line. (INT-2388)
    */
   guardWarnings?: string[];
+  /** Trusted ruling instruction plus the data-wrapped open findings from earlier rounds (AGT-4535). */
+  findingLedger?: string;
   /** Deterministic command evidence produced by the harness tester. */
   verificationEvidence?: VerifyEvidence[];
   /** Relevant repository-local logs from earlier review commands. */
@@ -269,7 +274,7 @@ ${commandLines}
 ${options.workerResult.error ? `- **Error:** ${options.workerResult.error}` : ''}
 ${guardSection}${diffSection}`;
 
-  return getPrompts().buildReviewerPrompt({
+  const base = getPrompts().buildReviewerPrompt({
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
     authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
@@ -278,6 +283,9 @@ ${guardSection}${diffSection}`;
     verificationEvidence: renderVerifyEvidence(options.verificationEvidence ?? []),
     priorReviewContext: options.priorReviewContext,
   });
+  // Outside the worker-report data block: the ruling instruction must read as
+  // an instruction, while the findings themselves stay wrapped as data. (AGT-4535)
+  return options.findingLedger ? `${base}\n\n${options.findingLedger}` : base;
 }
 
 // Pre-Check Execution (Fast Validation with Haiku)
@@ -362,12 +370,40 @@ export async function runPreCheck(options: ReviewerOptions): Promise<PreCheckRes
 // Reviewer Execution
 
 /**
+ * The one tool-less repair turn a reviewer gets when its final answer carries
+ * no verdict (AGT-4313). It asks for a restatement, not a new review: the
+ * reviewer has already read everything it is going to read.
+ */
+export const REVIEWER_FORMAT_REPAIR_PROMPT =
+  'Your previous message did not contain a verdict this harness can read: there was no JSON ' +
+  'result block and no `Decision:` line. Do not call tools and do not start the review over. ' +
+  'Restate the conclusion you already reached as exactly one fenced JSON block of this shape:\n\n' +
+  '```json\n' +
+  '{"decision": "approve" | "revise" | "reject", "feedback": "<one-paragraph summary>", ' +
+  '"issues": ["<file:line — concrete defect>"], "suggestions": ["<concrete change>"]}\n' +
+  '```\n\n' +
+  'Use "approve" only if your review found nothing that must change. If you found any defect, ' +
+  'the decision is "revise" or "reject" and every defect goes in "issues".';
+
+/**
  * Run Reviewer agent (full review with Sonnet)
  */
 export async function runReviewer(options: ReviewerOptions): Promise<ReviewResult> {
   const prompt = buildReviewerPrompt(options);
   const cwd = expandPath(options.projectPath);
   const adapter = getAdapter(options.adapterName);
+  // The reviewer's final text, kept for a no-verdict failure below. (AGT-4413)
+  let finalText: string | undefined;
+  // What the run did when it ended with no final text at all, reported by the
+  // loop through the repair object, which survives an adapter that swallows
+  // the loop's error. (AGT-4413)
+  let partialTranscript: string | undefined;
+  const finalAnswerRepair: TranscriptAwareRepair | undefined = options.mode === 'blocker' ? undefined : {
+    needsRepair: reviewerOutputNeedsFormatRepair,
+    prompt: REVIEWER_FORMAT_REPAIR_PROMPT,
+    acceptRepair: reviewerFormatRepairIsConsistent,
+    onNoFinalAnswer: (digest) => { partialTranscript = digest; },
+  };
 
   try {
     // Run CLI via adapter
@@ -392,8 +428,14 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
       signal: options.signal,
       readOnly: options.readOnly,
       coordinationContext: options.coordinationContext,
+      // One bounded, tool-less restatement when the final answer carries no
+      // verdict at all; in-process adapters only (AGT-4313). Not in blocker
+      // mode, where "approve" means "the worker's claim is confirmed" and the
+      // repair prompt's approve/revise wording would mean something else.
+      finalAnswerRepair,
     });
 
+    finalText = raw.stdout;
     // Parse result via adapter
     const parsedResult: ReviewResult = raw.blockedOnOperator || raw.executionOutcomeUnknown
       ? { decision: 'revise', feedback: raw.executionOutcomeUnknown
@@ -425,7 +467,12 @@ export async function runReviewer(options: ReviewerOptions): Promise<ReviewResul
     // error → the pipeline classifies infra_error (backoff retry, no STUCK) and the
     // CLI exits non-zero. (INT-2521)
     const msg = error instanceof Error ? error.message : String(error);
-    throw new Error(`reviewer-stage: produced no parseable verdict: ${msg}`, { cause: error });
+    // Carries the reviewer's last text so a caller can still show what it found. (AGT-4413)
+    // An empty final text falls back to the transcript digest: on the error when
+    // the adapter let it through, else the one the loop reported. (AGT-4413)
+    const notes = partialReviewerText(finalText)
+      ?? transcriptNotes(error instanceof NoFinalAnswerError ? error.partialTranscript : partialTranscript);
+    throw new ReviewerNoVerdictError(`reviewer-stage: produced no parseable verdict: ${msg}`, notes, { cause: error });
   }
 }
 

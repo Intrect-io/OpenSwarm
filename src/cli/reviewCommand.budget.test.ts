@@ -6,7 +6,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const runReviewerMock = vi.fn();
 vi.mock('../agents/reviewer.js', () => ({ runReviewer: runReviewerMock }));
 
+// Pass-through unless a test overrides it, so the "nothing configured" path
+// (adapter left to the registry default) can be reached without a config file.
+const builtInDefault = vi.hoisted(() => ({ on: false }));
+vi.mock('./reviewAdapter.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./reviewAdapter.js')>();
+  return {
+    ...actual,
+    resolveReviewAdapter: (...args: Parameters<typeof actual.resolveReviewAdapter>) =>
+      builtInDefault.on ? { source: 'built-in default' as const } : actual.resolveReviewAdapter(...args),
+  };
+});
+
 const { runReviewCommand } = await import('./reviewCommand.js');
+const adapterRegistry = await import('../adapters/index.js');
 
 const stubDeps = {
   getChangedFiles: async () => ['src/a.ts'],
@@ -42,7 +55,37 @@ describe('runReviewCommand forwards the caller\'s reviewer budget (AGT-4410)', (
     const [opts] = runReviewerMock.mock.calls[0] as [Record<string, unknown>];
     expect(opts.model).toBeUndefined();
     expect(opts.processContext).toBeUndefined();
-    expect(opts.timeoutMs).toBe(300_000);
+    // OpenRouter gets its own, larger floor (AGT-4313); other adapters keep 300 s.
+    expect(opts.timeoutMs).toBe(900_000);
     expect(opts.maxTurns).toBe(20);
+  });
+
+  it('keeps the 300 s floor for a non-OpenRouter adapter', async () => {
+    await runReviewCommand({ path: '/repo', adapter: 'codex' }, stubDeps);
+    const [opts] = runReviewerMock.mock.calls[0] as [Record<string, unknown>];
+    expect(opts.timeoutMs).toBe(300_000);
+  });
+
+  // AGT-4313 review: with no flag, env or config the reviewer runs on the
+  // registry default, which a provider override can set to OpenRouter. The
+  // budget must follow that adapter, not fall back to the generic floor.
+  it('budgets for the effective registry default when nothing names an adapter', async () => {
+    const before = adapterRegistry.getDefaultAdapterName();
+    builtInDefault.on = true;
+    try {
+      adapterRegistry.setDefaultAdapter('openrouter');
+      await runReviewCommand({ path: '/repo' }, stubDeps);
+      const [opts] = runReviewerMock.mock.calls[0] as [Record<string, unknown>];
+      expect(opts.adapterName).toBeUndefined();
+      expect(opts.timeoutMs).toBe(900_000);
+
+      adapterRegistry.setDefaultAdapter('codex');
+      await runReviewCommand({ path: '/repo' }, stubDeps);
+      const [codexOpts] = runReviewerMock.mock.calls[1] as [Record<string, unknown>];
+      expect(codexOpts.timeoutMs).toBe(300_000);
+    } finally {
+      builtInDefault.on = false;
+      adapterRegistry.setDefaultAdapter(before);
+    }
   });
 });

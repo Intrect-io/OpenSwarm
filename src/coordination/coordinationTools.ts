@@ -79,6 +79,12 @@ export interface CoordinationToolContext {
   actorRole?: string;
   /** Overridable operator notifier; defaults to the configured Discord channel. */
   notifyOperator?: (message: string) => Promise<boolean>;
+  /**
+   * False when nothing would resume this run after a blocking human question:
+   * a Discord /pair session has no run-ledger row, so `ask_human` (which tells
+   * the agent to stop and wait for the operator) is withheld. (AGT-4055 review)
+   */
+  humanQuestions?: false;
   /** Cache-first tracker bridge, installed only for the trusted project supervisor. */
   tracker?: OrchestratorTrackerBridge;
 }
@@ -195,6 +201,13 @@ export const COORDINATION_TOOL_DEFINITIONS: ToolDefinition[] = [
  * The adapter used to carry its own hardcoded copy of this list, so adding a
  * tool here left it undispatchable until someone noticed. (AGT-4065)
  */
+/** The coordination tools offered to one agent: `ask_human` only when its answer can resume the run. */
+export function coordinationToolDefinitionsFor(context: CoordinationToolContext): ToolDefinition[] {
+  return context.humanQuestions === false
+    ? COORDINATION_TOOL_DEFINITIONS.filter((definition) => definition.function.name !== 'ask_human')
+    : COORDINATION_TOOL_DEFINITIONS;
+}
+
 export const COORDINATION_TOOL_NAMES: ReadonlySet<string> = new Set(
   [
     ...COORDINATION_TOOL_DEFINITIONS.map((definition) => definition.function.name),
@@ -418,6 +431,9 @@ export async function executeCoordinationTool(
     return { content: JSON.stringify({ accepted: true, event }), isError: false };
   }
   if (name === 'ask_human') {
+    if (context.humanQuestions === false) {
+      return { content: 'ask_human is not available in this session: nothing would resume it. Report the blocker in your result instead.', isError: true };
+    }
     if (typeof args.question !== 'string' || !args.question.trim()) {
       return { content: 'question must be a non-empty string', isError: true };
     }

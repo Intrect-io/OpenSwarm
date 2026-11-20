@@ -28,7 +28,7 @@ function matchesCriticalKeyword(bodyLower: string): boolean {
   });
 }
 
-const FEEDBACK_ADDRESSED_MARKERS = [
+export const FEEDBACK_ADDRESSED_MARKERS = [
   'Review feedback addressed',
   'Auto-fix completed - CI passing',
 ];

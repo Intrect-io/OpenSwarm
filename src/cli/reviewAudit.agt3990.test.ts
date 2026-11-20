@@ -10,6 +10,7 @@ import {
   type AuditAreaResult,
   type AuditProgress,
 } from './reviewAudit.js';
+import { scaledReviewTimeoutMs } from './reviewBudget.js';
 
 const mkAreas = (n: number): AuditArea[] =>
   Array.from({ length: n }, (_, i) => ({
@@ -40,6 +41,52 @@ describe('buildAuditReviewerOptions (AGT-3990)', () => {
       onLog,
     });
     expect(options.workerResult.filesChanged).toEqual(['src/auth/token.ts']);
+  });
+
+  // `review --max` used to forward an undefined timeout, so every area fell
+  // back to the reviewer's flat 300 s — measured as `openrouter timeout after
+  // 300000ms` on 2 of 17 areas at concurrency 16. (AGT-4313)
+  it('scales the per-area timeout by area size and adapter when no --timeout is given', () => {
+    const files = (n: number) => Array.from({ length: n }, (_, i) => `src/x/f${i}.ts`);
+    const timeoutFor = (adapter: 'openrouter' | 'codex' | undefined, n: number) =>
+      buildAuditReviewerOptions({ label: 'src/x', dir: 'src/x', files: files(n) }, '/repo', {
+        concurrency: 16,
+        adapter,
+      }, () => {}).timeoutMs;
+
+    expect(timeoutFor('openrouter', 3)).toBe(scaledReviewTimeoutMs(3, undefined, 'openrouter'));
+    expect(timeoutFor('openrouter', 3)).toBe(900_000);
+    expect(timeoutFor('openrouter', 40)).toBe(1_500_000);
+    expect(timeoutFor('codex', 3)).toBe(300_000);
+    expect(timeoutFor('codex', 40)).toBe(scaledReviewTimeoutMs(40, undefined, 'codex'));
+    expect(timeoutFor(undefined, 3)).toBe(300_000);
+    expect(timeoutFor('openrouter', 3)).not.toBeUndefined();
+  });
+
+  // AGT-4313 review: no --adapter means the registry default, which a provider
+  // override can make OpenRouter; that area still needs the OpenRouter budget.
+  it('scales by the effective registry default adapter when --adapter is absent', async () => {
+    const registry = await import('../adapters/index.js');
+    const before = registry.getDefaultAdapterName();
+    try {
+      registry.setDefaultAdapter('openrouter');
+      const options = buildAuditReviewerOptions({ label: 'src/x', dir: 'src/x', files: ['a.ts'] }, '/repo', {
+        concurrency: 16,
+      }, () => {});
+      expect(options.timeoutMs).toBe(900_000);
+      expect(options.adapterName).toBeUndefined();
+    } finally {
+      registry.setDefaultAdapter(before);
+    }
+  });
+
+  it('lets an explicit --timeout win over the scaled default', () => {
+    const options = buildAuditReviewerOptions({ label: 'src/x', dir: 'src/x', files: ['a.ts'] }, '/repo', {
+      concurrency: 16,
+      adapter: 'openrouter',
+      timeoutMs: 42_000,
+    }, () => {});
+    expect(options.timeoutMs).toBe(42_000);
   });
 });
 

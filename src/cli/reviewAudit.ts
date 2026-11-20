@@ -16,6 +16,8 @@ import type { AdapterName } from '../adapters/types.js';
 import { runPool } from '../support/concurrencyPool.js';
 import { RateLimitError } from '../adapters/rateLimitError.js';
 import { isInfraError } from '../adapters/errorClassification.js';
+import { scaledReviewTimeoutMs } from './reviewBudget.js';
+import { getDefaultAdapterName } from '../adapters/index.js';
 import { c, status } from '../support/colors.js';
 import { sanitizeTerminalText } from '../tui/sanitize.js';
 import type { SecurityFinding } from '../verify/securityAudit.js';
@@ -518,7 +520,7 @@ export interface RunMaxReviewOptions {
   adapter?: AdapterName;
   /** Per-area reviewer agentic-loop turn ceiling. */
   maxTurns?: number;
-  /** Per-area reviewer wall-clock budget in milliseconds. */
+  /** Per-area reviewer wall-clock budget in milliseconds (default: scaled by area size and adapter). */
   timeoutMs?: number;
   /** Abort the whole audit (Ctrl+C) — propagated to every subagent. */
   signal?: AbortSignal;
@@ -581,7 +583,11 @@ export function buildAuditReviewerOptions(
     projectPath: cwd,
     adapterName: opts.adapter,
     maxTurns: opts.maxTurns,
-    timeoutMs: opts.timeoutMs,
+    // Same adapter-aware, size-scaled budget as `openswarm review`. Forwarding
+    // `opts.timeoutMs` alone handed every area the reviewer's flat 300 s
+    // default, which OpenRouter areas hit at concurrency 16. (AGT-4313) No
+    // --adapter means the registry default, which may itself be OpenRouter.
+    timeoutMs: opts.timeoutMs ?? scaledReviewTimeoutMs(area.files.length, undefined, opts.adapter ?? getDefaultAdapterName()),
     signal: opts.signal,
     priorReviewContext: opts.priorReviewContextByArea?.[area.label],
     onLog,

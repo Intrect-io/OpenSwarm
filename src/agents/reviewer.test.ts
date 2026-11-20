@@ -7,6 +7,7 @@ import { buildReviewerPrompt, formatReviewFeedback, buildRevisionPrompt, runRevi
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import * as adapters from '../adapters/index.js';
 import { initLocale } from '../locale/index.js';
+import { ReviewerNoVerdictError } from './reviewerNoVerdict.js';
 
 describe('runReviewer parse failure (INT-2521)', () => {
   beforeAll(() => { initLocale('en'); });
@@ -25,6 +26,22 @@ describe('runReviewer parse failure (INT-2521)', () => {
     await expect(
       runReviewer({ taskTitle: 't', taskDescription: 'd', workerResult: wr, projectPath: '/tmp/x' }),
     ).rejects.toThrow(/reviewer-stage: produced no parseable verdict/);
+  });
+
+  it('carries the reviewer final text on the no-verdict error so a caller can post it (AGT-4413)', async () => {
+    const prose = 'I read src/a.ts. The retry at src/a.ts:42 swallows the error.';
+    vi.spyOn(adapters, 'spawnCli').mockResolvedValue({ exitCode: 0, stdout: prose, stderr: '', durationMs: 1 } as never);
+    vi.spyOn(adapters, 'getAdapter').mockReturnValue({
+      name: 'mock',
+      getDefaultModel: async () => 'm',
+      parseReviewerOutput: () => { throw new Error('Reviewer output carried no verdict'); },
+    } as never);
+    const wr: WorkerResult = { success: true, summary: 's', filesChanged: ['a.ts'], commands: [], output: '' };
+    const err = await runReviewer({ taskTitle: 't', taskDescription: 'd', workerResult: wr, projectPath: '/tmp/x' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ReviewerNoVerdictError);
+    expect((err as ReviewerNoVerdictError).partialText).toBe(prose);
+    expect((err as Error).message).toMatch(/^reviewer-stage: produced no parseable verdict/);
   });
 });
 
