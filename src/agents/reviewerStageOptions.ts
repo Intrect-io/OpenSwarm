@@ -19,6 +19,8 @@ import { taskAttributionKey, taskEventKey } from '../orchestration/decisionEngin
 import { coordinationContextFor } from './pipelineCoordination.js';
 import { compatibleStageModel, effortForTask, modelForTask } from './pipelineRoleSelection.js';
 import { stageTimeoutMs } from './stageTimeouts.js';
+import { buildReviewerFindingsSection } from './findingLedger.js';
+import { getLocale, promptDataBlock } from '../locale/index.js';
 import type { ModelRole } from '../adapters/modelCompat.js';
 import type { PipelineConfig, PipelineContext } from './pairPipelineTypes.js';
 import type { ReviewerOptions } from './reviewer.js';
@@ -158,6 +160,9 @@ export async function buildReviewerStageOptions(input: {
         .flatMap((r) => r.issues) ?? []),
       ...scopeWarning,
     ],
+    // Open finding ids and the worker's per-id answers, so the reviewer rules on
+    // each id instead of restating the whole review in new words. (AGT-4535)
+    findingLedger: buildReviewerFindingsSection(context.findingLedger, promptDataBlock, getLocale() === 'ko' ? 'ko' : 'en') || undefined,
     processContext: { taskId: taskAttributionKey(context.task), stage: 'reviewer' },
     // runReviewer has always accepted onLog; nothing passed one, so the
     // reviewer's turns never reached the dashboard/desktop console the way the

@@ -11,6 +11,7 @@ import { taskAttributionKey, taskEventKey, type TaskItem } from '../orchestratio
 import { rejectedWorkerPaths } from '../support/rejectedWorkerPaths.js';
 import { scratchNotesSection, workerScratchpadRunId } from './workerScratchpad.js';
 import { createSnapshotState } from './iterationSnapshot.js';
+import { buildWorkerFindingsSection } from './findingLedger.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import type { WorkerResult, ReviewResult } from './agentPair.js';
 import type { TesterResult } from './tester.js';
@@ -436,7 +437,7 @@ export class PairPipeline extends EventEmitter {
           const includeReview =
             context.feedbackSource === 'review' && !!context.reviewResult;
           const reviewPart = includeReview
-            ? reviewerAgent.buildRevisionPrompt(context.reviewResult!)
+            ? [reviewerAgent.buildRevisionPrompt(context.reviewResult!), buildWorkerFindingsSection(context.findingLedger)].filter(Boolean).join('\n\n')
             : undefined;
           // Cross-SESSION feedback: a re-picked task that failed/was rejected
           // before carries the last reviewer feedback (persisted in task state).

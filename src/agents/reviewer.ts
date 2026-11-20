@@ -52,6 +52,8 @@ export interface ReviewerOptions {
    * line. (INT-2388)
    */
   guardWarnings?: string[];
+  /** Trusted ruling instruction plus the data-wrapped open findings from earlier rounds (AGT-4535). */
+  findingLedger?: string;
   /** Deterministic command evidence produced by the harness tester. */
   verificationEvidence?: VerifyEvidence[];
   /** Relevant repository-local logs from earlier review commands. */
@@ -271,7 +273,7 @@ ${commandLines}
 ${options.workerResult.error ? `- **Error:** ${options.workerResult.error}` : ''}
 ${guardSection}${diffSection}`;
 
-  return getPrompts().buildReviewerPrompt({
+  const base = getPrompts().buildReviewerPrompt({
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
     authoritativeOperatorFeedback: options.authoritativeOperatorFeedback,
@@ -280,6 +282,9 @@ ${guardSection}${diffSection}`;
     verificationEvidence: renderVerifyEvidence(options.verificationEvidence ?? []),
     priorReviewContext: options.priorReviewContext,
   });
+  // Outside the worker-report data block: the ruling instruction must read as
+  // an instruction, while the findings themselves stay wrapped as data. (AGT-4535)
+  return options.findingLedger ? `${base}\n\n${options.findingLedger}` : base;
 }
 
 // Pre-Check Execution (Fast Validation with Haiku)

@@ -1,4 +1,5 @@
 import type { ChangeRisk } from '../support/changeRisk.js';
+import type { FindingLedger } from './findingLedger.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig, PipelineGuardsConfig, JobProfile, SecurityAuditConfig, VerifyConfig } from '../core/types.js';
 import type { CostInfo } from '../support/costTracker.js';
@@ -37,6 +38,8 @@ export interface PipelineConfig {
   continueOnTestFail?: boolean;
   skipDocumenterIfNoChange?: boolean;
   maxIterations?: number;
+  /** Reviewer rounds one finding id may stay open before the loop stops (AGT-4535). Default 3. */
+  maxFindingRounds?: number;
   /**
    * Wall-clock budget for the whole task — the SAME number the scheduler's
    * watchdog uses (resolveHardTaskTimeoutMs). The loop stops before it rather
@@ -197,6 +200,8 @@ export interface PipelineContext {
   lastReviseFeedback?: string;
   /** One-shot worker escalation triggered by repeated similar revise feedback: higher model and/or effort for the retry (INT-2475). */
   workerEscalation?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high' };
+  /** Per-finding ids, worker answers and reviewer rulings across revise rounds (AGT-4535). */
+  findingLedger?: FindingLedger;
   /** The missing-validation-evidence gate has already nudged once this session — after that it defers to the reviewer instead of consuming more iterations (INT-2485). */
   validationNudged?: boolean;
   /** Tracked test / test-runner config files the worker may not edit this run (protectedFiles.ts). */

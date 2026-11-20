@@ -10,6 +10,7 @@ import { discardStagedMemoriesFrom } from './stagedMemory.js';
 import { runGuards } from './pipelineGuards.js';
 import { adjudicateContractEvidenceStagnation } from './guardArbiter.js';
 import { recordReflection, similarReviewFeedback } from './reflection.js';
+import { createFindingLedger, describeLedgerStop, ledgerVerdict, openFindings, recordReviewRound, recordWorkerResponses } from './findingLedger.js';
 import type { ReflectionSource } from './reflection.js';
 import { buildRepeatEscalation, resolveWorkerStageOverrides } from './workerEscalation.js';
 import { emitWorkerFanoutGateDecision, evaluateWorkerFanoutGate } from './workerFanoutGate.js';
@@ -160,6 +161,16 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
         error: (workerResult.result as WorkerResult).error,
         timestamp: Date.now(),
       });
+
+      // Record the worker's per-id answers to open review findings; an id it
+      // does not answer is recorded as unresolved. (AGT-4535)
+      if (openFindings(context.findingLedger).length > 0) {
+        context.findingLedger = recordWorkerResponses(context.findingLedger!, {
+          round: context.currentIteration,
+          summary: (workerResult.result as WorkerResult).summary ?? '',
+          output: (workerResult.result as WorkerResult).output,
+        });
+      }
 
       if (!workerResult.success) {
         const failedWorker = workerResult.result as WorkerResult;
@@ -534,6 +545,29 @@ export async function runFullIterationLoop(host: PipelineLoopHost, context: Pipe
 
         if (decision === 'revise') {
           const reviseFeedback = (reviewerResult.result as ReviewResult).feedback ?? '';
+
+          // Per-finding ledger (AGT-4535): ids, worker answers, reviewer
+          // rulings. A finding the two sides keep disagreeing on, or one that
+          // stays open past the round cap, stops the loop — it is never waved
+          // through. A reviewer that returns no structured issues leaves the
+          // ledger empty and the text-similarity check below works as before.
+          context.findingLedger = recordReviewRound(context.findingLedger ?? createFindingLedger(), {
+            round: context.currentIteration,
+            decision,
+            issues: (reviewerResult.result as ReviewResult).issues,
+            feedback: reviseFeedback,
+          });
+          const ledgerStop = ledgerVerdict(context.findingLedger, { maxRounds: host.config.maxFindingRounds });
+          if (ledgerStop.kind !== 'continue') {
+            const reason = describeLedgerStop(context.findingLedger, ledgerStop);
+            safeConsole.log(`[${context.taskPrefix}] ${reason.split('\n')[0]}`);
+            host.emit('log', { line: `🛑 ${reason.split('\n')[0]}` });
+            // Carried to the next attempt with the reviewer's own words.
+            context.lastReviseFeedback = `${reviseFeedback}\n\n${reason}`;
+            host.emit('iteration:fail', { iteration: context.currentIteration, stage: 'reviewer', context });
+            agentPair.updateSessionStatus(context.session.id, 'failed');
+            return { success: false };
+          }
 
           // The reflection stagnation detector only counts OBJECTIVE sources, so
           // a reviewer that keeps saying the same thing never trips it — failing
