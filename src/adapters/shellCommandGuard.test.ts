@@ -41,6 +41,14 @@ const rewriteBypasses = [
 ];
 
 describe('destructive-command guard sees what the shell will run (AGT-3436)', () => {
+  it.each([
+    'cat <(rm -rf /foo)',
+    'diff <(git reset --hard) out.txt',
+    'tee >(rm -rf /foo)',
+  ])('blocks destructive process substitution: %s', (command) => {
+    expect(isCommandBlocked(command)).toBe(true);
+  });
+
   it.each(rewriteBypasses)('blocks the shell-rewritten form: %s', (command) => {
     expect(isCommandBlocked(command)).toBe(true);
   });

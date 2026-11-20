@@ -5,6 +5,50 @@
 
 import { randomUUID } from 'node:crypto';
 
+const MAX_TRACE_NAME_BYTES = 1024;
+const MAX_METADATA_BYTES = 4096;
+const MAX_ERROR_BYTES = 4096;
+
+function boundText(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+  let result = '';
+  for (const char of value) {
+    if (Buffer.byteLength(result + char + '…', 'utf8') > maxBytes) break;
+    result += char;
+  }
+  return `${result}…`;
+}
+
+function boundMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const bounded: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    try {
+      const encoded = JSON.stringify({ ...bounded, [key]: value });
+      if (encoded !== undefined && Buffer.byteLength(encoded, 'utf8') <= MAX_METADATA_BYTES) bounded[key] = value;
+      else if (typeof value === 'string') {
+        const room = MAX_METADATA_BYTES - Buffer.byteLength(JSON.stringify(bounded), 'utf8') - Buffer.byteLength(JSON.stringify(key), 'utf8') - 8;
+        const shortened = boundText(value, Math.max(0, room));
+        const candidate = JSON.stringify({ ...bounded, [key]: shortened });
+        if (candidate && Buffer.byteLength(candidate, 'utf8') <= MAX_METADATA_BYTES) bounded[key] = shortened;
+      }
+    } catch {
+      // Ignore unserializable values rather than retaining them unchecked.
+    }
+  }
+  return bounded;
+}
+
+function boundError(error: { message: string; stack?: string; code?: string }): { message: string; stack?: string; code?: string } {
+  const result = {
+    message: boundText(error.message, 1024),
+    ...(error.stack === undefined ? {} : { stack: boundText(error.stack, 2048) }),
+    ...(error.code === undefined ? {} : { code: boundText(error.code, 256) }),
+  };
+  return Buffer.byteLength(JSON.stringify(result), 'utf8') <= MAX_ERROR_BYTES
+    ? result
+    : { message: boundText(result.message, MAX_ERROR_BYTES - 16) };
+}
+
 // Types
 
 export type SpanStatus = 'running' | 'completed' | 'failed';
@@ -95,11 +139,11 @@ export class TraceCollector {
     const traceId = randomUUID();
     const trace: Trace = {
       traceId,
-      name,
+      name: boundText(name, MAX_TRACE_NAME_BYTES),
       startTime: Date.now(),
       status: 'running',
       spans: [],
-      metadata,
+      metadata: boundMetadata(metadata),
     };
     this.traces.set(traceId, trace);
     return traceId;
@@ -150,10 +194,10 @@ export class TraceCollector {
       spanId,
       traceId,
       parentSpanId,
-      name,
+      name: boundText(name, MAX_TRACE_NAME_BYTES),
       status: 'running',
       startTime: Date.now(),
-      metadata,
+      metadata: boundMetadata(metadata),
     };
     trace.spans.push(span);
     return spanId;
@@ -190,7 +234,7 @@ export class TraceCollector {
     const span = trace.spans.find((s) => s.spanId === spanId);
     if (!span) return false;
 
-    span.errorInfo = error;
+    span.errorInfo = boundError(error);
     span.status = 'failed';
     span.endTime = span.endTime ?? Date.now();
     return true;
