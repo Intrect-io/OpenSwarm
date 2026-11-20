@@ -24,7 +24,12 @@ const SECTION_LABELS: Record<DefinitionOfReadySection, RegExp> = {
 
 const ALL_SECTIONS = Object.keys(SECTION_LABELS) as DefinitionOfReadySection[];
 
-/** Strip markdown decoration from a candidate label line: `## Acceptance criteria:` → `Acceptance criteria`. */
+/**
+ * Strip markdown decoration from a candidate label line: `## Acceptance criteria:` →
+ * `Acceptance criteria`. Also drops a leading list number or emoji (`## 1. Acceptance
+ * criteria`, `## ✅ Acceptance criteria`) and a trailing parenthetical (`Acceptance
+ * Criteria (AC)`), which people write and which used to read as a missing section.
+ */
 function normaliseLabel(raw: string): string {
   return raw
     .replace(/^#{1,6}\s+/, '')
@@ -32,13 +37,37 @@ function normaliseLabel(raw: string): string {
     .replace(/[*_]{1,3}\s*:?\s*$/, '')
     .replace(/\s*[:：]\s*$/, '')
     .replace(/^[*_]{1,3}|[*_]{1,3}$/g, '')
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/^\d+[.)]\s*/, '')
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/\s*[(（][^)）]*[)）]\s*$/, '')
     .trim();
+}
+
+/** A setext underline (`---`/`===`) or a thematic break: decoration, never content. */
+const RULE_LINE = /^(?:[-=*_]\s*){3,}$/;
+
+/** Content that says something: at least one letter or digit, not a rule line. */
+function isContent(line: string): boolean {
+  return !RULE_LINE.test(line) && /[\p{L}\p{N}]/u.test(line);
+}
+
+/** The section a line labels on its own (heading, bold label, `Label:` or setext title), if any. */
+function labelledSection(lines: readonly string[], i: number): DefinitionOfReadySection | null {
+  const line = lines[i].trim();
+  const setext = /^(?:=+|-+)$/.test((lines[i + 1] ?? '').trim()) && !/^#{1,6}\s+/.test(line);
+  const isLabelLine = /^#{1,6}\s+/.test(line) || /^[*_]{1,3}.+[*_]{1,3}\s*:?$/.test(line) || /[:：]$/.test(line) || setext;
+  if (!isLabelLine) return null;
+  const label = normaliseLabel(line);
+  return ALL_SECTIONS.find(key => SECTION_LABELS[key].test(label)) ?? null;
 }
 
 /**
  * Which of the three sections the issue body lacks. A section counts when a line that is only its
- * label (a markdown heading, a bold label, or `Label:`) is followed by non-empty content before the
- * next heading, or when the label is inline with content (`**Out of scope:** billing`).
+ * label (a markdown heading, a setext title, a bold label, or `Label:`) is followed by real content
+ * before the next heading or the next section label, or when the label is inline with content
+ * (`**Out of scope:** billing`). A label followed directly by another label, or by nothing but a
+ * rule line, is empty.
  */
 export function missingDefinitionOfReadySections(description: string | undefined): DefinitionOfReadySection[] {
   const lines = (description ?? '').split(/\r?\n/);
@@ -47,24 +76,21 @@ export function missingDefinitionOfReadySections(description: string | undefined
     const line = lines[i].trim();
     if (!line) continue;
     const inline = /^(?:#{1,6}\s+)?(?:[*_]{1,3})?([^*_:：\n]{2,60}?)(?:[*_]{1,3})?\s*[:：]\s*(?:[*_]{1,3})?\s*(\S.*)$/.exec(line);
-    for (const key of ALL_SECTIONS) {
-      if (found.has(key)) continue;
-      if (inline && SECTION_LABELS[key].test(inline[1].trim()) && inline[2].replace(/[*_]/g, '').trim()) {
-        found.add(key);
-        continue;
-      }
-      const isLabelLine = /^#{1,6}\s+/.test(line) || /^[*_]{1,3}.+[*_]{1,3}\s*:?$/.test(line) || /[:：]$/.test(line);
-      if (!isLabelLine || !SECTION_LABELS[key].test(normaliseLabel(line))) continue;
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j].trim();
-        if (!next) continue;
-        if (/^#{1,6}\s+/.test(next)) break;
-        found.add(key);
-        break;
-      }
+    if (inline && isContent(inline[2].replace(/[*_]/g, ''))) {
+      const label = normaliseLabel(inline[1]);
+      const key = ALL_SECTIONS.find(k => SECTION_LABELS[k].test(label));
+      if (key) { found.add(key); continue; }
+    }
+    const key = labelledSection(lines, i);
+    if (!key || found.has(key)) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j].trim();
+      if (!next || RULE_LINE.test(next) || /^(?:=+|-+)$/.test(next)) continue;
+      if (/^#{1,6}\s+/.test(next) || labelledSection(lines, j) !== null) break;
+      if (isContent(next)) { found.add(key); break; }
     }
   }
-  return ALL_SECTIONS.filter(key => !found.has(key));
+  return ALL_SECTIONS.filter(k => !found.has(k));
 }
 
 const SECTION_PROMPTS: Record<DefinitionOfReadySection, string> = {

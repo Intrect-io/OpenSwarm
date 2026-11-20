@@ -199,3 +199,26 @@ describe('definitionOfReadyHooks', () => {
     expect(linear.addComment).toHaveBeenCalledWith('i', 'b', 'm');
   });
 });
+
+describe('Definition of Ready section parsing (#872 review)', () => {
+  it.each([
+    ['numbered headings', '## 1. Acceptance criteria\n- a\n## 2. Out of scope\nnone\n## 3. Verification\nnpm test'],
+    ['emoji headings', '## ✅ Acceptance criteria\n- a\n## 🚫 Out of scope\nnone\n## 🧪 Verification\nnpm test'],
+    ['a trailing parenthetical', '## Acceptance Criteria (AC)\n- a\n## Out of scope\nnone\n## Verification\nnpm test'],
+    ['setext headings', 'Acceptance criteria\n---\n- a\n\nOut of scope\n---\nnone\n\nVerification\n---\nnpm test'],
+  ])('accepts %s', (_name, body) => {
+    expect(missingDefinitionOfReadySections(body)).toEqual([]);
+  });
+
+  it('counts a label followed directly by the next label as empty', () => {
+    expect(missingDefinitionOfReadySections('Acceptance criteria:\nOut of scope:\nVerification:\nnpm test'))
+      .toEqual(['acceptance_criteria', 'out_of_scope']);
+    expect(missingDefinitionOfReadySections('**Acceptance criteria**\n**Out of scope**\n**Verification**\nnpm test'))
+      .toEqual(['acceptance_criteria', 'out_of_scope']);
+  });
+
+  it('does not take a rule line as verification content', () => {
+    expect(missingDefinitionOfReadySections('## Acceptance criteria\n- a\n## Out of scope\nnone\n## Verification\n---'))
+      .toEqual(['verification']);
+  });
+});
