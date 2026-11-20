@@ -11,6 +11,18 @@
 export const MAX_RETAINED_STDOUT_CHARS = 32 * 1024 * 1024;
 /** Retained stderr per CLI stage. */
 export const MAX_RETAINED_STDERR_CHARS = 1024 * 1024;
+/**
+ * Longest partial stream line kept while waiting for its newline. The live-log
+ * parser re-splits the carried remainder on every chunk, so a runaway line with
+ * no newline would grow it without bound and cost O(n^2). The full output is
+ * still retained (tail-bounded) for the result; only the live log drops it.
+ */
+export const MAX_STREAM_REMAINDER_CHARS = 1024 * 1024;
+
+/** The parser's carried remainder, dropped once it passes the cap. */
+export function boundStreamRemainder(remainder: string, cap = MAX_STREAM_REMAINDER_CHARS): string {
+  return remainder.length > cap ? '' : remainder;
+}
 
 export class BoundedOutput {
   private text = '';

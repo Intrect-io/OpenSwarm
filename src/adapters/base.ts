@@ -3,7 +3,7 @@
 // Shared spawn logic for all CLI adapters
 // ============================================
 
-import { BoundedOutput, MAX_RETAINED_STDERR_CHARS, MAX_RETAINED_STDOUT_CHARS } from './outputRetention.js';
+import { BoundedOutput, MAX_RETAINED_STDERR_CHARS, MAX_RETAINED_STDOUT_CHARS, boundStreamRemainder } from './outputRetention.js';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -259,9 +259,9 @@ export async function spawnCli(
         const text = data.toString();
         stdoutBuf.append(text);
         if (options.onLog && adapter.capabilities.supportsStreaming) {
-          streamBuffer = adapter.parseStreamingChunk
+          streamBuffer = boundStreamRemainder(adapter.parseStreamingChunk
             ? adapter.parseStreamingChunk(text, options.onLog, streamBuffer)
-            : parseCliStreamChunk(text, options.onLog, streamBuffer);
+            : parseCliStreamChunk(text, options.onLog, streamBuffer));
         }
       });
 

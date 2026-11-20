@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BoundedOutput } from './outputRetention.js';
+import { BoundedOutput, MAX_STREAM_REMAINDER_CHARS, boundStreamRemainder } from './outputRetention.js';
 import { extractStreamJsonError } from './base.js';
 
 describe('BoundedOutput (AGT-3423)', () => {
@@ -40,5 +40,13 @@ describe('BoundedOutput (AGT-3423)', () => {
   it('rejects an invalid cap', () => {
     expect(() => new BoundedOutput(0)).toThrow();
     expect(() => new BoundedOutput(Number.NaN)).toThrow();
+  });
+});
+
+describe('boundStreamRemainder (#900 review)', () => {
+  it('keeps a partial line under the cap and drops one past it', () => {
+    expect(boundStreamRemainder('{"type":"par', 64)).toBe('{"type":"par');
+    expect(boundStreamRemainder('x'.repeat(65), 64)).toBe('');
+    expect(MAX_STREAM_REMAINDER_CHARS).toBe(1024 * 1024);
   });
 });
