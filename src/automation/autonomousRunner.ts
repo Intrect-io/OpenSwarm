@@ -50,10 +50,7 @@ import { resolveOwningProject, resolveProjectGoal } from '../support/projectGoal
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { TaskScheduler, initScheduler, normalizeProjectPath } from '../orchestration/taskScheduler.js';
-import {
-  PipelineResult,
-  formatPipelineResultEmbed,
-} from '../agents/pairPipeline.js';
+import { PipelineResult, formatPipelineResultEmbed } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig } from '../core/types.js';
 import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
@@ -70,7 +67,7 @@ import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol
 import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
 import { listHeldIssueIds } from './execHold.js';
 import { inputFingerprint, mayRedispatch } from './dispatchFingerprint.js';
-import { HostDiskGate, dispatchWritePaths } from '../support/hostHealth.js';
+import { HostDiskGate, dispatchWritePaths, isHostResourceError } from '../support/hostHealth.js';
 import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from '../agents/pairPipelineTypes.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
@@ -79,12 +76,7 @@ import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upser
 import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
 import { RunnerPauseControl } from './runnerPauseControl.js';
 import { providerSwitchViolation } from '../adapters/unattendedPolicy.js'; import { providerSwitchFamilyViolation } from '../adapters/reviewerIndependence.js';
-import {
-  findPullRequestForBranch,
-  inspectWorktreeRecovery,
-  pruneWorktrees,
-  removePreservedWorktreeAt,
-} from '../support/worktreeManager.js';
+import { findPullRequestForBranch, inspectWorktreeRecovery, pruneWorktrees, removePreservedWorktreeAt } from '../support/worktreeManager.js';
 import { publishStuckWork } from './publishOnPark.js';
 import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
 import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
@@ -946,7 +938,13 @@ export class AutonomousRunner {
       // edited files) STUCK in production. (INT-2010)
       if (result.finalStatus === 'infra_error') {
         const detail = pickPipelineFailureDetail(result) || 'infra/CLI execution error';
-        if (task.issueId) {
+        // Host resource failures (ENOSPC) pause all dispatch through the disk gate with one
+        // notice instead of a per-task backoff that fails the same way next time (AGT-4785).
+        if (isHostResourceError(detail)) {
+          const { notice } = this.diskGate.resourceFailure(detail);
+          console.error(`[Scheduler] ${taskCtx} stopped dispatch after a host resource failure: ${detail}`);
+          if (notice) await reportToDiscord(`⚠️ ${notice}`);
+        } else if (task.issueId) {
           // Fixed mid-range backoff — we intentionally don't bump failure counts,
           // so there's no attempt number to scale by.
           const nextRetryTime = setRetryTime(task.issueId, 3, this.failedTaskRetryTimes);

@@ -32,6 +32,14 @@ const GiB = 1024 ** 3;
  */
 export const DEFAULT_MIN_FREE_BYTES = 10 * GiB;
 
+/**
+ * How long a reported host-resource failure (ENOSPC) holds dispatch regardless of
+ * what the next free-space reading says. The failing verify clone is deleted on
+ * exit, so the disk usually measures fine again a moment later; without a hold
+ * the very next heartbeat would re-dispatch into the same failure.
+ */
+export const DEFAULT_RESOURCE_FAILURE_HOLD_MS = 15 * 60_000;
+
 export type DiskVerdict = 'ok' | 'low';
 
 /** `low` strictly below the floor, `ok` at or above it. */
@@ -119,14 +127,36 @@ export type DispatchGateDecision =
  */
 export class HostDiskGate {
   private low = false;
+  private failureHold: { until: number; line: string } | null = null;
 
   constructor(
     private readonly paths: () => readonly string[],
     private readonly minFreeBytes: () => number = () => DEFAULT_MIN_FREE_BYTES,
+    private readonly now: () => number = Date.now,
+    private readonly failureHoldMs: number = DEFAULT_RESOURCE_FAILURE_HOLD_MS,
   ) {}
+
+  /**
+   * A run failed on a host resource (ENOSPC). Pause dispatch for `failureHoldMs`
+   * through the same one-notice path as a low-space reading; after the hold the
+   * gate goes back to measuring. A repeat failure extends the hold silently.
+   */
+  resourceFailure(detail: string): DispatchGateDecision {
+    const first = !this.low;
+    this.low = true;
+    const line = `Host resource failure: ${detail}`;
+    this.failureHold = { until: this.now() + this.failureHoldMs, line };
+    return first
+      ? { pause: true, line, notice: `Dispatch paused: ${line}. New work waits until host resources recover.` }
+      : { pause: true, line };
+  }
 
   /** Measure now and decide. A floor of zero or less switches the check off. */
   evaluate(): DispatchGateDecision {
+    if (this.failureHold) {
+      if (this.now() < this.failureHold.until) return { pause: true, line: this.failureHold.line };
+      this.failureHold = null;
+    }
     const floor = this.minFreeBytes();
     if (floor <= 0) {
       const recovered = this.low;

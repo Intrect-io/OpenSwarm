@@ -172,6 +172,18 @@ describe('HostDiskGate', () => {
     expect(g.evaluate()).toEqual({ pause: false });
   });
 
+  it('holds dispatch after a reported ENOSPC even though the disk measures fine, then resumes once', () => {
+    let clock = 1_000;
+    const g = new HostDiskGate(() => [tmpdir()], () => UNDER, () => clock, 60_000);
+    expect(g.resourceFailure('No space left on device').notice).toContain('Dispatch paused');
+    expect(g.resourceFailure('No space left on device').notice).toBeUndefined();
+    clock += 30_000;
+    expect(g.evaluate()).toEqual({ pause: true, line: 'Host resource failure: No space left on device' });
+    clock += 30_001;
+    expect(g.evaluate()).toMatchObject({ pause: false, notice: expect.stringContaining('recovered') });
+    expect(g.evaluate()).toEqual({ pause: false });
+  });
+
   it('names the scarcest volume and the floor in the pause line', () => {
     const decision = gate({ value: OVER }).evaluate();
     expect(decision.pause && decision.line).toContain(tmpdir());
