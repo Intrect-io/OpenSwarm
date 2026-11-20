@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LIST_ENTITIES_MAX_LIMIT, SqliteRegistryStore } from './sqliteStore.js';
+import { ENTITY_SYNC_COLUMNS } from './sqliteRows.js';
+import { HELPER_QUERY_MAX_LIMIT, ISSUE_LINK_MAX_ENTITIES, LIST_ENTITIES_MAX_LIMIT, SqliteRegistryStore } from './sqliteStore.js';
 
 let dir: string | undefined;
 let store: SqliteRegistryStore | undefined;
@@ -23,7 +24,7 @@ describe('SqliteRegistryStore safe queries', () => {
   it('treats malformed FTS and LIKE metacharacters as literal input', () => {
     const registry = createStore();
     registry.registerEntity({ projectId: 'p', kind: 'function', name: 'alpha%_\\beta', filePath: 'src/a.ts' });
-    expect(() => registry.listEntities({ search: '" OR NOT (' })).not.toThrow();
+    expect(() => registry.listEntities({ search: '" OR NOT (', limit: 20, offset: 0 })).not.toThrow();
     expect(() => registry.searchEntities('%_\\')).not.toThrow();
     expect(registry.searchEntities('%_\\').map((entity) => entity.name)).toContain('alpha%_\\beta');
   });
@@ -35,7 +36,7 @@ describe('SqliteRegistryStore safe queries', () => {
     for (const entity of [a, b]) {
       registry.linkIssue(entity.id, 'INT-1');
       registry.addTag(entity.id, 'layer', 'api');
-      registry.addWarning(entity.id, 'warning', 'complexity', 'warning');
+      registry.addWarning(entity.id, 'warning', 'correctness', 'warning');
     }
     expect(registry.getEntitiesByIssueId('INT-1', 'a').map((entity) => entity.id)).toEqual([a.id]);
     expect(registry.entitiesByTag('layer', 'api', 'b').map((entity) => entity.id)).toEqual([b.id]);
@@ -54,6 +55,82 @@ describe('SqliteRegistryStore safe queries', () => {
     const page = registry.listEntities({ projectId: 'p', limit: 2, offset: 2 });
     expect(page.entities).toHaveLength(2);
     expect(page.total).toBe(5);
+  });
+});
+
+describe('SqliteRegistryStore bounded scanner and issue reads (AGT-3470)', () => {
+  it('walks every entity of a project in keyset pages of the light sync shape', () => {
+    const registry = createStore();
+    const ids: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      ids.push(registry.registerEntity({
+        projectId: 'p', kind: 'function', name: `fn${i}`, filePath: `src/f${i}.ts`,
+        lineStart: i + 1, signature: `fn${i}()`, hasTests: i % 2 === 0, author: 'scanner',
+      }).id);
+    }
+    registry.registerEntity({ projectId: 'other', kind: 'function', name: 'foreign', filePath: 'src/x.ts' });
+    registry.addTag(ids[0], 'layer', 'api');
+
+    const seen: string[] = [];
+    let afterId: string | undefined;
+    let pages = 0;
+    for (;;) {
+      const page = registry.listEntitySyncPage('p', afterId, 3);
+      pages++;
+      seen.push(...page.map((row) => row.id));
+      if (page.length < 3) break;
+      afterId = page.at(-1)!.id;
+    }
+
+    expect(pages).toBe(3);
+    expect(seen).toEqual([...ids].sort());
+    const first = registry.listEntitySyncPage('p', undefined, 100).find((row) => row.qualifiedName === 'src/f0.ts::fn0');
+    // Only the compared columns, with the same null→undefined mapping as CodeEntity.
+    expect(first).toEqual({
+      id: ids[0], qualifiedName: 'src/f0.ts::fn0', filePath: 'src/f0.ts', status: 'active',
+      author: 'scanner', lineStart: 1, lineEnd: undefined, signature: 'fn0()', hasTests: true,
+      testFile: undefined, complexityScore: undefined, riskLevel: expect.any(String),
+    });
+    expect(Object.keys(first!)).not.toContain('tags');
+  });
+
+  it('clamps the sync page to the store query cap', () => {
+    const registry = createStore();
+    registry.registerEntity({ projectId: 'p', kind: 'function', name: 'only', filePath: 'src/a.ts' });
+    expect(registry.listEntitySyncPage('p', undefined, LIST_ENTITIES_MAX_LIMIT * 10)).toHaveLength(1);
+    expect(registry.listEntitySyncPage('p', undefined, 0)).toHaveLength(1);
+  });
+
+  it('serves the keyset sync page from the (project_id, id) index without a temp sort', () => {
+    const registry = createStore();
+    for (let i = 0; i < 20; i++) {
+      registry.registerEntity({ projectId: i % 2 ? 'p' : 'q', kind: 'function', name: `k${i}`, filePath: `src/k${i}.ts` });
+    }
+    const db = (registry as unknown as { db: { prepare(sql: string): { all(...args: unknown[]): Array<{ detail: string }> } } }).db;
+    const planFor = (after: string, args: unknown[]) => db.prepare(
+      `EXPLAIN QUERY PLAN SELECT ${ENTITY_SYNC_COLUMNS} FROM code_entities WHERE project_id = ? ${after} ORDER BY id LIMIT ?`,
+    ).all(...args).map((row) => row.detail).join('\n');
+    for (const plan of [planFor('', ['p', 10]), planFor('AND id > ?', ['p', 'x', 10])]) {
+      expect(plan).toContain('idx_ce_project_id');
+      expect(plan).not.toMatch(/TEMP B-TREE/);
+    }
+  });
+
+  it('bounds issue-linked entities in SQL and keeps link order', () => {
+    const registry = createStore();
+    const linked = Array.from({ length: 5 }, (_, i) =>
+      registry.registerEntity({ projectId: 'p', kind: 'function', name: `l${i}`, filePath: `src/l${i}.ts` }));
+    for (const entity of linked) registry.linkIssue(entity.id, 'INT-9');
+    registry.addTag(linked[0].id, 'layer', 'api');
+
+    const limited = registry.getEntitiesByIssueId('INT-9', 'p', 3);
+    expect(limited).toHaveLength(3);
+    expect(registry.getEntitiesByIssueId('INT-9', 'p')).toHaveLength(5);
+    expect(registry.getEntitiesByIssueId('INT-9', 'p', 0)).toEqual([]);
+    // Batch hydration still fills tags and links.
+    const first = registry.getEntitiesByIssueId('INT-9', 'p').find((entity) => entity.id === linked[0].id);
+    expect(first?.tags).toEqual([{ tag: 'layer', value: 'api' }]);
+    expect(first?.linkedIssueIds).toEqual(['INT-9']);
   });
 });
 
@@ -162,5 +239,84 @@ describe('SqliteRegistryStore.getStats (AGT-4668)', () => {
 
     expect(registry.getStats('p', { maxAgeMs: 60_000 })).toBe(first);
     expect(registry.getStats('q', { maxAgeMs: 60_000 }).total).toBe(1);
+  });
+});
+
+// AGT-3421: the risk/status helpers and issue-link lookups were unbounded
+// full scans with an N+1 per row — bound and batch them.
+describe('bounded helper and issue-link queries (AGT-3421)', () => {
+  it('paginates the risk/status helper queries', () => {
+    const registry = createStore();
+    for (let i = 0; i < 6; i++) {
+      registry.registerEntity({
+        projectId: 'p', kind: 'function', name: `dep${i}`, filePath: `src/dep${i}.ts`, status: 'deprecated',
+      });
+    }
+    for (let i = 0; i < 4; i++) {
+      registry.registerEntity({
+        projectId: 'p', kind: 'function', name: `risk${i}`, filePath: `src/risk${i}.ts`,
+        hasTests: false, riskLevel: 'high',
+      });
+    }
+    registry.registerEntity({ projectId: 'p', kind: 'function', name: 'good', filePath: 'src/g.ts', hasTests: true });
+
+    const deprecatedPage1 = registry.deprecatedEntities('p', 4, 0);
+    const deprecatedPage2 = registry.deprecatedEntities('p', 4, 4);
+    expect(deprecatedPage1).toHaveLength(4);
+    expect(deprecatedPage2).toHaveLength(2);
+    const page1Ids = new Set(deprecatedPage1.map(e => e.id));
+    expect(deprecatedPage2.every(e => !page1Ids.has(e.id))).toBe(true);
+
+    const untestedPage1 = registry.untestedEntities('p', 2, 0);
+    const untestedPage2 = registry.untestedEntities('p', 2, 2);
+    expect(untestedPage1).toHaveLength(2);
+    expect(untestedPage2).toHaveLength(2);
+    expect(new Set([...untestedPage1, ...untestedPage2]).size).toBe(4);
+
+    expect(registry.highRiskEntities('p')).toHaveLength(4);
+    expect(registry.highRiskEntities('p', 2, 2)).toHaveLength(2);
+    // Small limit pages do not lose data across offsets.
+    expect(registry.deprecatedEntities('p', 1000, 0)).toHaveLength(6);
+  });
+
+  it('clamps helper page sizes and caps the entities loaded per issue id', () => {
+    const registry = createStore();
+    // HELPER_QUERY_MAX_LIMIT + 5 high-risk entities, 3 more links than
+    // ISSUE_LINK_MAX_ENTITIES: both answers must be capped, not full scans.
+    const total = HELPER_QUERY_MAX_LIMIT + 5;
+    for (let i = 0; i < total; i++) {
+      const entity = registry.registerEntity({
+        projectId: 'p', kind: 'function', name: `cap${i}`, filePath: `src/cap${i}.ts`, riskLevel: 'high',
+      });
+      if (i < ISSUE_LINK_MAX_ENTITIES + 3) registry.linkIssue(entity.id, 'INT-CAP');
+    }
+
+    expect(registry.highRiskEntities('p', 1_000_000, 0)).toHaveLength(HELPER_QUERY_MAX_LIMIT);
+    const linked = registry.getEntitiesByIssueId('INT-CAP');
+    expect(linked).toHaveLength(ISSUE_LINK_MAX_ENTITIES);
+    // Batch path keeps relation hydration intact.
+    expect(linked.every(e => e.projectId === 'p')).toBe(true);
+  });
+
+  it('batch-loads entities by issue id and preserves link coverage across projects', () => {
+    const registry = createStore();
+    const a1 = registry.registerEntity({ projectId: 'a', kind: 'function', name: 'a1', filePath: 'src/a1.ts' });
+    const a2 = registry.registerEntity({ projectId: 'a', kind: 'function', name: 'a2', filePath: 'src/a2.ts' });
+    const a3 = registry.registerEntity({ projectId: 'a', kind: 'function', name: 'a3', filePath: 'src/a3.ts' });
+    const b1 = registry.registerEntity({ projectId: 'b', kind: 'function', name: 'b1', filePath: 'src/b1.ts' });
+    for (const entity of [a1, a2, a3, b1]) {
+      registry.linkIssue(entity.id, 'INT-9');
+      registry.addTag(entity.id, 'layer', 'api');
+      registry.addWarning(entity.id, 'warning', 'correctness', 'w');
+    }
+
+    const linked = registry.getEntitiesByIssueId('INT-9', 'a');
+    expect(new Set(linked.map(e => e.id))).toEqual(new Set([a1.id, a2.id, a3.id]));
+    expect(linked.every(e => e.projectId === 'a')).toBe(true);
+    // Relations arrive through the batch loaders, not the per-row path.
+    expect(linked.every(e => e.tags.length === 1 && e.warnings.length === 1 && e.linkedIssueIds.includes('INT-9'))).toBe(true);
+
+    expect(registry.getEntitiesByIssueId('INT-9', 'b').map(e => e.id)).toEqual([b1.id]);
+    expect(registry.getEntitiesByIssueId('INT-404')).toEqual([]);
   });
 });

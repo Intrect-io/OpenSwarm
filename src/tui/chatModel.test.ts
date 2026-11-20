@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
-import { chatReducer, initialChatState, parseInput, matchSlash, movePaletteSelection, dedupeDoubledGrapheme, normalizeConfirm, isActivityNoise, historyToMessages, messagesToHistory, type ChatLine } from './chatModel.js';
+import {
+  chatReducer,
+  initialChatState,
+  parseInput,
+  matchSlash,
+  movePaletteSelection,
+  dedupeDoubledGrapheme,
+  normalizeConfirm,
+  isActivityNoise,
+  historyToMessages,
+  messagesToHistory,
+  boundChatHistory,
+  buildConversationPrompt,
+  MAX_CHAT_HISTORY,
+  MAX_CHAT_HISTORY_CHARS,
+  initChatState,
+  type ChatLine,
+} from './chatModel.js';
 
 describe('chatReducer (EPIC INT-1813 S4)', () => {
   it('appends user and system lines', () => {
@@ -28,6 +45,45 @@ describe('chatReducer (EPIC INT-1813 S4)', () => {
   it('clear resets to the initial state', () => {
     const s = chatReducer({ history: [{ role: 'user', content: 'x' }], streaming: 'y' }, { type: 'clear' });
     expect(s).toEqual(initialChatState);
+  });
+
+  it(`bounds retained history to ${MAX_CHAT_HISTORY} lines`, () => {
+    let s = initialChatState;
+    for (let i = 0; i < MAX_CHAT_HISTORY + 40; i++) {
+      s = chatReducer(s, { type: 'user', content: `msg-${i}` });
+    }
+    expect(s.history).toHaveLength(MAX_CHAT_HISTORY);
+    expect(s.history[0]?.content).toBe('msg-40');
+    expect(s.history.at(-1)?.content).toBe(`msg-${MAX_CHAT_HISTORY + 39}`);
+  });
+});
+
+describe('chat history budgets (long sessions)', () => {
+  it('boundChatHistory keeps the newest window', () => {
+    const lines = Array.from({ length: 250 }, (_, i) => ({ role: 'user' as const, content: `u${i}` }));
+    const bounded = boundChatHistory(lines);
+    expect(bounded).toHaveLength(MAX_CHAT_HISTORY);
+    expect(bounded[0]?.content).toBe('u50');
+    expect(bounded.at(-1)?.content).toBe('u249');
+  });
+
+  it('prompt construction and persisted messages obey the same budget', () => {
+    const history: ChatLine[] = Array.from({ length: 260 }, (_, i) =>
+      i % 2 === 0
+        ? { role: 'user', content: `user-${i}` }
+        : { role: 'assistant', content: `asst-${i}` },
+    );
+    const retained = boundChatHistory(history);
+    expect(retained).toHaveLength(MAX_CHAT_HISTORY);
+
+    const persisted = boundChatHistory(historyToMessages(retained), MAX_CHAT_HISTORY);
+    expect(persisted.length).toBeLessThanOrEqual(MAX_CHAT_HISTORY);
+    expect(persisted.every((m) => m.role === 'user' || m.role === 'assistant')).toBe(true);
+
+    const prompt = buildConversationPrompt(persisted);
+    expect(prompt).not.toContain('user-0');
+    expect(prompt).toContain(persisted.at(-1)!.content);
+    expect(prompt.split('\n\n').length).toBeLessThanOrEqual(MAX_CHAT_HISTORY + 2);
   });
 });
 
@@ -151,5 +207,124 @@ describe('movePaletteSelection (INT-1959)', () => {
   });
   it('returns 0 for an empty list', () => {
     expect(movePaletteSelection(0, 1, 0)).toBe(0);
+  });
+});
+
+describe('boundChatHistory keeps whole conversations (AGT-3494)', () => {
+  it('evicts transient system lines before any user/assistant turn', () => {
+    const turns: ChatLine[] = Array.from({ length: 20 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `t${i}`,
+    }));
+    const noise: ChatLine[] = Array.from({ length: 30 }, (_, i) => ({ role: 'system', content: `n${i}` }));
+    const bounded = boundChatHistory([...turns.slice(0, 10), ...noise, ...turns.slice(10)], 25);
+    expect(bounded).toHaveLength(25);
+    expect(historyToMessages(bounded)).toEqual(historyToMessages(turns));
+    // The newest system lines survive; the oldest went first.
+    expect(bounded.filter((l) => l.role === 'system').map((l) => l.content)).toEqual(['n25', 'n26', 'n27', 'n28', 'n29']);
+  });
+
+  it('cuts conversation on a turn boundary, never starting at an orphan reply', () => {
+    const history: ChatLine[] = [
+      { role: 'user', content: 'q1' }, { role: 'assistant', content: 'a1' },
+      { role: 'user', content: 'q2' }, { role: 'assistant', content: 'a2' },
+      { role: 'user', content: 'q3' }, { role: 'assistant', content: 'a3' },
+    ];
+    const bounded = boundChatHistory(history, 5);
+    expect(bounded.map((l) => l.content)).toEqual(['q2', 'a2', 'q3', 'a3']);
+  });
+
+  it('persisted messages keep every turn when only system lines push the cap', () => {
+    let s = initialChatState;
+    for (let i = 0; i < 50; i++) {
+      s = chatReducer(s, { type: 'user', content: `u${i}` });
+      s = chatReducer(s, { type: 'stream', chunk: `a${i}` });
+      s = chatReducer(s, { type: 'commit' });
+    }
+    for (let i = 0; i < MAX_CHAT_HISTORY; i++) s = chatReducer(s, { type: 'system', content: `notice ${i}` });
+    expect(s.history).toHaveLength(MAX_CHAT_HISTORY);
+    expect(historyToMessages(s.history)).toHaveLength(100);
+  });
+});
+
+describe('boundChatHistory at the cap (AGT-3494)', () => {
+  it('keeps a system notice that arrives when the history is full of conversation', () => {
+    let s = initialChatState;
+    for (let i = 0; i < MAX_CHAT_HISTORY / 2; i++) {
+      s = chatReducer(s, { type: 'user', content: `u${i}` });
+      s = chatReducer(s, { type: 'stream', chunk: `a${i}` });
+      s = chatReducer(s, { type: 'commit' });
+    }
+    s = chatReducer(s, { type: 'system', content: '✖ failed to save session: disk full' });
+    expect(s.history.at(-1)).toEqual({ role: 'system', content: '✖ failed to save session: disk full' });
+    expect(s.history.length).toBeLessThanOrEqual(MAX_CHAT_HISTORY);
+    expect(s.history[0]?.role).toBe('user');
+  });
+});
+
+describe('boundChatHistory character budget', () => {
+  const big = (role: ChatLine['role'], tag: string, size: number): ChatLine => ({ role, content: `${tag}:${'x'.repeat(size)}` });
+
+  it('drops oldest turns until the total fits, starting at a user line', () => {
+    const history = [big('user', 'q1', 40), big('assistant', 'a1', 40), big('user', 'q2', 40), big('assistant', 'a2', 40)];
+    const bounded = boundChatHistory(history, MAX_CHAT_HISTORY, 100);
+    expect(bounded.map((l) => l.content.split(':')[0])).toEqual(['q2', 'a2']);
+  });
+
+  it('drops system lines before conversation', () => {
+    const history = [big('user', 'q1', 30), big('system', 's', 60), big('assistant', 'a1', 30)];
+    const bounded = boundChatHistory(history, MAX_CHAT_HISTORY, 80);
+    expect(bounded.map((l) => l.role)).toEqual(['user', 'assistant']);
+  });
+
+  it('keeps every conversation line when dropping system lines is enough', () => {
+    const history = [big('assistant', 'goal-reply', 20), big('user', 'q', 20), big('assistant', 'a', 20), big('system', 's', 200), big('user', 'newest', 20)];
+    const bounded = boundChatHistory(history, MAX_CHAT_HISTORY, 150);
+    expect(bounded.map((l) => l.content.split(':')[0])).toEqual(['goal-reply', 'q', 'a', 'newest']);
+  });
+
+  it('never drops the newest message; clips it when it alone exceeds the budget', () => {
+    const newest = big('assistant', 'huge', 500);
+    const bounded = boundChatHistory([big('user', 'q', 10), newest], MAX_CHAT_HISTORY, 100);
+    expect(bounded).toHaveLength(1);
+    expect(bounded[0].role).toBe('assistant');
+    expect(bounded[0].content.startsWith('huge:')).toBe(true);
+    expect(bounded[0].content.length).toBeLessThanOrEqual(100);
+    expect(bounded[0].content).toContain('[clipped]');
+  });
+
+  it(`keeps reducer history within ${MAX_CHAT_HISTORY_CHARS} characters and counts trimmed messages`, () => {
+    let s = initialChatState;
+    for (let i = 0; i < 20; i++) {
+      s = chatReducer(s, { type: 'user', content: `q${i}` });
+      s = chatReducer(s, { type: 'stream', chunk: 'r'.repeat(50_000) });
+      s = chatReducer(s, { type: 'commit' });
+    }
+    const total = s.history.reduce((n, l) => n + l.content.length, 0);
+    expect(total).toBeLessThanOrEqual(MAX_CHAT_HISTORY_CHARS);
+    expect(s.history[0].role).toBe('user');
+    expect(s.history.length + (s.trimmed ?? 0)).toBe(40);
+    expect(s.dropped).toBe(s.trimmed);
+  });
+});
+
+describe('initChatState (resume trim)', () => {
+  it('bounds a resumed history and records how many messages were trimmed', () => {
+    const history: ChatLine[] = Array.from({ length: MAX_CHAT_HISTORY + 50 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `m${i}`,
+    }));
+    const s = initChatState(history);
+    expect(s.history).toHaveLength(MAX_CHAT_HISTORY);
+    expect(s.trimmed).toBe(50);
+    expect(s.dropped).toBe(50);
+    expect(s.history[0].content).toBe('m50');
+  });
+
+  it('records nothing for a resume within budget, and clear keeps only the dropped count', () => {
+    expect(initChatState([{ role: 'user', content: 'hi' }]).trimmed).toBeUndefined();
+    expect(initChatState(undefined)).toBe(initialChatState);
+    const cleared = chatReducer({ history: [], streaming: null, trimmed: 3, dropped: 3 }, { type: 'clear' });
+    expect(cleared).toEqual({ history: [], streaming: null, dropped: 3 });
   });
 });

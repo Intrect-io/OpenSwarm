@@ -42,6 +42,18 @@ export function sanitizeTerminalText(value: string): string {
 }
 
 /**
+ * Sanitize, collapse every line break and tab run to one space, and clamp to
+ * `maxLength` characters with an ellipsis. For fields the layout renders as a
+ * single row (stage names, model ids, decisions): an embedded newline there
+ * would push the rest of the timeline down and break the row budget.
+ */
+export function toSingleLineText(value: string, maxLength: number = MAX_RENDERED_LINE_LENGTH): string {
+  if (maxLength <= 0) return '';
+  const flat = sanitizeTerminalText(value).replace(/[\t\r\n\u2028\u2029]+/g, ' ');
+  return flat.length <= maxLength ? flat : `${flat.slice(0, Math.max(0, maxLength - 1))}\u2026`;
+}
+
+/**
  * Sanitize and bound each rendered line to MAX_RENDERED_LINE_LENGTH,
  * then cap the aggregate payload to MAX_TOTAL_RENDERED_CONTENT.
  * Strips control sequences first, then truncates each line / total body.

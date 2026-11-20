@@ -6,11 +6,20 @@
 // the existing fuzzy matcher. We do not exercise the fuzzy path here — it is
 // load-bearing legacy and lives untested for now.
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { mapLinearProject, scanLocalProjects, clearMappingCache } from './projectMapper.js';
+import {
+  mapLinearProject,
+  scanLocalProjects,
+  clearMappingCache,
+  invalidateProjectCache,
+  getAllMappings,
+  getMappingCacheSizes,
+  MAX_LOCAL_PROJECTS_CACHE_ENTRIES,
+  MAX_MAPPING_CACHE_ENTRIES,
+} from './projectMapper.js';
 import { REPO_METADATA_FILENAME } from './repoMetadata.js';
 
 const LINEAR_PROJECT_ID = 'c49a99e6-e420-463d-9c9a-ca5ee1fa51c2';
@@ -110,5 +119,98 @@ describe('mapLinearProject — explicit openswarm.json mapping', () => {
     } finally {
       rmSync(otherBase, { recursive: true, force: true });
     }
+  });
+});
+
+describe('projectMapper cache bounds', () => {
+  let base: string;
+
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), 'openswarm-mapper-bounds-'));
+    clearMappingCache();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    rmSync(base, { recursive: true, force: true });
+    clearMappingCache();
+  });
+
+  it('caps mapping entries across many distinct project IDs', async () => {
+    makeRepo(base, 'alpha-service');
+    for (let i = 0; i < MAX_MAPPING_CACHE_ENTRIES + 20; i++) {
+      await mapLinearProject(`project-${i}`, 'alpha-service', [base]);
+    }
+    expect(getMappingCacheSizes().mappings).toBe(MAX_MAPPING_CACHE_ENTRIES);
+  });
+
+  it('caps local-project scans across many distinct base-path sets', async () => {
+    const extra = MAX_LOCAL_PROJECTS_CACHE_ENTRIES + 5;
+    for (let i = 0; i < extra; i++) {
+      const dir = join(base, `root-${i}`);
+      mkdirSync(dir, { recursive: true });
+      await scanLocalProjects([dir]);
+    }
+    expect(getMappingCacheSizes().localProjects).toBe(MAX_LOCAL_PROJECTS_CACHE_ENTRIES);
+  });
+
+  it('evicts expired entries before live ones when the cap is reached', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    makeRepo(base, 'alpha-service');
+    // fill the cache with entries that will expire
+    for (let i = 0; i < MAX_MAPPING_CACHE_ENTRIES; i++) {
+      await mapLinearProject(`stale-${i}`, 'alpha-service', [base]);
+    }
+    expect(getMappingCacheSizes().mappings).toBe(MAX_MAPPING_CACHE_ENTRIES);
+    vi.setSystemTime(new Date('2026-01-01T00:10:00Z'));
+    await mapLinearProject('fresh-1', 'alpha-service', [base]);
+    // every stale entry went in one sweep; only the fresh one is left
+    expect(getMappingCacheSizes().mappings).toBe(1);
+  });
+
+  it('drops an expired mapping on lookup for the same project and base-path set', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    makeRepo(base, 'alpha-service');
+    await mapLinearProject('p', 'alpha-service', [base]);
+    const other = join(base, 'other-root');
+    mkdirSync(other, { recursive: true });
+    await mapLinearProject('p', 'alpha-service', [base, other]);
+    expect(getMappingCacheSizes().mappings).toBe(2);
+    vi.setSystemTime(new Date('2026-01-01T00:10:00Z'));
+    rmSync(join(base, 'alpha-service'), { recursive: true, force: true });
+    expect(await mapLinearProject('p', 'alpha-service', [base])).toBeNull();
+    expect(getMappingCacheSizes().mappings).toBe(1);
+  });
+
+  it('evicts the least recently used mapping, not the oldest inserted (LRU on hit)', async () => {
+    makeRepo(base, 'alpha-service');
+    for (let i = 0; i < MAX_MAPPING_CACHE_ENTRIES; i++) {
+      await mapLinearProject(`project-${i}`, 'alpha-service', [base]);
+    }
+    const before = getAllMappings().find((m) => m.linearProjectId === 'project-0')!.lastVerified;
+    // touch the oldest entry, then overflow the cap by one
+    await mapLinearProject('project-0', 'alpha-service', [base]);
+    await mapLinearProject('overflow', 'alpha-service', [base]);
+    const ids = getAllMappings().map((m) => m.linearProjectId);
+    expect(ids).toContain('project-0');
+    expect(ids).not.toContain('project-1');
+    expect(ids).toHaveLength(MAX_MAPPING_CACHE_ENTRIES);
+    // a hit does not refresh the TTL stamp
+    expect(getAllMappings().find((m) => m.linearProjectId === 'project-0')!.lastVerified).toBe(before);
+  });
+
+  it('invalidateProjectCache clears cached mappings along with the scans', async () => {
+    const first = makeRepo(base, 'alpha-service');
+    expect(await mapLinearProject('p', 'alpha-service', [base])).toBe(first);
+    expect(getMappingCacheSizes().mappings).toBe(1);
+    invalidateProjectCache();
+    expect(getMappingCacheSizes()).toEqual({ mappings: 0, localProjects: 0 });
+    rmSync(first, { recursive: true, force: true });
+    expect(await mapLinearProject('p', 'alpha-service', [base])).toBeNull();
   });
 });

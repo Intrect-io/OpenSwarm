@@ -16,15 +16,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { searchRepoMemoryText } from '../memory/repoKnowledge.js';
-import { z } from 'zod';
-
-const SearchArgumentsSchema = z.object({
-  query: z.string().trim().min(1).max(2_000),
-  limit: z.number().int().min(1).max(10).default(5),
-}).strict();
-
-/** Wall-clock ceiling for a single search — hung embeddings must not pin the MCP process. */
-const SEARCH_TIMEOUT_MS = 60_000;
+import { createMemorySearchHandler } from './memorySearch.js';
 
 // MCP stdio reserves stdout for protocol frames. Keep all console.log output on
 // stderr for this process lifetime instead of patching/restoring it per request.
@@ -52,37 +44,17 @@ async function main(): Promise<void> {
     { capabilities: { tools: {} } },
   );
 
+  // Deadline and concurrency cap live in memorySearch.ts (AGT-4875).
+  const searchMemory = createMemorySearchHandler({ search: searchRepoMemoryText, cwd: () => process.cwd() });
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [SEARCH_TOOL] }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     if (req.params.name !== 'search_memory') {
       return { content: [{ type: 'text', text: `Unknown tool: ${req.params.name}` }], isError: true };
     }
-    let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
-    try {
-      const args = SearchArgumentsSchema.parse(req.params.arguments ?? {});
-      const controller = new AbortController();
-      deadlineTimer = setTimeout(
-        () => controller.abort(new Error(`search_memory timed out after ${SEARCH_TIMEOUT_MS}ms`)),
-        SEARCH_TIMEOUT_MS,
-      );
-      const text = await Promise.race([
-        searchRepoMemoryText(process.cwd(), args.query, args.limit),
-        new Promise<string>((_, reject) => {
-          const onAbort = () => reject(controller.signal.reason ?? new Error('search_memory aborted'));
-          if (controller.signal.aborted) onAbort();
-          else controller.signal.addEventListener('abort', onAbort, { once: true });
-        }),
-      ]);
-      return { content: [{ type: 'text', text }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text', text: `search_memory failed: ${err instanceof Error ? err.message : String(err)}` }],
-        isError: true,
-      };
-    } finally {
-      if (deadlineTimer) clearTimeout(deadlineTimer);
-    }
+    // A cancelled request releases its slot like a deadline does.
+    return searchMemory(req.params.arguments, extra.signal);
   });
 
   await server.connect(new StdioServerTransport());

@@ -26,7 +26,8 @@ import { embeddingTextFor } from './embeddingConfig.js';
 type MemoryTable = NonNullable<ReturnType<typeof getTable>>;
 const MAX_MEMORY_REVISIONS = 20;
 
-/** Rows deleted per Lance commit while sweeping expired records. */
+/** Rows deleted per Lance commit while sweeping expired records, and rows read
+ *  per page by the bounded recent-conversation scan. */
 const PAGE_SIZE = 10_000;
 
 /**
@@ -716,6 +717,81 @@ export async function saveConversation(
   );
 }
 
+/** The slice of the LanceDB query builder selectNewestRows pages through. */
+interface PagedQuery {
+  where?: (predicate: string) => PagedQuery;
+  select?: (columns: string[]) => PagedQuery;
+  offset: (n: number) => { limit: (n: number) => { toArray: () => Promise<any[]> } };
+}
+
+export interface NewestRowsScan {
+  /** SQL filter pushed down to the store, so non-matching rows never cross into JS. */
+  where?: string;
+  /** Columns to read; leave out wide ones (the embedding `vector`) the caller never uses. */
+  columns?: string[];
+}
+
+/**
+ * Walk every row of `table` in offset pages and return the newest `limit`
+ * rows that satisfy `accept`, ordered newest first by `createdAt`.
+ *
+ * Unlike fetchAllTableRows this never materialises the table: only the current
+ * page and the `limit` best candidates are held at once. Ties on `createdAt`
+ * keep the row seen first, matching a stable sort over the full scan.
+ *
+ * Offset paging is not a snapshot: a concurrent write can shift rows so one is
+ * read on two pages. Rows are de-duplicated by `id` so it is counted once.
+ */
+export async function selectNewestRows(
+  table: { query: () => PagedQuery },
+  accept: (row: any) => boolean,
+  limit: number,
+  pageSize: number = PAGE_SIZE,
+  scan: NewestRowsScan = {},
+): Promise<any[]> {
+  const keep = Math.max(0, Math.floor(limit));
+  if (keep === 0) return [];
+  const size = Math.max(1, Math.floor(pageSize));
+  const best: any[] = [];  // newest first, length <= keep
+  const bestIds = new Set<unknown>();
+  const stamp = (row: any): number => row.createdAt || 0;
+  const pageQuery = (): PagedQuery => {
+    let query = table.query();
+    if (scan.where) query = query.where!(scan.where);
+    if (scan.columns) query = query.select!(scan.columns);
+    return query;
+  };
+
+  let offset = 0;
+  for (;;) {
+    const page = await pageQuery().offset(offset).limit(size).toArray();
+    if (page.length === 0) break;
+    for (const row of page) {
+      if (typeof row !== 'object' || row === null || !accept(row)) continue;
+      if (row.id !== undefined && bestIds.has(row.id)) continue;
+      const t = stamp(row);
+      if (best.length === keep && t <= stamp(best[best.length - 1])) continue;
+      // Insert after every row that is at least as new (stable for ties).
+      let at = best.length;
+      while (at > 0 && stamp(best[at - 1]) < t) at--;
+      best.splice(at, 0, row);
+      bestIds.add(row.id);
+      if (best.length > keep) bestIds.delete(best.pop().id);
+    }
+    offset += page.length;
+    if (page.length < size) break;
+  }
+  return best;
+}
+
+/** Columns getRecentConversations reads: everything except the embedding vector. */
+const RECENT_CONVERSATION_COLUMNS = [
+  'id', 'type', 'repo', 'title', 'content', 'metadata', 'trust',
+  'createdAt', 'importance', 'confidence', 'derivedFrom',
+];
+// Identifiers quoted as in memoryCore: Lance/DataFusion lowercases unquoted ones.
+const RECENT_CONVERSATION_FILTER = `"type" = 'journal' AND ("repo" = 'chat' OR "repo" = 'discord')`;
+
 /**
  * Get recent conversations (sorted by createdAt)
  * - Chronological lookup, not semantic search
@@ -731,12 +807,16 @@ export async function getRecentConversations(
     if (!table) return [];
 
     // Scalar scan is intentional: vector similarity must not decide which
-    // messages count as recent. The final ordering uses the source timestamp.
-    const results = await table.query().limit(100_000).toArray();
-
-    // Filter: journal + chat (channelId matching is loose for legacy data compat)
-    const filtered = results
-      .filter((r: any) => {
+    // messages count as recent. Every chat journal row is walked in offset
+    // pages — the previous single `.limit(100_000)` silently dropped every row
+    // past that boundary, so a large store could miss the newest messages —
+    // while only the newest `limit` matches are retained, keeping memory
+    // bounded. The type/repo filter and column list are pushed down so other
+    // rows and the embedding vectors are never read.
+    const filtered = await selectNewestRows(
+      table,
+      (r: any) => {
+        // Also pushed down as RECENT_CONVERSATION_FILTER; kept here as the contract.
         if (r.type !== 'journal' || (r.repo !== 'chat' && r.repo !== 'discord')) return false;  // Support legacy 'discord' repo
 
         // channelId matching: derivedFrom or metadata.issueRef
@@ -748,9 +828,11 @@ export async function getRecentConversations(
         if (meta.issueRef === channelId) return true;
 
         return false;
-      })
-      .sort((a: any, b: any) => (b.createdAt || 0) - (a.createdAt || 0))  // Newest first
-      .slice(0, limit);
+      },
+      limit,
+      PAGE_SIZE,
+      { where: RECENT_CONVERSATION_FILTER, columns: RECENT_CONVERSATION_COLUMNS },
+    );
 
     // Convert to MemorySearchResult format
     return filtered.map((r: any) => ({

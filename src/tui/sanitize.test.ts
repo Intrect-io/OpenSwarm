@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  toSingleLineText,
   clampAndSanitize,
   escapeHtml,
   formatMonitorError,
@@ -139,5 +140,22 @@ describe('formatMonitorError', () => {
 
   it('preserves short safe errors', () => {
     expect(formatMonitorError('connection refused')).toBe('connection refused');
+  });
+});
+
+describe('toSingleLineText', () => {
+  it('collapses line breaks and tabs into single spaces', () => {
+    expect(toSingleLineText('a\nb\r\nc\t\td e')).toBe('a b c d e');
+  });
+
+  it('strips escapes before flattening', () => {
+    expect(toSingleLineText('\u001b[31mred\u001b[0m\nnext')).toBe('red next');
+  });
+
+  it('clamps to the length bound with an ellipsis', () => {
+    const out = toSingleLineText('x'.repeat(50), 10);
+    expect(out).toHaveLength(10);
+    expect(out.endsWith('…')).toBe(true);
+    expect(toSingleLineText('abc', 0)).toBe('');
   });
 });

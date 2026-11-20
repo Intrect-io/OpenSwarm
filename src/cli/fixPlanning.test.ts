@@ -13,7 +13,7 @@ vi.mock('../memory/repoKnowledge.js', () => ({
   repoKey: (path: string) => path.replace(/\/worktree\/[^/]+\/?$/, ''),
 }));
 
-const { buildFixRepositoryContext, pathWithinScope, planFixUnits } = await import('./fixPlanning.js');
+const { buildFixRepositoryContext, pathWithinScope, planFixUnits, workerContextForFixUnit } = await import('./fixPlanning.js');
 import type { FixRepositoryContext } from './fixPlanning.js';
 
 const roots: string[] = [];
@@ -166,5 +166,52 @@ describe('planFixUnits', () => {
     expect(pathWithinScope('package.json', unit.allowedPaths)).toBe(true);
     expect(pathWithinScope('package-lock.json', unit.allowedPaths)).toBe(true);
     expect(pathWithinScope('unrelated.js', unit.allowedPaths)).toBe(false);
+  });
+});
+
+describe('incomplete dependency graph', () => {
+  it('carries graph.incomplete from the scan into the repository context', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'openswarm-fix-context-incomplete-'));
+    roots.push(root);
+    const { scanProject } = await import('../knowledge/index.js');
+    const node = { id: 'src/a.ts', type: 'module' };
+    vi.mocked(scanProject).mockResolvedValueOnce({
+      incomplete: true,
+      getAllNodes: () => [node],
+      getImports: () => [],
+      getDependents: () => [],
+      getTests: () => [],
+    } as never);
+
+    const result = await buildFixRepositoryContext(root, undefined, 'fix');
+
+    expect(result.dependencyGraphAvailable).toBe(true);
+    expect(result.dependencyGraphIncomplete).toBe(true);
+    expect(result.dependencyMap['src/a.ts']).toEqual({ imports: [], dependents: [], tests: [] });
+  });
+
+  it('does not treat empty dependents as authoritative when the graph is incomplete', () => {
+    const targets = [
+      { area: { label: 'a', dir: 'src/a', files: ['src/a/x.ts'] }, review: { decision: 'revise' as const, feedback: '' } },
+      { area: { label: 'b', dir: 'src/b', files: ['src/b/y.ts'] }, review: { decision: 'revise' as const, feedback: '' } },
+    ];
+    const dependencyMap = {
+      'src/a/x.ts': { imports: [], dependents: [], tests: [] },
+      'src/b/y.ts': { imports: [], dependents: [], tests: [] },
+    };
+    // Complete graph: empty dependents prove independence, so two units.
+    expect(planFixUnits(targets, context({ dependencyMap }))).toHaveLength(2);
+
+    // Incomplete graph: a caller could sit in an unscanned file, so independence
+    // is unknown and planning falls back to one repository-wide unit.
+    const ctx = context({ dependencyMap, dependencyGraphIncomplete: true });
+    const units = planFixUnits(targets, ctx);
+    expect(units).toHaveLength(1);
+    expect(units[0].dependencyGraphBacked).toBe(false);
+    expect(units[0].allowedPaths).toEqual(['.']);
+
+    const worker = workerContextForFixUnit(units[0], ctx);
+    expect(worker.repository.dependencyGraphAvailable).toBe(false);
+    expect(worker.repository.dependencyGraphIncomplete).toBe(true);
   });
 });

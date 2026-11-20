@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { clampDiscordText, getChatHistory, questionCorrelationIdFrom, saveChatHistory, startTypingIndicator } from './discordCore.js';
+import { fitHistoryToBudget, HISTORY_CONTEXT_CHAR_BUDGET } from './historyBudget.js';
+import { appendHistoryEntry, buildHistoryContext, channelHistoryMap, clampDiscordText, getChatHistory, questionCorrelationIdFrom, saveChatHistory, startTypingIndicator } from './discordCore.js';
 import { enableHumanSurfaceReadOnly, resetHumanSurfaceReadOnlyForTests } from '../mcp/humanSurfacePolicy.js';
 
 afterEach(() => {
@@ -97,5 +98,54 @@ describe('questionCorrelationIdFrom (AGT-4070)', () => {
     // false, so without the explicit guard an author-less message would be
     // read as ours and answer a question on nobody's authority.
     expect(questionCorrelationIdFrom({ author: null, content: '!answer hq-abc123 yes' }, undefined)).toBeUndefined();
+  });
+});
+
+describe('Discord chat history prompt budget', () => {
+  afterEach(() => channelHistoryMap.clear());
+
+  it('keeps the newest entries within the budget', () => {
+    const out = fitHistoryToBudget(['old-'.padEnd(40, 'a'), 'mid-'.padEnd(40, 'b'), 'new-'.padEnd(40, 'c')], 90);
+    expect(out.length).toBeLessThanOrEqual(90);
+    expect(out).toContain('new-');
+    expect(out).toContain('mid-');
+    expect(out).not.toContain('old-');
+  });
+
+  it('clips a single oversized newest entry instead of dropping it', () => {
+    const out = fitHistoryToBudget(['x'.repeat(500)], 100);
+    expect(out.length).toBeLessThanOrEqual(100);
+    expect(out).toContain('[clipped]');
+    expect(fitHistoryToBudget(['abc'], 0)).toBe('');
+  });
+
+  it('bounds the assembled prompt history even with 30 huge replies', () => {
+    const channel = 'budget-channel';
+    for (let i = 0; i < 31; i++) {
+      appendHistoryEntry(channel, { sender: 'u', senderId: '1', body: `q${i}`, response: 'r'.repeat(10_000), timestamp: i * 1000, messageId: `m${i}` });
+    }
+    const current = 'CURRENT QUESTION';
+    const out = buildHistoryContext(channel, current);
+    const overhead = '[Chat messages since your last reply - for context]\n'.length + '\n\n[Current message]\n'.length + current.length;
+    expect(out.length).toBeLessThanOrEqual(HISTORY_CONTEXT_CHAR_BUDGET + overhead);
+    expect(out.endsWith(current)).toBe(true);
+    // newest past entry survives
+    expect(out).toContain('u: q29');
+  });
+
+  const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  it('clips an oversized entry on a grapheme boundary, never inside an emoji', () => {
+    // budget 100 leaves 89 units before the ' …[clipped]' suffix
+    const pair = fitHistoryToBudget([`${'a'.repeat(88)}😀${'z'.repeat(50)}`], 100);
+    expect(pair).not.toMatch(LONE_SURROGATE);
+    expect(pair.length).toBeLessThanOrEqual(100);
+    expect(pair.startsWith(`${'a'.repeat(88)} …[clipped]`)).toBe(true);
+
+    const family = '👨‍👩‍👧'; // 8 UTF-16 units, one grapheme
+    const zwj = fitHistoryToBudget([`${'a'.repeat(85)}${family}${'z'.repeat(50)}`], 100);
+    expect(zwj).not.toMatch(LONE_SURROGATE);
+    expect(zwj).not.toContain('\u200d');
+    expect(zwj.startsWith(`${'a'.repeat(85)} …[clipped]`)).toBe(true);
   });
 });

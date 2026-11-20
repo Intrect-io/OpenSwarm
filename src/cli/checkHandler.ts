@@ -7,12 +7,23 @@
 import { daemonPort } from '../core/daemonPort.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { getRegistryStore, closeRegistryStore, LIST_ENTITIES_MAX_LIMIT } from '../registry/sqliteStore.js';
+import { getRegistryStore, closeRegistryStore, HELPER_QUERY_MAX_LIMIT, LIST_ENTITIES_MAX_LIMIT } from '../registry/sqliteStore.js';
 import { scanRepository } from '../registry/entityScanner.js';
 import type {
   CodeEntity, EntityStatus, RiskLevel, WarningSeverity, WarningCategory,
 } from '../registry/schema.js';
 import { c, status } from '../support/colors.js';
+
+/**
+ * Heading count for a capped helper listing. The helper queries stop at
+ * HELPER_QUERY_MAX_LIMIT rows, so when a listing hits the cap the real total is
+ * read from the stats counts (same predicates) and shown alongside.
+ */
+export function cappedCountLabel(shown: number, total: () => number): string {
+  if (shown < HELPER_QUERY_MAX_LIMIT) return `(${shown})`;
+  const real = Math.max(shown, total());
+  return real > shown ? `(showing ${shown} of ${real}, capped at ${HELPER_QUERY_MAX_LIMIT})` : `(${shown})`;
+}
 
 /** package.json name → Cargo.toml → go.mod → 폴더명 순으로 프로젝트 ID 추론 */
 function resolveProjectId(projectPath: string): string {
@@ -409,8 +420,10 @@ export async function handleCheck(
 
     // --deprecated
     if (opts.deprecated) {
-      const entities = store.deprecatedEntities(opts.project ?? resolveProjectId(process.cwd()));
-      console.log(`\n${c.bold('Deprecated Entities')} (${entities.length})\n`);
+      const projectId = opts.project ?? resolveProjectId(process.cwd());
+      const entities = store.deprecatedEntities(projectId);
+      const label = cappedCountLabel(entities.length, () => store.getStats(projectId).deprecated);
+      console.log(`\n${c.bold('Deprecated Entities')} ${label}\n`);
       if (entities.length === 0) {
         console.log(`  ${c.green('None')}\n`);
       } else {
@@ -422,8 +435,10 @@ export async function handleCheck(
 
     // --untested
     if (opts.untested) {
-      const entities = store.untestedEntities(opts.project ?? resolveProjectId(process.cwd()));
-      console.log(`\n${c.bold('Untested Active Entities')} (${entities.length})\n`);
+      const projectId = opts.project ?? resolveProjectId(process.cwd());
+      const entities = store.untestedEntities(projectId);
+      const label = cappedCountLabel(entities.length, () => store.getStats(projectId).untested);
+      console.log(`\n${c.bold('Untested Active Entities')} ${label}\n`);
       if (entities.length === 0) {
         console.log(`  ${c.green('All tested')}\n`);
       } else {
@@ -435,8 +450,10 @@ export async function handleCheck(
 
     // --high-risk
     if (opts.highRisk) {
-      const entities = store.highRiskEntities(opts.project ?? resolveProjectId(process.cwd()));
-      console.log(`\n${c.bold('High Risk Entities')} (${entities.length})\n`);
+      const projectId = opts.project ?? resolveProjectId(process.cwd());
+      const entities = store.highRiskEntities(projectId);
+      const label = cappedCountLabel(entities.length, () => store.getStats(projectId).highRisk);
+      console.log(`\n${c.bold('High Risk Entities')} ${label}\n`);
       if (entities.length === 0) {
         console.log(`  ${c.green('None')}\n`);
       } else {

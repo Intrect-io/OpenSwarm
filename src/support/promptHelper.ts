@@ -48,6 +48,14 @@ export interface Prompter {
   close(): void;
 }
 
+/**
+ * Most stdin lines held before a question asks for them.
+ *
+ * Every question takes one line, so a scripted answer file is far shorter than
+ * this. More than this many unasked lines is a runaway pipe, not answers.
+ */
+export const MAX_LINE_QUEUE = 100;
+
 export function createPrompter(input: Readable = processStdin, output: Writable = processStdout): Prompter {
   // Drain readline's `line` events into a queue and hand them out one at a time.
   // rl.question (both callback and promises forms) drops lines when a pipe
@@ -57,18 +65,31 @@ export function createPrompter(input: Readable = processStdin, output: Writable 
   const lineQueue: string[] = [];
   const waiters: Array<{ resolve: (l: string) => void; reject: (e: Error) => void }> = [];
   let closed = false;
+  // Set when the queue overflows. Dropping lines to stay under the bound would
+  // shift every later answer onto the wrong question, so the prompter fails
+  // instead: queued lines are discarded and every further question rejects.
+  let overflowed = false;
+  const overflowError = () =>
+    new Error(`stdin sent more than ${MAX_LINE_QUEUE} lines before they were asked for; refusing to guess which answer goes where`);
 
   rl.on('line', (line: string) => {
+    if (overflowed) return;
     const w = waiters.shift();
     if (w) w.resolve(line);
-    else lineQueue.push(line);
+    else if (lineQueue.length >= MAX_LINE_QUEUE) {
+      overflowed = true;
+      lineQueue.length = 0;
+      rl.close();
+    } else lineQueue.push(line);
   });
   rl.on('close', () => {
     closed = true;
-    while (waiters.length) waiters.shift()!.reject(new Error('input stream closed before all answers were given'));
+    const err = () => (overflowed ? overflowError() : new Error('input stream closed before all answers were given'));
+    while (waiters.length) waiters.shift()!.reject(err());
   });
 
   const nextLine = (): Promise<string> => {
+    if (overflowed) return Promise.reject(overflowError());
     if (lineQueue.length) return Promise.resolve(lineQueue.shift()!);
     if (closed) return Promise.reject(new Error('input stream closed before all answers were given'));
     return new Promise((resolve, reject) => waiters.push({ resolve, reject }));

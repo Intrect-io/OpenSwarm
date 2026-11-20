@@ -13,6 +13,19 @@ vi.mock('./chatBackend.js', () => ({
   }),
 }));
 
+// Pass-through spy so the coalescing test can count real writes. (AGT-3494)
+const atomicWrites = vi.hoisted(() => ({ count: 0 }));
+vi.mock('./atomicFile.js', async () => {
+  const actual = await vi.importActual<typeof import('./atomicFile.js')>('./atomicFile.js');
+  return {
+    ...actual,
+    atomicWriteFileSync: (...args: Parameters<typeof actual.atomicWriteFileSync>) => {
+      atomicWrites.count += 1;
+      return actual.atomicWriteFileSync(...args);
+    },
+  };
+});
+
 import {
   generateSessionId,
   inferProvider,
@@ -21,6 +34,8 @@ import {
   listSessions,
   latestSession,
   callChatModel,
+  appendSessionArchive,
+  sessionArchivePath,
   type Session,
 } from './chatSession.js';
 
@@ -102,6 +117,33 @@ describe('saveSession / loadSession (injectable dir)', () => {
     expect(loaded!.totalTokens).toBe(42);
   });
 
+  it('collapses a burst of saves into the newest snapshot without losing the final state (AGT-3494)', async () => {
+    const snap = (n: number) => mk({ messages: Array.from({ length: n }, (_, i) => ({ role: 'user' as const, content: `m${i}` })) });
+    const before = atomicWrites.count;
+    await Promise.all([1, 2, 3, 4, 5].map((n) => saveSession(snap(n), dir)));
+    const loaded = await loadSession('20260626-1200', dir);
+    expect(loaded!.messages).toHaveLength(5);
+    expect(atomicWrites.count - before).toBeLessThanOrEqual(2);
+  });
+
+  it('never leaves an older snapshot on disk after a newer save resolves', async () => {
+    const first = saveSession(mk({ messages: [{ role: 'user', content: 'old' }] }), dir);
+    const second = saveSession(mk({ messages: [{ role: 'user', content: 'new' }] }), dir);
+    await second;
+    expect((await loadSession('20260626-1200', dir))!.messages[0].content).toBe('new');
+    await first;
+    expect((await loadSession('20260626-1200', dir))!.messages[0].content).toBe('new');
+  });
+
+  it('recovers after a failed directory step instead of reusing its rejection', async () => {
+    const blocker = path.join(dir, 'not-a-dir');
+    await fs.writeFile(blocker, 'x');
+    await expect(saveSession(mk(), path.join(blocker, 'sub'))).rejects.toThrow();
+    await expect(saveSession(mk(), path.join(blocker, 'sub'))).rejects.toThrow();
+    await saveSession(mk(), dir);
+    expect(await loadSession('20260626-1200', dir)).not.toBeNull();
+  });
+
   it('returns null for a missing session', async () => {
     expect(await loadSession('does-not-exist', dir)).toBeNull();
   });
@@ -123,6 +165,28 @@ describe('saveSession / loadSession (injectable dir)', () => {
     expect(loaded!.provider).toBe('codex'); // inferred from the gpt- model
     expect(loaded!.model).toBe('default-codex'); // provider changed → default model
     expect(loaded!.totalCost).toBe(0); // missing fields defaulted
+  });
+});
+
+describe('appendSessionArchive (resume trim archive)', () => {
+  let dir: string;
+  beforeEach(async () => { dir = await fs.mkdtemp(path.join(os.tmpdir(), 'chatarch-')); });
+  afterEach(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+
+  it('appends messages as JSON lines next to the session file and stays out of listSessions', async () => {
+    appendSessionArchive('s1', [{ role: 'user', content: 'q1' }, { role: 'assistant', content: 'a1' }], dir);
+    appendSessionArchive('s1', [{ role: 'user', content: 'q2' }], dir);
+    appendSessionArchive('s1', [], dir);
+    const file = sessionArchivePath('s1', dir);
+    expect(file).toBe(path.join(dir, 's1.archive.jsonl'));
+    const lines = (await fs.readFile(file, 'utf-8')).trim().split('\n').map((l) => JSON.parse(l));
+    expect(lines.map((m) => m.content)).toEqual(['q1', 'a1', 'q2']);
+    expect(await listSessions(dir)).toEqual([]);
+    expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+  });
+
+  it('rejects an id that would escape the chat directory', () => {
+    expect(() => appendSessionArchive('../evil', [{ role: 'user', content: 'x' }], dir)).toThrow();
   });
 });
 

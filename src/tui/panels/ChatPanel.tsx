@@ -10,36 +10,31 @@ import { Box } from 'ink';
 import { useReducer, useState, useCallback, useEffect, useRef } from 'react';
 import {
   chatReducer,
-  initialChatState,
+  initChatState,
   parseInput,
   matchSlash,
   movePaletteSelection,
   normalizeConfirm,
   isActivityNoise,
   historyToMessages,
+  boundChatHistory,
+  buildConversationPrompt,
+  MAX_CHAT_HISTORY,
   SLASH_COMMANDS,
   type ChatLine,
 } from '../chatModel.js';
 import { ChatLog } from '../components/ChatLog.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { ChatInput } from '../components/ChatInput.js';
 import { CommandPalette } from '../components/CommandPalette.js';
 import { SelectList } from '../components/SelectList.js';
 import { listAdapterNames } from '../../adapters/index.js';
-import { callChatModel, loadDefaultProvider, saveSession, generateSessionId, type Message } from '../../support/chatSession.js';
+import { callChatModel, loadDefaultProvider, saveSession, generateSessionId, appendSessionArchive } from '../../support/chatSession.js';
 import { getDefaultChatModel, listChatModels } from '../../support/chatBackend.js';
 import { runPlanCommand, type PlanIO } from '../../support/planCommand.js';
 import { runGoalCommand, buildGoalPursuitPrompt, GOAL_PURSUIT_MAX_TURNS } from '../../support/goalCommand.js';
 import type { AdapterName } from '../../adapters/types.js';
 import { track } from '../../telemetry/telemetry.js';
-
-function buildConversationPrompt(messages: Message[]): string {
-  if (messages.length <= 1) return messages[0]?.content ?? '';
-  return [
-    'Use the following conversation history as context. Continue by answering the latest user message.',
-    '',
-    messages.map((m) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${m.content}`).join('\n\n'),
-  ].join('\n');
-}
 
 export interface ChatPanelProps {
   active: boolean;
@@ -58,12 +53,29 @@ export interface ChatPanelProps {
 /** Process-scoped: the signal is "did this session engage at all", not a counter. */
 let engagementReported = false;
 
+/** Rows outside the chat log: the input box (3) plus the app's tab bar and status line. */
+export const CHAT_CHROME_ROWS = 6;
+
+/**
+ * Rows the menu under the input box renders: a /provider|/model SelectList
+ * (margin + title + items + hint) when a selector is open, otherwise the
+ * slash CommandPalette (margin + one row per match) when it has matches.
+ */
+export function chatMenuRows(selectorItems: number | null, paletteMatches: number): number {
+  if (selectorItems !== null) return selectorItems > 0 ? selectorItems + 3 : 0;
+  return paletteMatches > 0 ? paletteMatches + 1 : 0;
+}
+
+/** Row budget for the chat log: the terminal minus chrome and the open menu, floored at 8. */
+export function chatLogRowBudget(terminalRows: number, menuRows: number): number {
+  return Math.max(8, terminalRows - CHAT_CHROME_ROWS - menuRows);
+}
+
 export function ChatPanel({ active, provider: providerProp, model: modelProp, projectPath, sessionId: sessionIdProp, initialHistory, goal: goalProp }: ChatPanelProps) {
-  const [state, dispatch] = useReducer(
-    chatReducer,
-    undefined,
-    () => (initialHistory && initialHistory.length > 0 ? { history: initialHistory, streaming: null } : initialChatState),
-  );
+  const { rows: terminalRows } = useTerminalSize();
+  // A resumed history over the budget is trimmed here; the trim is counted so
+  // the log shows one notice and the save path can archive what the file loses.
+  const [state, dispatch] = useReducer(chatReducer, initialHistory, initChatState);
   const [input, setInput] = useState('');
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -80,6 +92,13 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
   const modelSelectorRequestRef = useRef(0);
   const resumedGoalRef = useRef(false);
   const persistenceErrorRef = useRef<string | null>(null);
+  // Saving is armed by the first user/assistant message or a user goal change,
+  // never by the resume itself: rewriting a resumed file with its trimmed view
+  // would delete its older turns. (AGT-3494 review)
+  const persistArmedRef = useRef(false);
+  // The resumed file's messages, and how many of its oldest are already archived.
+  const resumedMessagesRef = useRef(historyToMessages(initialHistory ?? []));
+  const archivedCountRef = useRef(0);
   // When set, the next submitted line is routed here (a /plan confirm or edit)
   // instead of being treated as chat — the Ink analogue of blessed pendingInput.
   const [pending, setPending] = useState<{ resolve: (value: string) => void } | null>(null);
@@ -109,16 +128,41 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
     modelSelectorRequestRef.current += 1;
   }, [provider]);
 
-  // Persist the conversation on every change so it survives exit and can be
-  // reopened with `openswarm resume`. System/UI lines are dropped by
-  // historyToMessages; an active goal rides along so resume can restart it. (INT-2014)
+  // Persist the conversation so it survives exit and can be reopened with
+  // `openswarm resume`. System/UI lines are dropped by historyToMessages; an
+  // active goal rides along so resume can restart it. (INT-2014)
+  // Retained history is already capped at MAX_CHAT_HISTORY; persist the same budget.
   useEffect(() => {
+    if (!persistArmedRef.current) return;
     if (state.history.length === 0) return;
+    const reportError = (e: unknown, prefix: string) => {
+      if (!mountedRef.current) return;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (persistenceErrorRef.current === msg) return;
+      persistenceErrorRef.current = msg;
+      dispatch({ type: 'system', content: `✖ ${prefix}: ${msg}` });
+    };
+    // The oldest `dropped` messages are no longer in memory. Those that came
+    // from the resumed file would vanish from disk with this save, so append
+    // them to `<id>.archive.jsonl` first. Synchronous, so saves stay in call
+    // order; on failure skip the save and keep the file as it is.
+    const resumed = resumedMessagesRef.current;
+    const goneFromFile = Math.min(resumed.length, state.dropped ?? 0);
+    if (goneFromFile > archivedCountRef.current) {
+      try {
+        appendSessionArchive(sessionIdRef.current, resumed.slice(archivedCountRef.current, goneFromFile));
+        archivedCountRef.current = goneFromFile;
+      } catch (e) {
+        reportError(e, 'failed to archive older messages; session not saved');
+        return;
+      }
+    }
+    const messages = boundChatHistory(historyToMessages(state.history), MAX_CHAT_HISTORY);
     void saveSession({
       id: sessionIdRef.current,
       provider,
       model,
-      messages: historyToMessages(state.history),
+      messages,
       totalCost: 0,
       totalTokens: 0,
       createdAt: createdAtRef.current,
@@ -129,14 +173,8 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
         if (!mountedRef.current) return;
         persistenceErrorRef.current = null;
       })
-      .catch((e) => {
-        if (!mountedRef.current) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        if (persistenceErrorRef.current === msg) return;
-        persistenceErrorRef.current = msg;
-        dispatch({ type: 'system', content: `✖ failed to save session: ${msg}` });
-      });
-  }, [state.history, provider, model, goalActive]);
+      .catch((e) => reportError(e, 'failed to save session'));
+  }, [state.history, state.dropped, provider, model, goalActive]);
 
   const ask = useCallback(
     (prompt: string) =>
@@ -182,6 +220,8 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
   // /goal pursuit (the latter raises maxTurns). (INT-1821)
   const streamChat = useCallback(
     async (prompt: string, maxTurns?: number) => {
+      // The reply becomes an assistant message: from here on, saves are wanted.
+      persistArmedRef.current = true;
       dispatch({ type: 'stream', chunk: '' });
       setActivity([]);
       setBusy(true);
@@ -245,6 +285,8 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
       } finally {
         if (mountedRef.current) {
           goalRef.current = undefined;
+          // The finished goal must leave the session file, or resume restarts it.
+          persistArmedRef.current = true;
           setBusy(false);
           // Pursuit turn finished — unblock input and remove the completed goal
           // from the persisted session.
@@ -296,6 +338,8 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
         case '/goal': {
           // /goal clear stops the active pursuit — the only way to interrupt it.
           // It aborts the in-flight turn and releases the session goal. (INT-2014)
+          // Either way the persisted goal changes, so saving is armed.
+          persistArmedRef.current = true;
           if (args.trim() === 'clear') {
             abortRef.current?.abort();
             goalRef.current = undefined;
@@ -405,8 +449,13 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
         runCommand(parsed.name, parsed.args);
         return;
       }
+      persistArmedRef.current = true;
       dispatch({ type: 'user', content: parsed.text });
-      await streamChat(buildConversationPrompt([...historyToMessages(state.history), { role: 'user', content: parsed.text }]));
+      const promptMessages = boundChatHistory(
+        [...historyToMessages(state.history), { role: 'user' as const, content: parsed.text }],
+        MAX_CHAT_HISTORY,
+      );
+      await streamChat(buildConversationPrompt(promptMessages));
     },
     [pending, runCommand, streamChat, goalActive, busy, state.history],
   );
@@ -440,7 +489,15 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
 
   return (
     <Box flexDirection="column">
-      <ChatLog history={state.history} streaming={state.streaming} activity={activity} busy={busy && pending === null} />
+      <ChatLog
+        history={state.history}
+        streaming={state.streaming}
+        trimmedCount={state.trimmed ?? 0}
+        activity={activity}
+        busy={busy && pending === null}
+        // Leave room for the input box, the menu under it and the live reply. (AGT-3494)
+        maxRows={chatLogRowBudget(terminalRows, chatMenuRows(selectorOpen ? selector!.items.length : null, matches.length))}
+      />
       <ChatInput
         value={input}
         active={inputActive}

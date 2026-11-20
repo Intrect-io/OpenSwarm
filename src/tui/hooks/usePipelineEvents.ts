@@ -24,6 +24,20 @@ export interface PipelineEventsResult extends PipelineState {
 // screen every commit repaints the whole frame, so dispatching per event made
 // the Pipeline tab flicker on every log/stage event. (INT-2407)
 const DEFAULT_FLUSH_MS = 90;
+/** Longest window that still feels live; beyond it the panel would look frozen. */
+export const MAX_FLUSH_MS = 1_000;
+
+/**
+ * Normalize a flush interval before it reaches the timer. NaN, Infinity,
+ * zero and negatives would either flush synchronously (`<= 0` disables
+ * coalescing in createCoalescer, bringing the per-event flicker back) or hand
+ * setTimeout a value it clamps to ~1 ms, so all of them fall back to the
+ * default. Finite values are rounded and capped at MAX_FLUSH_MS.
+ */
+export function normalizeFlushMs(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return DEFAULT_FLUSH_MS;
+  return Math.min(MAX_FLUSH_MS, Math.max(1, Math.round(value)));
+}
 
 type PipelineAction =
   | Parameters<typeof reducePipelineEvent>[1]
@@ -42,6 +56,7 @@ export function usePipelineEvents(
 ): PipelineEventsResult {
   const [state, dispatch] = useReducer(pipelineReducer, initialPipelineState);
   const [connected, setConnected] = useState(false);
+  const delayMs = normalizeFlushMs(flushMs);
 
   useEffect(() => {
     dispatch({ type: 'reset' });
@@ -51,7 +66,7 @@ export function usePipelineEvents(
     // Buffer events and flush a single batched dispatch per window; connection
     // status stays immediate (not coalesced) so the live indicator is snappy.
     const coalescer = createCoalescer<HubEvent>({
-      delayMs: flushMs,
+      delayMs,
       onFlush: (events) => {
         if (!disposed) dispatch({ type: 'batch', events });
       },
@@ -66,7 +81,7 @@ export function usePipelineEvents(
       coalescer.cancel();
       handle.close();
     };
-  }, [port, flushMs]);
+  }, [port, delayMs]);
 
   return { ...state, connected };
 }

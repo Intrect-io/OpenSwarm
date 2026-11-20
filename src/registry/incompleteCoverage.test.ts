@@ -24,7 +24,7 @@ describe('incomplete scan coverage', () => {
       LIST_ENTITIES_MAX_LIMIT: 2,
       getRegistryStore: () => ({
         inTransaction: (fn: () => unknown) => fn(),
-        listEntities: () => ({ entities: [], total: 0 }),
+        listEntitySyncPage: () => [],
         registerEntity: (input: { name: string }) => {
           store.warnings.push(input.name);
         },
@@ -55,7 +55,7 @@ describe('incomplete scan coverage', () => {
       LIST_ENTITIES_MAX_LIMIT: 2,
       getRegistryStore: () => ({
         inTransaction: (fn: () => unknown) => fn(),
-        listEntities: () => ({ entities: [], total: 0 }),
+        listEntitySyncPage: () => [],
         registerEntity: () => null,
         updateEntity: () => null,
         changeEntityStatus: () => null,

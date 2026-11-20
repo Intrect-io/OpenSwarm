@@ -41,6 +41,12 @@ const MCP_OPERATION_TIMEOUT_MS = 30_000;
 const MAX_INPUT_SCHEMA_BYTES = 16_384;
 const MAX_INPUT_SCHEMA_PROPERTIES = 64;
 const EMPTY_INPUT_SCHEMA: Record<string, unknown> = { type: 'object', properties: {} };
+/**
+ * Bound how many remote tools discovery may cache (AGT-4873). One server that
+ * lists thousands of tools would otherwise be cached and exposed whole.
+ */
+export const MAX_DISCOVERED_TOOLS_PER_SERVER = 256;
+export const MAX_DISCOVERED_TOOLS = 1024;
 
 interface ServerConfig {
   transport: 'stdio' | 'http' | 'sse';
@@ -430,23 +436,38 @@ interface DiscoveryResult {
  * earlier, for as long as rediscovery took.
  */
 async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise<DiscoveryResult> {
-  const defs: ToolDefinition[] = [];
-  const routing: Record<string, McpToolRoute> = {};
   const unreachable: string[] = [];
   const entries = Object.entries(registry);
+  // Per-server results kept in registry order so the global cap below trims
+  // deterministically, whichever server answers first.
+  const perServer: Array<Array<{ definition: ToolDefinition; route: McpToolRoute }>> = entries.map(() => []);
   let next = 0;
   const worker = async (): Promise<void> => {
     while (next < entries.length) {
-      const [server, cfg] = entries[next++];
+      const index = next++;
+      const [server, cfg] = entries[index];
       try {
         const listed = (await withClient(cfg, (c) => c.listTools())) as { tools?: McpTool[] };
-        for (const tool of listed.tools ?? []) {
-          if (typeof tool.name !== 'string') continue;
+        const seen = new Set<string>();
+        let duplicates = 0;
+        let overCap = 0;
+        for (const tool of Array.isArray(listed.tools) ? listed.tools : []) {
+          if (typeof tool?.name !== 'string') continue;
           const qualified = `${server}${SEP}${tool.name}`;
           if (!isMcpTool(qualified)) {
             console.warn(`[MCP] server "${server}" returned invalid tool name "${tool.name}" — skipped`);
             continue;
           }
+          // Same name twice: keep the first, drop the rest.
+          if (seen.has(qualified)) {
+            duplicates++;
+            continue;
+          }
+          if (seen.size >= MAX_DISCOVERED_TOOLS_PER_SERVER) {
+            overCap++;
+            continue;
+          }
+          seen.add(qualified);
           const definition: ToolDefinition = {
             type: 'function',
             function: {
@@ -463,13 +484,18 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
             serverIdentityHints: [cfg.url ?? '', cfg.command ?? '', ...(cfg.args ?? [])].filter(Boolean),
             annotations: tool.annotations,
           });
-          routing[qualified] = {
-            cfg,
-            toolName: tool.name,
-            policy,
-            inputSchema: definition.function.parameters,
-          };
-          defs.push(definition);
+          perServer[index].push({
+            definition,
+            route: { cfg, toolName: tool.name, policy, inputSchema: definition.function.parameters },
+          });
+        }
+        if (duplicates > 0) {
+          console.warn(`[MCP] server "${server}" returned ${duplicates} duplicate tool name(s) — kept the first of each`);
+        }
+        if (overCap > 0) {
+          console.warn(
+            `[MCP] server "${server}" returned more than ${MAX_DISCOVERED_TOOLS_PER_SERVER} tools — dropped ${overCap}`,
+          );
         }
       } catch (err) {
         unreachable.push(server);
@@ -478,6 +504,33 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
     }
   };
   await Promise.all(Array.from({ length: Math.min(4, entries.length) }, () => worker()));
+
+  const defs: ToolDefinition[] = [];
+  const routing: Record<string, McpToolRoute> = {};
+  let droppedTotal = 0;
+  for (const [index, tools] of perServer.entries()) {
+    for (const { definition, route } of tools) {
+      const name = definition.function.name;
+      if (routing[name]) {
+        // Within one server duplicates were already dropped, so this is a cross-server
+        // collision (server "a_" + tool "b" vs server "a" + tool "_b"). Keep the first.
+        const kept = entries.find(([, cfg]) => cfg === routing[name].cfg)?.[0] ?? '?';
+        console.warn(
+          `[MCP] tool name "${name}" from server "${entries[index][0]}" collides with server "${kept}" — kept "${kept}"`,
+        );
+        continue;
+      }
+      if (defs.length >= MAX_DISCOVERED_TOOLS) {
+        droppedTotal++;
+        continue;
+      }
+      routing[name] = route;
+      defs.push(definition);
+    }
+  }
+  if (droppedTotal > 0) {
+    console.warn(`[MCP] discovery exceeded ${MAX_DISCOVERED_TOOLS} tools in total — dropped ${droppedTotal}`);
+  }
   return { defs, routing, unreachable };
 }
 

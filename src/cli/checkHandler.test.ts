@@ -49,7 +49,7 @@ const bsScanRepositoryMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../registry/sqliteStore.js', () => ({
   // Keep in sync with production page cap used by handleCheck --tree pagination.
-  LIST_ENTITIES_MAX_LIMIT: 2,
+  LIST_ENTITIES_MAX_LIMIT: 2, HELPER_QUERY_MAX_LIMIT: 200,
   getRegistryStore: () => store,
   closeRegistryStore,
 }));
