@@ -2,16 +2,8 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>OpenSwarm · Terminal</title>
 <script src="/static/js/themeBoot.js"></script><script src="/static/js/webToken.js"></script>
 <link rel="stylesheet" href="/static/css/tokens.css"><link rel="stylesheet" href="/static/css/shell.css">
-<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
-<style>
-  .page-terminal main { display: flex; flex-direction: column; height: calc(100dvh - 56px); padding: var(--space-2, 8px); gap: var(--space-2, 8px); box-sizing: border-box; }
-  .terminal-bar { display: flex; align-items: center; gap: var(--space-2, 8px); font-size: var(--text-sm, 13px); }
-  .terminal-bar .grow { flex: 1; }
-  #terminal-state[data-tone="ok"] { color: var(--success, #3fb950); }
-  #terminal-state[data-tone="warn"] { color: var(--warning, #d29922); }
-  #terminal-state[data-tone="danger"] { color: var(--danger, #f85149); }
-  #terminal { flex: 1; min-height: 0; background: #000; border-radius: var(--radius-md, 6px); padding: 4px; }
-</style></head>
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css"><link rel="stylesheet" href="/static/css/terminal.css">
+</head>
 <body class="page-terminal"><header class="topbar" data-shell></header>
 <main>
   <div class="terminal-bar">

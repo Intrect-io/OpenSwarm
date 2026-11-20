@@ -1,0 +1,15 @@
+/* The opt-in web terminal page (AGT-4002). Token values only (AGT-4201 §0.2). */
+.page-terminal main {
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - 56px);
+  padding: var(--space-2);
+  gap: var(--space-2);
+  box-sizing: border-box;
+}
+.terminal-bar { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+.terminal-bar .grow { flex: 1; }
+#terminal-state[data-tone="ok"] { color: var(--success); }
+#terminal-state[data-tone="warn"] { color: var(--warning); }
+#terminal-state[data-tone="danger"] { color: var(--danger); }
+#terminal { flex: 1; min-height: 0; background: var(--bg-code); border-radius: var(--radius-md); padding: var(--space-1); }
