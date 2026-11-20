@@ -1358,12 +1358,12 @@ export class AutonomousRunner {
         // The same-fingerprint infra circuit parks a run so that an operator
         // changes something before it runs again; a free slot changes nothing.
         // Resuming it by idle fill re-runs a known-broken environment every
-        // heartbeat (AGT-4306). Only an explicit dispatch or a tracker Todo
+        // heartbeat (AGT-4306). Only an explicit dispatch (board/work API)
         // lifts that park — the resume paths that carry an operator's hand.
         const isInfraCircuitPark = durableRun?.lastErrorCode === INFRA_CIRCUIT_PARK_REASON
           // A blocker the reviewer confirmed is a claim about the task text; a
           // free slot re-runs the same text into the same confirmed claim
-          // (AGT-4535). Explicit dispatch or a tracker Todo lifts it.
+          // (AGT-4535). Only an explicit dispatch lifts it; Todo alone does not.
           || durableRun?.lastErrorCode === VERIFIED_WORKER_BLOCKER_PARK_REASON
           || durableRun?.lastErrorCode === RECOVERY_ADVISOR_PARK_REASON
           || durableRun?.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON;

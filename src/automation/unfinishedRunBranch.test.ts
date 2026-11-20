@@ -80,7 +80,7 @@ describe('keepUnfinishedWorkOnRemote', () => {
     expect(body).toContain('Run ended `infra_error`. No pull request.');
     expect(body).toContain(`\`${branch}\` (1 commit ahead of \`origin/main\`), pushed`);
     expect(body).toContain('ENOSPC');
-    expect(key).toBe(`unfinished-run:uuid-1:${git(repo, 'rev-parse', branch).trim()}`);
+    expect(key).toBe(`unfinished-run:uuid-1:${git(repo, 'rev-parse', branch).trim()}:pushed`);
     expect(gh).not.toHaveBeenCalled();
   });
 
@@ -127,6 +127,19 @@ describe('keepUnfinishedWorkOnRemote', () => {
     const keys = addComment.mock.calls.map((call) => (call as unknown[])[2]);
     expect(keys[0]).toBe(keys[1]);
     expect(keys[0]).not.toContain('s-1');
+  });
+
+  it('a head held local and later pushed gets a second comment that says it was pushed', async () => {
+    const { repo, branch } = repoWithBranch({ 'a.ts': 'export const a = 1;\n' });
+    const addComment = vi.fn(async () => {});
+    await keepUnfinishedWorkOnRemote({ originalPath: repo, branchName: branch }, { issueId: 'uuid-h' }, infra,
+      { source: { addComment }, openPullRequest: async () => { throw new Error('gh: offline'); } });
+    await keepUnfinishedWorkOnRemote({ originalPath: repo, branchName: branch }, { issueId: 'uuid-h' }, infra,
+      { source: { addComment }, openPullRequest: noOpenPr });
+    const calls = addComment.mock.calls as unknown as Array<[string, string, string]>;
+    expect(calls[0][2]).not.toBe(calls[1][2]);
+    expect(calls[0][1]).toContain('was not pushed');
+    expect(calls[1][1]).toContain('pushed to the remote');
   });
 
   it('keeps the branch local when the sensitive-data fence refuses it, and says why', async () => {

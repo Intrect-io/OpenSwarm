@@ -18,8 +18,9 @@
 //   issue that already has a reviewed PR would otherwise land failed WIP on
 //   it. A lookup that cannot answer keeps the branch local (fail closed);
 // - posts one summary comment on the issue: what ended the run, the branch,
-//   and how far it is ahead of the base. Keyed per issue and branch head, so
-//   neither a retried post nor a retried run with no new commits repeats it.
+//   and how far it is ahead of the base. Keyed per issue, branch head and
+//   whether it was pushed, so neither a retried post nor a retried run with no
+//   new commits repeats it, while a later push of a held head still says so.
 // No PR. A fence refusal keeps the branch local and says why in the comment.
 // Never throws: the run's outcome is already decided.
 
@@ -172,7 +173,7 @@ export async function keepUnfinishedWorkOnRemote(
         pushed: outcome.pushed,
         heldReason: outcome.heldReason,
         failure: result.failureDetail,
-      }), `unfinished-run:${task.issueId}:${headSha ?? result.sessionId}`);
+      }), `unfinished-run:${task.issueId}:${headSha ?? result.sessionId}:${outcome.pushed ? 'pushed' : 'local'}`);
       outcome.commented = true;
     } catch (error) {
       console.warn(`[Runner] Unfinished-run comment failed for ${task.issueIdentifier ?? task.issueId}:`, error);

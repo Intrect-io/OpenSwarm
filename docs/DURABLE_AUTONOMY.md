@@ -125,7 +125,11 @@ run with guessed defaults.
 
 The daemon config sets two budgets (AGT-4807). They are read from the run
 ledger's recorded attempt costs. An attempt with no recorded cost counts at
-the same estimate the daily ceilings use.
+the same estimate the daily ceilings use. The usage ledger
+(`~/.openswarm/usage/*.jsonl`) is not the source: only the agentic-loop
+adapters write it, so Claude CLI runs never appear there, and it is per host
+while the run ledger is shared by every daemon that claims from it. Days are
+UTC, as in both ledgers.
 
 ```yaml
 autonomous:

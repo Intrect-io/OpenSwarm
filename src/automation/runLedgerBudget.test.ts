@@ -212,6 +212,13 @@ describe('per-issue budget (AGT-4807)', () => {
       const parked = await coordinator.execute(task('z'), '/repo', vi.fn(), { admission: { maxConcurrent: 4, maxCostUsdPerIssue: 5 } });
       expect(parked.operatorPark?.code).toBe(ISSUE_BUDGET_PARK_REASON);
 
+      // The tracker reads Todo again (the operator moved the card back): that
+      // alone neither reopens the park nor runs the issue.
+      const todoExecutor = vi.fn(async () => spent(1));
+      await coordinator.execute({ ...task('z'), linearState: 'Todo' }, '/repo', todoExecutor, { admission: { maxConcurrent: 4, maxCostUsdPerIssue: 5 } });
+      expect(todoExecutor).not.toHaveBeenCalled();
+      expect(ledger.getRun('z')?.state).toBe('NEEDS_HUMAN');
+
       const db = new Database(path);
       try {
         expect(issueSpend(db, 'z', Date.now()).totalUsd).toBe(6);
