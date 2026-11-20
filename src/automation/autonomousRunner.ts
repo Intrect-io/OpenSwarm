@@ -2735,8 +2735,8 @@ export class AutonomousRunner {
         console.warn(`[AutonomousRunner] Tracker refused stale-state repair for ${task.issueIdentifier ?? issueId}`);
         continue;
       }
-      task.linearState = targetState;
-      updateTaskLinearState(issueId, targetState);
+      await source.addComment(issueId, `No OpenSwarm run, lease or pull request has owned this issue for ${this.config.stalledInProgressHours ?? 6}h, so it returns to ${targetState}.`).catch((error) => console.warn(`[AutonomousRunner] Stale-state comment failed for ${task.issueIdentifier ?? issueId}:`, error)); // AGT-4800: say why, after the tracker accepted the move
+      task.linearState = targetState; updateTaskLinearState(issueId, targetState);
       moved++;
       this.syslog(`↩ ${task.issueIdentifier ?? issueId}: stale In Progress → ${targetState}`);
     }
