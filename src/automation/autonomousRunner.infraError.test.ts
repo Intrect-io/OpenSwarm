@@ -11,6 +11,7 @@ import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { AutonomousConfig } from './runnerTypes.js';
 import type { ITaskSource } from './taskSource.js';
 import { RETRY_RAMP_FROM_ATTEMPT } from './durableRunCoordinator.js';
+import { HostDiskGate } from '../support/hostHealth.js';
 
 // Regression for INT-2010: adapter CLI/infra failures (the worker/reviewer never
 // ran) must NOT drive a completable issue to durable STUCK. They get a backoff
@@ -42,14 +43,14 @@ const task = (): TaskItem => ({
   createdAt: Date.now(),
 });
 
-const result = (finalStatus: PipelineResult['finalStatus']): PipelineResult => ({
+const result = (finalStatus: PipelineResult['finalStatus'], error = 'codex CLI failed with code 1'): PipelineResult => ({
   success: false,
   sessionId: 'pipeline-1',
   iterations: 0,
   totalDuration: 5,
   finalStatus,
   stages: [],
-  workerResult: { success: false, summary: '', filesChanged: [], commands: [], output: '', error: 'codex CLI failed with code 1' },
+  workerResult: { success: false, summary: '', filesChanged: [], commands: [], output: '', error },
 });
 
 function mockTaskSource() {
@@ -105,6 +106,46 @@ describe('AutonomousRunner infra_error handling (INT-2010)', () => {
     const history = JSON.parse(readFileSync(join(tempDir, 'runner-pipeline-history.json'), 'utf8'));
     expect(history).toHaveLength(6);
     expect(history.every((entry: { failureCause?: string }) => entry.failureCause === 'infra')).toBe(true);
+  });
+
+  it('parks dispatch on ENOSPC without scheduling a retry', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    // The report pauses only when a re-measurement confirms it, so the floor is set above any real volume.
+    const runner = new AutonomousRunner(cfg({ minFreeDiskGiB: Number.MAX_SAFE_INTEGER / 1024 ** 3 }));
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      scheduler.startTask(task(), '/repo', async () => result('infra_error', 'tester: git exited with code 128: No space left on device'));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+
+    expect((runner as unknown as { failedTaskRetryTimes: Map<string, number> }).failedTaskRetryTimes.has('ISSUE-1')).toBe(false);
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining('stopped dispatch after a host resource failure'));
+    // The runner's own gate holds dispatch while the disk measures below the floor.
+    expect((runner as unknown as { diskGate: HostDiskGate }).diskGate.evaluate().pause).toBe(true);
+    const gate = new HostDiskGate(() => [tmpdir()], () => Number.MAX_SAFE_INTEGER);
+    expect(gate.resourceFailure('No space left on device').notice).toBeDefined();
+    expect(gate.resourceFailure('No space left on device').notice).toBeUndefined();
+  });
+
+  // #849 review: an ENOSPC string the free-space measurement does not confirm (a test's own
+  // tmpfs filling, quoted output) holds dispatch for a while but is not a factory pause.
+  it('holds dispatch for a while on an unconfirmed ENOSPC without turning it into a factory pause', async () => {
+    const source = mockTaskSource();
+    runnerExecution.setTaskSource(source);
+    const runner = new AutonomousRunner(cfg({ minFreeDiskGiB: 0.000001 }));
+    const scheduler = (runner as unknown as { scheduler: TaskScheduler }).scheduler;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    scheduler.startTask(task(), '/repo', async () => result('infra_error', 'tester: write failed: No space left on device'));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect((runner as unknown as { failedTaskRetryTimes: Map<string, number> }).failedTaskRetryTimes.has('ISSUE-1')).toBe(false);
+    // `hold` keeps it out of `diskLow`, so no auto:disk factory pause is armed for it.
+    expect((runner as unknown as { diskGate: HostDiskGate }).diskGate.evaluate()).toMatchObject({ pause: true, hold: true });
   });
 
   it('retries a pair-level stuck result with fresh outer context before requiring a human', async () => {

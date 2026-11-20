@@ -25,7 +25,9 @@
 #   - OPENSWARM_TELEMETRY=0 and DO_NOT_TRACK=1, so no install id is registered;
 #   - OPENSWARM_WEB_PORT is a free port other than 3847, so the operator's
 #     daemon (if any) is neither probed as a duplicate nor disturbed;
-#   - the daemon is stopped by its own pid only; nothing is matched by name.
+#   - the daemon is stopped by its own process group only (it runs under
+#     setsid, so the group is the daemon and whatever it spawned); nothing is
+#     matched by name.
 #
 # Scratch space lives next to the bundle (<bundle>/../.smoke-*), not in /tmp,
 # which is tmpfs on some hosts, and is removed on exit.
@@ -48,15 +50,30 @@ VERSION="$(tr -d '[:space:]' < "$BUNDLE/VERSION")"
 
 SCRATCH="$(cd "$BUNDLE/.." && pwd -P)/.smoke-$$"
 DAEMON_PID=""
+# The daemon's process group: the daemon plus anything it spawned. Before this,
+# DAEMON_PID was the `( cd ... && env -i ... )` subshell, so SIGTERM stopped the
+# subshell and left node running; it kept writing $SCRATCH/home after the rm
+# below (found as a stale .smoke-* tree in auto-claude's verify checkout,
+# written at the daemon's 02:00 memory-compaction tick).
+group_alive() { [ -n "$DAEMON_PID" ] && kill -0 -- "-$DAEMON_PID" 2>/dev/null; }
+stop_group() {
+  group_alive || return 0
+  kill -TERM -- "-$DAEMON_PID" 2>/dev/null || true
+  for _ in $(seq 1 "${1:-20}"); do group_alive || return 0; sleep 0.5; done
+  kill -KILL -- "-$DAEMON_PID" 2>/dev/null || true
+  for _ in $(seq 1 10); do group_alive || return 0; sleep 0.2; done
+}
 cleanup() {
-  if [ -n "$DAEMON_PID" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
-    kill -TERM "$DAEMON_PID" 2>/dev/null || true
-    for _ in $(seq 1 20); do kill -0 "$DAEMON_PID" 2>/dev/null || break; sleep 0.5; done
-    kill -KILL "$DAEMON_PID" 2>/dev/null || true
-  fi
+  stop_group 20
   rm -rf "$SCRATCH"
+  # A straggler that outlived the group check could recreate it; remove once more.
+  sleep 1; rm -rf "$SCRATCH"
 }
 trap cleanup EXIT
+# Signals end the script through EXIT, so the scratch tree and the daemon go too.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
 mkdir -p "$SCRATCH/home" "$SCRATCH/cwd" "$SCRATCH/decoy" "$SCRATCH/project"
 
 # A `node` that fails loudly, first on PATH: the launcher must not reach it.
@@ -88,9 +105,10 @@ PORT="$("$BUNDLED_NODE" -e '
 ')"
 [ -n "$PORT" ] && [ "$PORT" != 3847 ] || die "could not pick a free port"
 
-# Run a command with nothing inherited but what is listed here.
-inert() {
-  (cd "$SCRATCH/cwd" && env -i \
+# Replace the current (sub)shell with a command that inherits nothing but what is
+# listed here. Call it inside ( ... ); `inert` below does that for foreground use.
+inert_exec() {
+  cd "$SCRATCH/cwd" && exec ${INERT_PREFIX:-} env -i \
     HOME="$SCRATCH/home" \
     PATH="$SCRATCH/decoy:/usr/bin:/bin" \
     LANG=C.UTF-8 \
@@ -100,8 +118,9 @@ inert() {
     NO_UPDATE_NOTIFIER=1 \
     OPENSWARM_CONFIG="$SCRATCH/config.yaml" \
     OPENSWARM_WEB_PORT="$PORT" \
-    "$@")
+    "$@"
 }
+inert() { (inert_exec "$@"); }
 
 # 1. Version through the launcher, with the decoy node first on PATH.
 GOT="$(inert "$LAUNCHER" --version 2>&1)" || die "bin/openswarm --version failed: $GOT"
@@ -127,7 +146,10 @@ NATIVE="$(inert "$BUNDLED_NODE" --input-type=module -e '
 log "$NATIVE"
 
 # 3. The daemon from the bundle, inert, on its own port.
-inert "$BUNDLED_NODE" "$BUNDLE/app/dist/index.js" > "$SCRATCH/daemon.log" 2>&1 &
+# One subshell that execs setsid -> env -> node, so $! is the daemon itself,
+# leading its own process group. (Backgrounding the `inert` function added a
+# second subshell, and $! named that wrapper instead of the daemon.)
+(INERT_PREFIX=setsid inert_exec "$BUNDLED_NODE" "$BUNDLE/app/dist/index.js") > "$SCRATCH/daemon.log" 2>&1 &
 DAEMON_PID=$!
 HEALTH=""
 for _ in $(seq 1 180); do
@@ -149,8 +171,8 @@ HEALTH_VERSION="$(printf '%s' "$HEALTH" | inert "$BUNDLED_NODE" -e '
 [ "$HEALTH_VERSION" = "$VERSION" ] || die "/api/health reported '$HEALTH_VERSION', VERSION is '$VERSION'"
 log "daemon on 127.0.0.1:$PORT answered /api/health with $HEALTH_VERSION"
 
-kill -TERM "$DAEMON_PID"
-for _ in $(seq 1 30); do kill -0 "$DAEMON_PID" 2>/dev/null || break; sleep 0.5; done
-if kill -0 "$DAEMON_PID" 2>/dev/null; then die "daemon pid $DAEMON_PID did not stop within 15 s of SIGTERM"; fi
-DAEMON_PID=""
+kill -TERM -- "-$DAEMON_PID"
+for _ in $(seq 1 30); do group_alive || break; sleep 0.5; done
+if group_alive; then die "daemon process group $DAEMON_PID did not stop within 15 s of SIGTERM"; fi
+DAEMON_PID=""""
 log "daemon stopped; bundle $BUNDLE is good"

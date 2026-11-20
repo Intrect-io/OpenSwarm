@@ -155,7 +155,7 @@ describe('per-issue budget (AGT-4807)', () => {
       expect(executor).not.toHaveBeenCalled();
       expect(result.operatorPark?.code).toBe(ISSUE_BUDGET_PARK_REASON);
       // The runner posts this reason as the issue's one operator-park comment.
-      expect(result.operatorPark?.reason).toContain('[OpenSwarm] This issue has spent $5.50 of its $5.00 budget');
+      expect(result.operatorPark?.reason).toContain('🧭 **[OpenSwarm]** This issue has spent $5.50 of its $5.00 budget');
       // The comment names the resume that actually lifts this park (an explicit
       // dispatch); a Todo move alone never calls resumeNeedsHuman for it.
       expect(result.operatorPark?.reason).toContain('dispatch it from the dashboard issue board to resume');

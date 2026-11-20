@@ -50,13 +50,11 @@ import { resolveOwningProject, resolveProjectGoal } from '../support/projectGoal
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
 import { TaskScheduler, initScheduler, normalizeProjectPath } from '../orchestration/taskScheduler.js';
-import {
-  PipelineResult,
-  formatPipelineResultEmbed,
-} from '../agents/pairPipeline.js';
+import { PipelineResult, formatPipelineResultEmbed } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig } from '../core/types.js';
 import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
+import { dispatchBudget, recordDispatchClaims } from './dispatchRamp.js';
 import { pipelineExecutionBoundary } from '../agents/stageExecutionBoundary.js';
 import * as execution from './runnerExecution.js';
 import { draftFingerprint, pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
@@ -70,7 +68,7 @@ import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol
 import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
 import { listHeldIssueIds } from './execHold.js';
 import { inputFingerprint, mayRedispatch } from './dispatchFingerprint.js';
-import { HostDiskGate, dispatchWritePaths } from '../support/hostHealth.js';
+import { HostDiskGate, dispatchWritePaths, isHostResourceError } from '../support/hostHealth.js';
 import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from '../agents/pairPipelineTypes.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
@@ -79,12 +77,7 @@ import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upser
 import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
 import { RunnerPauseControl } from './runnerPauseControl.js';
 import { providerSwitchViolation } from '../adapters/unattendedPolicy.js'; import { providerSwitchFamilyViolation } from '../adapters/reviewerIndependence.js';
-import {
-  findPullRequestForBranch,
-  inspectWorktreeRecovery,
-  pruneWorktrees,
-  removePreservedWorktreeAt,
-} from '../support/worktreeManager.js';
+import { findPullRequestForBranch, inspectWorktreeRecovery, pruneWorktrees, removePreservedWorktreeAt } from '../support/worktreeManager.js';
 import { publishStuckWork } from './publishOnPark.js';
 import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
 import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
@@ -946,7 +939,12 @@ export class AutonomousRunner {
       // edited files) STUCK in production. (INT-2010)
       if (result.finalStatus === 'infra_error') {
         const detail = pickPipelineFailureDetail(result) || 'infra/CLI execution error';
-        if (task.issueId) {
+        // Host resource failures (ENOSPC) pause all dispatch through the disk gate with one
+        // notice instead of a per-task backoff that fails the same way next time (AGT-4785).
+        const resource = isHostResourceError(detail) ? this.diskGate.resourceFailure(detail) : undefined;
+        if (resource?.pause) { // a measured low alerts via the heartbeat's auto:disk pause; an unconfirmed report is a timed hold (#849 review)
+          console.error(`[Scheduler] ${taskCtx} stopped dispatch after a host resource failure: ${detail}`); if (resource.hold && resource.notice) await reportToDiscord(`⚠️ ${resource.notice}`);
+        } else if (task.issueId) { // includes an ENOSPC report the measurement did not confirm: ordinary infra backoff
           // Fixed mid-range backoff — we intentionally don't bump failure counts,
           // so there's no attempt number to scale by.
           const nextRetryTime = setRetryTime(task.issueId, 3, this.failedTaskRetryTimes);
@@ -2737,8 +2735,8 @@ export class AutonomousRunner {
         console.warn(`[AutonomousRunner] Tracker refused stale-state repair for ${task.issueIdentifier ?? issueId}`);
         continue;
       }
-      task.linearState = targetState;
-      updateTaskLinearState(issueId, targetState);
+      await source.addComment(issueId, `No OpenSwarm run, lease or pull request has owned this issue for ${this.config.stalledInProgressHours ?? 6}h, so it returns to ${targetState}.`).catch((error) => console.warn(`[AutonomousRunner] Stale-state comment failed for ${task.issueIdentifier ?? issueId}:`, error)); // AGT-4800: say why, after the tracker accepted the move
+      task.linearState = targetState; updateTaskLinearState(issueId, targetState);
       moved++;
       this.syslog(`↩ ${task.issueIdentifier ?? issueId}: stale In Progress → ${targetState}`);
     }
@@ -2830,7 +2828,7 @@ export class AutonomousRunner {
       // 1. Kill switch + anomaly auto-pause (AGT-4808, AGT-4809) before the holds below return, so a `now` pause
       // cancels and logs during them. Free disk is measured once here (AGT-4785); low disk pauses the factory (`auto:disk`).
       const disk = this.diskGate.evaluate();
-      const dispatchable = await this.pauses.apply(this.scheduler, (line) => this.syslog(line), { projects: this.config.allowedProjects, alert: reportToDiscord, diskLow: disk.pause ? disk.line : undefined });
+      const dispatchable = await this.pauses.apply(this.scheduler, (line) => this.syslog(line), { projects: this.config.allowedProjects, alert: reportToDiscord, diskLow: disk.pause && !disk.hold ? disk.line : undefined }); // a timed ENOSPC hold is not a factory pause
       if (disk.notice) { // before the time-window return, or a recovery seen on a blocked heartbeat is lost
         console.warn(`[AutonomousRunner] ${disk.notice}`);
         if (!disk.pause) await reportToDiscord(`✅ ${disk.notice}`);
@@ -3014,8 +3012,7 @@ export class AutonomousRunner {
       return;
     }
 
-    // Fill all available slots (worktree mode isolates each task)
-    const maxSlots = availableSlots;
+    const maxSlots = dispatchBudget(this, this.config.dispatchRampClaims, availableSlots, this.config.heartbeatSchedule); // free slots, capped by the cold-start ramp
 
     // Pre-filter tasks to enabled projects only (before DecisionEngine selection)
     // This prevents DecisionEngine from wasting its max-slot budget on non-enabled projects.
@@ -3155,6 +3152,7 @@ export class AutonomousRunner {
     } else {
       this.syslog(`✓ Enqueued ${enqueuedCount} task(s) | skipped: ${skippedCount}`);
     }
+    recordDispatchClaims(this, enqueuedCount); // only claiming passes advance the cold-start ramp
 
     // Execute tasks
     if (!this.stopping) await this.runAvailableTasks();

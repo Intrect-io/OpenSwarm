@@ -133,12 +133,48 @@ export interface AutomationCommentInput {
 }
 
 /**
+ * The daemon writes with the operator's credential, so every comment it posts carries this lead to
+ * tell it apart from the person on the issue page (AGT-4800). `formatAutomationComment` and the
+ * task-state / merged-publication builders already open with it; `signDaemonComment` adds it to
+ * anything else at the one place comments leave the process (`linear.addComment`).
+ */
+export const DAEMON_COMMENT_LEAD = '🧭 **[OpenSwarm]**';
+
+/**
+ * The daemon's own signature: the lead (`🧭 **[OpenSwarm]**`), or the lead's emoji fused with a bold
+ * heading (`🧭 **[OpenSwarm] Task complete**`). A bare `[OpenSwarm]` is NOT a signature: a person can
+ * type it ("[OpenSwarm] please retry"), and `dispatchFingerprint` must still count that as theirs.
+ * Shared by `signDaemonComment` and `isDaemonComment` so the two cannot drift (#853 review).
+ */
+const DAEMON_SIGNATURE = /^🧭 \*\*\[OpenSwarm\](?:\*\*| )/;
+
+/** Already signed with the lead the daemon writes. */
+export function isSignedDaemonComment(body: string): boolean {
+  return DAEMON_SIGNATURE.test(body.trimStart());
+}
+
+/** A body opening with a Markdown block (heading, list, table, fence, quote, HTML, ordered list). */
+const OPENS_WITH_BLOCK = /^(?:#|-|\*|\||```|>|<|\d+\.)/;
+
+/**
+ * Prefix an unsigned body with the lead. Signed bodies are returned unchanged; a bare leading
+ * `[OpenSwarm]` is replaced by the lead rather than doubled. A body that opens with a Markdown
+ * block gets a blank line after the lead, or the lead would fuse into its first line (a heading
+ * stops being a heading, a table loses its header row).
+ */
+export function signDaemonComment(body: string): string {
+  if (isSignedDaemonComment(body)) return body;
+  const text = body.trimStart().replace(/^\[OpenSwarm\]\s*/, '');
+  return OPENS_WITH_BLOCK.test(text) ? `${DAEMON_COMMENT_LEAD}\n\n${text}` : `${DAEMON_COMMENT_LEAD} ${text}`;
+}
+
+/**
  * Build a comment that reads like a person wrote it: bold lead, a plain-language
  * summary, a few supporting details, and a single muted (italic) sign-off line
  * carrying just enough trace to find the run later.
  */
 export function formatAutomationComment(input: AutomationCommentInput): string {
-  const parts: string[] = [`**${input.heading}**`];
+  const parts: string[] = [`🧭 **[OpenSwarm] ${input.heading}**`];
 
   if (input.summary?.trim()) parts.push(input.summary.trim());
 

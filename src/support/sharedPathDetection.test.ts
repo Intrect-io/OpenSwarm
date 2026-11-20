@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +10,9 @@ import {
   resolveSharedPaths,
   secretSharedPathComponents,
   secretSharedPathsWarning,
+  unsharedGitignoredPaths,
+  gitignoredPathsWarning,
+  warnGitignoredPathsOnce,
 } from './sharedPathDetection.js';
 
 describe('detectSharedPaths (AGT-4043)', () => {
@@ -102,6 +106,146 @@ describe('detectSharedPaths (AGT-4043)', () => {
       dir(workspace, '.venv');
     }
     expect(detectSharedPaths(repo).shared).toEqual(['w1/.venv', 'w2/.venv', 'w3/.venv', 'w4/.venv']);
+  });
+});
+
+
+describe('unsharedGitignoredPaths (AGT-4041)', () => {
+  let repo: string;
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'openswarm-ignored-paths-'));
+    execFileSync('git', ['init', '-q', repo]);
+    writeFileSync(join(repo, '.gitignore'), 'ignored-data\nignored-dir/\npartial\nlocked\n');
+  });
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+  it('returns none when no ignored paths exist', () => {
+    writeFileSync(join(repo, 'tracked.txt'), 'x');
+    expect(unsharedGitignoredPaths(repo)).toEqual({ missing: [], unreadable: [] });
+  });
+  it('counts ignored paths not included in sharedPaths', () => {
+    mkdirSync(join(repo, 'ignored-data'));
+    writeFileSync(join(repo, 'partial'), 'x');
+    expect(unsharedGitignoredPaths(repo, ['partial']).missing).toEqual(['ignored-data']);
+  });
+  it('reports a partially shared ignored path: sharing a child leaves the rest missing', () => {
+    mkdirSync(join(repo, 'ignored-dir', 'a'), { recursive: true });
+    mkdirSync(join(repo, 'ignored-dir', 'b'), { recursive: true });
+    writeFileSync(join(repo, 'ignored-dir', 'b', 'x.csv'), 'x');
+    expect(unsharedGitignoredPaths(repo, ['ignored-dir/a']).missing).toEqual(['ignored-dir']);
+    expect(unsharedGitignoredPaths(repo, ['ignored-dir'])).toEqual({ missing: [], unreadable: [] });
+    expect(gitignoredPathsWarning({ missing: ['ignored-dir'], unreadable: [] })).toContain('1 gitignored path(s)');
+  });
+
+  it('finds an ignored data dir nested under a tracked directory (docs/CGF_data)', () => {
+    writeFileSync(join(repo, '.gitignore'), 'docs/CGF_data/\n');
+    mkdirSync(join(repo, 'docs', 'CGF_data'), { recursive: true });
+    writeFileSync(join(repo, 'docs', 'README.md'), 'tracked');
+    for (let i = 0; i < 3; i++) writeFileSync(join(repo, 'docs', 'CGF_data', `f${i}.pdf`), 'x');
+    execFileSync('git', ['-C', repo, 'add', '.gitignore', 'docs/README.md']);
+    expect(unsharedGitignoredPaths(repo).missing).toEqual(['docs/CGF_data']);
+    expect(unsharedGitignoredPaths(repo, ['docs/CGF_data'])).toEqual({ missing: [], unreadable: [] });
+  });
+
+  it('skips a nested checkout parked inside the repository', () => {
+    mkdirSync(join(repo, '.worktrees', 't1', 'data'), { recursive: true });
+    writeFileSync(join(repo, '.worktrees', 't1', '.git'), 'gitdir: elsewhere');
+    writeFileSync(join(repo, '.worktrees', 't1', '.gitignore'), 'data/\n');
+    writeFileSync(join(repo, '.gitignore'), 'ignored-data\n');
+    mkdirSync(join(repo, 'ignored-data'));
+    expect(unsharedGitignoredPaths(repo).missing).toEqual(['ignored-data']);
+  });
+
+  it('caps the listed names in the warning but counts them all', () => {
+    const many = Array.from({ length: 25 }, (_, i) => `p${i}`);
+    const warning = gitignoredPathsWarning({ missing: many, unreadable: [] })!;
+    expect(warning).toContain('25 gitignored path(s)');
+    expect(warning).toContain('+5 more');
+  });
+  it('counts ignored paths with no read permission even when running as root', () => {
+    mkdirSync(join(repo, 'locked'));
+    chmodSync(join(repo, 'locked'), 0);
+    try {
+      // Shared (linked) but unreadable still counts: the worktree sees a name and no content.
+      expect(unsharedGitignoredPaths(repo, ['locked'])).toEqual({ missing: [], unreadable: ['locked'] });
+    } finally {
+      chmodSync(join(repo, 'locked'), 0o755);
+    }
+  });
+
+  it('reports a daemon-owned 0700 dir as unreadable when the sandbox runs as another uid (the incident)', () => {
+    mkdirSync(join(repo, 'locked'));
+    chmodSync(join(repo, 'locked'), 0o700);
+    const self = process.getuid!();
+    // Same uid as the daemon (the bubblewrap sandbox): readable.
+    expect(unsharedGitignoredPaths(repo, ['locked'])).toEqual({ missing: [], unreadable: [] });
+    // A container mapping the worker to another uid needs the "other" read bit.
+    expect(unsharedGitignoredPaths(repo, ['locked'], { uid: self + 1 }).unreadable).toEqual(['locked']);
+    // Group read counts only when the sandbox gid matches the owning group.
+    chmodSync(join(repo, 'locked'), 0o750);
+    expect(unsharedGitignoredPaths(repo, ['locked'], { uid: self + 1, gid: process.getgid!() }).unreadable).toEqual([]);
+    expect(unsharedGitignoredPaths(repo, ['locked'], { uid: self + 1, gid: process.getgid!() + 1 }).unreadable).toEqual(['locked']);
+    chmodSync(join(repo, 'locked'), 0o755);
+    expect(unsharedGitignoredPaths(repo, ['locked'], { uid: self + 1 }).unreadable).toEqual([]);
+  });
+
+  it('reads the sandbox uid from OPENSWARM_SANDBOX_UID when no reader is passed', () => {
+    mkdirSync(join(repo, 'locked'));
+    chmodSync(join(repo, 'locked'), 0o700);
+    vi.stubEnv('OPENSWARM_SANDBOX_UID', String(process.getuid!() + 1));
+    try {
+      expect(unsharedGitignoredPaths(repo, ['locked']).unreadable).toEqual(['locked']);
+    } finally { vi.unstubAllEnvs(); chmodSync(join(repo, 'locked'), 0o755); }
+  });
+
+  it('lists an ignored directory once even when git also lists the files under it', () => {
+    writeFileSync(join(repo, '.gitignore'), 'data/**\n');
+    mkdirSync(join(repo, 'data', 'sub'), { recursive: true });
+    writeFileSync(join(repo, 'data', 'f'), 'x');
+    writeFileSync(join(repo, 'data', 'sub', 'g'), 'x');
+    const listing = execFileSync('git', ['-C', repo, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory'], { encoding: 'utf8' });
+    expect(listing).toContain('data/f'); // the duplicate git really emits
+    expect(unsharedGitignoredPaths(repo).missing).toEqual(['data']);
+  });
+
+  it('skips an ignored directory that holds nested checkouts (worktrees/<id>/.git) or is one', () => {
+    writeFileSync(join(repo, '.gitignore'), 'worktrees/\nworktree/\nclone/\nignored-data\n');
+    for (const parked of ['worktrees/t1', 'worktree/AGT-1']) {
+      mkdirSync(join(repo, parked, 'src'), { recursive: true });
+      writeFileSync(join(repo, parked, '.git'), 'gitdir: elsewhere');
+    }
+    mkdirSync(join(repo, 'clone', '.git'), { recursive: true });
+    mkdirSync(join(repo, 'ignored-data'));
+    expect(unsharedGitignoredPaths(repo).missing).toEqual(['ignored-data']);
+  });
+
+  it('still lists an ignored dir that mixes a nested clone with real data', () => {
+    writeFileSync(join(repo, '.gitignore'), 'ignored-data/\n');
+    mkdirSync(join(repo, 'ignored-data', 'clone', '.git'), { recursive: true });
+    mkdirSync(join(repo, 'ignored-data', 'csv'), { recursive: true });
+    expect(unsharedGitignoredPaths(repo).missing).toEqual(['ignored-data']);
+  });
+
+  it('lists missing and unreadable separately in the warning', () => {
+    const warning = gitignoredPathsWarning({ missing: ['docs/CGF_data'], unreadable: ['private'] })!;
+    expect(warning).toContain('1 gitignored path(s) from the source are absent from this worktree (docs/CGF_data)');
+    expect(warning).toContain('1 shared gitignored path(s) are unreadable by the sandbox identity (private)');
+    expect(gitignoredPathsWarning({ missing: [], unreadable: [] })).toBeNull();
+  });
+
+  it('warns once per repository and gap list', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      warnGitignoredPathsOnce(repo, { missing: ['a'], unreadable: [] });
+      warnGitignoredPathsOnce(repo, { missing: ['a'], unreadable: [] });
+      expect(warn).toHaveBeenCalledTimes(1);
+      warnGitignoredPathsOnce(repo, { missing: ['a', 'b'], unreadable: [] });
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally { warn.mockRestore(); }
+  });
+
+  it('bounds the git listing with a timeout', () => {
+    const source = readFileSync(join(__dirname, 'sharedPathDetection.ts'), 'utf8');
+    expect(source).toMatch(/'ls-files', '--others'[^\n]*\n[^\n]*timeout: 10_000/);
   });
 });
 

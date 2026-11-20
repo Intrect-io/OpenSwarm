@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PipelineResult } from '../agents/pairPipeline.js';
@@ -36,6 +36,7 @@ type InternalRunner = {
   filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[];
   resolveProjectPath(task: TaskItem): Promise<string | null>;
   reconcileDurableArtifacts(tasks: TaskItem[]): Promise<void>;
+  reconcileMissingWorktreePointers(): Promise<void>;
   scheduler: TaskScheduler;
   deferredShutdownCleanup: Promise<void> | null;
 };
@@ -579,6 +580,82 @@ esac
     internal.durableRuns.close();
   });
 
+  it('recovers a lost worktree PR while preserving its already-applied completion effect (AGT-4518)', async () => {
+    const [{ AutonomousRunner }, execution] = await Promise.all([
+      import('./autonomousRunner.js'),
+      import('./runnerExecution.js'),
+    ]);
+    const bin = join(root, 'applied-effect-bin');
+    const repo = join(root, 'applied-effect-repo');
+    const lostWorktree = join(root, 'lost-worktree');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in\n  *"pr list --head"*) echo '[{"url":"https://github.com/acme/repo/pull/4518","state":"OPEN","isDraft":false,"headRefOid":"sha4518"}]';;\nesac\n`);
+    chmodSync(join(bin, 'gh'), 0o755);
+    const logPairComplete = vi.fn(async () => {});
+    execution.setTaskSource({
+      kind: 'linear', fetchTasks: vi.fn(async () => []), getExecutionComments: vi.fn(async () => []),
+      updateState: vi.fn(async () => true), addComment: vi.fn(async () => {}),
+      createTask: vi.fn(), createSubIssue: vi.fn(), logPairStart: vi.fn(), logPairComplete,
+      logBlocked: vi.fn(), logStuck: vi.fn(), unstick: vi.fn(), logHalt: vi.fn(), markAsDecomposed: vi.fn(),
+    } as unknown as ITaskSource);
+    const runner = new AutonomousRunner({
+      linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
+      autoExecute: true, dryRun: true,
+      automationLedgerMode: 'primary', automationDbPath: join(root, 'lost-worktree-applied-effect.db'),
+    });
+    const internal = runner as unknown as InternalRunner;
+    internal.executePipeline = vi.fn(async () => resultFixture());
+    const issueId = 'lost-published';
+    const task: TaskItem = {
+      id: issueId, issueId, issueIdentifier: 'AGT-4518', source: 'linear',
+      title: 'recover published completion', priority: 2, createdAt: Date.now(), linearState: 'In Progress',
+      linearProject: { id: 'project', name: 'Repo' },
+    };
+    const ledger = (internal.durableRuns as unknown as { ledger: import('./runLedger.js').RunLedger }).ledger;
+    internal.durableRuns.importLegacyRun({
+      issueId: task.issueId, source: 'linear', identifier: 'AGT-4518', title: task.title,
+      projectPath: repo, state: 'READY', branchName: 'swarm/AGT-4518', worktreePath: lostWorktree,
+    });
+    const claim = ledger.claimRun(task.issueId, {
+      ownerInstanceId: 'dead-worker', leaseMs: 1_000, maxActiveForProject: 10, now: 2_000,
+    });
+    expect(claim).not.toBeNull();
+    expect(ledger.transition(claim!, 'EXECUTING', {}, 2_100)).toBe(true);
+    expect(ledger.transition(claim!, 'PUBLISHING', {}, 2_200)).toBe(true);
+    const originalEffect = {
+      kind: 'tracker.complete', dedupeKey: 'complete:lost-published:attempt:1',
+      payload: { stats: { originalWorker: true } },
+    };
+    expect(ledger.enqueueEffect(claim!, originalEffect, 2_250)).not.toBeNull();
+    const effect = ledger.getEffectByDedupeKey(originalEffect.dedupeKey)!;
+    (ledger as unknown as { db: { prepare(sql: string): { run(...values: unknown[]): void } } }).db
+      .prepare("UPDATE automation_effects SET status = 'applied', applied_at = 2_260 WHERE id = ?")
+      .run(effect.id);
+    expect(ledger.reconcileExpiredLeases(3_001)).toHaveLength(1);
+    expect(ledger.confirmExecutorExit(claim!, 3_002)).toBe(true);
+    expect(internal.durableRuns.getRun(task.issueId)).toMatchObject({ state: 'NEEDS_RECONCILE' });
+    expect(existsSync(lostWorktree)).toBe(false);
+
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${bin}:${previousPath}`;
+    try {
+      await internal.reconcileDurableArtifacts([task]);
+    } finally {
+      process.env.PATH = previousPath;
+    }
+
+    expect(internal.executePipeline).not.toHaveBeenCalled();
+    expect(logPairComplete).not.toHaveBeenCalled();
+    expect(internal.durableRuns.getRun(task.issueId)).toMatchObject({
+      state: 'DONE', prUrl: 'https://github.com/acme/repo/pull/4518', headSha: 'sha4518',
+    });
+    expect(ledger.getEffectByDedupeKey(originalEffect.dedupeKey)).toMatchObject({
+      status: 'applied', payload: { stats: { originalWorker: true } },
+    });
+    internal.durableRuns.close();
+  });
+
   // AGT-4094: the heartbeat fetch asks Linear only for Todo / In Progress /
   // In Review / Backlog, so a run whose card reached Done is structurally
   // absent from `tasks`. Reconciliation used to skip such a row before it ever
@@ -702,6 +779,44 @@ esac
 
     expect(internal.durableRuns.getRun('unpublished')).toMatchObject({ state: 'NEEDS_RECONCILE' });
     expect(logPairComplete).not.toHaveBeenCalled();
+    internal.durableRuns.close();
+  });
+
+  it('reconciles several missing worktree rows without repeated state changes or a heartbeat failure (AGT-4518)', async () => {
+    vi.setSystemTime(new Date('2026-07-21T16:00:00Z'));
+    const { AutonomousRunner } = await import('./autonomousRunner.js');
+    const execution = await import('./runnerExecution.js');
+    execution.setTaskSource({
+      kind: 'linear', fetchTasks: vi.fn(async () => []), getExecutionComments: vi.fn(async () => []),
+      updateState: vi.fn(async () => true), addComment: vi.fn(async () => {}),
+      createTask: vi.fn(), createSubIssue: vi.fn(), logPairStart: vi.fn(), logPairComplete: vi.fn(),
+      logBlocked: vi.fn(), logStuck: vi.fn(), unstick: vi.fn(), logHalt: vi.fn(), markAsDecomposed: vi.fn(),
+    } as unknown as ITaskSource);
+    const runner = new AutonomousRunner({
+      linearTeamId: 'team', allowedProjects: ['/repo'], heartbeatSchedule: '0 * * * *',
+      autoExecute: true, dryRun: true,
+      automationLedgerMode: 'primary', automationDbPath: join(root, 'multi-stale-worktrees.db'),
+    });
+    const internal = runner as unknown as InternalRunner;
+    internal.refreshKnowledgeGraphs = vi.fn();
+    for (const issueId of ['stale-one', 'stale-two', 'stale-three']) {
+      internal.durableRuns.importLegacyRun({
+        issueId, source: 'linear', identifier: issueId, title: issueId,
+        projectPath: '/repo', state: 'RETRY_AT',
+        worktreePath: join(root, `already-removed-${issueId}`),
+      });
+    }
+
+    await expect(internal.reconcileMissingWorktreePointers()).resolves.toBeUndefined();
+    expect(internal.durableRuns.listRuns()).toHaveLength(3);
+    expect(internal.durableRuns.listRuns().map((run) => run.state)).toEqual(['RETRY_AT', 'RETRY_AT', 'RETRY_AT']);
+    await expect(internal.reconcileMissingWorktreePointers()).resolves.toBeUndefined();
+    expect(internal.durableRuns.listRuns().map((run) => run.state)).toEqual(['RETRY_AT', 'RETRY_AT', 'RETRY_AT']);
+
+    // Exercise the enclosing heartbeat boundary too: a row-level reconciliation
+    // failure must not turn into a failed heartbeat or stop sibling rows.
+    await expect(runner.heartbeat()).resolves.toBeUndefined();
+    expect(internal.durableRuns.listRuns().map((run) => run.state)).toEqual(['RETRY_AT', 'RETRY_AT', 'RETRY_AT']);
     internal.durableRuns.close();
   });
 

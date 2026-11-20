@@ -41,7 +41,7 @@ import { ISSUE_BOARD_HTML } from '../issues/issueBoardHtml.js';
 import { createSubIssuesWithDependencies, getTaskSource } from '../automation/runnerExecution.js';
 import { refuseForChildCap } from '../automation/decompositionLimits.js';
 import { projectInfoForRepository } from '../automation/runnerState.js';
-import { loadConfig } from '../core/config.js';
+import { loadConfig } from '../core/config.js'; import { getWorkScope } from '../core/workScope.js';
 import { loadRepoMetadata } from './repoMetadata.js';
 import type { SubTask } from './planner.js';
 import { getCachedHealthPayload, startHealthCache, stopHealthCache } from './healthEndpoint.js';
@@ -405,7 +405,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
           schedulerFairness: stats?.schedulerStats?.fairness ?? { projects: [] },
           uptime: state?.startedAt ? Date.now() - state.startedAt : 0,
           isRunning: stats?.isRunning ?? false,
-          sseClients: getActiveSSECount(),
+          sseClients: getActiveSSECount(), workScope: getWorkScope(), // AGT-3188
           adapters,
           dailyPace: stats?.dailyPace ?? null,
           failureCauses: { window: 50, counts: runnerRef?.getFailureCauseSummary(50) ?? {} },
@@ -681,8 +681,8 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             return;
           }
 
-          // Import linear dynamically to avoid circular deps
-          const linearModule = await import('../linear/index.js');
+          const linearModule = await import('../linear/index.js'); // dynamic: avoids circular deps
+          await linearModule.addComment(issueId, 'Moved to Todo from the OpenSwarm dashboard by the operator.'); // AGT-4800: say why
           await linearModule.updateIssueState(issueId, 'Todo');
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1310,7 +1310,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
             }
 
             if (tasks.length === 0) {
-              // Planner saw no decomposition — run the goal itself as one task.
+              await source.addComment(parent.id, 'The planner proposed no sub-tasks, so this goal runs as one task: moved to Todo.').catch(() => {}); // AGT-4800
               await source.updateState(parent.id, 'Todo').catch(() => {});
               triggerHeartbeat();
               res.writeHead(200, { 'Content-Type': 'application/json' });

@@ -1,13 +1,13 @@
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, cp, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm } from 'node:fs/promises';
+import { access, cp, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rm, rmdir } from 'node:fs/promises';
 import { constants, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
 import { describeLinuxSandbox, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
-import { selectOsSandbox } from './verifySandbox.js';
+import { makeBwrapOverlayProbe, selectOsSandbox, type UvCacheOverlay } from './verifySandbox.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { symlinkTargetEscapes } from '../support/escapingSymlink.js';
 import { isPrivateConfigurationFile, isPrivateWorkspaceFile } from '../support/environmentFiles.js';
@@ -21,25 +21,12 @@ import type { VerifyCommand } from './manifest.js';
 import { rebasePythonEnvironment } from './pythonEnvironment.js';
 import { pinTrustedTestConfig } from './trustedConfig.js';
 import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
+import { logVerifySandboxUsage } from './diskUsage.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
 const FINGERPRINT_BYTES = 4 * 1024 * 1024;
-const GIT_TIMEOUT_MS = 30_000;
-/**
- * The head sandbox is a `--no-hardlinks` clone: a full copy of the object store,
- * because the sandbox runs the repository's own test commands and hardlinked
- * packs would share inodes with the real checkout. That copy is bounded by disk
- * throughput, not by git, and on a loaded host it outgrows the 30 s every other
- * git call gets — cgf-portal's 135 MB took 33 s at load 55, and the runner fell
- * back to the LLM tester 29 times in one day, which is how `ruff`-red code shipped
- * as ready PRs (AGT-4416). The clone gets its own budget.
- */
-export const CLONE_TIMEOUT_MS = 10 * 60_000;
-
-/** The budget a git invocation gets: the sandbox clone's own, everything else the short default. */
-export function gitTimeoutMsFor(args: readonly string[]): number {
-  return args[0] === 'clone' ? CLONE_TIMEOUT_MS : GIT_TIMEOUT_MS;
-}
+import { git, gitTimeoutMsFor, CLONE_TIMEOUT_MS, GIT_TIMEOUT_MS } from './git.js';
+export { gitTimeoutMsFor, CLONE_TIMEOUT_MS };
 const execFileAsync = promisify(execFile);
 
 /** Dependency manifests the sandbox may observe when comparing base vs head. */
@@ -50,22 +37,14 @@ export const VERIFY_DEPENDENCY_INPUTS = new Set([
 ]);
 
 /** Shared dependency directories the verify sandbox may bind read-only from the live tree. */
-export const VERIFY_ALLOWED_DEPENDENCY_DIRS = new Set([
-  'node_modules', '.venv-verify', '.venv', 'venv',
-]);
+export { VERIFY_ALLOWED_DEPENDENCY_DIRS, VERIFY_TOOLCHAIN_PATH_PREFIXES, buildVerifyToolchainPath } from './toolchainPath.js';
+import { VERIFY_ALLOWED_DEPENDENCY_DIRS, buildVerifyToolchainPath } from './toolchainPath.js';
 
 /**
  * Read-only toolchain PATH prefixes verification may inherit. Anything else on
  * the host PATH (writable home dirs, arbitrary tool installs) stays out of the
  * sandbox so a malicious checkout cannot pick an unexpected binary via PATH.
  */
-export const VERIFY_TOOLCHAIN_PATH_PREFIXES = [
-  '/usr/bin',
-  '/bin',
-  '/usr/local/bin',
-  '/opt/homebrew/bin',
-] as const;
-
 export interface VerifyEvidence {
   command: VerifyCommand;
   baseStatus: 'pass' | 'fail' | 'infra' | 'skipped';
@@ -290,7 +269,11 @@ function isEnvironmentFailure(output: string): boolean {
     // uv / pip driven from inside the network-less verification sandbox: the
     // environment cannot be built, so neither run is a verdict. (AGT-4407)
     /Failed to initialize cache at/i,
-    /error: Failed to (?:download|fetch|prepare|sync)/i,
+    // uv prints `error: Failed to ...` or `  × Failed to download ...`: lowercase `error`
+    // not glued to a preceding letter (ANSI codes allowed), so a test's `TypeError: Failed
+    // to fetch` is not uv, while a line with other text in front of uv's message still is.
+    /(?:^|[^A-Za-z]|\x1b\[[0-9;]*m)(?:error|×)(?:\x1b\[[0-9;]*m)*:?(?:\x1b\[[0-9;]*m)*[ \t]+Failed to (?:download|fetch|prepare|sync)\b/m,
+    /Network connectivity is disabled, but the\s+requested data wasn't found in the cache/,
     /No solution found when resolving dependencies/i,
     /(?:Network is unreachable|Temporary failure in name resolution|Could not resolve host|nodename nor servname provided)/i,
     /No virtual environment found/i,
@@ -317,70 +300,34 @@ async function terminateVerificationProcesses(processGroupId: number | undefined
   await terminateProcessesWithEnvMarker(marker);
 }
 
-/**
- * Build the sandbox PATH from project-local dependency bins plus an explicit
- * read-only toolchain allowlist. Host PATH entries outside those prefixes are
- * dropped, so a writable tool install or an attacker-planted directory on the
- * host PATH cannot shadow a toolchain binary inside the verify sandbox.
- *
- * Project bins come FIRST: the sandbox must run the checkout's own
- * `node_modules/.bin/vitest`, not a system-wide one.
- */
-export function buildVerifyToolchainPath(
-  envPath: string | undefined,
-  root: string,
-  cwd: string = root,
-): string {
-  const entries: string[] = [];
-  const seen = new Set<string>();
-  const add = (candidate: string): void => {
-    if (!candidate || seen.has(candidate)) return;
-    seen.add(candidate);
-    entries.push(candidate);
-  };
-
-  for (const base of [cwd, root]) {
-    add(join(base, 'node_modules', '.bin'));
-    for (const venv of VERIFY_ALLOWED_DEPENDENCY_DIRS) {
-      if (venv === 'node_modules') continue;
-      add(join(base, venv, process.platform === 'win32' ? 'Scripts' : 'bin'));
-    }
-  }
-
-  // The interpreter running this verification comes right after the project bins.
-  // Its directory is trustworthy by construction — the daemon chose it — and it
-  // is the entry that covers every layout (/opt/hostedtoolcache/node/<v>/bin,
-  // Homebrew, a version manager) without opening $HOME. Ahead of the generic
-  // prefixes on purpose: this host's /usr/local/bin/node is a different major
-  // version, and the sandbox must run the interpreter the daemon runs.
-  add(dirname(process.execPath));
-
-  for (const prefix of VERIFY_TOOLCHAIN_PATH_PREFIXES) add(prefix);
-
-  for (const part of (envPath ?? '').split(delimiter)) {
-    if (!part) continue;
-    const normalized = part.replace(/\\/g, '/').replace(/\/+$/, '');
-    const allowedPrefix = VERIFY_TOOLCHAIN_PATH_PREFIXES.some(
-      (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`),
-    );
-    const projectLocal = /(?:^|\/)(?:node_modules\/\.bin|(?:\.venv-verify|\.venv|venv)\/(?:bin|Scripts))$/
-      .test(normalized);
-    // Node version managers install under */bin — keep those so `node`/`npm`
-    // remain reachable without opening the entire home directory PATH.
-    const versionManagerBin = /(?:^|\/)(?:\.?nvm|fnm|asdf|volta|n)(?:\/|$)/.test(normalized)
-      && normalized.endsWith('/bin');
-    if (allowedPrefix || projectLocal || versionManagerBin) add(part);
-  }
-
-  return entries.join(delimiter);
-}
-
 /** Working sandbox memoized, broken one re-probed — see makeSandboxCache. */
 const linuxSandbox = makeSandboxCache(() => describeLinuxSandbox(makeSystemProbe({
   exists: existsSync,
   readFile: (path) => readFileSync(path, 'utf8'),
   spawn: (executable, args) => spawnSync(executable, args, { encoding: 'utf8', timeout: 10_000 }),
 })));
+
+/** Memoized per bwrap and cache path: does a throwaway overlay of the host uv cache mount here? */
+const bwrapOverlaySupported = makeBwrapOverlayProbe(
+  (executable, args) => spawnSync(executable, args, { encoding: 'utf8', timeout: 10_000 }),
+);
+
+/** The host uv cache as an overlay lower layer, with fresh upper/work dirs in the sandbox root. */
+export async function uvCacheOverlay(env: NodeJS.ProcessEnv, sandboxRoot: string): Promise<UvCacheOverlay | undefined> {
+  if (process.platform !== 'linux' || !env.HOME) return undefined;
+  const cache = await realpath(join(env.HOME, '.cache', 'uv')).catch(() => undefined);
+  if (!cache) return undefined;
+  const base = join(sandboxRoot, 'uv-cache');
+  const overlay = { cache, upper: join(base, 'upper'), work: join(base, 'work') };
+  try {
+    // Exclusive creation: an existing entry (say a link verified code planted) means no overlay,
+    // never an overlay whose writes land wherever that entry points.
+    for (const dir of [base, overlay.upper, overlay.work]) await mkdir(dir);
+  } catch {
+    return undefined;
+  }
+  return overlay;
+}
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -522,13 +469,18 @@ async function runCommand(
       boundedCommand, root, cwd, isolatedHome, isolatedTmp, safeEnv, sandboxExecutorSessionFactory,
     );
   }
+  const overlay = await uvCacheOverlay(env, dirname(root));
   // Fails closed on every host without an OS sandbox (AGT-3447, INT-3103).
   const sandbox = await selectOsSandbox(root, process.env.SHELL || '/bin/sh', boundedCommand.run, {
     platform: process.platform, exists: existsSync, realpath, linuxSandbox,
+    // #817: the host uv cache as a throwaway overlay (Linux bwrap >= 0.9, probed), with
+    // UV_CACHE_DIR/UV_OFFLINE/UV_LINK_MODE=copy set inside. Never writable on the host;
+    // without an overlay uv gets the empty isolated cache and a miss is an environment failure.
+    uvCacheOverlay: overlay, overlaySupported: bwrapOverlaySupported,
   });
   if (!sandbox.ok) return { status: 'fail', output: sandbox.output };
   const { executable, args: invocationArgs } = sandbox;
-  return await new Promise((resolveResult) => {
+  const result = await new Promise<CommandResult>((resolveResult) => {
     let output: Buffer = Buffer.alloc(0);
     // Fingerprint bytes are kept per stream and concatenated in a fixed order at
     // the end (stdout, then stderr, then any synthetic trailer). Recording both
@@ -626,6 +578,10 @@ async function runCommand(
       })();
     });
   });
+  // overlayfs leaves an empty `work/work` at mode 000, which a recursive rm cannot enter; rmdir
+  // removes it without following a link the sandboxed code may have planted there.
+  if (overlay) await rmdir(join(overlay.work, 'work')).catch(() => undefined);
+  return result;
 }
 
 async function runTrustedCommand(
@@ -749,6 +705,7 @@ async function createVerifySandboxRoot(prefix: string, scratchRoot?: string): Pr
   return await mkdtemp(join(scratchRoot ?? tmpdir(), prefix));
 }
 
+
 async function createHeadSandbox(
   projectPath: string,
   commands: VerifyCommand[],
@@ -791,59 +748,15 @@ async function createHeadSandbox(
     // Close the copy race first (no escaping link is left to write through), then pin config.
     await validateSandboxSymlinks(project, sharedPaths);
     if (baseRef) await pinTrustedTestConfig(projectPath, project, baseRef);
+    logVerifySandboxUsage(root, 'create'); // fire-and-forget (AGT-4801)
     return { root, project };
   } catch (error) {
+    logVerifySandboxUsage(root, 'remove');
     await rm(root, { recursive: true, force: true });
     throw error;
   }
 }
 
-async function git(projectPath: string, args: string[]): Promise<string> {
-  const timeoutMs = gitTimeoutMsFor(args);
-  return await new Promise((resolveResult, reject) => {
-    const maxOutputBytes = 4 * 1024 * 1024;
-    // Checkout hooks belong to the live developer environment. Running them in
-    // a verification worktree can restore external data/secrets after filtering.
-    const child = spawn('git', ['-C', projectPath, '-c', 'core.hooksPath=/dev/null', ...args], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-    });
-    let stdout = '';
-    let stderr = '';
-    let outputBytes = 0;
-    let settled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (child.pid && process.platform !== 'win32') {
-        try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
-      } else child.kill('SIGKILL');
-      reject(error);
-    };
-    timer = setTimeout(() => fail(new Error(`git ${args[0] ?? ''} timed out after ${timeoutMs}ms`)), timeoutMs);
-    const append = (target: 'stdout' | 'stderr', chunk: Buffer) => {
-      outputBytes += chunk.length;
-      if (outputBytes > maxOutputBytes) {
-        fail(new Error(`git ${args[0] ?? ''} output exceeded ${maxOutputBytes} bytes`));
-        return;
-      }
-      if (target === 'stdout') stdout += chunk.toString('utf8');
-      else stderr += chunk.toString('utf8');
-    };
-    child.stdout.on('data', (chunk: Buffer) => append('stdout', chunk));
-    child.stderr.on('data', (chunk: Buffer) => append('stderr', chunk));
-    child.on('error', fail);
-    child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (code === 0) resolveResult(stdout.trim());
-      else reject(new Error(`git exited with code ${code}: ${stderr.trim()}`));
-    });
-  });
-}
 
 async function runAtBase(
   projectPath: string,
@@ -1016,6 +929,7 @@ async function runVerifyInSlot(options: RunVerifyOptions): Promise<VerifyEvidenc
         durationMs: Date.now() - started,
       });
     } finally {
+      logVerifySandboxUsage(sandbox.root, 'remove');
       await rm(sandbox.root, { recursive: true, force: true });
     }
   }

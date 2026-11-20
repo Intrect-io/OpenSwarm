@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchIssues, fetchStuck, fetchTasks } from './monitorApi.js';
+import { fetchIssues, fetchProjects, fetchStuck, fetchTasks } from './monitorApi.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -16,6 +16,28 @@ describe('monitorApi', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('bad gateway', { status: 502 })));
 
     await expect(fetchStuck(3847)).rejects.toThrow('GET /api/stuck-issues failed: HTTP 502: bad gateway');
+  });
+
+  it('captions the Projects tab with the daemon work scope (AGT-3188)', async () => {
+    const fetchMock = vi.fn(async (url: string) => url.endsWith('/api/stats')
+      ? new Response(JSON.stringify({ workScope: { milestone: 'S4 — Gate Trustworthiness' } }))
+      : new Response(JSON.stringify([])));
+    vi.stubGlobal('fetch', fetchMock);
+    expect((await fetchProjects(3847)).caption).toBe('Work scope: milestone "S4 — Gate Trustworthiness" only');
+
+    fetchMock.mockImplementation(async (url: string) => url.endsWith('/api/stats')
+      ? new Response(JSON.stringify({ workScope: { milestone: null } }))
+      : new Response(JSON.stringify([])));
+    expect((await fetchProjects(3847)).caption).toBe('Work scope: all issues in the allowed projects');
+  });
+
+  it('still loads the Projects tab when an older daemon has no work scope', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => url.endsWith('/api/stats')
+      ? new Response('nope', { status: 404 })
+      : new Response(JSON.stringify([]))));
+    const table = await fetchProjects(3847);
+    expect(table.rows).toEqual([]);
+    expect(table.caption).toBe('Work scope: unknown');
   });
 
   it('checks GraphQL HTTP errors before reading GraphQL payloads', async () => {

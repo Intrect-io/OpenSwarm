@@ -6,6 +6,7 @@
 
 import { partitionByReadiness, type ReadinessOptions, type ReadinessPartition, type ReadinessTask } from './readinessGate.js';
 import { resolveOwningProject } from '../support/projectGoal.js';
+import { DAEMON_COMMENT_LEAD } from '../linear/format.js';
 
 // On 2026-10-20 multi-defect issues ("15 defects") got +5-line drafts (AGT-4786): nothing told the
 // worker or the reviewer what "done" meant. The gate does not judge the quality of the sections, only
@@ -102,7 +103,7 @@ const SECTION_PROMPTS: Record<DefinitionOfReadySection, string> = {
 /** The one comment the drafter posts. It proposes sections; it never edits the issue body. */
 export function definitionOfReadyProposal(missing: readonly DefinitionOfReadySection[]): string {
   return [
-    '[OpenSwarm] This issue is not ready for dispatch (Definition of Ready, AGT-4805).',
+    `${DAEMON_COMMENT_LEAD} This issue is not ready for dispatch (Definition of Ready, AGT-4805).`,
     '',
     'OpenSwarm will not claim it until the issue body has these sections:',
     ...missing.map(key => `- ${SECTION_PROMPTS[key]}`),

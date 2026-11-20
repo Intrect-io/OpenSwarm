@@ -60,7 +60,7 @@ describe('missingDefinitionOfReadySections (AGT-4805)', () => {
 describe('definitionOfReadyProposal', () => {
   it('starts with [OpenSwarm] and names only the missing sections', () => {
     const body = definitionOfReadyProposal(['out_of_scope']);
-    expect(body.startsWith('[OpenSwarm]')).toBe(true);
+    expect(body.startsWith('🧭 **[OpenSwarm]** ')).toBe(true);
     expect(isDaemonComment(body)).toBe(true);
     expect(body).toContain('Out of scope');
     expect(body).not.toContain('Acceptance criteria');
@@ -86,7 +86,7 @@ describe('partitionByDefinitionOfReady', () => {
     expect(second.ready).toEqual([]);
     expect([...first.held.keys()]).toEqual(['definition_of_ready:acceptance_criteria,out_of_scope,verification']);
     expect(comment).toHaveBeenCalledTimes(1);
-    expect(comment).toHaveBeenCalledWith('uuid-1', expect.stringMatching(/^\[OpenSwarm\]/), definitionOfReadyMarker('uuid-1'));
+    expect(comment).toHaveBeenCalledWith('uuid-1', expect.stringMatching(/^🧭 \*\*\[OpenSwarm\]\*\* /), definitionOfReadyMarker('uuid-1'));
   });
 
   it('retries the comment on the next heartbeat when posting failed', async () => {

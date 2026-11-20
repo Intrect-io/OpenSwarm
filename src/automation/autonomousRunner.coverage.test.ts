@@ -987,12 +987,9 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
 
   describe('stalled In Progress reconciliation', () => {
     it('moves an unowned stale Linear task to Backlog and updates the current snapshot', async () => {
-      const updateState = vi.fn(async () => true);
-      const lookupIssueState = vi.fn(async () => ({
-        ok: true as const,
-        issue: { state: 'In Progress', updatedAt: 1_000 },
-      }));
-      runnerExecution.setTaskSource({ kind: 'linear', updateState, lookupIssueState } as unknown as ITaskSource);
+      const updateState = vi.fn(async () => true); const addComment = vi.fn(async () => undefined); // AGT-4800: the move says why
+      const lookupIssueState = vi.fn(async () => ({ ok: true as const, issue: { state: 'In Progress', updatedAt: 1_000 } }));
+      runnerExecution.setTaskSource({ kind: 'linear', updateState, lookupIssueState, addComment } as unknown as ITaskSource);
       const r = new AutonomousRunner(cfg({ stalledInProgressHours: 6 }));
       const internal = r as unknown as Internal;
       vi.spyOn(internal.durableRuns, 'getRun').mockReturnValue({ state: 'RETRY_AT' });
@@ -1003,6 +1000,7 @@ describe('AutonomousRunner coverage — safely-reachable helpers', () => {
 
       expect(lookupIssueState).toHaveBeenCalledWith('INT-1');
       expect(updateState).toHaveBeenCalledWith('ISSUE-1', 'Backlog');
+      expect(addComment).toHaveBeenCalledWith('ISSUE-1', expect.stringContaining('owned this issue for 6h, so it returns to Backlog'));
       expect(stale.linearState).toBe('Backlog');
     });
 

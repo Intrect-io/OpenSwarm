@@ -645,6 +645,7 @@ export type AutonomousStartupConfig = {
   maxAttempts: number;
   /** Allowed project paths */
   allowedProjects: string[];
+  scope?: { milestone?: string };
   /** Treat Linear Backlog as a work queue (legacy). Default false = Backlog parked (R5). */
   includeBacklog?: boolean;
   /** Model configuration (legacy) */
@@ -655,6 +656,7 @@ export type AutonomousStartupConfig = {
   reviewerTimeoutMs?: number;
   /** Max concurrent tasks */
   maxConcurrentTasks?: number;
+  dispatchRampClaims?: number;
   /** Move unowned In Progress issues back to Backlog after this many idle hours. */
   stalledInProgressHours?: number;
   /** Issues the heartbeat must not pick because a person owns them (labels, epics, title tags). */

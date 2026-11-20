@@ -30,7 +30,8 @@ const issue = { title: 'Fix the importer', description: 'It drops rows.' };
 describe('isDaemonComment', () => {
   it.each([
     '🧭 **[OpenSwarm] Task execution started**\n\nattempt 3',
-    '**[OpenSwarm] Worker halted**\n\nreason',
+    '🧭 **[OpenSwarm]** Draft grooming deferred this task.',
+    '🧭 **[OpenSwarm]**\n\n## Plan',
     '**Worker actions — Halted (attempt #1/5)**\n\nsummary\n\n_via OpenSwarm_',
     '**Heading**\n\nbody\n\n_via OpenSwarm · run abc_',
   ])('recognises the daemon\'s own shapes: %s', (body) => {
@@ -42,6 +43,9 @@ describe('isDaemonComment', () => {
     'I looked at OpenSwarm and it is fine',
     'via OpenSwarm is the footer they use',
     'The [OpenSwarm] label is wrong',
+    // A person typing the bare tag is still a person (#853 review): only the full lead is the daemon's.
+    '[OpenSwarm] please retry',
+    '**[OpenSwarm] retry** please',
   ])('does not mistake a person for the daemon: %s', (body) => {
     expect(isDaemonComment(body)).toBe(false);
   });

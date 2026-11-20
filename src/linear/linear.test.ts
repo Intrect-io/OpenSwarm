@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, drainLinearConnectionPages, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_MAX_CANDIDATES, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers, populateBlockedBy, type LinearIssueInfo, type RawIssueNode } from './linear.js';
+import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, drainLinearConnectionPages, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, logBlocked, logWorkComplete, logWorkStart, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_MAX_CANDIDATES, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers, populateBlockedBy, type LinearIssueInfo, type RawIssueNode } from './linear.js';
 import { LinearClient } from '@linear/sdk';
 
 // createSubIssue reads the module-level client singleton (getClient()), set only
@@ -252,10 +252,12 @@ describe('fetchIssuesForStates pagination', () => {
   it('collects every page', async () => {
     let page = 0;
     const queries: string[] = [];
+    const variables: Array<Record<string, unknown> | undefined> = [];
     const linear = {
       client: {
-        rawRequest: async (query: string) => {
+        rawRequest: async (query: string, vars?: Record<string, unknown>) => {
           queries.push(query);
+          variables.push(vars);
           return ({ data: { issues: {
           nodes: [{ id: `id-${page}`, identifier: `INT-${page}`, title: 't', priority: 2 }],
           pageInfo: { hasNextPage: page++ === 0, endCursor: `cursor-${page}` },
@@ -263,7 +265,9 @@ describe('fetchIssuesForStates pagination', () => {
         },
       },
     } as unknown as LinearClient;
-    expect((await fetchIssuesForStates(linear, ['Todo'])).nodes.map((node) => node.id)).toEqual(['id-0', 'id-1']);
+    expect((await fetchIssuesForStates(linear, ['Todo'], {
+      projectMilestone: { name: { eq: 'S4 — Gate Trustworthiness' } },
+    })).nodes.map((node) => node.id)).toEqual(['id-0', 'id-1']);
     expect(queries[0]).toMatch(/\burl\b/);
     // The native blockers ride the same request (AGT-4050): one nested field,
     // not one `inverseRelations()` resolver call per issue — measured 100
@@ -272,6 +276,11 @@ describe('fetchIssuesForStates pagination', () => {
     // One child is enough to tell an epic from a task (AGT-4682); the swarm must not pick an epic.
     expect(queries[0]).toMatch(/children\(first: 1\) \{ nodes \{ id \} \}/);
     expect(queries).toHaveLength(2);
+    expect(variables[0]?.filter).toEqual({
+      projectMilestone: { name: { eq: 'S4 — Gate Trustworthiness' } },
+      team: { id: { eq: 'team-1' } },
+      state: { name: { in: ['Todo'] } },
+    });
   });
 
   it('reports explicit truncation instead of silently returning a partial set', async () => {
@@ -513,6 +522,52 @@ describe('createSubIssue idempotent recovery (AGT-4048)', () => {
   });
 });
 
+// AGT-3188: a milestone-scoped daemon only fetches issues in the milestone, so a sub-issue
+// created without it would fall out of scope the moment its in-scope parent was decomposed.
+describe('createSubIssue milestone inheritance (AGT-3188)', () => {
+  function installCreateClient(parentMilestone: { id: string; projectId: string } | undefined) {
+    const parentIssue = {
+      id: 'parent-uuid',
+      identifier: 'AGT-1',
+      team: Promise.resolve({ id: 'team-uuid' }),
+      projectMilestone: parentMilestone
+        ? Promise.resolve({ id: parentMilestone.id, project: Promise.resolve({ id: parentMilestone.projectId }) })
+        : undefined,
+    };
+    const created = { id: 'child', identifier: 'AGT-2', title: 't', url: 'u', description: 'd', priority: 3, state: Promise.resolve({ name: 'Todo' }) };
+    const fakeClient = {
+      issue: vi.fn(async () => parentIssue),
+      team: vi.fn(async () => ({ labels: vi.fn(async () => ({ nodes: [] })) })),
+      createIssue: vi.fn(async (_input: Record<string, unknown>) => ({ issue: Promise.resolve(created) })),
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1');
+    return fakeClient;
+  }
+
+  it("copies the parent's milestone into the create input", async () => {
+    const client = installCreateClient({ id: 'ms-s4', projectId: 'proj-1' });
+    await createSubIssue('parent-uuid', 'child', 'body', { projectId: 'proj-1' });
+    expect(client.createIssue).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'proj-1', projectMilestoneId: 'ms-s4' }));
+  });
+
+  it("sends the milestone's project when the caller passed none", async () => {
+    const client = installCreateClient({ id: 'ms-s4', projectId: 'proj-1' });
+    await createSubIssue('parent-uuid', 'child', 'body');
+    expect(client.createIssue).toHaveBeenCalledWith(expect.objectContaining({ projectId: 'proj-1', projectMilestoneId: 'ms-s4' }));
+  });
+
+  it('leaves the milestone off when the parent has none or the child goes to another project', async () => {
+    let client = installCreateClient(undefined);
+    await createSubIssue('parent-uuid', 'child', 'body', { projectId: 'proj-1' });
+    expect(client.createIssue.mock.calls[0][0]).not.toHaveProperty('projectMilestoneId');
+    client = installCreateClient({ id: 'ms-s4', projectId: 'proj-1' });
+    await createSubIssue('parent-uuid', 'child', 'body', { projectId: 'proj-2' });
+    expect(client.createIssue.mock.calls[0][0]).toMatchObject({ projectId: 'proj-2' });
+    expect(client.createIssue.mock.calls[0][0]).not.toHaveProperty('projectMilestoneId');
+  });
+});
+
 // AGT-4051: same shape as AGT-4048, one call deeper — a stable commentId is
 // the identity guarantee; the body (which callers bake a timestamp into) can
 // legitimately differ on every retry and must not block convergence.
@@ -593,5 +648,25 @@ describe('populateBlockedBy', () => {
     const result = [info('ax-1')];
     populateBlockedBy(result, new Map([['ax-1', { id: 'ax-1', identifier: 'AX-1', title: 'ax-1', priority: 2, inverseRelations: null }]]));
     expect(result[0].blockedBy).toBeUndefined();
+  });
+});
+
+describe('state-change comment ordering', () => {
+  it.each([
+    ['start', logWorkStart, ['issue-1', 'agent-1'], 'In Progress'],
+    ['complete', logWorkComplete, ['issue-1', 'agent-1', 'done'], 'Done'],
+    ['blocked', logBlocked, ['issue-1', 'agent-1', 'reason'], 'Todo'],
+  ])('%s comments before changing state', async (_label, action, args, expectedState) => {
+    const events: string[] = [];
+    const fakeClient = {
+      createComment: vi.fn(async () => { events.push('comment'); return { success: true }; }),
+      issue: vi.fn(async () => ({ team: Promise.resolve({ id: 'team-1' }) })),
+      team: vi.fn(async () => ({ states: async () => ({ nodes: [{ id: 'state-1', name: expectedState }] }) })),
+      updateIssue: vi.fn(async () => { events.push('state'); return { success: true }; }),
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1');
+    await (action as (...values: string[]) => Promise<void>)(...(args as string[]));
+    expect(events).toEqual(['comment', 'state']);
   });
 });

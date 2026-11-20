@@ -511,6 +511,9 @@ export async function syncStatusToLinear(
 
   try {
     const stateId = await resolveLinearStateId(mapStatusToLinear(newStatus));
+    // AGT-4800: a state change comes with a signed comment saying why. It goes through
+    // linear.addComment (the one comment write path), a no-op when that client is not initialised.
+    await (await import('../linear/linear.js')).addComment(issue.linearId, `Status synced from the local issue store: ${newStatus}.`);
     await linearClient.updateIssue(issue.linearId, { stateId });
     console.log(`[LinearBridge] Linear 상태 업데이트: ${issue.linearIdentifier} → ${newStatus}`);
     return true;

@@ -119,7 +119,7 @@ describe('heartbeat skips issues that are not the agent\'s work (AGT-4682)', () 
     const comments = gated.addComment.mock.calls.filter((call: unknown[]) => String(call[1]).includes('Definition of Ready'));
     expect(comments).toHaveLength(1);
     expect(comments[0][0]).toBe('dor-1');
-    expect(String(comments[0][1]).startsWith('[OpenSwarm]')).toBe(true);
+    expect(String(comments[0][1]).startsWith('🧭 **[OpenSwarm]** ')).toBe(true);
 
     const optedOut = await runHeartbeat(fetched, undefined, {
       projectAgents: [{ projectPath: '/repo', linearProjectId: 'lp-repo', requireDefinitionOfReady: false }],

@@ -5,6 +5,7 @@ import type { WorkerContext } from '../locale/types.js';
 import { enforcedFileScope } from '../orchestration/writeScope.js';
 import { safeConsole } from '../support/safeLog.js';
 import { collectSiblingWork } from './siblingWork.js';
+import { worktreeGitignoredGaps } from '../support/worktreeMissingPaths.js';
 import type { PipelineContext } from './pairPipelineTypes.js';
 
 export async function collectWorkerContext(
@@ -57,6 +58,13 @@ export async function collectWorkerContext(
     // it changes what the worker knows, not what it is allowed to do. (AGT-4088)
     const siblingWork = await collectSiblingWork(context.projectPath);
     if (siblingWork.length) { wc.siblingWork = siblingWork; safeConsole.log(`[Pipeline] ${siblingWork.length} sibling worktree(s) have uncommitted changes`); }
-    return wc.fileScope || wc.priorDeliveries || wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories || wc.siblingWork ? wc : undefined;
+    // Gitignored source data the worktree cannot see, recorded when it was created. Without
+    // it a worker reads a missing data dir as "never delivered". (AGT-4041, #855 review)
+    const gaps = worktreeGitignoredGaps(context.projectPath);
+    if (gaps) {
+      wc.repository = { workspaces: [], manifests: [], verificationCommands: [], sharedPaths: gaps.shared,
+        missingGitignoredPaths: gaps.missing, unreadableGitignoredPaths: gaps.unreadable, dependencyGraphAvailable: Boolean(wc.impactAnalysis) };
+    }
+    return wc.repository || wc.fileScope || wc.priorDeliveries || wc.impactAnalysis || wc.registryBriefs || wc.draftAnalysis || wc.repoMemories || wc.siblingWork ? wc : undefined;
   } catch (error) { safeConsole.warn('[Pipeline] Worker context collection failed (non-blocking):', error); return undefined; }
 }

@@ -72,10 +72,12 @@ export function dispatchWritePaths(projectPaths: readonly string[], extra: reado
 }
 
 /**
- * True for a failure that means the host is out of a resource rather than that
- * the task was wrong: ENOSPC, by code or by the text git and node print.
- * Deliberately narrow — "no space left for the label" in prose must not match,
- * and neither must a network failure.
+ * True for a failure that means the host may be out of a resource rather than
+ * that the task was wrong: ENOSPC, by structured error code first, else by the
+ * text git and node print. Deliberately narrow — "no space left for the label"
+ * in prose must not match, and neither must a network failure. Text from worker
+ * or test output is only a reason to re-measure (see
+ * {@link HostDiskGate.resourceFailure}), never a verdict on its own.
  */
 export function isHostResourceError(error: unknown): boolean {
   if (error && typeof error === 'object' && (error as { code?: unknown }).code === 'ENOSPC') return true;
@@ -108,8 +110,15 @@ export function formatGiB(bytes: number): string {
 export type DispatchGateDecision =
   /** Disk is fine: carry on. */
   | { pause: false; notice?: string }
-  /** Disk is low: skip this heartbeat's claims. `notice` is set only on the first low reading. */
-  | { pause: true; line: string; notice?: string };
+  /**
+   * Disk is low, or a reported host-resource failure holds dispatch for a while
+   * (`hold`): skip this heartbeat's claims. `notice` is set only on the first reading.
+   * Only a measured low (no `hold`) becomes the operator-lifted `auto:disk` factory pause.
+   */
+  | { pause: true; line: string; notice?: string; hold?: true };
+
+/** How long an ENOSPC report the free-space measurement did not confirm holds dispatch. */
+export const DEFAULT_RESOURCE_FAILURE_HOLD_MS = 15 * 60_000;
 
 /**
  * One heartbeat's disk check, remembering the previous one so the operator hears
@@ -119,11 +128,48 @@ export type DispatchGateDecision =
  */
 export class HostDiskGate {
   private low = false;
+  /** An unconfirmed ENOSPC report holds dispatch until this time; 0 = no hold. */
+  private heldUntil = 0;
+  private holdLine = '';
 
   constructor(
     private readonly paths: () => readonly string[],
     private readonly minFreeBytes: () => number = () => DEFAULT_MIN_FREE_BYTES,
+    private readonly log: (line: string) => void = (line) => console.warn(line),
+    private readonly options: { now?: () => number; holdMs?: number } = {},
   ) {}
+
+  private now(): number { return (this.options.now ?? Date.now)(); }
+
+  /**
+   * A run reported a host-resource failure (ENOSPC, usually as text in worker or
+   * test output). The free space is measured right away: below the floor it is
+   * the ordinary low reading, which leads to the operator-lifted `auto:disk`
+   * factory pause. When the disk measures fine the report may still be true for
+   * a volume the gate does not measure (a tmpfs, a container overlay), so
+   * dispatch is held for a while (AGT-4785) — but only held: the hold expires on
+   * its own and never becomes a factory pause, so one test that prints "No space
+   * left on device" cannot drain the factory until an operator steps in.
+   */
+  resourceFailure(detail: string): DispatchGateDecision {
+    const floor = this.minFreeBytes();
+    if (floor > 0 && checkHostHealth(this.paths(), floor).verdict === 'low') return this.evaluate();
+    const line = `Host resource failure: ${detail}`;
+    if (this.heldUntil > this.now()) return { pause: true, hold: true, line: this.holdLine };
+    const holdMs = this.options.holdMs ?? DEFAULT_RESOURCE_FAILURE_HOLD_MS;
+    this.heldUntil = this.now() + holdMs;
+    this.holdLine = line;
+    this.log(`[HostHealth] ENOSPC report not confirmed by a free-space measurement; holding dispatch for ${Math.round(holdMs / 60_000)} min: ${detail}`);
+    return { pause: true, hold: true, line, notice: `Dispatch paused for ${Math.round(holdMs / 60_000)} min after a host resource failure the free-space check did not confirm: ${detail}` };
+  }
+
+  /** The unconfirmed-report hold, while it lasts; a one-time recovery notice once it expires. */
+  private holdDecision(): DispatchGateDecision | undefined {
+    if (this.heldUntil === 0) return undefined;
+    if (this.heldUntil > this.now()) return { pause: true, hold: true, line: this.holdLine };
+    this.heldUntil = 0;
+    return { pause: false, notice: 'Host resource hold expired; dispatch recovered.' };
+  }
 
   /** Measure now and decide. A floor of zero or less switches the check off. */
   evaluate(): DispatchGateDecision {
@@ -131,13 +177,13 @@ export class HostDiskGate {
     if (floor <= 0) {
       const recovered = this.low;
       this.low = false;
-      return recovered ? { pause: false, notice: 'Disk-space check switched off; dispatch resumes.' } : { pause: false };
+      return recovered ? { pause: false, notice: 'Disk-space check switched off; dispatch resumes.' } : (this.holdDecision() ?? { pause: false });
     }
     const health = checkHostHealth(this.paths(), floor);
     if (health.verdict === 'ok') {
       const recovered = this.low;
       this.low = false;
-      if (!recovered) return { pause: false };
+      if (!recovered) return this.holdDecision() ?? { pause: false };
       const free = health.scarcest ? ` (${formatGiB(health.scarcest.freeBytes)} free on ${health.scarcest.dir})` : '';
       // The automatic `auto:disk` factory pause (AGT-4809) is not lifted here; an operator lifts it.
       return { pause: false, notice: `Disk space recovered${free}; the disk hold is lifted. An auto:disk factory pause stays until \`openswarm unpause\`.` };

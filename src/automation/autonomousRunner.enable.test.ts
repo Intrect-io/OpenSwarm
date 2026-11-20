@@ -137,6 +137,7 @@ describe('AutonomousRunner per-project candidate cap', () => {
       allowSameProjectConcurrent: true,
       worktreeMode: true,
       maxConcurrentPerProject: 2,
+      dispatchRampClaims: 3, // isolate the per-project cap from the cold-start ramp (AGT-4799)
     }));
     const internal = r as unknown as {
       engine: {

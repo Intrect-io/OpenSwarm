@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
-import { DARWIN_SANDBOX_EXEC, selectOsSandbox, type OsSandboxDeps } from './verifySandbox.js';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DARWIN_SANDBOX_EXEC, makeBwrapOverlayProbe, selectOsSandbox, type OsSandboxDeps } from './verifySandbox.js';
 
 // Platform is injected, so the macOS branches run on any host. They were not
 // exercised against a real sandbox-exec here.
@@ -56,5 +59,82 @@ describe('selectOsSandbox (AGT-3447)', () => {
     }));
     expect(missing.ok).toBe(false);
     if (!missing.ok) expect(missing.output).toContain('bwrap missing');
+  });
+});
+
+// #817: the host uv cache is reachable only as a throwaway overlay, never writable.
+describe('selectOsSandbox uvCacheOverlay (#817, offline uv cache)', () => {
+  const overlay = { cache: '/home/u/.cache/uv', upper: '/scratch/x/uv-cache/upper', work: '/scratch/x/uv-cache/work' };
+
+  it('mounts the cache as an overlay after the root bind and sets offline copy mode', async () => {
+    const overlaySupported = vi.fn(() => true);
+    const choice = await selectOsSandbox('/scratch/x/repo', '/bin/sh', 'uv run pytest', deps({ uvCacheOverlay: overlay, overlaySupported }));
+    expect(overlaySupported).toHaveBeenCalledWith('/usr/bin/bwrap', overlay);
+    expect(choice.ok).toBe(true);
+    if (!choice.ok) return;
+    const at = choice.args.indexOf('--overlay-src');
+    expect(choice.args.slice(at, at + 6)).toEqual(['--overlay-src', overlay.cache, '--overlay', overlay.upper, overlay.work, overlay.cache]);
+    expect(at).toBeGreaterThan(choice.args.indexOf('/scratch/x'));
+    expect(at).toBeLessThan(choice.args.indexOf('--unshare-net'));
+    const joined = choice.args.join(' ');
+    expect(joined).toContain(`--setenv UV_CACHE_DIR ${overlay.cache}`);
+    expect(joined).toContain('--setenv UV_OFFLINE 1');
+    expect(joined).toContain('--setenv UV_LINK_MODE copy');
+    // The cache itself is never bound writable.
+    expect(choice.args.filter((a) => a === '--bind')).toHaveLength(1);
+  });
+
+  it('exposes no cache and sets no uv variables when bwrap cannot overlay', async () => {
+    for (const overlaySupported of [() => false, undefined]) {
+      const choice = await selectOsSandbox('/scratch/x/repo', '/bin/sh', 'uv run pytest', deps({ uvCacheOverlay: overlay, overlaySupported }));
+      expect(choice.ok).toBe(true);
+      if (!choice.ok) continue;
+      expect(choice.args).not.toContain(overlay.cache);
+      expect(choice.args.join(' ')).not.toMatch(/UV_|overlay/);
+    }
+  });
+
+  it('never adds the cache to the macOS write allowlist', async () => {
+    const choice = await selectOsSandbox('/scratch/x/repo', '/bin/zsh', 'uv run pytest', deps({
+      platform: 'darwin',
+      realpath: async () => '/private/scratch/x',
+      uvCacheOverlay: { ...overlay, cache: '/Users/u/.cache/uv' },
+      overlaySupported: () => true,
+    }));
+    expect(choice.ok).toBe(true);
+    if (choice.ok) {
+      expect(choice.args[1]).not.toContain('.cache/uv');
+      expect(choice.args.join(' ')).not.toContain('UV_');
+    }
+  });
+});
+
+describe('makeBwrapOverlayProbe', () => {
+  const ok = { status: 0, stdout: '', stderr: '' };
+  let scratch: string;
+  beforeEach(async () => { scratch = await mkdtemp(join(tmpdir(), 'osw-overlay-probe-')); });
+  afterEach(async () => { await rm(scratch, { recursive: true, force: true }); });
+  const overlayIn = () => ({ cache: '/c', upper: join(scratch, 'upper'), work: join(scratch, 'work') });
+
+  it('requires the overlay flags in --help and a write through a trial mount, and memoizes the answer', async () => {
+    const spawn = vi.fn((_: string, args: string[]) => (args[0] === '--help'
+      ? { ...ok, stdout: '--overlay-src SRC\n--overlay RWSRC WORKDIR DEST\n' }
+      : ok));
+    const probe = makeBwrapOverlayProbe(spawn);
+    expect(probe('/usr/bin/bwrap', overlayIn())).toBe(true);
+    expect(probe('/usr/bin/bwrap', overlayIn())).toBe(true);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    const trial = spawn.mock.calls[1][1];
+    expect(trial.indexOf('--overlay-src')).toBeLessThan(trial.indexOf('--overlay'));
+    expect(trial.slice(-2)).toEqual(['touch', '/c/.openswarm-overlay-probe']);
+    expect(await readdir(scratch)).toEqual([]); // the trial's upper/work are cleaned up
+  });
+
+  it('says no for an old bwrap, a refused trial write, or a probe that throws', () => {
+    expect(makeBwrapOverlayProbe(() => ({ ...ok, stdout: '--bind SRC DEST' }))('/b', overlayIn())).toBe(false);
+    expect(makeBwrapOverlayProbe((_, args) => (args[0] === '--help'
+      ? { ...ok, stdout: '--overlay-src SRC --overlay RWSRC WORKDIR DEST' }
+      : { status: 1, stdout: '', stderr: 'touch: Invalid argument' }))('/b', overlayIn())).toBe(false);
+    expect(makeBwrapOverlayProbe(() => { throw new Error('spawn failed'); })('/b', overlayIn())).toBe(false);
   });
 });

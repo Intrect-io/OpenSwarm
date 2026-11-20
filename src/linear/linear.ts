@@ -5,7 +5,7 @@
 import { LinearClient } from '@linear/sdk';
 import { createHash } from 'node:crypto';
 import type { LinearIssueInfo, LinearProjectInfo } from '../core/types.js';
-import { formatAutomationComment, formatPairDialogue, type CommentSection } from './format.js';
+import { formatAutomationComment, formatPairDialogue, signDaemonComment, type CommentSection } from './format.js';
 import { completionTargetState, type PairCompleteStats } from '../automation/taskSource.js';
 import { setLinearClient } from './projectUpdater.js';
 import { withRateLimit } from '../support/rateLimiter.js';
@@ -578,7 +578,7 @@ export async function getNextBacklogIssue(
  * Options for getMyIssues
  */
 export interface GetMyIssuesOptions {
-  agentLabel?: string;
+  agentLabel?: string; milestone?: string;
   /**
    * Slim mode: skip N+1 queries for comments/labels/project.
    * Returns only core fields (id, identifier, title, description, priority, state, project).
@@ -678,10 +678,10 @@ export async function getMyIssues(
     ? { agentLabel: agentLabelOrOptions }
     : agentLabelOrOptions ?? {};
 
-  const { agentLabel, slim = false, timeoutMs = 30000 } = opts;
+  const { agentLabel, milestone, slim = false, timeoutMs = 30000 } = opts;
 
   // Generate cache key
-  const cacheKey = `${agentLabel || 'all'}:${slim}`;
+  const cacheKey = `${agentLabel || 'all'}:${slim}:${milestone ?? ''}`;
 
   // Check cache first
   const cached = myIssuesCache.get(cacheKey);
@@ -703,7 +703,7 @@ export async function getMyIssues(
     const result: LinearIssueInfo[] = [];
 
     const extraFilter: Record<string, unknown> = {};
-    if (agentLabel) extraFilter.labels = { name: { eq: agentLabel } };
+    if (agentLabel) extraFilter.labels = { name: { eq: agentLabel } }; if (milestone) extraFilter.projectMilestone = { name: { eq: milestone } };
 
     if (slim) {
       // Separate queries per state → tag each issue without resolver calls.
@@ -1041,7 +1041,7 @@ export async function addComment(
     await linear.createComment({
       id: commentId,
       issueId,
-      body,
+      body: signDaemonComment(body), // every daemon comment starts with [OpenSwarm] (AGT-4800)
     });
   } catch (error) {
     if (commentId) {
@@ -1511,9 +1511,8 @@ export async function createSubIssue(
 
     // Add auto-decomposed label
     const autoLabel = teamLabels.nodes.find((l) => l.name === 'auto-decomposed');
-    if (autoLabel) {
-      labelIds.push(autoLabel.id);
-    }
+    if (autoLabel) labelIds.push(autoLabel.id);
+    const { subIssueProjectFields } = await import('./subIssueMilestone.js'); // inherit the parent's milestone (AGT-3188 scope)
 
     const issuePayload = await linear.createIssue({
       id: options?.idempotencyId,
@@ -1523,7 +1522,7 @@ export async function createSubIssue(
       description,
       labelIds,
       priority: options?.priority ?? 3,
-      projectId: options?.projectId,
+      ...(await subIssueProjectFields(parentIssue, options?.projectId)),
     });
 
     const issue = await issuePayload.issue;

@@ -55,6 +55,12 @@ export interface ReviewerOptions {
   guardWarnings?: string[];
   /** Trusted ruling instruction plus the data-wrapped open findings from earlier rounds (AGT-4535). */
   findingLedger?: string;
+  /**
+   * Rendered list of gitignored source paths the worktree cannot see (missing / unreadable),
+   * appended in every mode: a blocker claim that some data does not exist is judged against it.
+   * (AGT-4041, #855 review)
+   */
+  worktreeGapSection?: string;
   /** Deterministic command evidence produced by the harness tester. */
   verificationEvidence?: VerifyEvidence[];
   /** Relevant repository-local logs from earlier review commands. */
@@ -186,6 +192,11 @@ Keep it brief. This is a fast filter, not a deep review.`;
  * Build Reviewer prompt using locale templates
  */
 export function buildReviewerPrompt(options: ReviewerOptions): string {
+  const prompt = buildReviewerPromptBody(options);
+  return options.worktreeGapSection ? `${prompt}\n\n${options.worktreeGapSection}` : prompt;
+}
+
+function buildReviewerPromptBody(options: ReviewerOptions): string {
   const files = options.workerResult.filesChanged;
   const filesSummary = files.length <= 20
     ? (files.join(', ') || '(none)')

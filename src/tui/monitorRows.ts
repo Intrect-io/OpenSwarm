@@ -7,6 +7,16 @@
 export interface Table {
   columns: string[];
   rows: string[][];
+  /** One line above the table, e.g. the daemon's work scope on the Projects tab. */
+  caption?: string;
+}
+
+/** The Projects tab caption: what the daemon may pick from (AGT-3188). Unknown when the daemon did not say. */
+export function workScopeCaption(scope: { milestone?: string | null; matched?: boolean } | null | undefined): string {
+  if (scope === undefined || scope === null) return 'Work scope: unknown';
+  if (!scope.milestone) return 'Work scope: all issues in the allowed projects';
+  // matched === false: the last fetch found no open issues for this milestone (wrong/renamed/archived name).
+  return `Work scope: milestone "${scope.milestone}" only${scope.matched === false ? ' (matches no open issues)' : ''}`;
 }
 
 export interface ApiProject {
