@@ -1,8 +1,8 @@
 // recoverTelemetryLock used to read the lock owner, judge it, then unlink the
 // PATH. If a live process took a fresh lock between the judgement and the
-// unlink, that live lock was deleted (AGT-4903). Reclaim now moves the file
-// aside, deletes it only when it is the lock that was judged, and otherwise
-// puts it back.
+// unlink, that live lock was deleted (AGT-4903). Reclaimers are now serialized
+// by a guard file and judge the lock again under it; only a lock that is still
+// the judged one is deleted.
 //
 // Liveness and namespace proof are stubbed so the race can be injected at the
 // exact point of judgement: the stub for processAppearsAlive swaps the lock on
@@ -143,5 +143,36 @@ describe('telemetry stale lock reclaim — atomic and ownership-safe', () => {
     expect(existsSync(lockFile())).toBe(false);
     expect(leftoverQuarantines()).toEqual([]);
     expect(JSON.parse(readFileSync(stateFile(), 'utf8')).noticeShown).toBe(true);
+  });
+});
+
+describe('telemetry lock reclaimers are serialized (#920 review)', () => {
+  const guardFile = () => `${lockFile()}.reclaim`;
+
+  it('leaves the stale lock alone while another reclaimer holds the guard', async () => {
+    const { maybeShowNotice } = await loadTelemetry();
+    writeLock({ pid: DEAD_PID, token: 'dead-owner' });
+    writeFileSync(guardFile(), '', { mode: 0o600 });
+    liveness.processAppearsAlive.mockImplementation((pid: number) => pid !== DEAD_PID);
+
+    withExpiredLockWait(() => maybeShowNotice());
+
+    expect(JSON.parse(readFileSync(lockFile(), 'utf8')).token).toBe('dead-owner');
+    expect(existsSync(guardFile())).toBe(true);
+  });
+
+  it('clears a guard left by a reclaimer that died, then reclaims on the next attempt', async () => {
+    const { maybeShowNotice } = await loadTelemetry();
+    writeLock({ pid: DEAD_PID, token: 'dead-owner' });
+    writeFileSync(guardFile(), '', { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(guardFile(), old, old);
+    liveness.processAppearsAlive.mockImplementation((pid: number) => pid !== DEAD_PID);
+
+    maybeShowNotice();
+
+    expect(existsSync(guardFile())).toBe(false);
+    expect(existsSync(lockFile())).toBe(false);
+    expect(JSON.parse(readFileSync(stateFile(), 'utf8')).installId).toMatch(/^[A-Za-z0-9_-]{21}$/);
   });
 });

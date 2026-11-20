@@ -26,8 +26,6 @@ import {
   unlinkSync,
   fsyncSync,
   statSync,
-  renameSync,
-  linkSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
@@ -127,48 +125,62 @@ function readTelemetryLockOwner(lockPath: string): { pid: number; token: string;
   }
 }
 
+/** A reclaim guard older than this was left by a reclaimer that died holding it. */
+const RECLAIM_GUARD_STALE_MS = 10_000;
+
 /**
  * Remove the exact lock that was judged stale, and nothing else.
  *
  * Unlinking the path after judging its owner is a TOCTOU: between the read and
- * the unlink the stale owner's file can be replaced by a live process's fresh
- * lock, and deleting the path would delete THAT lock (AGT-4903). Instead the
- * file at the path is first moved aside with an atomic rename, then the moved
- * file is compared with what was judged. Only a match is deleted. Anything else
- * is a live lock taken after the judgement and is put back with link(), which
- * fails rather than overwrite a lock another process acquired in the meantime.
+ * the unlink another reclaimer can remove the stale file and a live process
+ * can take a fresh lock at the same path, which an unlink would then delete
+ * (AGT-4903). Moving the file aside and linking it back narrowed that window
+ * without closing it: while a live lock sat in quarantine the path was free,
+ * and a third process could take it beside the first (#920 review).
+ *
+ * The only processes that ever remove a stale lock are reclaimers — its owner
+ * is dead — so reclaimers are serialized by an exclusive guard file. Under the
+ * guard the lock is judged again (same mtime, same token or still malformed);
+ * no new lock can appear at the path while the stale one is still there, so a
+ * match is safe to unlink.
  *
  * @param judgedToken token read from the judged lock, or undefined when its
  *   content was malformed (then the judged mtime identifies it).
  */
 function reclaimJudgedTelemetryLock(judgedToken: string | undefined, judgedMtimeMs: number): void {
-  const quarantine = `${TELEMETRY_LOCK}.reclaim-${randomUUID()}`;
+  const guard = `${TELEMETRY_LOCK}.reclaim`;
+  let fd: number;
   try {
-    renameSync(TELEMETRY_LOCK, quarantine);
+    fd = openSync(guard, 'wx', 0o600);
   } catch {
-    // ENOENT: the holder released (or another reclaim won) — nothing to do.
+    // Another reclaimer is at work. A guard left by one that died is removed so
+    // a later attempt can proceed; this attempt gives up either way.
+    try {
+      if (Date.now() - statSync(guard).mtimeMs > RECLAIM_GUARD_STALE_MS) unlinkSync(guard);
+    } catch { /* gone already */ }
     return;
   }
-  let judgedLock = false;
   try {
-    const moved = readTelemetryLockOwner(quarantine);
-    judgedLock = judgedToken !== undefined
-      ? moved?.token === judgedToken
-      : moved === null && statSync(quarantine).mtimeMs === judgedMtimeMs;
-  } catch {
-    judgedLock = false;
-  }
-  if (!judgedLock) {
+    closeSync(fd);
+    let stillJudged = false;
     try {
-      linkSync(quarantine, TELEMETRY_LOCK);
+      const mtimeMs = statSync(TELEMETRY_LOCK).mtimeMs;
+      const current = readTelemetryLockOwner(TELEMETRY_LOCK);
+      stillJudged = mtimeMs === judgedMtimeMs
+        && (judgedToken !== undefined ? current?.token === judgedToken : current === null);
     } catch {
-      // EEXIST: a newer lock already sits at the path. The displaced holder's
-      // release is token-checked, so it will not remove that newer lock.
+      stillJudged = false; // ENOENT: released or reclaimed already
     }
+    if (stillJudged) {
+      try {
+        unlinkSync(TELEMETRY_LOCK);
+      } catch { /* ENOENT: nothing to do */ }
+    }
+  } finally {
+    try {
+      unlinkSync(guard);
+    } catch { /* best-effort */ }
   }
-  try {
-    unlinkSync(quarantine);
-  } catch { /* best-effort */ }
 }
 
 /**
