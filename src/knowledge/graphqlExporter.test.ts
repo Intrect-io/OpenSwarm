@@ -98,7 +98,7 @@ describe('repo snapshot read is symlink-safe and size-bounded (AGT-3467)', () =>
 
   it('export refuses to write through a symlinked .openswarm directory', () => {
     symlinkSync(outside, join(project, '.openswarm'));
-    expect(() => exportRepoGraph(new KnowledgeGraph('p', project), project)).toThrow(/not a plain directory/);
+    expect(() => exportRepoGraph(new KnowledgeGraph('p', project), project)).toThrow(/Refusing to write through/);
     expect(existsSync(join(outside, 'repo-snapshot.json'))).toBe(false);
     expect(existsSync(join(outside, 'repo.graphql'))).toBe(false);
   });
@@ -106,7 +106,7 @@ describe('repo snapshot read is symlink-safe and size-bounded (AGT-3467)', () =>
   it('export into a dangling .openswarm symlink does not create its target', () => {
     const missing = join(outside, 'missing');
     symlinkSync(missing, join(project, '.openswarm'));
-    expect(() => exportRepoGraph(new KnowledgeGraph('p', project), project)).toThrow(/not a plain directory/);
+    expect(() => exportRepoGraph(new KnowledgeGraph('p', project), project)).toThrow(/Refusing to write through/);
     expect(existsSync(missing)).toBe(false);
   });
 });
