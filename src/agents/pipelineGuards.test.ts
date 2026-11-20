@@ -801,7 +801,9 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
         const mixed = result.issues.find(i => i.startsWith('Reformat mixed'))!;
         expect(mixed).toContain('reformat-only base.ts');
         expect(mixed).toContain('substantive other.ts');
-        expect(mixed).toContain('commit the formatting separately');
+        expect(mixed).toContain('revert the formatting-only changes in base.ts');
+        expect(mixed).toContain('`REFORMAT: <path>`');
+        expect(mixed).not.toContain('commit');
       });
 
       it('treats a new file as a substantive change next to a reformat', async () => {
@@ -809,6 +811,77 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
         writeFileSync(join(repo, 'fresh.ts'), 'export const fresh = 1;\n');
         const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
         expect(res.allPassed).toBe(false);
+      });
+
+      it('lists new files separately from edited ones in the hold message', async () => {
+        writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n');
+        writeFileSync(join(repo, 'fresh.ts'), 'export const fresh = 1;\n');
+        writeFileSync(join(repo, 'other.ts'), 'export const other = 3;\n');
+        const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
+        const mixed = guardIssues(res, 'reformatScope').find(i => i.startsWith('Reformat mixed'))!;
+        expect(mixed).toContain('substantive other.ts; new: fresh.ts.');
+      });
+
+      it('lifts the hold when every reformat-only file is acknowledged with REFORMAT:', async () => {
+        writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n');
+        writeFileSync(join(repo, 'other.ts'), 'export const other = 3;\n');
+        const res = await runGuards({ ...mockWorker(), summary: 'Done.\nREFORMAT: ./base.ts' }, repo, { reformatCheck: true });
+        const result = res.results.find(r => r.guard === 'reformatScope')!;
+        expect(result.blocking).toBe(false);
+        expect(result.issues.some(i => i.startsWith('Reformat mixed'))).toBe(false);
+        expect(res.allPassed).toBe(true);
+      });
+
+      it('keeps holding for reformat-only files the summary did not acknowledge', async () => {
+        writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n');
+        writeFileSync(join(repo, 'third.ts'), '  export const third = 1;\n');
+        execFileSync('git', ['add', 'third.ts'], { cwd: repo });
+        execFileSync('git', ['commit', '-m', 'third', '--', 'third.ts'], { cwd: repo });
+        writeFileSync(join(repo, 'third.ts'), 'export const third = 1;\n');
+        writeFileSync(join(repo, 'other.ts'), 'export const other = 3;\n');
+        const res = await runGuards({ ...mockWorker(), summary: 'REFORMAT: base.ts' }, repo, { reformatCheck: true });
+        const mixed = guardIssues(res, 'reformatScope').find(i => i.startsWith('Reformat mixed'))!;
+        expect(mixed).toContain('reformat-only third.ts;');
+        expect(mixed).not.toContain('reformat-only base.ts');
+        expect(res.allPassed).toBe(false);
+      });
+
+      it('does not treat a Python indentation fix as reformat-only', async () => {
+        writeFileSync(join(repo, 'job.py'), 'def run(xs):\n    for x in xs:\n        pass\n    return 1\n');
+        execFileSync('git', ['add', 'job.py'], { cwd: repo });
+        execFileSync('git', ['commit', '-m', 'job', '--', 'job.py'], { cwd: repo });
+        // Moving `return` into the loop changes behaviour but vanishes under -w.
+        writeFileSync(join(repo, 'job.py'), 'def run(xs):\n    for x in xs:\n        pass\n        return 1\n');
+        writeFileSync(join(repo, 'other.ts'), 'export const other = 3;\n');
+        const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
+        const issues = guardIssues(res, 'reformatScope');
+        expect(issues.some(i => i.includes('job.py') && i.includes('reformat-only'))).toBe(false);
+        expect(res.allPassed).toBe(true);
+      });
+
+      it('counts a Python re-indent as substantive next to a real reformat', async () => {
+        writeFileSync(join(repo, 'job.py'), 'if True:\n    a = 1\nb = 2\n');
+        execFileSync('git', ['add', 'job.py'], { cwd: repo });
+        execFileSync('git', ['commit', '-m', 'job', '--', 'job.py'], { cwd: repo });
+        writeFileSync(join(repo, 'job.py'), 'if True:\n    a = 1\n    b = 2\n');
+        writeFileSync(join(repo, 'base.ts'), '  export const base = 1;\n');
+        const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
+        const mixed = guardIssues(res, 'reformatScope').find(i => i.startsWith('Reformat mixed'))!;
+        expect(mixed).toContain('reformat-only base.ts; substantive job.py');
+      });
+
+      it('never counts a whitespace-only lockfile or build output as reformat-only', async () => {
+        mkdirSync(join(repo, 'dist'), { recursive: true });
+        writeFileSync(join(repo, 'package-lock.json'), '{\n"a": 1\n}\n');
+        writeFileSync(join(repo, 'dist', 'app.js'), 'var a=1;\n');
+        execFileSync('git', ['add', '-A'], { cwd: repo });
+        execFileSync('git', ['commit', '-m', 'gen'], { cwd: repo });
+        writeFileSync(join(repo, 'package-lock.json'), '{\n  "a": 1\n}\n');
+        writeFileSync(join(repo, 'dist', 'app.js'), '  var a=1;\n');
+        writeFileSync(join(repo, 'other.ts'), 'export const other = 3;\n');
+        const res = await runGuards(mockWorker(), repo, { reformatCheck: true });
+        expect(guardIssues(res, 'reformatScope')).toEqual([]);
+        expect(res.allPassed).toBe(true);
       });
 
       it('passes a formatting-only change (advisory flag only)', async () => {

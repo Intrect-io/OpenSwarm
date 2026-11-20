@@ -18,7 +18,7 @@ import { inspectRewrites, describeRewrite } from './rewriteGuard.js';
 import { figuresChangedInPlace, unsourcedFigures, uncitedApprovalClaims } from './claimEvidenceGuard.js';
 import { claimsGate, unassertedReportedKeys, gateClaimIssue } from './gateClaimGuard.js';
 import { runCallerCheckGuard } from './callerCheckGuard.js';
-import { isMixedReformatIssue, mixedReformatIssues } from './reformatMix.js';
+import { isMixedReformatIssue, mixedReformatIssues, reformatOnlyFiles } from './reformatMix.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -780,16 +780,16 @@ async function runVerifiedMetricEvidenceGuard(
  * `git diff -w`) and large diffs, which hide the real change. Advisory, except a
  * reformat mixed with substantive changes blocks publication (AGT-4899).
  */
-async function runReformatScopeGuard(projectPath: string): Promise<GuardResult> {
+async function runReformatScopeGuard(workerResult: WorkerResult, projectPath: string): Promise<GuardResult> {
   const guard = 'reformatScope';
   const issues: string[] = [];
   const LARGE_DIFF_LINES = 1200;
   try {
     const details = await getWorkingDiffDetail(projectPath);
-    issues.push(...mixedReformatIssues(details));
-    for (const d of details.filter(d => d.whitespaceOnly)) {
+    issues.push(...mixedReformatIssues(details, workerResult.summary ?? ''));
+    for (const d of reformatOnlyFiles(details)) {
       issues.push(
-        `[${d.file}] reformat-only change (no semantic diff under -w) — move formatting to a separate commit to keep the PR scoped.`,
+        `[${d.file}] reformat-only change (no semantic diff under -w) — keep formatting out of this change unless the task asks for it.`,
       );
     }
 
@@ -971,7 +971,7 @@ export async function runGuards(
   }
 
   if (config.reformatCheck) {
-    results.push(await runReformatScopeGuard(projectPath));
+    results.push(await runReformatScopeGuard(guardWorkerResult, projectPath));
   }
 
   if (config.rewriteCheck) {
