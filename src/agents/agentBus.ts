@@ -441,8 +441,18 @@ export class AgentBus {
         // to escape to the outer catch, abort this pass and, because the file
         // was never marked processed, abort every later pass too.
         let message: AgentMessage;
+        // A read failure is not a malformed message: EMFILE/EACCES pass and
+        // the file is read again next poll; ENOENT means it was pruned or
+        // consumed meanwhile. Only content that fails to parse is quarantined.
+        let raw: string;
         try {
-          const parsed: unknown = JSON.parse(await fs.readFile(resolve(this.messagesPath, file), 'utf-8'));
+          raw = await fs.readFile(resolve(this.messagesPath, file), 'utf-8');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') this.markProcessed(file);
+          continue;
+        }
+        try {
+          const parsed: unknown = JSON.parse(raw);
           if (!isWellFormedMessage(parsed)) throw new Error('message is missing required fields');
           message = parsed;
         } catch (error) {
