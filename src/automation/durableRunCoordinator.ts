@@ -29,6 +29,7 @@ import {
 import type { TrackerTerminalState } from './runLedgerTrackerCache.js';
 import { pickPipelineFailureDetail } from './runnerState.js';
 import { fencedResult, nonExecutingResult } from './durableRunResults.js';
+import { PauseNowFence } from './factoryPauseFence.js';
 import {
   normalizeOperatorQuestionCorrelations,
   OPERATOR_QUESTION_PARK_REASON,
@@ -561,9 +562,7 @@ export class DurableRunCoordinator {
     // delivery. Otherwise the observer itself becomes a second control plane.
     if (this.mode === 'shadow') return executor(this.noopHooks(), new AbortController().signal);
 
-    // Kill switch (AGT-4808). A paused repository is not "claim unavailable": deferring it would
-    // rewrite the row as RETRY_AT every 30 s, which reads as a re-dispatch. Leave the row alone.
-    // claimRun re-checks inside its transaction, so a pause written after this read still holds.
+    // Kill switch (AGT-4808): leave a paused repository's row alone (a 30 s RETRY_AT reads as a re-dispatch); claimRun re-checks in its transaction.
     const paused = this.ledger.getBlockingPause(normalizeProjectPath(projectPath));
     if (paused) return nonExecutingResult(task, projectPath, `factory paused: ${paused.reason}`, { status: 'superseded' });
 
@@ -632,10 +631,11 @@ export class DurableRunCoordinator {
       leaseAbortController.abort();
     };
     const renewEveryMs = Math.max(1_000, Math.floor(this.leaseMs / 3));
+    const pauseFence = new PauseNowFence(this.ledger, projectPath); // AGT-4808: `pause --now` reaches runs in any process
     const renewTimer = setInterval(() => {
       const renewed = this.ledger!.renewLease(claim!, this.leaseMs);
-      if (renewed) claim = renewed;
-      else loseLease();
+      if (renewed) claim = renewed; else loseLease();
+      if (!leaseLost && pauseFence.check()) leaseAbortController.abort(new Error('factory paused (now)'));
     }, renewEveryMs);
     renewTimer.unref?.();
 
@@ -803,10 +803,10 @@ export class DurableRunCoordinator {
     }
 
     if (result.finalStatus === 'cancelled') {
-      if (options.retryCancellation?.(result, claim)) {
+      if (pauseFence.tripped || options.retryCancellation?.(result, claim)) {
         return this.ledger.transition(claim, 'RETRY_AT', {
           retryAt: now + 60_000,
-          errorCode: 'shutdown_cancelled',
+          errorCode: pauseFence.tripped ? 'factory_paused' : 'shutdown_cancelled',
           eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus, resumable: true },
         }, now) ? result : fencedResult(result);
       }

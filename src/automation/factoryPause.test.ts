@@ -14,7 +14,7 @@ import {
   readPauseSnapshot,
   snapshotBlocks,
 } from './factoryPause.js';
-import { runPauseCommand, runResumeCommand } from '../cli/pauseCommand.js';
+import { factoryPauseHint, runPauseCommand, runResumeCommand } from '../cli/pauseCommand.js';
 import { setAutomationDbPath } from './automationDbPath.js';
 
 // AGT-4808: the factory kill switch. A durable pause row in the automation
@@ -200,6 +200,62 @@ describe('claims while paused', () => {
     expect(resumed.success).toBe(true);
     store.close();
     coordinator.close();
+  });
+});
+
+describe('a `now` pause reaches a run claimed by any process (AGT-4808 review D, A)', () => {
+  // The fence lives in the coordinator's lease renewal, which every claimer
+  // (daemon, `openswarm work`, `openswarm exec`) runs, so it is tested there.
+  async function runUntilAborted(mode: 'now' | 'drain') {
+    const root = tempRoot();
+    const repo = join(root, 'repo');
+    mkdirSync(repo);
+    const dbPath = join(root, 'automation.db');
+    const coordinator = new DurableRunCoordinator({ mode: 'primary', dbPath, instanceId: 'work-cli', leaseMs: 3_000 });
+    const store = new FactoryPauseStore(dbPath);
+    const cancelEffect = vi.fn(() => ({ kind: 'tracker.cancel' }) as never);
+    let aborted = false;
+    const result = await coordinator.execute(task('AGT-7'), repo, async (_hooks, leaseSignal) => {
+      store.set({ projectPath: repo, actor: 'cli:test', mode, reason: 'incident' });
+      await new Promise<void>((resolve) => {
+        leaseSignal.addEventListener('abort', () => { aborted = true; resolve(); }, { once: true });
+        setTimeout(resolve, 2_500); // > one renewal tick (leaseMs / 3 = 1 s)
+      });
+      return aborted
+        ? { success: false, sessionId: 's', stages: [], finalStatus: 'cancelled', totalDuration: 1, iterations: 1 }
+        : ok();
+    }, { cancelEffect, retryCancellation: () => false });
+    const run = coordinator.listRuns().find((r) => r.issueId === 'AGT-7');
+    store.close();
+    coordinator.close();
+    return { result, run, aborted, cancelEffect };
+  }
+
+  it('aborts the executor at the next lease renewal and parks the run for a retry instead of a tracker cancel', async () => {
+    const { result, run, aborted, cancelEffect } = await runUntilAborted('now');
+    expect(aborted).toBe(true);
+    expect(result.finalStatus).toBe('cancelled');
+    expect(cancelEffect).not.toHaveBeenCalled();
+    expect(run).toMatchObject({ state: 'RETRY_AT', lastErrorCode: 'factory_paused' });
+  }, 15_000);
+
+  it('a drain pause lets the claimed run finish', async () => {
+    const { result, aborted } = await runUntilAborted('drain');
+    expect(aborted).toBe(false);
+    expect(result.success).toBe(true);
+  }, 15_000);
+});
+
+describe('openswarm resume while paused (review F)', () => {
+  it('a bare resume is told how to lift an active pause; nothing is said when none stands', () => {
+    const dbPath = join(tempRoot(), 'hint.db');
+    vi.stubEnv('OPENSWARM_AUTOMATION_DB', '');
+    const deps = { loadConfig: () => ({ autonomous: { automationDbPath: dbPath } }) as never };
+    expect(factoryPauseHint(deps)).toBeUndefined();
+    const store = new FactoryPauseStore(dbPath);
+    store.set({ actor: 'cli:test', reason: 'incident' });
+    store.close();
+    expect(factoryPauseHint(deps)).toMatch(/kill switch is on \(the whole factory\).*openswarm unpause.*resume --factory/);
   });
 });
 

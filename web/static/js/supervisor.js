@@ -377,9 +377,19 @@ function renderFactoryPause(state) {
 async function fetchFactoryPause() {
   try {
     const res = await fetch("/api/factory/pause");
-    if (!res.ok) return;
-    renderFactoryPause(await res.json());
-  } catch {}
+    // A 500 carries { pauses, error } when the pause table is unreadable: render
+    // it, so the operator sees the kill switch cannot be read instead of nothing.
+    let body = null;
+    try { body = await res.json(); } catch {}
+    if (!res.ok) {
+      const error = (body && body.error) || ("HTTP " + res.status);
+      renderFactoryPause({ pauses: (body && body.pauses) || [], error: error });
+      return;
+    }
+    renderFactoryPause(body);
+  } catch (e) {
+    renderFactoryPause({ pauses: [], error: e && e.message ? e.message : String(e) });
+  }
 }
 
 async function toggleFactoryPause() {

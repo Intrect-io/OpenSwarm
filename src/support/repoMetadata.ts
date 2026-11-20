@@ -82,10 +82,14 @@ const RepoMetadataSchema = z.object({
      */
     anomaly: z.object({
       maxPrsPerHour: z.number().int().min(1).max(1000).optional(),
+      /** Draft PRs only (unreviewed work from parked or stuck runs). */
+      maxDraftPrsPerHour: z.number().int().min(1).max(1000).optional(),
       maxRedispatchesPer24h: z.number().int().min(1).max(1000).optional(),
       infraErrorWindow: z.number().int().min(1).max(1000).optional(),
       maxInfraErrorShare: z.number().min(0).max(1).optional(),
       sandboxNetworkDenial: z.boolean().optional(),
+      /** `factory`: a trip in this repository pauses the whole factory (`*`) instead of the repository. */
+      pauseScope: z.enum(['project', 'factory']).optional(),
     }).optional(),
   }).optional(),
   /**

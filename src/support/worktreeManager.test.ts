@@ -919,7 +919,7 @@ describe('resolveBaseRef / createWorktree on non-main-default repos (INT-2545)',
       );
       expect(publication).toEqual({
         prUrl: 'https://example.test/park',
-        headSha: String(git(info.worktreePath, 'rev-parse', 'HEAD')).trim(), risk: expect.objectContaining({ level: 'low', files: 1 }),
+        headSha: String(git(info.worktreePath, 'rev-parse', 'HEAD')).trim(), risk: expect.objectContaining({ level: 'low', files: 1 }), draft: true, // draft: AGT-4809 PR-open signal
       });
     } finally {
       process.env.PATH = prevPath;

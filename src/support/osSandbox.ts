@@ -54,10 +54,27 @@ export function defaultHiddenRoots(env: NodeJS.ProcessEnv = process.env, home: s
 export type WorkerNetworkPolicy = 'loopback' | 'open';
 
 let workerNetworkPolicy: WorkerNetworkPolicy = 'loopback';
+let workerNetworkPolicyConfigured = false;
 
-/** Set once at daemon start from `autonomous.workerNetwork`. */
+/** Set once at daemon (or `openswarm work`) start from `autonomous.workerNetwork`. */
 export function setWorkerNetworkPolicy(policy: WorkerNetworkPolicy): void {
   workerNetworkPolicy = policy;
+  workerNetworkPolicyConfigured = true;
+}
+
+/**
+ * Whether this process is a factory worker host that declared its policy (the
+ * daemon or `openswarm work`). A chat or ad-hoc process never set it, and its
+ * failed network commands must not pause the factory (AGT-4809).
+ */
+export function isWorkerNetworkPolicyConfigured(): boolean {
+  return workerNetworkPolicyConfigured;
+}
+
+/** Tests only: back to the unconfigured process default. */
+export function resetWorkerNetworkPolicyForTests(): void {
+  workerNetworkPolicy = 'loopback';
+  workerNetworkPolicyConfigured = false;
 }
 
 export function getWorkerNetworkPolicy(): WorkerNetworkPolicy {
@@ -210,20 +227,13 @@ export function looksLikeSandboxDenial(output: string): boolean {
 }
 
 /**
- * `looksLikeSandboxDenial`, plus: when the refusal was a network connect to a
- * non-loopback address, record it for the anomaly monitor (AGT-4809), which
- * pauses the repository and alerts once. A worker reaching for the network
- * from inside the fence is the signal; the command is kept so the alert can
- * name it. Recording is fire-and-forget and never fails the tool call.
+ * `looksLikeSandboxDenial`, plus: when the refusal was a network connect (or a
+ * name lookup) for a non-loopback target and the worker network policy is
+ * loopback-only, record it for the anomaly monitor (AGT-4809). The detector
+ * is shared with the CLI adapters: support/sandboxNetworkSignal.ts.
+ * Recording is fire-and-forget and never fails the tool call.
  */
 export function noteSandboxDenial(output: string, command: string, cwd: string): boolean {
-  const denied = looksLikeSandboxDenial(output);
-  // Not gated on `denied`: Linux bwrap refuses a connect with ENETUNREACH, which is no EPERM.
-  if (/ENETUNREACH|EPERM|EACCES|Failed to connect to/i.test(output)) {
-    void import('../automation/anomalyPause.js').then(({ nonLoopbackConnectDenial, recordFactorySignal }) => {
-      const target = nonLoopbackConnectDenial(output);
-      if (target) recordFactorySignal({ projectPath: cwd, kind: 'sandbox_network', detail: `${target}\n${command.slice(0, 500)}` });
-    }).catch(() => { /* bookkeeping only */ });
-  }
-  return denied;
+  void import('./sandboxNetworkSignal.js').then(({ noteNetworkDenial }) => noteNetworkDenial(output, command, cwd)).catch(() => { /* bookkeeping only */ });
+  return looksLikeSandboxDenial(output);
 }

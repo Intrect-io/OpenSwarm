@@ -1046,7 +1046,7 @@ async function findOpenPullRequestUrl(worktreePath: string, branchName: string):
 }
 
 /** PR URL plus the immutable commit this publication call pushed. */
-export type PublishedPullRequest = { prUrl: string; headSha: string; risk?: ChangeRisk };
+export type PublishedPullRequest = { prUrl: string; headSha: string; risk?: ChangeRisk; /** Opened as a draft by this call (AGT-4809); unset when an open PR was reused. */ draft?: boolean };
 export async function commitAndCreatePRWithHead(
   info: WorktreeInfo,
   title: string,
@@ -1236,7 +1236,7 @@ export async function commitAndCreatePRWithHead(
   // Draft when the work never earned a review: a duplicate implementation must
   // not masquerade as the sole one, and work published because a run parked
   // (AGT-4076) never reached a reviewer at all.
-  if (options.draft || duplicates.length > 0 || conflicting || regressed || !claimEvidence.ready) createArgs.push('--draft');
+  const openedDraft = !!(options.draft || duplicates.length > 0 || conflicting || regressed || !claimEvidence.ready); if (openedDraft) createArgs.push('--draft');
   let url: string;
   try {
     url = (await gh(worktreePath, ...createArgs)).trim();
@@ -1276,7 +1276,7 @@ export async function commitAndCreatePRWithHead(
     }
   }
 
-  return { prUrl: url, headSha, risk };
+  return { prUrl: url, headSha, risk, draft: openedDraft };
 }
 
 /** Backwards-compatible URL-only publication surface. */

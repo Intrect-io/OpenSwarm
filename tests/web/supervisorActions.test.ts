@@ -353,3 +353,26 @@ describe('Supervisor controls tell the truth about the daemon', () => {
     expect(restart.textContent).toBe('Restart sent');
   });
 });
+
+describe('Factory kill switch button (AGT-4808 review H)', () => {
+  it('shows an unreadable pause table instead of hiding the 500', async () => {
+    const page = load((url) => (url === '/api/factory/pause' ? { status: 500, body: { pauses: [], error: 'SQLITE_CORRUPT: database disk image is malformed' } } : undefined));
+    await page.settle();
+    page.fire(3000); // secondary panels load three seconds in
+    await page.settle();
+    const btn = page.doc.getElementById('factory-pause-btn') as HTMLButtonElement;
+    expect(btn.title).toContain('Pause table unreadable: SQLITE_CORRUPT');
+  });
+
+  it('shows a global pause from a normal answer', async () => {
+    const page = load((url) => (url === '/api/factory/pause'
+      ? { status: 200, body: { pauses: [{ scope: '*', mode: 'drain', actor: 'auto:disk', reason: 'low disk', createdAt: 0 }] } }
+      : undefined));
+    await page.settle();
+    page.fire(3000);
+    await page.settle();
+    const btn = page.doc.getElementById('factory-pause-btn') as HTMLButtonElement;
+    expect(btn.textContent).toBe('Resume factory');
+    expect(btn.title).toContain('Factory paused (drain) by auto:disk: low disk');
+  });
+});

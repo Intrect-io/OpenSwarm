@@ -15,21 +15,27 @@
 // before that lift are not counted again, so a resume is not undone by the
 // next heartbeat re-reading the same history.
 //
-// Disk space is not here: the AGT-4785 hold already stops dispatch below
-// `autonomous.minFreeDiskGiB` and alerts once per change of state, and it lifts
-// itself when space comes back.
+// Disk space is here too (`auto:disk`): the heartbeat hands over the AGT-4785
+// free-disk measurement, and a reading below `autonomous.minFreeDiskGiB`
+// writes a factory-wide pause, because a full disk is a host problem, not one
+// repository's.
 
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { defaultAutomationDbPath } from './automationDbPath.js';
-import { GLOBAL_PAUSE_SCOPE, PAUSE_TABLE_DDL, type FactoryPause } from './factoryPause.js';
+import { GLOBAL_PAUSE_SCOPE, PAUSE_TABLE_DDL, listPausesInDb, type FactoryPause, type PauseMode } from './factoryPause.js';
+import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
 
-export type AnomalySignal = 'pr_rate' | 'redispatch' | 'infra_error_share' | 'sandbox_network';
+export { nonLoopbackConnectDenial } from '../support/sandboxNetworkSignal.js';
+
+export type AnomalySignal = 'pr_rate' | 'draft_pr_rate' | 'redispatch' | 'infra_error_share' | 'sandbox_network' | 'disk';
 
 export interface AnomalyThresholds {
-  /** Pause when this many PRs are opened from one repository within 60 minutes. */
+  /** Pause when this many PRs (draft or ready) are opened from one repository within 60 minutes. */
   maxPrsPerHour: number;
+  /** Pause when this many DRAFT PRs (unreviewed work: parked or stuck runs) are opened within 60 minutes. */
+  maxDraftPrsPerHour: number;
   /** Pause when one issue is claimed this many times beyond its first within 24 hours. */
   maxRedispatchesPer24h: number;
   /** How many of the most recent finished runs the infra_error share is taken over. */
@@ -38,12 +44,26 @@ export interface AnomalyThresholds {
   maxInfraErrorShare: number;
   /** Trip on any sandbox EPERM for a non-loopback connect. */
   sandboxNetworkDenial: boolean;
+  /** What a trip pauses: this repository (default) or the whole factory (`*`). */
+  pauseScope: 'project' | 'factory';
 }
 
 /**
- * Defaults. Replaying the 2026-10-20 factory ledger against these trips the
- * PR-rate signal at 14:17:20Z, the third unreviewed PR in 39 minutes
- * (anomalyPause.test.ts).
+ * Defaults.
+ *
+ * PR rate is two signals. On 2026-10-20 the factory published 25 DRAFT PRs for
+ * runs that never finished (publishParkedWork / publishStuckWork open drafts);
+ * a healthy factory opens ready PRs from approved runs. So drafts are the
+ * degenerate signal and get the tight limit, 2 per hour: replaying that night
+ * through the heartbeat path (15-minute default schedule) pauses at 14:00Z,
+ * 43 minutes after the first claim, the AGT-4809 acceptance line. The same
+ * timeline as ready PRs does not trip in the first hour under the all-PR limit.
+ *
+ * The all-PR limit stays 3. Measured on this repository's own swarm PRs
+ * (12 days with any, 2026-03-07..09-29, `gh pr list`), the busiest hour held
+ * 1 PR on 2 days, 2 on 4, 3 on 4, 4 on 1 and 9 on 1: a limit of 3 still trips
+ * on 6 of those 12 days (2 would on 10). A busy repository should raise
+ * `automation.anomaly.maxPrsPerHour` in its openswarm.json.
  *
  * Re-dispatch is set high on purpose. Replayed over every project-day in the
  * same ledger (32 of them, 2026-07-21..10-20), a limit of 3 tripped on 22,
@@ -53,14 +73,18 @@ export interface AnomalyThresholds {
  */
 export const DEFAULT_ANOMALY_THRESHOLDS: AnomalyThresholds = {
   maxPrsPerHour: 3,
+  maxDraftPrsPerHour: 2,
   maxRedispatchesPer24h: 10,
   infraErrorWindow: 10,
   maxInfraErrorShare: 0.4,
   sandboxNetworkDenial: true,
+  pauseScope: 'project',
 };
 
 export interface ProjectObservations {
   prOpenedAt: number[];
+  /** The subset of `prOpenedAt` opened as drafts. Optional for callers that know none. */
+  draftPrOpenedAt?: number[];
   claims: Array<{ issueId: string; at: number }>;
   /** Finished runs, oldest first. */
   finished: Array<{ status: string; at: number }>;
@@ -90,14 +114,18 @@ export function evaluateAnomalies(obs: ProjectObservations, thresholds: AnomalyT
     if (denial) trips.push({ signal: 'sandbox_network', at: denial.at, detail: `sandbox refused a network connect to ${denial.target}: ${denial.command}` });
   }
 
-  const prs = obs.prOpenedAt.filter((t) => t <= now).sort((a, b) => a - b);
-  for (let i = 0; i < prs.length; i++) {
-    const inHour = prs.filter((t) => t > prs[i] - HOUR_MS && t <= prs[i]).length;
-    if (inHour >= thresholds.maxPrsPerHour && prs[i] > now - DAY_MS) {
-      trips.push({ signal: 'pr_rate', at: prs[i], detail: `${inHour} PRs opened within 60 minutes (pauses at ${thresholds.maxPrsPerHour})` });
-      break;
+  const rate = (opened: number[], limit: number, signal: 'pr_rate' | 'draft_pr_rate', noun: string): void => {
+    const prs = opened.filter((t) => t <= now).sort((a, b) => a - b);
+    for (let i = 0; i < prs.length; i++) {
+      const inHour = prs.filter((t) => t > prs[i] - HOUR_MS && t <= prs[i]).length;
+      if (inHour >= limit && prs[i] > now - DAY_MS) {
+        trips.push({ signal, at: prs[i], detail: `${inHour} ${noun} opened within 60 minutes (pauses at ${limit})` });
+        return;
+      }
     }
-  }
+  };
+  rate(obs.prOpenedAt, thresholds.maxPrsPerHour, 'pr_rate', 'PRs');
+  rate(obs.draftPrOpenedAt ?? [], thresholds.maxDraftPrsPerHour, 'draft_pr_rate', 'draft PRs');
 
   const claimsByIssue = new Map<string, number[]>();
   for (const claim of obs.claims) {
@@ -121,7 +149,8 @@ export function evaluateAnomalies(obs: ProjectObservations, thresholds: AnomalyT
   if (finished.length >= window) {
     const recent = finished.slice(-window);
     const infra = recent.filter((f) => f.status === 'infra_error').length;
-    if (infra / window >= thresholds.maxInfraErrorShare) {
+    // infra > 0: a share of 0 means "any infra_error", not "always".
+    if (infra > 0 && infra / window >= thresholds.maxInfraErrorShare) {
       trips.push({
         signal: 'infra_error_share',
         at: recent[recent.length - 1].at,
@@ -155,8 +184,15 @@ function open(dbPath: string): Database.Database {
   db.pragma('busy_timeout = 5000');
   db.pragma('journal_mode = WAL');
   db.exec(PAUSE_TABLE_DDL);
-  db.exec(SIGNAL_TABLE_DDL);
+  migrateSignalTable(db);
   return db;
+}
+
+/** Create the signal table, and add `draft` to one created before it existed (old rows read as not draft). */
+function migrateSignalTable(db: Database.Database): void {
+  db.exec(SIGNAL_TABLE_DDL);
+  const columns = db.prepare('PRAGMA table_info(automation_factory_signals)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'draft')) db.exec('ALTER TABLE automation_factory_signals ADD COLUMN draft INTEGER');
 }
 
 /**
@@ -165,15 +201,16 @@ function open(dbPath: string): Database.Database {
  * the factory's bookkeeping could not be written.
  */
 export function recordFactorySignal(
-  input: { projectPath: string; kind: 'pr_opened' | 'sandbox_network'; issueId?: string; detail?: string },
+  input: { projectPath: string; kind: 'pr_opened' | 'sandbox_network'; issueId?: string; detail?: string; draft?: boolean },
   dbPath = defaultAutomationDbPath(),
   now = Date.now(),
 ): void {
   let db: Database.Database | undefined;
   try {
     db = open(dbPath);
-    db.prepare('INSERT INTO automation_factory_signals(project_path, kind, issue_id, detail, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(input.projectPath, input.kind, input.issueId ?? null, input.detail ?? null, now);
+    // Normalized like the ledger's project_path, so a relative or symlinked cwd still counts.
+    db.prepare('INSERT INTO automation_factory_signals(project_path, kind, issue_id, detail, created_at, draft) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(normalizeProjectPath(input.projectPath), input.kind, input.issueId ?? null, input.detail ?? null, now, input.draft === undefined ? null : input.draft ? 1 : 0);
   } catch (error) {
     console.warn('[AnomalyPause] Could not record signal:', error instanceof Error ? error.message : error);
   } finally {
@@ -181,38 +218,41 @@ export function recordFactorySignal(
   }
 }
 
+/** The exact path and a LIKE pattern for everything under it, `_`/`%` escaped (used with ESCAPE '\\'). */
 function under(projectPath: string): [string, string] {
-  return [projectPath, `${projectPath.replace(/\/+$/, '')}/%`];
+  const base = projectPath.replace(/\/+$/, '').replace(/[\\%_]/g, (c) => `\\${c}`);
+  return [projectPath, `${base}/%`];
 }
 
 /**
  * Observations for one (normalized) repository since `since`. Signals recorded
  * from a worktree path count toward the repository that holds it.
  */
-export function readProjectObservations(db: Database.Database, projectPath: string, since: number, infraWindow: number): ProjectObservations {
-  db.exec(SIGNAL_TABLE_DDL);
+export function readProjectObservations(db: Database.Database, projectPath: string, since: number, infraWindow: number, now = Date.now()): ProjectObservations {
+  migrateSignalTable(db);
   const [exact, prefix] = under(projectPath);
   const signals = db.prepare(`
-    SELECT kind, detail, created_at FROM automation_factory_signals
-    WHERE (project_path = ? OR project_path LIKE ?) AND created_at > ?
+    SELECT kind, detail, created_at, draft FROM automation_factory_signals
+    WHERE (project_path = ? OR project_path LIKE ? ESCAPE '\\') AND created_at > ? AND created_at <= ?
     ORDER BY created_at
-  `).all(exact, prefix, since) as Array<{ kind: string; detail: string | null; created_at: number }>;
+  `).all(exact, prefix, since, now) as Array<{ kind: string; detail: string | null; created_at: number; draft: number | null }>;
   // A database the run ledger never opened (ledger mode off, a fresh install) has signals but no attempts.
   const hasLedger = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'automation_attempts'").get();
   const claims = !hasLedger ? [] : db.prepare(`
     SELECT COALESCE(r.identifier, a.issue_id) AS issueId, a.started_at AS at
     FROM automation_attempts a JOIN automation_runs r ON r.issue_id = a.issue_id
-    WHERE r.project_path = ? AND a.started_at > ?
-  `).all(projectPath, since) as Array<{ issueId: string; at: number }>;
+    WHERE r.project_path = ? AND a.started_at > ? AND a.started_at <= ?
+  `).all(projectPath, since, now) as Array<{ issueId: string; at: number }>;
   const finished = !hasLedger ? [] : (db.prepare(`
     SELECT COALESCE(a.result_status, a.status) AS status, a.finished_at AS at
     FROM automation_attempts a JOIN automation_runs r ON r.issue_id = a.issue_id
-    WHERE r.project_path = ? AND a.finished_at IS NOT NULL AND a.finished_at > ?
+    WHERE r.project_path = ? AND a.finished_at IS NOT NULL AND a.finished_at > ? AND a.finished_at <= ?
     ORDER BY a.finished_at DESC LIMIT ?
-  `).all(projectPath, since, Math.max(1, infraWindow)) as Array<{ status: string; at: number }>).reverse();
+  `).all(projectPath, since, now, Math.max(1, infraWindow)) as Array<{ status: string; at: number }>).reverse();
   return {
-    // One PR is counted once, however many runs report it back.
-    prOpenedAt: [...new Map(signals.filter((s) => s.kind === 'pr_opened').reverse().map((s) => [s.detail ?? `${s.created_at}`, s.created_at])).values()],
+    // One PR is counted once, however many runs report it back (the earliest report wins).
+    prOpenedAt: firstOpenPerPr(signals.filter((s) => s.kind === 'pr_opened')),
+    draftPrOpenedAt: firstOpenPerPr(signals.filter((s) => s.kind === 'pr_opened' && s.draft === 1)),
     claims,
     finished,
     networkDenials: signals.filter((s) => s.kind === 'sandbox_network').map((s) => {
@@ -222,41 +262,100 @@ export function readProjectObservations(db: Database.Database, projectPath: stri
   };
 }
 
+function firstOpenPerPr(rows: Array<{ detail: string | null; created_at: number }>): number[] {
+  return [...new Map([...rows].reverse().map((s) => [s.detail ?? `${s.created_at}`, s.created_at])).values()];
+}
+
 function liftedAt(db: Database.Database, scope: string): number {
   const row = db.prepare('SELECT lifted_at FROM automation_pause_lifts WHERE scope = ?').get(scope) as { lifted_at: number } | undefined;
   return row?.lifted_at ?? 0;
 }
 
+const META_DDL = 'CREATE TABLE IF NOT EXISTS automation_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)';
+/** One row per automatic pause whose alert went out; keyed by the pause it alerted on. */
+const ALERT_DDL = `
+  CREATE TABLE IF NOT EXISTS automation_pause_alerts (
+    scope TEXT NOT NULL,
+    pause_created_at INTEGER NOT NULL,
+    alerted_at INTEGER NOT NULL,
+    PRIMARY KEY (scope, pause_created_at)
+  );
+`;
+const ARMED_KEY = 'anomaly_armed_at';
+const SIGNAL_RETENTION_MS = 30 * DAY_MS;
+
+/**
+ * When the monitor first ran against this database, writing it on the first
+ * call. Nothing observed before it counts: enabling the feature on a ledger
+ * with a bad yesterday must not pause on the first heartbeat after deploy.
+ */
+export function anomalyArmedAt(db: Database.Database, now = Date.now()): number {
+  db.exec(META_DDL);
+  db.prepare('INSERT OR IGNORE INTO automation_meta(key, value) VALUES (?, ?)').run(ARMED_KEY, String(now));
+  const row = db.prepare('SELECT value FROM automation_meta WHERE key = ?').get(ARMED_KEY) as { value: string };
+  return Number(row.value) || now;
+}
+
+/** Arm the monitor at `now` unless it already is (tests and the replay seed history after arming). */
+export function armAnomalyMonitor(dbPath = defaultAutomationDbPath(), now = Date.now()): number {
+  const db = open(dbPath);
+  try {
+    return anomalyArmedAt(db, now);
+  } finally {
+    db.close();
+  }
+}
+
 export interface AnomalyCheckResult {
   projectPath: string;
+  /** The pause scope the trip wrote: the repository, or `*`. */
+  scope: string;
   trip: AnomalyTrip;
-  /** A new pause was written (and so an alert is due); false when one already stood. */
+  /** A new pause was written; false when one already stood. */
   paused: boolean;
 }
 
+/** A network reach pauses `now`: in-flight runs are the ones reaching out. Everything else drains. */
+function modeFor(signal: AnomalySignal): PauseMode {
+  return signal === 'sandbox_network' ? 'now' : 'drain';
+}
+
 /**
- * Check every repository once and pause the ones that crossed a threshold.
- * An existing pause (operator or automatic) is left exactly as it is, and no
- * alert is sent for it: one trip, one alert.
+ * Check every repository once and pause the ones that crossed a threshold;
+ * pause the factory when `disk` (the heartbeat's low free-disk line) is given.
+ * An existing pause (operator or automatic) is left exactly as it is. Alerts
+ * are not sent here: `pendingAnomalyAlerts` lists the automatic pauses whose
+ * alert has not gone out, so a failed send is retried next heartbeat.
  */
 export function checkAnomalies(
   dbPath: string,
   projects: Array<{ projectPath: string; thresholds: AnomalyThresholds }>,
   now = Date.now(),
+  disk?: { line: string },
 ): AnomalyCheckResult[] {
   const db = open(dbPath);
   try {
+    const armedAt = anomalyArmedAt(db, now);
+    db.prepare('DELETE FROM automation_factory_signals WHERE created_at < ?').run(now - SIGNAL_RETENTION_MS);
     const results: AnomalyCheckResult[] = [];
+    const insert = db.prepare(`
+      INSERT OR IGNORE INTO automation_pauses(scope, mode, reason, actor, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    if (disk) {
+      const trip: AnomalyTrip = { signal: 'disk', at: now, detail: disk.line };
+      const paused = insert.run(GLOBAL_PAUSE_SCOPE, 'drain', trip.detail, 'auto:disk', now).changes > 0;
+      results.push({ projectPath: GLOBAL_PAUSE_SCOPE, scope: GLOBAL_PAUSE_SCOPE, trip, paused });
+    }
     const globalLift = liftedAt(db, GLOBAL_PAUSE_SCOPE);
     for (const { projectPath, thresholds } of projects) {
-      const since = Math.max(now - DAY_MS, globalLift, liftedAt(db, projectPath));
-      const trip = evaluateAnomalies(readProjectObservations(db, projectPath, since, thresholds.infraErrorWindow), thresholds, now);
+      const scope = thresholds.pauseScope === 'factory' ? GLOBAL_PAUSE_SCOPE : projectPath;
+      const since = Math.max(now - DAY_MS, armedAt, globalLift, liftedAt(db, projectPath));
+      const trip = evaluateAnomalies(readProjectObservations(db, projectPath, since, thresholds.infraErrorWindow, now), thresholds, now);
       if (!trip) continue;
-      const inserted = db.prepare(`
-        INSERT OR IGNORE INTO automation_pauses(scope, mode, reason, actor, created_at)
-        VALUES (?, 'drain', ?, ?, ?)
-      `).run(projectPath, trip.detail, `auto:${trip.signal}`, now).changes > 0;
-      results.push({ projectPath, trip, paused: inserted });
+      const detail = scope === GLOBAL_PAUSE_SCOPE ? `${projectPath}: ${trip.detail}` : trip.detail;
+      const paused = insert.run(scope, modeFor(trip.signal), detail, `auto:${trip.signal}`, now).changes > 0;
+      results.push({ projectPath, scope, trip, paused });
     }
     return results;
   } finally {
@@ -264,33 +363,52 @@ export function checkAnomalies(
   }
 }
 
-/** The one alert a new automatic pause sends. */
-export function formatAnomalyAlert(result: AnomalyCheckResult): string {
-  const repo = result.projectPath.split('/').pop() || result.projectPath;
-  return `⏸ Auto-paused ${repo} (${result.trip.signal}): ${result.trip.detail}. `
-    + `In-flight runs finish; nothing new is claimed. Resume with \`openswarm unpause --project ${result.projectPath}\` or the dashboard.`;
+/** Automatic pauses written since arming whose one alert has not been sent yet. */
+export function pendingAnomalyAlerts(dbPath: string, now = Date.now()): FactoryPause[] {
+  const db = open(dbPath);
+  try {
+    db.exec(ALERT_DDL);
+    const armedAt = anomalyArmedAt(db, now);
+    // A lifted pause takes its marker with it; the next trip on that scope alerts again.
+    db.exec('DELETE FROM automation_pause_alerts WHERE scope NOT IN (SELECT scope FROM automation_pauses)');
+    const sent = db.prepare('SELECT 1 FROM automation_pause_alerts WHERE scope = ? AND pause_created_at = ?');
+    return listPausesInDb(db).filter((p) => p.actor.startsWith('auto:') && p.createdAt >= armedAt && !sent.get(p.scope, p.createdAt));
+  } finally {
+    db.close();
+  }
 }
 
-// --------------------------------------------
-// Sandbox network denials
-// --------------------------------------------
+/** Record that this pause's alert went out. */
+export function markAnomalyAlerted(dbPath: string, pause: Pick<FactoryPause, 'scope' | 'createdAt'>, now = Date.now()): void {
+  const db = open(dbPath);
+  try {
+    db.exec(ALERT_DDL);
+    db.prepare('INSERT OR IGNORE INTO automation_pause_alerts(scope, pause_created_at, alerted_at) VALUES (?, ?, ?)').run(pause.scope, pause.createdAt, now);
+  } finally {
+    db.close();
+  }
+}
 
-const LOOPBACK = /^(?:127\.\d+\.\d+\.\d+|::1|0\.0\.0\.0|localhost|\[::1\])$/i;
+/** The openswarm.json key that tunes each signal, named in its alert. */
+const THRESHOLD_KEY: Record<string, keyof AnomalyThresholds> = {
+  pr_rate: 'maxPrsPerHour',
+  draft_pr_rate: 'maxDraftPrsPerHour',
+  redispatch: 'maxRedispatchesPer24h',
+  infra_error_share: 'maxInfraErrorShare',
+  sandbox_network: 'sandboxNetworkDenial',
+};
 
-/**
- * The non-loopback address a sandboxed command was refused a connect to, if
- * its output says so. The refusal differs by sandbox: macOS sandbox-exec
- * answers EPERM, Linux bwrap's empty network namespace ENETUNREACH (measured
- * on vela: Node `connect ENETUNREACH 192.168.x.x:443`, curl exit 7 "Could not
- * connect to server"). Only called for a fenced shell, where every
- * non-loopback connect is a worker reaching for the network.
- */
-export function nonLoopbackConnectDenial(output: string): string | undefined {
-  const node = /connect (?:EPERM|ENETUNREACH|EACCES) (\[[^\]]+\]|[0-9A-Fa-f:.]+?)(?::(\d+))?(?=\s|$)/.exec(output);
-  if (node && !LOOPBACK.test(node[1])) return node[2] ? `${node[1]}:${node[2]}` : node[1];
-  const curl = /Failed to connect to (\S+) port (\d+)[^\n]*(?:Operation not permitted|Network is unreachable|Could not connect to server)/i.exec(output);
-  if (curl && !LOOPBACK.test(curl[1])) return `${curl[1]}:${curl[2]}`;
-  return undefined;
+/** The one alert an automatic pause sends. */
+export function formatAnomalyAlert(pause: FactoryPause): string {
+  const factory = pause.scope === GLOBAL_PAUSE_SCOPE;
+  const what = factory ? 'the factory' : pause.scope.split('/').pop() || pause.scope;
+  const inFlight = pause.mode === 'now' ? 'In-flight runs are cancelled and retried after the resume' : 'In-flight runs finish';
+  const resume = factory ? '`openswarm unpause`' : `\`openswarm unpause --project ${pause.scope}\``;
+  const signal = pause.actor.replace(/^auto:/, '');
+  const key = THRESHOLD_KEY[signal];
+  const tune = key ? ` Threshold: \`automation.anomaly.${key}\` in openswarm.json.` : '';
+  return `⏸ Auto-paused ${what} (${signal}): ${pause.reason}. `
+    + `${inFlight}; nothing new is claimed. Resume with ${resume} or the dashboard.${tune}`;
 }
 
 export type { FactoryPause };

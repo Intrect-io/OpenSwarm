@@ -32,6 +32,9 @@ export function registerPauseCommands(program: Command, launchChatTui: (sessionI
         await liftPause({ project: opts.project, json: opts.json });
         return;
       }
+      const { factoryPauseHint } = await import('./pauseCommand.js');
+      const hint = factoryPauseHint();
+      if (hint) console.log(hint);
       const { latestSession } = await import('../support/chatSession.js');
       const id = await latestSession();
       if (!id) {

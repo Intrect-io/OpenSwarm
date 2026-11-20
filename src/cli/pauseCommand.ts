@@ -93,7 +93,7 @@ export function runPauseCommand(opts: PauseCommandOptions, deps: PauseCommandDep
     } else {
       out(`${existed ? 'Updated pause' : 'Paused'}: ${describeScope(pause.scope)} (${pause.mode})`);
       out(pause.mode === 'now'
-        ? 'The daemon cancels in-flight runs and stops claiming on its next heartbeat.'
+        ? 'The daemon cancels its in-flight runs on its next heartbeat; a run held by `openswarm work` stops at its next lease renewal. Cancelled runs resume after unpause.'
         : 'In-flight runs finish; nothing new is claimed from the next heartbeat.');
       out(`Database: ${dbPath}`);
     }
@@ -120,5 +120,25 @@ export function runResumeCommand(opts: Pick<PauseCommandOptions, 'project' | 'js
     return { exitCode: 0, dbPath, pauses: remaining };
   } finally {
     store.close();
+  }
+}
+
+/**
+ * One line for a bare `openswarm resume` (which reopens the chat) while the
+ * factory is paused, so an operator who meant the kill switch is told how to
+ * lift it. Undefined when nothing is paused or the table cannot be read.
+ */
+export function factoryPauseHint(deps: PauseCommandDeps = {}): string | undefined {
+  let store: Pick<FactoryPauseStore, 'list' | 'close'> | undefined;
+  try {
+    store = (deps.openStore ?? ((path: string) => new FactoryPauseStore(path)))(resolveDbPath(deps));
+    const pauses = store.list();
+    if (pauses.length === 0) return undefined;
+    const scopes = pauses.map((p) => describeScope(p.scope)).join(', ');
+    return `Note: the factory kill switch is on (${scopes}). \`openswarm resume\` reopens chat; lift the pause with \`openswarm unpause\` or \`openswarm resume --factory\` / \`--project <path>\`.`;
+  } catch {
+    return undefined;
+  } finally {
+    store?.close();
   }
 }
