@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { getResumedTaskFiles } from './worktreeResumeFiles.js';
 import { stagePreservableWorktreeChanges, purgeTrackedEphemeralArtifacts } from './worktreeEphemeralOps.js';
 import { getInstanceId } from './healthEndpoint.js';
-import { readyReusedPullRequest } from './pullRequestReady.js';
+import { readyReusedPullRequest, upsertPullRequestRiskSection } from './pullRequestReady.js';
 import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from './processLiveness.js';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import Database from 'better-sqlite3';
@@ -1188,7 +1188,7 @@ export async function commitAndCreatePRWithHead(
       const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
       await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
     }
-    return { prUrl: existing, headSha, risk };
+    await upsertPullRequestRiskSection(worktreePath, existing, changeRiskSection(risk)); return { prUrl: existing, headSha, risk }; // #884 review
   }
 
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
@@ -1254,10 +1254,10 @@ export async function commitAndCreatePRWithHead(
     // The winner may have opened it as a draft (a parked run does). Losing the
     // race must not turn a reviewed publication into a hidden draft. Reuses the
     // duplicate set already computed above rather than re-querying. `regressed`
-    // was computed above too, before this branch even knew whether it would
-    // create or reuse a PR — a merged-result regression (AGT-4465) must block
+    // was computed above too, before this branch knew whether it would create or reuse a PR — a merged-result regression (AGT-4465) must block
     // promotion here exactly as it does on the non-raced path.
     if (!options.draft && !conflicting && !regressed && claimEvidence.ready) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
+    await upsertPullRequestRiskSection(worktreePath, url, changeRiskSection(risk)); // #884 review: the raced PR lacks the risk section too
   }
 
   // Register PR ownership for conflict auto-resolution
