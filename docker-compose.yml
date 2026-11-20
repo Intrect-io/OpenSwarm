@@ -25,6 +25,10 @@ services:
       # web UI writes through a second mount of the same host directory.
       - OPENSWARM_WAREHOUSE_ROOT=/warehouse
       - OPENSWARM_WAREHOUSE_WRITE_ROOT=/warehouse-rw
+      # Web virtual terminal (/terminal): a bash shell INSIDE this container for
+      # any authorized web client. Off unless set to 1. Whoever can open it can
+      # read this container's environment, including every token above.
+      - OPENSWARM_WEB_TERMINAL=${OPENSWARM_WEB_TERMINAL:-}
       # Provider/API keys come from .env (see env_file) or the shell:
       #   LINEAR_API_KEY, LINEAR_TEAM_ID, DISCORD_TOKEN, DISCORD_CHANNEL_ID,
       #   ATLASCLOUD_API_KEY, OPENROUTER_API_KEY, ...
