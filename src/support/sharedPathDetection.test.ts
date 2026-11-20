@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SHARED_PATH_SCAN_DEPTH,
   detectSharedPaths,
@@ -148,5 +148,25 @@ describe('secretSharedPathComponents (AGT-4813)', () => {
   it('returns an actionable warning when a secret-like shared path is configured', () => {
     expect(secretSharedPathsWarning(['.env'])).toContain('Remove these entries from openswarm.json sandbox.sharedPaths');
     expect(secretSharedPathsWarning(['node_modules'])).toBeNull();
+  });
+});
+
+describe('resolveSharedPaths warns about secret-like entries for every consumer (#848 review)', () => {
+  it('warns once from resolveSharedPaths itself, whoever calls it', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'shared-secret-'));
+    mkdirSync(join(repo, '.env.d'), { recursive: true });
+    mkdirSync(join(repo, 'node_modules'), { recursive: true });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const config = { sandbox: { sharedPaths: ['node_modules', '.env.d'] } };
+      expect(resolveSharedPaths(repo, config)).toEqual(['node_modules', '.env.d']);
+      resolveSharedPaths(repo, config);
+      const secretWarnings = warn.mock.calls.filter(([line]) => String(line).includes('may expose secret files'));
+      expect(secretWarnings).toHaveLength(1);
+      expect(String(secretWarnings[0][0])).toContain('.env.d');
+    } finally {
+      warn.mockRestore();
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });

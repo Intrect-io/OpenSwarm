@@ -153,7 +153,25 @@ export function resolveSharedPaths(repoPath: string, openswarmJson?: SandboxConf
     seen.add(p);
     if (existsSync(join(repoPath, p))) out.push(p);
   }
+  warnSecretSharedPathsOnce(repoPath, out);
   return out;
+}
+
+const warnedSecretSharedPaths = new Set<string>();
+
+/**
+ * Every consumer of the shared list — worktree creation, worker fan-out
+ * (symlink and copy) and verification sandboxes — goes through
+ * `resolveSharedPaths`, so the secret-path warning is raised here, once per
+ * repository and list, instead of by one caller only. (#848 review)
+ */
+function warnSecretSharedPathsOnce(repoPath: string, paths: string[]): void {
+  const warning = secretSharedPathsWarning(paths);
+  if (!warning) return;
+  const key = `${repoPath}\0${warning}`;
+  if (warnedSecretSharedPaths.has(key)) return;
+  warnedSecretSharedPaths.add(key);
+  console.warn(warning);
 }
 
 /**
