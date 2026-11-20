@@ -411,6 +411,23 @@ async function toggleFactoryPause() {
   renderFactoryPause(state);
 }
 
+// ---- Factory digest (AGT-4810) ----
+// The same text the daemon posts to Discord once a day, read on demand when
+// the panel opens so a closed panel costs nothing.
+async function fetchFactoryDigest() {
+  const el = document.getElementById("digest-text");
+  if (!el) return;
+  try {
+    const res = await fetch("/api/factory/digest");
+    const failure = await failureOf(res.clone());
+    el.textContent = failure ? "Digest unavailable: " + failure : (await res.json()).text;
+  } catch (e) {
+    el.textContent = "Digest unavailable: " + e.message;
+  }
+}
+const digestPanel = document.getElementById("digest");
+if (digestPanel) digestPanel.addEventListener("toggle", function() { if (digestPanel.open) fetchFactoryDigest(); });
+
 // ---- Heartbeat trigger ----
 // POST /api/heartbeat answers 202 before the run starts; the run announces
 // itself with a "heartbeat" SSE event. Without a deadline on that signal a

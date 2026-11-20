@@ -12,7 +12,7 @@ import { atomicWriteFileSync } from './atomicFile.js';
 import { safeConsole as console } from './safeLog.js';
 import { execFile } from 'node:child_process';
 import { handleServiceControl, safeErrorMessage } from './webServiceControl.js';
-import { handleFactoryPause } from './webFactoryPause.js';
+import { handleFactoryPause } from './webFactoryPause.js'; import { handleFactoryDigest } from './webFactoryDigest.js';
 import { getChatHistory } from '../discord/index.js';
 import { addSSEClient, getActiveSSECount, broadcastEvent, getLogBuffer, getStageBuffer, getChatBuffer } from '../core/eventHub.js';
 import { formatCost } from './costTracker.js';
@@ -961,8 +961,8 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       // ---- Service control: status / stop / restart ----
       } else if (url.startsWith('/api/service/') && await handleServiceControl(url, req.method, res)) {
         // handled
-      } else if (url.startsWith('/api/factory/') && await handleFactoryPause(url, req, res, runnerRef?.pauses, (line) => broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'service', line } }))) {
-        // handled: kill switch (AGT-4808)
+      } else if (handleFactoryDigest(url, req.method, res)) { // handled: daily factory digest (AGT-4810)
+      } else if (url.startsWith('/api/factory/') && await handleFactoryPause(url, req, res, runnerRef?.pauses, (line) => broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'service', line } }))) { // handled: kill switch (AGT-4808)
 
       // ---- Knowledge Graph: project health ----
       } else if (url.startsWith('/api/knowledge/') && req.method === 'GET') {
