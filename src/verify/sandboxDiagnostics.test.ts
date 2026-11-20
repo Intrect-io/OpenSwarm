@@ -159,7 +159,8 @@ describe('makeSystemProbe', () => {
     // Read the runner's argv rather than restating it: a probe that drifts from
     // the real invocation is a probe that answers a different question.
     const { readFileSync } = await import('node:fs');
-    const runner = readFileSync(new URL('./runner.ts', import.meta.url), 'utf8');
+    // The bwrap argv moved from runner.ts into verifySandbox.ts (AGT-3447).
+    const runner = readFileSync(new URL('./verifySandbox.ts', import.meta.url), 'utf8');
     const invocation = runner.split('\n').find((line) => line.includes('--ro-bind'));
     expect(invocation).toBeDefined();
     for (const namespaceFlag of ['--unshare-net', '--dev', '--proc']) {

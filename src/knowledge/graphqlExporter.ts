@@ -2,11 +2,11 @@
 // KnowledgeGraph → .openswarm/repo.graphql + repo-snapshot.json
 // 에이전트가 컨텍스트 윈도우 없이도 저장소를 완전히 이해할 수 있는 정적 파일 생성
 
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import type { KnowledgeGraph } from './graph.js';
 import type { GraphNode, GraphEdge } from './types.js';
-import { atomicWriteFileSync } from '../support/atomicFile.js';
+import { pinChildDirectory, writeFileInPinnedDirectory } from '../support/containedWrite.js';
 import { safeConsole as console } from '../support/safeLog.js';
 
 // GraphQL 스키마 (고정 — 데이터 구조 정의)
@@ -412,24 +412,14 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
   schemaPath: string;
   snapshotPath: string;
 } {
-  const dir = join(projectPath, '.openswarm');
-  if (!existsSync(dir) && !isSymlink(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-  // A symlinked `.openswarm/` would send both writes outside the repository
-  // (AGT-3467). It is the repository owner's link, so it is refused, not
-  // replaced; the reader treats it as "no snapshot" for the same reason.
-  if (!isRegularEntry(dir, 'directory')) {
-    throw new Error(`${dir} is not a plain directory (symlink?) — refusing to export the repo graph into it`);
-  }
-
-  const schemaPath = join(dir, 'repo.graphql');
-  const snapshotPath = join(dir, 'repo-snapshot.json');
-
-  atomicWriteFileSync(schemaPath, REPO_SCHEMA);
+  // `.openswarm` is pinned as a real directory inside the canonical project
+  // root and every write re-checks that identity, so replacing it with a
+  // symlink cannot redirect the export outside the repository. (AGT-3447)
+  const dir = pinChildDirectory(projectPath, '.openswarm');
+  const schemaPath = writeFileInPinnedDirectory(dir, 'repo.graphql', REPO_SCHEMA);
 
   const snapshot = buildSnapshot(graph, projectPath);
-  atomicWriteFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
+  const snapshotPath = writeFileInPinnedDirectory(dir, 'repo-snapshot.json', JSON.stringify(snapshot, null, 2));
 
   console.log(`[Knowledge] Exported repo graph: ${schemaPath} (schema) + ${snapshotPath} (${snapshot.modules.length} modules, ${snapshot.circularDeps.length} cycles)`);
 
@@ -442,14 +432,6 @@ export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
  * real snapshot is a few MB, and anything past this is refused, not parsed.
  */
 export const MAX_REPO_SNAPSHOT_BYTES = 32 * 1024 * 1024;
-
-function isSymlink(path: string): boolean {
-  try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Is `path` a real directory or file entry rather than a symbolic link?

@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { isInfraError } from '../adapters/errorClassification.js';
-import { describeLinuxSandbox, formatSandboxUnavailable, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
+import { describeLinuxSandbox, makeSandboxCache, makeSystemProbe } from './sandboxDiagnostics.js';
+import { selectOsSandbox } from './verifySandbox.js';
 import { copyIsolatedPath } from '../support/isolatedPath.js';
 import { symlinkTargetEscapes } from '../support/escapingSymlink.js';
 import { isPrivateConfigurationFile, isPrivateWorkspaceFile } from '../support/environmentFiles.js';
@@ -521,28 +522,12 @@ async function runCommand(
       boundedCommand, root, cwd, isolatedHome, isolatedTmp, safeEnv, sandboxExecutorSessionFactory,
     );
   }
-  const shell = process.env.SHELL || '/bin/sh';
-  let executable = shell;
-  let invocationArgs = ['-lc', boundedCommand.run];
-  if (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
-    const writableRoot = (await realpath(dirname(root))).replaceAll('\\', '\\\\').replaceAll('"', '\\"');
-    const profile = `(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (subpath "${writableRoot}") (literal "/dev/null") (literal "/dev/tty"))`;
-    executable = '/usr/bin/sandbox-exec';
-    invocationArgs = ['-p', profile, shell, '-lc', boundedCommand.run];
-  } else if (process.platform === 'linux') {
-    // Still fails closed — running a worker's code unsandboxed to decide whether
-    // to trust it defeats the point. What changed is that the message now names
-    // which of the two causes applies and how to fix it, instead of reporting
-    // "unavailable" for a missing binary and dying at exec time with an opaque
-    // error for a blocked user namespace. (INT-3103)
-    const sandbox = linuxSandbox();
-    if (!sandbox.available) return { status: 'fail', output: formatSandboxUnavailable(sandbox) };
-    executable = sandbox.executable;
-    const writableRoot = dirname(root);
-    invocationArgs = ['--ro-bind', '/', '/', '--bind', writableRoot, writableRoot, '--unshare-net', '--dev', '/dev', '--proc', '/proc', '--', shell, '-lc', boundedCommand.run];
-  } else if (process.platform === 'win32') {
-    return { status: 'fail', output: '[security] OS verification sandbox is unavailable on this Windows host' };
-  }
+  // Fails closed on every host without an OS sandbox (AGT-3447, INT-3103).
+  const sandbox = await selectOsSandbox(root, process.env.SHELL || '/bin/sh', boundedCommand.run, {
+    platform: process.platform, exists: existsSync, realpath, linuxSandbox,
+  });
+  if (!sandbox.ok) return { status: 'fail', output: sandbox.output };
+  const { executable, args: invocationArgs } = sandbox;
   return await new Promise((resolveResult) => {
     let output: Buffer = Buffer.alloc(0);
     // Fingerprint bytes are kept per stream and concatenated in a fixed order at
