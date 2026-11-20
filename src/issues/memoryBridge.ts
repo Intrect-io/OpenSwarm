@@ -26,6 +26,7 @@ function digestSource(kind: string, values: string[]): string {
 export async function autoLinkMemories(
   store: SqliteIssueStore,
   issue: Issue,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const query = `${issue.title} ${issue.description}`.trim();
   if (query.length < 10) return [];
@@ -48,6 +49,8 @@ export async function autoLinkMemories(
   }
 
   if (!result.success || result.memories.length === 0) return [];
+  // The supervisor gave up on this job (deadline): do not write links late.
+  if (signal?.aborted) return [];
 
   const linkedIds: string[] = [];
   for (const mem of result.memories) {

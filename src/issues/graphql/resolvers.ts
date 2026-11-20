@@ -20,6 +20,13 @@ const MAX_EVENT_LIMIT = 200;
 export const AUTO_LINK_TIMEOUT_MS = 30_000;
 /** Cap concurrent fire-and-forget auto-links from createIssue. */
 export const MAX_BACKGROUND_AUTO_LINKS = 2;
+/**
+ * Cap on scheduled-but-not-finished background auto-links (running + queued).
+ * Auto-link is best-effort, so a createIssue burst beyond this skips it (the
+ * explicit autoLinkMemories mutation still works) instead of queueing without bound.
+ */
+export const MAX_PENDING_BACKGROUND_AUTO_LINKS = 32;
+let backgroundAutoLinkPending = 0;
 
 const autoLinkByIssueId = new Map<string, Promise<string[]>>();
 let backgroundAutoLinkActive = 0;
@@ -99,7 +106,8 @@ export async function runAutoLinkWithDeadline(
       timeoutMs,
     );
     return await Promise.race([
-      linkFn(store, issue),
+      // The signal reaches the job so a timed-out link stops before it writes.
+      linkFn(store, issue, controller.signal),
       new Promise<string[]>((_, reject) => {
         const onAbort = () => reject(controller.signal.reason ?? new Error('autoLinkMemories aborted'));
         if (controller.signal.aborted) onAbort();
@@ -117,6 +125,11 @@ function scheduleBackgroundAutoLink(
   linkFn: typeof autoLinkMemories = autoLinkMemories,
 ): void {
   if (autoLinkByIssueId.has(issue.id)) return;
+  if (backgroundAutoLinkPending >= MAX_PENDING_BACKGROUND_AUTO_LINKS) {
+    console.warn(`[GraphQL] auto-link skipped for ${issue.id}: ${backgroundAutoLinkPending} background jobs already pending`);
+    return;
+  }
+  backgroundAutoLinkPending++;
 
   const flight = (async () => {
     await acquireBackgroundAutoLinkSlot();
@@ -129,6 +142,7 @@ function scheduleBackgroundAutoLink(
       releaseBackgroundAutoLinkSlot();
     }
   })().finally(() => {
+    backgroundAutoLinkPending = Math.max(0, backgroundAutoLinkPending - 1);
     if (autoLinkByIssueId.get(issue.id) === flight) {
       autoLinkByIssueId.delete(issue.id);
     }
@@ -172,12 +186,17 @@ async function resolveAutoLinkMemories(store: SqliteIssueStore, issueId: string)
 export function resetAutoLinkSchedulerForTests(): void {
   autoLinkByIssueId.clear();
   backgroundAutoLinkActive = 0;
+  backgroundAutoLinkPending = 0;
   backgroundAutoLinkWaiters.length = 0;
 }
 
 /** Test-only: observe how many background slots are held. */
 export function getBackgroundAutoLinkActiveForTests(): number {
   return backgroundAutoLinkActive;
+}
+
+export function getBackgroundAutoLinkPendingForTests(): number {
+  return backgroundAutoLinkPending;
 }
 
 export const resolvers = {
