@@ -249,6 +249,11 @@ export async function drainLinearIssuesToStore(
       if (conn.hasNextPage !== true) {
         return { created, updated, truncated: false };
       }
+      // Limit met exactly at a page end: stop here instead of fetching one more
+      // page just to discover the limit is already reached.
+      if (created + updated >= maxItems) {
+        return { created, updated, truncated: true };
+      }
       after = conn.endCursor;
     }
 
@@ -268,16 +273,19 @@ export async function drainLinearIssuesToStore(
 
 /**
  * Linear → 로컬: Linear 이슈를 로컬 DB에 동기화
+ *
+ * Returns the full {@link LinearSyncProgress} so callers can tell a complete
+ * sync from a truncated (limit/page cap) or failed one, not just the counts.
  */
 export async function syncFromLinear(
   store: SqliteIssueStore,
   projectId: string,
   options?: { states?: string[]; limit?: number },
-): Promise<{ created: number; updated: number }> {
+): Promise<LinearSyncProgress> {
   await waitForLinearBridgeInit();
   if (!linearClient) {
     console.warn('[LinearBridge] 클라이언트 미초기화');
-    return { created: 0, updated: 0 };
+    return { created: 0, updated: 0, truncated: false, failed: new Error('Linear bridge client is not initialized') };
   }
 
   const states = options?.states ?? ['In Progress', 'Todo', 'Backlog', 'In Review', 'Done', 'Canceled', 'Cancelled'];
@@ -312,7 +320,7 @@ export async function syncFromLinear(
     console.log(`[LinearBridge] 동기화 완료 — created: ${progress.created}, updated: ${progress.updated}${truncatedNote}`);
   }
 
-  return { created: progress.created, updated: progress.updated };
+  return progress;
 }
 
 /**

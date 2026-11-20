@@ -233,7 +233,7 @@ export class SqliteRegistryStore {
       );
 
       -- 인덱스
-      CREATE INDEX IF NOT EXISTS idx_ce_project ON code_entities(project_id);
+      CREATE INDEX IF NOT EXISTS idx_ce_project_id ON code_entities(project_id, id); -- also serves project_id lookups
       CREATE INDEX IF NOT EXISTS idx_ce_kind ON code_entities(kind);
       CREATE INDEX IF NOT EXISTS idx_ce_file ON code_entities(file_path);
       CREATE INDEX IF NOT EXISTS idx_ce_status ON code_entities(status);

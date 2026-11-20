@@ -10,13 +10,12 @@ import { completionTargetState, type PairCompleteStats } from '../automation/tas
 import { setLinearClient } from './projectUpdater.js';
 import { withRateLimit } from '../support/rateLimiter.js';
 import {
+  drainBoundedIssues,
   drainLinearConnection,
   LINEAR_ACTIVE_ENRICH_CAP,
   LINEAR_ACTIVE_MAX_PAGES,
   LINEAR_ACTIVE_PAGE_SIZE,
-  LINEAR_BACKLOG_MAX_CANDIDATES,
-  LINEAR_BACKLOG_MAX_PAGES,
-  LINEAR_BACKLOG_PAGE_SIZE,
+  LINEAR_BACKLOG_MAX_CANDIDATES, LINEAR_BACKLOG_MAX_PAGES, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_EMPTY_BACKLOG_TTL_MS,
   LINEAR_RELATED_PAGE_SIZE,
 } from './linearPagination.js';
 import { c, status } from '../support/colors.js';
@@ -403,7 +402,7 @@ export async function listTeams(cred?: LinearCredential): Promise<LinearTeamInfo
 }
 
 export {
-  drainLinearConnection,
+  drainLinearConnection, drainLinearConnectionPages,
   LINEAR_ACTIVE_ENRICH_CAP,
   LINEAR_ACTIVE_MAX_PAGES,
   LINEAR_ACTIVE_PAGE_SIZE,
@@ -455,8 +454,7 @@ export async function getInProgressIssues(
     first: LINEAR_ACTIVE_PAGE_SIZE,
   }));
 
-  const nodes = (await drainLinearConnection(issues, LINEAR_ACTIVE_MAX_PAGES))
-    .slice(0, LINEAR_ACTIVE_ENRICH_CAP);
+  const { nodes } = await drainBoundedIssues(issues, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_ENRICH_CAP, `in-progress (${agentLabel})`);
   const result: LinearIssueInfo[] = [];
 
   // Batch fetch related data — capped so enrichment work cannot grow without bound.
@@ -506,9 +504,10 @@ export async function getNextBacklogIssue(
   if (!isLinearInitialized()) return null;
   // Check cache first
   const cached = backlogCache.get(agentLabel);
-  if (cached && isCacheValid(cached) && cached.data.length > 0) {
+  // An empty pick is cached too (shorter TTL) so an idle agent does not re-drain every poll.
+  if (cached && isCacheValid(cached) && (cached.data.length > 0 || Date.now() - cached.timestamp < LINEAR_EMPTY_BACKLOG_TTL_MS)) {
     console.log(`[Linear] Using cached backlog issue for ${agentLabel}`);
-    return cached.data[0];
+    return cached.data[0] ?? null;
   }
 
   console.log(`[Linear] Fetching backlog issues for ${agentLabel}`);
@@ -525,8 +524,8 @@ export async function getNextBacklogIssue(
 
   // Rank over ALL pages (bounded): the first page alone can hold only low
   // priority fillers while the true next issue sits pages deep.
-  const candidates = (await drainLinearConnection(issues, LINEAR_BACKLOG_MAX_PAGES))
-    .slice(0, LINEAR_BACKLOG_MAX_CANDIDATES);
+  const drained = await drainBoundedIssues(issues, LINEAR_BACKLOG_MAX_PAGES, LINEAR_BACKLOG_MAX_CANDIDATES, `backlog pick (${agentLabel})`);
+  const candidates = drained.nodes;
 
   // Sort by priority (lower = higher priority: 1=Urgent, 4=Low, 0=None)
   const sorted = [...candidates].sort((a, b) => {
@@ -537,6 +536,7 @@ export async function getNextBacklogIssue(
   });
 
   const issue = sorted[0];
+  if (!issue && !drained.truncated) setBoundedIssueCache(backlogCache, agentLabel, { data: [], timestamp: Date.now(), agentLabel });
   if (!issue) return null;
 
   const [comments, labels, state, project] = await Promise.all([

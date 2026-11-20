@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ENTITY_SYNC_COLUMNS } from './sqliteRows.js';
 import { HELPER_QUERY_MAX_LIMIT, ISSUE_LINK_MAX_ENTITIES, LIST_ENTITIES_MAX_LIMIT, SqliteRegistryStore } from './sqliteStore.js';
 
 let dir: string | undefined;
@@ -98,6 +99,21 @@ describe('SqliteRegistryStore bounded scanner and issue reads (AGT-3470)', () =>
     registry.registerEntity({ projectId: 'p', kind: 'function', name: 'only', filePath: 'src/a.ts' });
     expect(registry.listEntitySyncPage('p', undefined, LIST_ENTITIES_MAX_LIMIT * 10)).toHaveLength(1);
     expect(registry.listEntitySyncPage('p', undefined, 0)).toHaveLength(1);
+  });
+
+  it('serves the keyset sync page from the (project_id, id) index without a temp sort', () => {
+    const registry = createStore();
+    for (let i = 0; i < 20; i++) {
+      registry.registerEntity({ projectId: i % 2 ? 'p' : 'q', kind: 'function', name: `k${i}`, filePath: `src/k${i}.ts` });
+    }
+    const db = (registry as unknown as { db: { prepare(sql: string): { all(...args: unknown[]): Array<{ detail: string }> } } }).db;
+    const planFor = (after: string, args: unknown[]) => db.prepare(
+      `EXPLAIN QUERY PLAN SELECT ${ENTITY_SYNC_COLUMNS} FROM code_entities WHERE project_id = ? ${after} ORDER BY id LIMIT ?`,
+    ).all(...args).map((row) => row.detail).join('\n');
+    for (const plan of [planFor('', ['p', 10]), planFor('AND id > ?', ['p', 'x', 10])]) {
+      expect(plan).toContain('idx_ce_project_id');
+      expect(plan).not.toMatch(/TEMP B-TREE/);
+    }
   });
 
   it('bounds issue-linked entities in SQL and keeps link order', () => {

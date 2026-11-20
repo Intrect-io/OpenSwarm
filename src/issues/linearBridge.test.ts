@@ -4,7 +4,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteIssueStore } from './sqliteStore.js';
-import { drainLinearIssuesToStore, LINEAR_SYNC_MAX_PAGES, type LinearIssuePage } from './linearBridge.js';
+import { __setLinearBridgeClientForTests, drainLinearIssuesToStore, LINEAR_SYNC_MAX_PAGES, syncFromLinear, type LinearIssuePage } from './linearBridge.js';
 
 function linearNode(id: string, priority = 3): Record<string, unknown> {
   return {
@@ -134,6 +134,45 @@ describe('drainLinearIssuesToStore', () => {
     expect(progress.created).toBe(LINEAR_SYNC_MAX_PAGES);
     expect(progress.truncated).toBe(true);
     expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining('페이지 상한'));
+  });
+
+  it('does not fetch another page when the limit is met exactly at a page end', async () => {
+    let calls = 0;
+    const fetchPage = async () => {
+      calls++;
+      return page(Array.from({ length: 5 }, (_, i) => linearNode(`e${calls}-${i}`)), {
+        hasNextPage: true,
+        endCursor: `c${calls}`,
+      });
+    };
+
+    const progress = await drainLinearIssuesToStore(store, 'proj', fetchPage, 10);
+
+    expect(progress).toEqual({ created: 10, updated: 0, truncated: true });
+    expect(calls).toBe(2);
+  });
+
+  it('syncFromLinear returns the full progress including truncation', async () => {
+    const issues = vi.fn(async (args: { after?: string }) => ({
+      nodes: [linearNode(`s-${args.after ?? 'first'}`)],
+      pageInfo: { hasNextPage: true, endCursor: `${args.after ?? ''}x` },
+    }));
+    __setLinearBridgeClientForTests({ issues });
+
+    const progress = await syncFromLinear(store, 'proj', { limit: 2 });
+
+    expect(progress).toEqual({ created: 2, updated: 0, truncated: true });
+    expect(issues).toHaveBeenCalledTimes(2);
+  });
+
+  it('syncFromLinear surfaces a mid-run failure instead of hiding it behind counts', async () => {
+    const issues = vi.fn(async () => ({ nodes: [linearNode('ok')], pageInfo: { hasNextPage: true } }));
+    __setLinearBridgeClientForTests({ issues });
+
+    const progress = await syncFromLinear(store, 'proj', { limit: 50 });
+
+    expect(progress.truncated).toBe(false);
+    expect(progress.failed?.message).toMatch(/missing cursor/);
   });
 
   it('reports a clean end when the connection terminates on its own', async () => {

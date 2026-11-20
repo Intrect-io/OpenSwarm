@@ -22,6 +22,19 @@ function bound(value: number | undefined, fallback: number): number {
   return Math.max(0, Math.trunc(value));
 }
 
+/** Bounded entity aggregation for one issue. */
+export interface EntitiesForIssueResult {
+  entities: CodeEntity[];
+  /**
+   * True when a cap stopped the walk with input left over: more explicit links
+   * than fit (or the store-side ISSUE_ENTITIES_DEFAULT_LIMIT clamp was hit),
+   * relevant files past `maxFiles`, or files/entities left unread once
+   * `maxEntities` was reached. Conservative: may be true when the remaining
+   * input would only have produced duplicates.
+   */
+  truncated: boolean;
+}
+
 /**
  * 이슈에 연결된 코드 엔티티 조회
  * - 명시적으로 linkEntityToIssue된 엔티티
@@ -31,37 +44,61 @@ function bound(value: number | undefined, fallback: number): number {
  * links are fetched with that limit in SQL and take precedence), and at most
  * `maxFiles` relevant files are consulted. The walk stops as soon as the cap is
  * reached, so a heavily linked issue or a long file list cannot grow the result
- * without bound.
+ * without bound. `truncated` reports when a cap cut the result short.
  */
+export function getEntitiesForIssueBounded(
+  issueId: string,
+  relevantFiles?: string[],
+  projectId?: string,
+  options: EntitiesForIssueOptions = {},
+): EntitiesForIssueResult {
+  const maxEntities = bound(options.maxEntities, ISSUE_ENTITIES_DEFAULT_LIMIT);
+  const maxFiles = bound(options.maxFiles, ISSUE_RELEVANT_FILES_LIMIT);
+  const files = relevantFiles ?? [];
+  if (maxEntities === 0) {
+    const anyInput = files.length > 0 || getRegistryStore().getEntitiesByIssueId(issueId, projectId, 1).length > 0;
+    return { entities: [], truncated: anyInput };
+  }
+
+  const store = getRegistryStore();
+  const entityMap = new Map<string, CodeEntity>();
+  let truncated = files.length > maxFiles;
+
+  // 1. 명시적 연결된 엔티티 (정식 store 메서드 사용, SQL LIMIT). One extra row
+  // reveals overflow; the store clamps at ISSUE_ENTITIES_DEFAULT_LIMIT, so a
+  // result that hits that clamp may also hide more links.
+  const explicit = store.getEntitiesByIssueId(issueId, projectId, maxEntities + 1);
+  if (explicit.length > maxEntities || explicit.length >= ISSUE_ENTITIES_DEFAULT_LIMIT) truncated = true;
+  for (const entity of explicit.slice(0, maxEntities)) {
+    entityMap.set(entity.id, entity);
+  }
+
+  // 2. relevantFiles 경로로 암시적 연결
+  const consulted = files.slice(0, maxFiles);
+  fileLoop: for (let i = 0; i < consulted.length; i++) {
+    if (entityMap.size >= maxEntities) {
+      truncated = true; // files left unread at the cap
+      break;
+    }
+    for (const entity of store.fileBrief(consulted[i], projectId).entities) {
+      if (entityMap.has(entity.id)) continue;
+      if (entityMap.size >= maxEntities) {
+        truncated = true;
+        break fileLoop;
+      }
+      entityMap.set(entity.id, entity);
+    }
+  }
+
+  return { entities: Array.from(entityMap.values()), truncated };
+}
+
+/** Entities-only form of {@link getEntitiesForIssueBounded}. */
 export function getEntitiesForIssue(
   issueId: string,
   relevantFiles?: string[],
   projectId?: string,
   options: EntitiesForIssueOptions = {},
 ): CodeEntity[] {
-  const maxEntities = bound(options.maxEntities, ISSUE_ENTITIES_DEFAULT_LIMIT);
-  const maxFiles = bound(options.maxFiles, ISSUE_RELEVANT_FILES_LIMIT);
-  if (maxEntities === 0) return [];
-
-  const store = getRegistryStore();
-  const entityMap = new Map<string, CodeEntity>();
-
-  // 1. 명시적 연결된 엔티티 (정식 store 메서드 사용, SQL LIMIT)
-  for (const entity of store.getEntitiesByIssueId(issueId, projectId, maxEntities)) {
-    entityMap.set(entity.id, entity);
-  }
-
-  // 2. relevantFiles 경로로 암시적 연결
-  if (relevantFiles) {
-    for (const filePath of relevantFiles.slice(0, maxFiles)) {
-      if (entityMap.size >= maxEntities) break;
-      const brief = store.fileBrief(filePath, projectId);
-      for (const entity of brief.entities) {
-        if (entityMap.size >= maxEntities) break;
-        entityMap.set(entity.id, entity);
-      }
-    }
-  }
-
-  return Array.from(entityMap.values());
+  return getEntitiesForIssueBounded(issueId, relevantFiles, projectId, options).entities;
 }

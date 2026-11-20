@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers, populateBlockedBy, type LinearIssueInfo, type RawIssueNode } from './linear.js';
+import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, drainLinearConnectionPages, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_MAX_CANDIDATES, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers, populateBlockedBy, type LinearIssueInfo, type RawIssueNode } from './linear.js';
 import { LinearClient } from '@linear/sdk';
 
 // createSubIssue reads the module-level client singleton (getClient()), set only
@@ -133,6 +133,109 @@ describe('active/backlog inventory bounds', () => {
     const next = await getNextBacklogIssue('worker');
     expect(fakeClient.issues).toHaveBeenCalledTimes(1);
     expect(next?.identifier).toBe('AGT-WIN');
+  });
+
+  const backlogNode = (i: number, priority = 3) => ({
+    id: `bk-${i}`,
+    identifier: `AGT-BK-${i}`,
+    title: `Backlog ${i}`,
+    url: `https://linear.app/i/bk${i}`,
+    description: null,
+    priority,
+  });
+  const backlogPages = (count: number) => Array.from({ length: count }, (_, p) =>
+    Array.from({ length: LINEAR_BACKLOG_PAGE_SIZE }, (_, i) => backlogNode(p * 1000 + i)));
+
+  it('drains a 200-candidate backlog in at most 4 Linear requests and warns once naming the cap', async () => {
+    expect(LINEAR_BACKLOG_MAX_CANDIDATES).toBe(200);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { fakeClient, connection } = installIssueClient({ pages: backlogPages(6), expectedFirst: LINEAR_BACKLOG_PAGE_SIZE });
+      const fetchNext = vi.spyOn(connection, 'fetchNext');
+      const next = await getNextBacklogIssue('worker');
+      expect(next).not.toBeNull();
+      expect(fakeClient.issues.mock.calls.length + fetchNext.mock.calls.length).toBeLessThanOrEqual(4);
+      const capWarnings = warn.mock.calls.filter((args) => String(args[0]).includes('200-issue cap'));
+      expect(capWarnings).toHaveLength(1);
+      expect(String(capWarnings[0][0])).toMatch(/backlog pick \(worker\)/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn when the backlog holds exactly the candidate cap', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      installIssueClient({ pages: backlogPages(4), expectedFirst: LINEAR_BACKLOG_PAGE_SIZE });
+      await getNextBacklogIssue('worker');
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes('cap'))).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('caches an empty backlog pick for a short TTL instead of re-draining every poll', async () => {
+    const now = vi.spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      const { fakeClient } = installIssueClient({ pages: [[]], expectedFirst: LINEAR_BACKLOG_PAGE_SIZE });
+      expect(await getNextBacklogIssue('worker')).toBeNull();
+      expect(await getNextBacklogIssue('worker')).toBeNull();
+      expect(fakeClient.issues).toHaveBeenCalledTimes(1);
+      // Past the empty-result TTL (60 s) the pick re-queries Linear.
+      now.mockReturnValue(1_000_000 + 61_000);
+      expect(await getNextBacklogIssue('worker')).toBeNull();
+      expect(fakeClient.issues).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  function installFaultyCursorClient(firstPage: Array<Record<string, unknown>>) {
+    clearLinearCache();
+    const enrich = (node: Record<string, unknown>) => ({
+      ...node,
+      comments: vi.fn(async () => ({ nodes: [] })),
+      labels: vi.fn(async () => ({ nodes: [] })),
+      state: Promise.resolve({ name: 'Todo' }),
+      project: Promise.resolve(undefined),
+    });
+    const connection = {
+      nodes: firstPage.map(enrich),
+      pageInfo: { hasNextPage: true, endCursor: 'stuck' },
+      // Re-serves the same window with the same cursor (SDK appends in place).
+      fetchNext: async () => {
+        connection.nodes.push(...firstPage.map(enrich));
+        return connection;
+      },
+    };
+    const fakeClient = { issues: vi.fn(async () => connection) };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1');
+  }
+
+  it('returns the pages collected so far when the backlog cursor repeats, instead of throwing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      installFaultyCursorClient([backlogNode(1, 2), backlogNode(2, 1)]);
+      const next = await getNextBacklogIssue('worker');
+      expect(next?.identifier).toBe('AGT-BK-2');
+      expect(warn.mock.calls.some((args) => /repeated cursor/.test(String(args[0])))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('returns the pages collected so far when the in-progress cursor repeats, instead of throwing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      installFaultyCursorClient([backlogNode(1), backlogNode(2)]);
+      const result = await getInProgressIssues('worker');
+      expect(result.map((i) => i.identifier)).toEqual(['AGT-BK-1', 'AGT-BK-2']);
+      expect(warn.mock.calls.some((args) => /repeated cursor/.test(String(args[0])))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -296,6 +399,48 @@ describe('drainLinearConnection', () => {
 
   it('tolerates a connection with no pageInfo', async () => {
     await expect(drainLinearConnection({ nodes: [{ id: 'n' }] })).resolves.toEqual([{ id: 'n' }]);
+  });
+
+  it('stops on an initial page that claims more pages but has no cursor', async () => {
+    const fetchNext = vi.fn();
+    const conn = { nodes: [{ id: 'a' }], pageInfo: { hasNextPage: true, endCursor: null }, fetchNext };
+    const result = await drainLinearConnectionPages(conn);
+    expect(result).toMatchObject({ nodes: [{ id: 'a' }], truncated: true });
+    expect(result.cursorFault).toMatch(/missing cursor/);
+    expect(fetchNext).not.toHaveBeenCalled();
+  });
+
+  it('drops a re-served page and reports truncation on a repeated cursor', async () => {
+    const conn = {
+      nodes: [{ id: 'a' }],
+      pageInfo: { hasNextPage: true, endCursor: 'c1' },
+      fetchNext: async () => {
+        conn.nodes.push({ id: 'b' });
+        conn.pageInfo = { hasNextPage: true, endCursor: 'c2' };
+        // Second fetch re-serves page two with the same cursor.
+        conn.fetchNext = async () => { conn.nodes.push({ id: 'b' }); return conn; };
+        return conn;
+      },
+    };
+    const result = await drainLinearConnectionPages(conn);
+    expect(result.nodes).toEqual([{ id: 'a' }, { id: 'b' }]);
+    expect(result.truncated).toBe(true);
+    expect(result.cursorFault).toMatch(/repeated cursor/);
+  });
+
+  it('accepts a final empty page with no cursor as the end, not truncation', async () => {
+    const conn = {
+      nodes: [{ id: 'a' }],
+      pageInfo: { hasNextPage: true, endCursor: 'c1' } as { hasNextPage: boolean; endCursor: string | null },
+      fetchNext: async () => { conn.pageInfo = { hasNextPage: false, endCursor: null }; return conn; },
+    };
+    await expect(drainLinearConnectionPages(conn)).resolves.toEqual({ nodes: [{ id: 'a' }], truncated: false });
+  });
+
+  it('reports truncation when the page cap stops a connection that has more pages', async () => {
+    const pages = Array.from({ length: 6 }, (_, i) => [{ id: `p${i}` }]);
+    const result = await drainLinearConnectionPages(connection(pages), 2);
+    expect(result).toEqual({ nodes: [{ id: 'p0' }, { id: 'p1' }], truncated: true });
   });
 });
 

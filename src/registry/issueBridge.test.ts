@@ -14,7 +14,7 @@ vi.mock('./sqliteStore.js', async (importOriginal) => {
 });
 
 const { SqliteRegistryStore } = await import('./sqliteStore.js');
-const { getEntitiesForIssue } = await import('./issueBridge.js');
+const { getEntitiesForIssue, getEntitiesForIssueBounded } = await import('./issueBridge.js');
 
 let dir: string;
 
@@ -70,5 +70,27 @@ describe('getEntitiesForIssue (AGT-3470)', () => {
 
     expect(getEntitiesForIssue('INT-3', files, 'p', { maxFiles: 2 })).toHaveLength(2);
     expect(fileBrief).toHaveBeenCalledTimes(2);
+  });
+  it('reports truncated only when a cap cut the result short', () => {
+    const store = holder.store!;
+    for (let i = 0; i < 3; i++) {
+      const entity = store.registerEntity({ projectId: 'p', kind: 'function', name: `t${i}`, filePath: `src/t${i}.ts` });
+      store.linkIssue(entity.id, 'INT-4');
+    }
+    store.registerEntity({ projectId: 'p', kind: 'function', name: 'extra', filePath: 'src/extra.ts' });
+
+    // Everything fits: not truncated.
+    expect(getEntitiesForIssueBounded('INT-4', ['src/extra.ts'], 'p', { maxEntities: 4 }))
+      .toMatchObject({ truncated: false });
+    // Explicit links alone exceed the cap.
+    const linksCapped = getEntitiesForIssueBounded('INT-4', undefined, 'p', { maxEntities: 2 });
+    expect(linksCapped.entities).toHaveLength(2);
+    expect(linksCapped.truncated).toBe(true);
+    // Exactly at the cap with nothing left over: not truncated.
+    expect(getEntitiesForIssueBounded('INT-4', undefined, 'p', { maxEntities: 3 }).truncated).toBe(false);
+    // A relevant-file entity left out at the cap.
+    expect(getEntitiesForIssueBounded('INT-4', ['src/extra.ts'], 'p', { maxEntities: 3 }).truncated).toBe(true);
+    // Relevant files past maxFiles were never consulted.
+    expect(getEntitiesForIssueBounded('INT-4', ['src/extra.ts', 'src/t0.ts'], 'p', { maxFiles: 1 }).truncated).toBe(true);
   });
 });
