@@ -269,9 +269,10 @@ function isEnvironmentFailure(output: string): boolean {
     // uv / pip driven from inside the network-less verification sandbox: the
     // environment cannot be built, so neither run is a verdict. (AGT-4407)
     /Failed to initialize cache at/i,
-    // uv prints `error: Failed to ...` or `  × Failed to download ...` at the start
-    // of a line, lowercase; `TypeError: Failed to fetch` from a test is not uv.
-    /^[ \t]*(?:\x1b\[[0-9;]*m)*(?:error|×)(?:\x1b\[[0-9;]*m)*:?(?:\x1b\[[0-9;]*m)*[ \t]+Failed to (?:download|fetch|prepare|sync)\b/m,
+    // uv prints `error: Failed to ...` or `  × Failed to download ...`: lowercase `error`
+    // not glued to a preceding letter (ANSI codes allowed), so a test's `TypeError: Failed
+    // to fetch` is not uv, while a line with other text in front of uv's message still is.
+    /(?:^|[^A-Za-z]|\x1b\[[0-9;]*m)(?:error|×)(?:\x1b\[[0-9;]*m)*:?(?:\x1b\[[0-9;]*m)*[ \t]+Failed to (?:download|fetch|prepare|sync)\b/m,
     /Network connectivity is disabled, but the\s+requested data wasn't found in the cache/,
     /No solution found when resolving dependencies/i,
     /(?:Network is unreachable|Temporary failure in name resolution|Could not resolve host|nodename nor servname provided)/i,

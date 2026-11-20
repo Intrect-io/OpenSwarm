@@ -350,6 +350,15 @@ describe('runVerify', () => {
     expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
   });
 
+  it('recognises a uv error line that has other text in front of it', async () => {
+    const [evidence] = await runVerify({
+      projectPath: repo,
+      commands: [verify('printf "[setup] error: Failed to download pkg\\n"; exit 2')],
+      baseRef: 'HEAD',
+    });
+    expect(evidence).toMatchObject({ headStatus: 'fail', baseStatus: 'fail', newFailure: false, environmentFailure: true });
+  });
+
   it('recognises a colourised uv error line as an environment failure', async () => {
     const [evidence] = await runVerify({
       projectPath: repo,
