@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, mkdtempSync, rmSync, readFileSync, statSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdtempSync, rmSync, readFileSync, statSync, existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -77,6 +77,18 @@ describe('appendInputDebug (INT-1964)', () => {
     appendInputDebug('x', {}, path);
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(readFileSync(path, 'utf8')).toContain('old line');
+  });
+
+  it('leaves a hard-linked log and its other name untouched (#899 review)', async () => {
+    const { appendInputDebug } = await import('./inputDebug.js');
+    const path = join(process.env.OSW_TEST_HOME!, '.openswarm', 'input-debug.log');
+    const other = join(sandbox, 'user-script.sh');
+    writeFileSync(other, '#!/bin/sh\necho hi\n', { mode: 0o755 });
+    chmodSync(other, 0o755);
+    linkSync(other, path);
+    appendInputDebug('x', {}, path);
+    expect(statSync(other).mode & 0o777).toBe(0o755);
+    expect(readFileSync(other, 'utf8')).toBe('#!/bin/sh\necho hi\n');
   });
 
   it('swallows write errors (NUL in path)', async () => {
