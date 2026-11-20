@@ -20,6 +20,21 @@ describe('StageTimeline', () => {
     expect(f).toContain('5s');
     expect(f).toContain('approve');
   });
+
+  it('renders each stage as one bounded row even when fields carry line breaks', () => {
+    const stages: StageEntry[] = [
+      { taskId: 't', stage: 'worker\nINJECTED ROW', status: 'start', model: 'gpt\r\nx', decision: `revise\n${'d'.repeat(400)}` },
+      { taskId: 't', stage: 'reviewer', status: 'complete' },
+    ];
+    const f = render(<StageTimeline stages={stages} />).lastFrame()!;
+    const lines = f.split('\n');
+    // header + exactly one row per stage
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toContain('worker INJECTED ROW');
+    expect(lines[1]).toContain('(gpt x)');
+    expect(lines[1]).toContain('\u2026');
+    expect(lines[2]).toContain('reviewer');
+  });
 });
 
 describe('LiveLog', () => {

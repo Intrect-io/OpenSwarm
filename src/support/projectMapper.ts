@@ -31,6 +31,44 @@ export interface LocalProject {
 const mappingCache: Map<string, ProjectMapping> = new Map();
 const localProjectsCache = new Map<string, { projects: LocalProject[]; lastScanTime: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+/** Entry caps: each distinct project ID x base-path set adds a key, so neither map may grow without bound. */
+export const MAX_MAPPING_CACHE_ENTRIES = 256;
+export const MAX_LOCAL_PROJECTS_CACHE_ENTRIES = 32;
+
+/**
+ * Insert into a bounded TTL cache. Expired entries are evicted first, then the
+ * oldest-inserted ones (Map keeps insertion order; re-setting moves a key to
+ * the end) until the map is within `maxEntries`.
+ */
+function setBounded<V>(
+  cache: Map<string, V>,
+  key: string,
+  value: V,
+  maxEntries: number,
+  stampOf: (v: V) => number,
+  now: number = Date.now(),
+): void {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size <= maxEntries) return;
+  for (const [k, v] of cache) {
+    if (now - stampOf(v) >= CACHE_TTL) cache.delete(k);
+  }
+  while (cache.size > maxEntries) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+function setMapping(key: string, mapping: ProjectMapping): void {
+  setBounded(mappingCache, key, mapping, MAX_MAPPING_CACHE_ENTRIES, (m) => m.lastVerified);
+}
+
+/** Current entry counts, for tests and diagnostics. */
+export function getMappingCacheSizes(): { mappings: number; localProjects: number } {
+  return { mappings: mappingCache.size, localProjects: localProjectsCache.size };
+}
 
 function basePathsCacheKey(basePaths: string[]): string {
   return basePaths.map((p) => expandPath(p)).sort().join('\n');
@@ -100,7 +138,14 @@ export async function scanLocalProjects(basePaths: string[]): Promise<LocalProje
     }
   }
 
-  localProjectsCache.set(cacheKey, { projects, lastScanTime: now });
+  setBounded(
+    localProjectsCache,
+    cacheKey,
+    { projects, lastScanTime: now },
+    MAX_LOCAL_PROJECTS_CACHE_ENTRIES,
+    (entry) => entry.lastScanTime,
+    now,
+  );
 
   console.log(`[ProjectMapper] Scanned ${projects.length} local projects`);
   return projects;
@@ -251,6 +296,7 @@ export async function mapLinearProject(
     console.log(`[ProjectMapper] Cache hit: ${linearProjectName} → ${cached.localPath}`);
     return cached.localPath;
   }
+  if (cached) mappingCache.delete(cacheKey);
 
   // Scan local projects
   const localProjects = await scanLocalProjects(basePaths);
@@ -276,7 +322,7 @@ export async function mapLinearProject(
         confidence: 1,
         lastVerified: Date.now(),
       };
-      mappingCache.set(cacheKey, mapping);
+      setMapping(cacheKey, mapping);
       console.log(
         `[ProjectMapper] Explicit mapping: ${linearProjectName} → ${project.path} (openswarm.json)`,
       );
@@ -296,7 +342,7 @@ export async function mapLinearProject(
       confidence: match.confidence,
       lastVerified: Date.now(),
     };
-    mappingCache.set(cacheKey, mapping);
+    setMapping(cacheKey, mapping);
 
     console.log(`[ProjectMapper] Mapped: ${linearProjectName} → ${match.project.path} (confidence: ${(match.confidence * 100).toFixed(0)}%)`);
     return match.project.path;
