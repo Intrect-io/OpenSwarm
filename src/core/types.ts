@@ -664,6 +664,8 @@ export type AutonomousStartupConfig = {
   automationDbPath?: string;
   /** Linear project for the daemon's self-filed retrospective issues; unset disables the lane. */
   retrospectiveProjectId?: string;
+  /** Daily factory digest (AGT-4810); `schedule` is a cron evaluated in UTC (default 00:05). */
+  factoryDigest?: { schedule?: string };
   automationLeaseMs?: number;
   shutdownGraceMs?: number;
   /** Default role configuration */

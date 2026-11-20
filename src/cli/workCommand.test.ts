@@ -928,6 +928,13 @@ describe('pure helpers', () => {
       .toMatchObject({ status: 'approved', success: true, prUrl: 'https://pr/1', worktreePreserved: false });
   });
 
+  it('summarizeSettled names the factory pause instead of "owned by another process" (AGT-4808 review G)', () => {
+    const refused = pipelineResult({ success: false, finalStatus: 'superseded', taskContext: { taskTitle: 'Fix (x) (factory paused: incident 42)' } as never });
+    expect(summarizeSettled(row, { value: refused })).toMatchObject({ status: 'superseded', note: 'factory paused: incident 42' });
+    const owned = pipelineResult({ success: false, finalStatus: 'superseded', taskContext: { taskTitle: 'Fix (durable claim unavailable)' } as never });
+    expect(summarizeSettled(row, { value: owned }).note).toMatch(/owned by another process/);
+  });
+
   it('summarizeSettled preserves the worktree for non-approved outcomes and errors', () => {
     expect(summarizeSettled(row, { value: pipelineResult({ success: false, finalStatus: 'rejected' }) }))
       .toMatchObject({ status: 'rejected', worktreePreserved: true });

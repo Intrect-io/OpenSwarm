@@ -75,6 +75,22 @@ const RepoMetadataSchema = z.object({
     maxCostUsdPerDay: z.number().positive().optional(),
     /** How long an admission circuit remains open before reevaluation. */
     circuitCooldownMinutes: z.number().int().min(1).max(24 * 60).default(60),
+    /**
+     * Anomaly auto-pause thresholds (AGT-4809). Crossing one writes a pause for
+     * this repository and sends one alert. Omitted keys keep the defaults in
+     * automation/anomalyPause.ts.
+     */
+    anomaly: z.object({
+      maxPrsPerHour: z.number().int().min(1).max(1000).optional(),
+      /** Draft PRs only (unreviewed work from parked or stuck runs). */
+      maxDraftPrsPerHour: z.number().int().min(1).max(1000).optional(),
+      maxRedispatchesPer24h: z.number().int().min(1).max(1000).optional(),
+      infraErrorWindow: z.number().int().min(1).max(1000).optional(),
+      maxInfraErrorShare: z.number().min(0).max(1).optional(),
+      sandboxNetworkDenial: z.boolean().optional(),
+      /** `factory`: a trip in this repository pauses the whole factory (`*`) instead of the repository. */
+      pauseScope: z.enum(['project', 'factory']).optional(),
+    }).optional(),
   }).optional(),
   /**
    * What happens to a pull request the swarm publishes from this repository.

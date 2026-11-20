@@ -19,6 +19,7 @@ import { PRProcessor, type PRProcessorConfig } from '../automation/prProcessor.j
 import { startCIWorker, stopCIWorker } from '../automation/ciWorker.js';
 import { initMonitors } from '../automation/longRunningMonitor.js';
 import * as dailyReporter from '../automation/dailyReporter.js';
+import { startConfiguredFactoryDigest } from '../automation/factoryDigestService.js';
 import { initLocale, t } from '../locale/index.js';
 import { initRateLimiters, destroyRateLimiters } from '../support/rateLimiter.js';
 import { compactMemoryTable, shouldCompact, cleanupBackupFiles } from '../memory/compaction.js';
@@ -46,6 +47,8 @@ let githubRepos: string[] = [];
 let githubCheckTimer: NodeJS.Timeout | null = null;
 let prProcessor: PRProcessor | null = null;
 let memoryCompactionJob: Cron | null = null;
+let failureTaxonomyJob: Cron | null = null;
+let factoryDigestStop: (() => void) | null = null;
 let serviceInstanceLock: ServiceInstanceLock | null = null;
 
 /**
@@ -448,6 +451,18 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       for (const event of remote) await store.publish(event);
       console.log(`[Service] Coordination board registered (${config.autonomous.coordinationBoardIssueId})`);
     }
+    // Weekly failure taxonomy (AGT-4812): parks, rejections and operator questions
+    // grouped by cause, each repeating cause filed as a Backlog candidate for a
+    // person to approve. Same opt-in and project as the ledger retrospective.
+    if (config.autonomous.retrospectiveProjectId) {
+      const { startWeeklyFailureTaxonomy } = await import('../automation/failureTaxonomy.js');
+      const { getTaskSource } = await import('../automation/runnerExecution.js');
+      failureTaxonomyJob = startWeeklyFailureTaxonomy({
+        projectId: config.autonomous.retrospectiveProjectId,
+        getTaskSource: () => getTaskSource(),
+        dbPath: config.autonomous.automationDbPath,
+      });
+    }
     web.setWebRunner(runnerInstance);
     // Re-apply the persisted provider toggle: switchProvider() is in-memory only, so without this a
     // restart silently reverts to config.yaml's adapter. Reusing switchProvider keeps the role +
@@ -545,6 +560,12 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     });
     dailyReporter.startDailyReporter(config.dailyReporter);
     console.log(`[Service] Daily reporter started (schedule: ${config.dailyReporter.schedule || '18:00 daily'})`);
+  }
+
+  // Daily factory digest (AGT-4810): runs, questions, spend, pauses and KPIs for
+  // the previous UTC day, one Discord post a day on its own UTC schedule.
+  if (config.autonomous) {
+    factoryDigestStop = startConfiguredFactoryDigest(config.autonomous, async (text) => { await discord.sendToChannel(text); });
   }
 
   // Sweep attachments once on the way up as well. The daily job is the only
@@ -787,6 +808,11 @@ async function stopServiceLocked(): Promise<void> {
     githubCheckTimer = null;
     console.log('GitHub monitoring stopped');
   }
+
+  failureTaxonomyJob?.stop();
+  failureTaxonomyJob = null;
+  factoryDigestStop?.();
+  factoryDigestStop = null;
 
   // Stop memory compaction scheduler
   if (memoryCompactionJob) {

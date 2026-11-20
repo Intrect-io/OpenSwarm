@@ -206,12 +206,14 @@ export function summarizeSettled(
   if (result.finalStatus === 'superseded') {
     // The ledger refused the claim: a daemon (or another `work` session) owns
     // this issue, or its failure circuit is open. Not a failure of this run.
+    // A kill-switch refusal says so, with the pause's reason (AGT-4808).
+    const paused = /\((factory paused: [\s\S]*)\)$/.exec(result.taskContext?.taskTitle ?? '')?.[1];
     return {
       ...base,
       status: 'superseded',
       success: false,
       worktreePreserved: false,
-      note: 'owned by another process (daemon or another session), or awaiting reconciliation',
+      note: paused ?? 'owned by another process (daemon or another session), or awaiting reconciliation',
     };
   }
   if (result.finalStatus === 'deferred') {

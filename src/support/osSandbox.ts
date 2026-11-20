@@ -54,10 +54,27 @@ export function defaultHiddenRoots(env: NodeJS.ProcessEnv = process.env, home: s
 export type WorkerNetworkPolicy = 'loopback' | 'open';
 
 let workerNetworkPolicy: WorkerNetworkPolicy = 'loopback';
+let workerNetworkPolicyConfigured = false;
 
-/** Set once at daemon start from `autonomous.workerNetwork`. */
+/** Set once at daemon (or `openswarm work`) start from `autonomous.workerNetwork`. */
 export function setWorkerNetworkPolicy(policy: WorkerNetworkPolicy): void {
   workerNetworkPolicy = policy;
+  workerNetworkPolicyConfigured = true;
+}
+
+/**
+ * Whether this process is a factory worker host that declared its policy (the
+ * daemon or `openswarm work`). A chat or ad-hoc process never set it, and its
+ * failed network commands must not pause the factory (AGT-4809).
+ */
+export function isWorkerNetworkPolicyConfigured(): boolean {
+  return workerNetworkPolicyConfigured;
+}
+
+/** Tests only: back to the unconfigured process default. */
+export function resetWorkerNetworkPolicyForTests(): void {
+  workerNetworkPolicy = 'loopback';
+  workerNetworkPolicyConfigured = false;
 }
 
 export function getWorkerNetworkPolicy(): WorkerNetworkPolicy {
@@ -207,4 +224,16 @@ export function defaultWorkerWritableRoots(
 /** True when stderr/stdout carries the OS sandbox's refusal, so the tool can name the fence. */
 export function looksLikeSandboxDenial(output: string): boolean {
   return /operation not permitted|read-only file system|EPERM|EROFS/i.test(output);
+}
+
+/**
+ * `looksLikeSandboxDenial`, plus: when the refusal was a network connect (or a
+ * name lookup) for a non-loopback target and the worker network policy is
+ * loopback-only, record it for the anomaly monitor (AGT-4809). The detector
+ * is shared with the CLI adapters: support/sandboxNetworkSignal.ts.
+ * Recording is fire-and-forget and never fails the tool call.
+ */
+export function noteSandboxDenial(output: string, command: string, cwd: string): boolean {
+  void import('./sandboxNetworkSignal.js').then(({ noteNetworkDenial }) => noteNetworkDenial(output, command, cwd)).catch(() => { /* bookkeeping only */ });
+  return looksLikeSandboxDenial(output);
 }

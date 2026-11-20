@@ -80,6 +80,9 @@ openswarm start                  # Start full daemon (requires config.yaml)
 openswarm run "Fix the bug" -p ~/my-project   # Run a single task
 openswarm exec "Run tests" --local --pipeline # Execute via daemon
 openswarm exec --issue INT-123    # Deploy one Linear issue's pipeline async; await/answer elevate
+openswarm pause [--project <path>] [--now] [--reason "..."]  # Kill switch: stop claiming new work, no restart
+openswarm pause --list           # Show current pauses (global and per repository)
+openswarm unpause [--project <path>]  # Lift a pause (also: openswarm resume --factory / --project <path>)
 openswarm init                   # Interactive setup wizard (provider auth, Linear OAuth, config)
 openswarm provider               # Show/switch the active provider (interactive picker)
 openswarm provider claude        # Switch straight to a provider — a running daemon switches in place

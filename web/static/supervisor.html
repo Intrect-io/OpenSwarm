@@ -73,9 +73,18 @@
         <div class="ctl-group ctl-service" role="group" aria-label="Daemon service">
           <span class="grp">Service</span>
           <span class="svc-status" id="svc-status">…</span>
+          <button class="btn btn-secondary btn-sm btn-stop" id="factory-pause-btn" type="button" onclick="toggleFactoryPause()" title="Stop claiming new work. In-flight runs finish. No restart needed.">Pause factory</button>
           <button class="btn btn-secondary btn-sm btn-stop" id="svc-stop-btn" type="button" onclick="svcAction('stop')">Stop daemon</button>
           <button class="btn btn-secondary btn-sm" id="svc-restart-btn" type="button" onclick="svcAction('restart')">Restart daemon</button>
         </div>
+      </section>
+
+      <!-- The daily factory digest (AGT-4810): the one thing to read a day. -->
+      <section class="board" aria-labelledby="digest-title">
+        <details id="digest">
+          <summary class="sec"><h2 id="digest-title">Factory digest (previous UTC day)</h2> <span class="src">automation database</span></summary>
+          <pre class="mono" id="digest-text">Loading…</pre>
+        </details>
       </section>
 
       <!-- The departure board: every run, when it left, where it is now. -->

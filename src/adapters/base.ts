@@ -28,6 +28,7 @@ import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { assertAdapterCanRunUnderHumanSurfaceBoundary } from './humanSurfaceBoundary.js';
 import { applyReasoningEffortOverride } from '../support/reasoningEffortOverride.js';
 import { createSessionRecorder, type SessionRecorder } from '../support/sessionLog.js';
+import { createCliNetworkScanner } from '../support/sandboxNetworkSignal.js';
 
 export { terminateCliProcessTree } from './processTree.js';
 
@@ -254,10 +255,14 @@ export async function spawnCli(
       const stdoutBuf = new BoundedOutput(MAX_RETAINED_STDOUT_CHARS);
       const stderrBuf = new BoundedOutput(MAX_RETAINED_STDERR_CHARS);
       let streamBuffer = '';
+      // AGT-4809: a worker's failed shell command that reached for the network. Read-only
+      // reviews are not workers; see support/sandboxNetworkSignal.ts for the adapters covered.
+      const networkScan = options.readOnly ? undefined : createCliNetworkScanner(options.cwd);
 
       proc.stdout?.on('data', (data: Buffer) => {
         const text = data.toString();
         stdoutBuf.append(text);
+        networkScan?.push(text);
         if (options.onLog && adapter.capabilities.supportsStreaming) {
           streamBuffer = boundStreamRemainder(adapter.parseStreamingChunk
             ? adapter.parseStreamingChunk(text, options.onLog, streamBuffer)
@@ -302,6 +307,7 @@ export async function spawnCli(
             : parseCliStreamChunk('\n', options.onLog, streamBuffer);
         }
 
+        networkScan?.flush();
         const stdout = stdoutBuf.toString();
         const stderr = stderrBuf.toString();
         session?.record({ type: 'assistant', rawStdout: stdout, rawStderr: stderr });

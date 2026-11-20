@@ -359,6 +359,40 @@ describe('publication failure classification', () => {
   });
 });
 
+describe('PR-open signal records whether the PR is a draft (AGT-4809)', () => {
+  async function draftFlag(prUrl: string): Promise<Array<{ draft: number | null }>> {
+    const Database = (await import('better-sqlite3')).default;
+    const { defaultAutomationDbPath } = await import('./automationDbPath.js');
+    const db = new Database(defaultAutomationDbPath(), { readonly: true });
+    try {
+      return db.prepare("SELECT draft FROM automation_factory_signals WHERE kind = 'pr_opened' AND detail = ?").all(prUrl) as Array<{ draft: number | null }>;
+    } finally {
+      db.close();
+    }
+  }
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-50', issueId: 'AGT-50' };
+  const task = { id: 'task-50', issueId: 'issue-50', issueIdentifier: 'AGT-50', title: 'Drafts' };
+
+  it('parked and stuck publications record a draft open', async () => {
+    commitAndCreatePRWithHead.mockResolvedValueOnce({ prUrl: 'https://github.com/o/r/pull/501', headSha: 'a' });
+    await publishParkedWork(info, task, undefined);
+    commitAndCreatePRWithHead.mockResolvedValueOnce({ prUrl: 'https://github.com/o/r/pull/502', headSha: 'b' });
+    await publishStuckWork({ worktreePath: '/tmp/w', repoRoot: '/tmp/r', branchName: 'swarm/AGT-50' }, task, 'stuck');
+    expect(await draftFlag('https://github.com/o/r/pull/501')).toEqual([{ draft: 1 }]);
+    expect(await draftFlag('https://github.com/o/r/pull/502')).toEqual([{ draft: 1 }]);
+  });
+
+  it('an approved publication records a ready open, or a draft when the PR had to be opened as one', async () => {
+    const result = () => ({ success: true, finalStatus: 'approved' } as { success: boolean; finalStatus: string; prUrl?: string });
+    commitAndCreatePRWithHead.mockResolvedValueOnce({ prUrl: 'https://github.com/o/r/pull/503', headSha: 'c', draft: false });
+    await publishApprovedWork(info, task, result(), undefined);
+    commitAndCreatePRWithHead.mockResolvedValueOnce({ prUrl: 'https://github.com/o/r/pull/504', headSha: 'd', draft: true });
+    await publishApprovedWork(info, task, result(), undefined);
+    expect(await draftFlag('https://github.com/o/r/pull/503')).toEqual([{ draft: 0 }]);
+    expect(await draftFlag('https://github.com/o/r/pull/504')).toEqual([{ draft: 1 }]);
+  });
+});
+
 describe('publishStuckWork — terminal parks publish instead of holding', () => {
   const ctx = { worktreePath: '/tmp/w', repoRoot: '/tmp/r', branchName: 'swarm/AGT-1' };
   const task = { id: 'task-1', issueId: 'issue-1', issueIdentifier: 'AGT-1', title: 'Do the thing' };
@@ -446,6 +480,12 @@ describe('an unfinished run opens no pull request (AGT-4786)', () => {
       expect(commitAndCreatePRWithHead).toHaveBeenCalledTimes(1);
       expect(commitAndCreatePRWithHead.mock.calls[0][4]).not.toMatchObject({ draft: true });
       expect(result.prUrl).toBe(pr.prUrl);
+      // AGT-4809: the PR feeds the PR-rate anomaly signal.
+      const Database = (await import('better-sqlite3')).default;
+      const { defaultAutomationDbPath } = await import('./automationDbPath.js');
+      const db = new Database(defaultAutomationDbPath(), { readonly: true });
+      expect(db.prepare("SELECT kind, detail FROM automation_factory_signals WHERE detail = ?").all(pr.prUrl)).toEqual([{ kind: 'pr_opened', detail: pr.prUrl }]);
+      db.close();
     });
 
     // A push or `gh` error in the reviewed publish rewrites the status to

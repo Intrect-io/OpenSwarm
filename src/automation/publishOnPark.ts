@@ -36,6 +36,16 @@ import { pipelineExecutionBoundary, type StageBoundaryResults } from '../agents/
 
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { TEST_REMOVAL_PARK_REASON, testRemovalHold } from './testRemovalGate.js';
+import { recordFactorySignal } from './anomalyPause.js';
+import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
+
+/**
+ * Every PR this daemon opens feeds the PR-rate anomaly signals (AGT-4809), with
+ * whether it was a draft: unreviewed drafts are the degenerate signal. Never throws.
+ */
+function notePrOpened(repoPath: string, prUrl: string, task: PublishableTask, draft: boolean): void {
+  recordFactorySignal({ projectPath: normalizeProjectPath(repoPath), kind: 'pr_opened', issueId: task.issueIdentifier || task.issueId, detail: prUrl, draft });
+}
 
 /** Runs once after a reviewed publication succeeded and was durably recorded. */
 export type ApprovedPublicationHook = (publication: {
@@ -164,6 +174,7 @@ export async function publishParkedWork(
     // into a reconcile row that holds a slot until a sweep releases it. That is
     // the phantom-row shape that idled the whole loop on 2026-08-29.
     const { prUrl, headSha } = publication;
+    notePrOpened(worktreeInfo.originalPath, prUrl, task, true); // `{ draft: true }`, and a reused PR is never promoted on this path
     const attached = await durability?.onPublication(prUrl, headSha) ?? true;
     if (attached) {
       console.log(`[Runner] Parked run published as draft for ${task.issueIdentifier}: ${prUrl}`);
@@ -284,6 +295,7 @@ export async function publishStuckWork(
       // tree is about to be deleted.
       { draft: true },
     );
+    notePrOpened(ctx.repoRoot, prUrl, task, true); // `{ draft: true }`
     broadcastEvent({
       type: 'log',
       data: { taskId: task.issueId || task.id, stage: 'pr', line: `Draft PR created for stuck run: ${prUrl}` },
@@ -358,6 +370,8 @@ export async function publishApprovedWork(
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;
         if (publication.risk) result.changeRisk = publication.risk;
+        // Ready unless commitAndCreatePRWithHead had to open it as a draft (duplicate, conflict, regression, unready claim).
+        notePrOpened(worktreeInfo.originalPath, prUrl, task, publication.draft ?? false);
         const publicationRecorded = await durability?.onPublication(prUrl, headSha) ?? true;
         if (!publicationRecorded) {
           throw new Error('Durable lease fence rejected publication attachment');

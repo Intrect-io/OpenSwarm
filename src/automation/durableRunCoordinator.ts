@@ -28,6 +28,8 @@ import {
 } from './runLedger.js';
 import type { TrackerTerminalState } from './runLedgerTrackerCache.js';
 import { pickPipelineFailureDetail } from './runnerState.js';
+import { fencedResult, nonExecutingResult } from './durableRunResults.js';
+import { PauseNowFence } from './factoryPauseFence.js';
 import {
   normalizeOperatorQuestionCorrelations,
   OPERATOR_QUESTION_PARK_REASON,
@@ -112,39 +114,6 @@ export interface OutboxDrainResult {
   applied: number;
   retried: number;
   dead: number;
-}
-
-function nonExecutingResult(
-  task: TaskItem,
-  projectPath: string,
-  reason: string,
-  disposition: { status: 'deferred'; retryAt: number } | { status: 'superseded' },
-): PipelineResult {
-  return {
-    success: false,
-    sessionId: `durable-admission-${Date.now()}`,
-    stages: [],
-    finalStatus: disposition.status,
-    retryAt: disposition.status === 'deferred' ? disposition.retryAt : undefined,
-    totalDuration: 0,
-    iterations: 0,
-    taskContext: {
-      issueIdentifier: task.issueIdentifier || task.issueId,
-      projectName: task.linearProject?.name,
-      projectPath,
-      taskTitle: `${task.title} (${reason})`,
-    },
-  };
-}
-
-function fencedResult(result: PipelineResult): PipelineResult {
-  return {
-    ...result,
-    success: false,
-    finalStatus: 'infra_error',
-    failureDetail: 'durable completion: lease fence rejected result from an expired or replaced owner',
-    failureSignal: result.failureSignal ?? 'timeout',
-  };
 }
 
 /** Attempt from which a failing run's retry delay doubles; idle fill reads it too (AGT-4675). */
@@ -593,6 +562,10 @@ export class DurableRunCoordinator {
     // delivery. Otherwise the observer itself becomes a second control plane.
     if (this.mode === 'shadow') return executor(this.noopHooks(), new AbortController().signal);
 
+    // Kill switch (AGT-4808): leave a paused repository's row alone (a 30 s RETRY_AT reads as a re-dispatch); claimRun re-checks in its transaction.
+    const paused = this.ledger.getBlockingPause(normalizeProjectPath(projectPath));
+    if (paused) return nonExecutingResult(task, projectPath, `factory paused: ${paused.reason}`, { status: 'superseded' });
+
     let claim = this.ledger.claimRun(issueId, {
       ownerInstanceId: this.instanceId,
       ownerPidSpace: this.pidSpace,
@@ -658,10 +631,11 @@ export class DurableRunCoordinator {
       leaseAbortController.abort();
     };
     const renewEveryMs = Math.max(1_000, Math.floor(this.leaseMs / 3));
+    const pauseFence = new PauseNowFence(this.ledger, projectPath); // AGT-4808: `pause --now` reaches runs in any process
     const renewTimer = setInterval(() => {
       const renewed = this.ledger!.renewLease(claim!, this.leaseMs);
-      if (renewed) claim = renewed;
-      else loseLease();
+      if (renewed) claim = renewed; else loseLease();
+      if (!leaseLost && pauseFence.check()) leaseAbortController.abort(new Error('factory paused (now)'));
     }, renewEveryMs);
     renewTimer.unref?.();
 
@@ -829,10 +803,10 @@ export class DurableRunCoordinator {
     }
 
     if (result.finalStatus === 'cancelled') {
-      if (options.retryCancellation?.(result, claim)) {
+      if (pauseFence.tripped || options.retryCancellation?.(result, claim)) {
         return this.ledger.transition(claim, 'RETRY_AT', {
           retryAt: now + 60_000,
-          errorCode: 'shutdown_cancelled',
+          errorCode: pauseFence.tripped ? 'factory_paused' : 'shutdown_cancelled',
           eventData: { sessionId: result.sessionId, finalStatus: result.finalStatus, resumable: true },
         }, now) ? result : fencedResult(result);
       }

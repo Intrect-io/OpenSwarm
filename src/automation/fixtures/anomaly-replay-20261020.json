@@ -1,0 +1,1341 @@
+{
+ "source": "automation.db ledger of the 2026-10-20 factory run on one repository (macstudio), read with immutable=1, plus the createdAt of the 25 swarm/* PRs that run opened. Issue ids are replaced with I-NN and the repository with a placeholder; timestamps and statuses are unchanged.",
+ "attempts": [
+  {
+   "issue": "I-01",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T13:16:39.983Z",
+   "finishedAt": "2026-10-20T13:18:04.037Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-02",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:16:41.823Z",
+   "finishedAt": "2026-10-20T13:39:29.543Z",
+   "status": "approved"
+  },
+  {
+   "issue": "I-03",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:18:11.863Z",
+   "finishedAt": "2026-10-20T13:18:14.763Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-04",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:18:41.893Z",
+   "finishedAt": "2026-10-20T14:30:35.647Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-05",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:25:42.422Z",
+   "finishedAt": "2026-10-20T13:59:44.079Z",
+   "status": "approved"
+  },
+  {
+   "issue": "I-06",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:25:42.533Z",
+   "finishedAt": "2026-10-20T13:25:42.884Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-07",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:26:12.568Z",
+   "finishedAt": "2026-10-20T13:27:13.606Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-01",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T13:27:42.529Z",
+   "finishedAt": "2026-10-20T13:27:42.878Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-08",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:28:12.630Z",
+   "finishedAt": "2026-10-20T14:36:05.017Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-09",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:35:12.846Z",
+   "finishedAt": "2026-10-20T14:29:25.811Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-10",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:35:12.930Z",
+   "finishedAt": "2026-10-20T14:25:22.630Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-11",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T13:39:43.030Z",
+   "finishedAt": "2026-10-20T14:17:26.200Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-03",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:02:04.759Z",
+   "finishedAt": "2026-10-20T14:02:05.806Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-12",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:03:57.168Z",
+   "finishedAt": "2026-10-20T14:44:33.948Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-03",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T14:17:38.446Z",
+   "finishedAt": "2026-10-20T14:17:40.200Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-06",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:17:43.842Z",
+   "finishedAt": "2026-10-20T14:17:44.697Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-13",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:17:48.482Z",
+   "finishedAt": "2026-10-20T14:51:27.688Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-07",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:25:51.632Z",
+   "finishedAt": "2026-10-20T14:26:54.438Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-14",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:27:00.569Z",
+   "finishedAt": "2026-10-20T14:27:00.951Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-15",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:27:04.313Z",
+   "finishedAt": "2026-10-20T14:58:39.825Z",
+   "status": "waiting_on_operator"
+  },
+  {
+   "issue": "I-16",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:32:23.088Z",
+   "finishedAt": "2026-10-20T14:41:53.768Z",
+   "status": "waiting_on_operator"
+  },
+  {
+   "issue": "I-17",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:32:33.732Z",
+   "finishedAt": "2026-10-20T14:33:55.359Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-18",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:34:40.588Z",
+   "finishedAt": "2026-10-20T14:44:32.754Z",
+   "status": "publication_reconcile"
+  },
+  {
+   "issue": "I-01",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T14:36:24.262Z",
+   "finishedAt": "2026-10-20T14:36:25.073Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-19",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:36:34.287Z",
+   "finishedAt": "2026-10-20T14:36:35.699Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-20",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:36:58.232Z",
+   "finishedAt": "2026-10-20T14:40:20.744Z",
+   "status": "decomposed"
+  },
+  {
+   "issue": "I-14",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T14:36:58.942Z",
+   "finishedAt": "2026-10-20T14:37:00.124Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-21",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:37:22.532Z",
+   "finishedAt": "2026-10-20T15:23:18.844Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-06",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T14:37:22.549Z",
+   "finishedAt": "2026-10-20T14:37:24.272Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-09",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:37:40.150Z",
+   "finishedAt": "2026-10-20T15:08:34.078Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-22",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:40:45.101Z",
+   "finishedAt": "2026-10-20T15:36:59.119Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-23",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:44:05.452Z",
+   "finishedAt": "2026-10-20T14:55:23.623Z",
+   "status": "publication_reconcile"
+  },
+  {
+   "issue": "I-17",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:44:55.649Z",
+   "finishedAt": "2026-10-20T14:44:57.186Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-19",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:44:56.669Z",
+   "finishedAt": "2026-10-20T14:44:58.091Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-08",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:45:10.599Z",
+   "finishedAt": "2026-10-20T15:07:48.771Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-07",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T14:45:10.616Z",
+   "finishedAt": "2026-10-20T14:46:09.435Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-12",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:46:24.583Z",
+   "finishedAt": "2026-10-20T15:09:00.883Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-13",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:51:36.579Z",
+   "finishedAt": "2026-10-20T15:22:35.505Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-23",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T14:55:41.218Z",
+   "finishedAt": "2026-10-20T15:05:45.161Z",
+   "status": "publication_reconcile"
+  },
+  {
+   "issue": "I-17",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T14:59:00.980Z",
+   "finishedAt": "2026-10-20T14:59:01.959Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-03",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T14:59:05.112Z",
+   "finishedAt": "2026-10-20T14:59:06.607Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-06",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T14:59:08.727Z",
+   "finishedAt": "2026-10-20T14:59:10.372Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-24",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T14:59:11.589Z",
+   "finishedAt": "2026-10-20T15:08:22.595Z",
+   "status": "waiting_on_operator"
+  },
+  {
+   "issue": "I-23",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:06:05.879Z",
+   "finishedAt": "2026-10-20T15:13:55.885Z",
+   "status": "approved"
+  },
+  {
+   "issue": "I-19",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:07:58.459Z",
+   "finishedAt": "2026-10-20T15:07:59.292Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-08",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:08:02.069Z",
+   "finishedAt": "2026-10-20T15:36:09.304Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-24",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T15:08:34.337Z",
+   "finishedAt": "2026-10-20T15:10:25.233Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-07",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T15:09:13.951Z",
+   "finishedAt": "2026-10-20T15:10:11.989Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-09",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:09:14.076Z",
+   "finishedAt": "2026-10-20T15:55:35.734Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-12",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:10:13.290Z",
+   "finishedAt": "2026-10-20T15:30:52.574Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-25",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T15:10:26.056Z",
+   "finishedAt": "2026-10-20T15:33:53.287Z",
+   "status": "waiting_on_operator"
+  },
+  {
+   "issue": "I-26",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T15:14:03.696Z",
+   "finishedAt": "2026-10-20T15:15:29.566Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-24",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:15:41.747Z",
+   "finishedAt": "2026-10-20T15:16:45.747Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-27",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T15:16:49.206Z",
+   "finishedAt": "2026-10-20T15:18:45.642Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-14",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T15:18:47.971Z",
+   "finishedAt": "2026-10-20T15:18:48.800Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-15",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T15:18:50.696Z",
+   "finishedAt": "2026-10-20T15:33:24.068Z",
+   "status": "waiting_on_operator"
+  },
+  {
+   "issue": "I-17",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T15:22:47.947Z",
+   "finishedAt": "2026-10-20T15:22:48.766Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-13",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:22:49.620Z",
+   "finishedAt": "2026-10-20T15:54:06.549Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-21",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T15:23:45.057Z",
+   "finishedAt": "2026-10-20T15:50:51.181Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-24",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T15:31:01.253Z",
+   "finishedAt": "2026-10-20T15:31:52.869Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-26",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T15:31:54.448Z",
+   "finishedAt": "2026-10-20T15:33:08.945Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-28",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T15:33:13.635Z",
+   "finishedAt": "2026-10-20T16:29:58.652Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-27",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:33:38.790Z",
+   "finishedAt": "2026-10-20T15:35:37.357Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-25",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T15:34:09.173Z",
+   "finishedAt": "2026-10-20T15:46:54.399Z",
+   "status": "waiting_on_operator"
+  },
+  {
+   "issue": "I-15",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:35:39.881Z",
+   "finishedAt": "2026-10-20T16:09:07.005Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-19",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T15:36:15.589Z",
+   "finishedAt": "2026-10-20T15:36:16.377Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-29",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T15:36:18.422Z",
+   "finishedAt": "2026-10-20T15:36:19.247Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-30",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T15:38:29.860Z",
+   "finishedAt": "2026-10-20T15:40:05.521Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-06",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T15:40:33.566Z",
+   "finishedAt": "2026-10-20T15:40:39.182Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-22",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T15:40:33.641Z",
+   "finishedAt": "2026-10-20T16:03:07.752Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-14",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T15:41:02.442Z",
+   "finishedAt": "2026-10-20T15:41:03.391Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-31",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T15:42:18.357Z",
+   "finishedAt": "2026-10-20T15:42:18.854Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-29",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T15:42:23.514Z",
+   "finishedAt": "2026-10-20T15:42:24.388Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-32",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T15:42:27.396Z",
+   "finishedAt": "2026-10-20T16:04:03.983Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-25",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:47:05.860Z",
+   "finishedAt": "2026-10-20T16:04:24.969Z",
+   "status": "waiting_on_operator"
+  },
+  {
+   "issue": "I-21",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:51:15.271Z",
+   "finishedAt": "2026-10-20T15:53:00.095Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-24",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T15:53:02.907Z",
+   "finishedAt": "2026-10-20T15:53:34.127Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-08",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T15:53:37.991Z",
+   "finishedAt": "2026-10-20T16:03:25.582Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-07",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T15:54:22.814Z",
+   "finishedAt": "2026-10-20T15:55:38.257Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-09",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T15:55:46.385Z",
+   "finishedAt": "2026-10-20T16:24:09.358Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-26",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T15:55:46.523Z",
+   "finishedAt": "2026-10-20T15:56:28.678Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-04",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T15:56:34.133Z",
+   "finishedAt": "2026-10-20T17:03:22.678Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-22",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T16:03:35.281Z",
+   "finishedAt": "2026-10-20T17:17:16.595Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-17",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T16:03:35.345Z",
+   "finishedAt": "2026-10-20T16:03:43.996Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-29",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T16:03:49.517Z",
+   "finishedAt": "2026-10-20T16:03:50.296Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-30",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T16:04:58.420Z",
+   "finishedAt": "2026-10-20T16:06:04.781Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-33",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T16:05:16.452Z",
+   "finishedAt": "2026-10-20T16:06:51.617Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-25",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T16:05:16.456Z",
+   "finishedAt": "2026-10-20T16:24:23.502Z",
+   "status": "waiting_on_operator"
+  },
+  {
+   "issue": "I-32",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T16:06:06.089Z",
+   "finishedAt": "2026-10-20T16:06:30.826Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-32",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T16:06:56.734Z",
+   "finishedAt": "2026-10-20T16:27:17.136Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-31",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T16:06:56.740Z",
+   "finishedAt": "2026-10-20T16:06:57.504Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-34",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T16:07:10.961Z",
+   "finishedAt": "2026-10-20T16:07:11.262Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-10",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T16:07:13.741Z",
+   "finishedAt": "2026-10-20T16:56:43.704Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-03",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T16:09:20.307Z",
+   "finishedAt": "2026-10-20T16:09:21.215Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-13",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T16:09:23.490Z",
+   "finishedAt": "2026-10-20T16:44:17.832Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-33",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T16:24:31.453Z",
+   "finishedAt": "2026-10-20T16:25:45.069Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-19",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T16:24:31.498Z",
+   "finishedAt": "2026-10-20T16:24:33.184Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-25",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T16:24:36.205Z",
+   "finishedAt": "2026-10-20T16:51:55.284Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-26",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T16:25:53.919Z",
+   "finishedAt": "2026-10-20T16:27:21.844Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-35",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T16:27:33.988Z",
+   "finishedAt": "2026-10-20T17:00:51.277Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-14",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T16:27:34.059Z",
+   "finishedAt": "2026-10-20T16:27:36.033Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-15",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T16:27:40.067Z",
+   "finishedAt": "2026-10-20T17:00:52.128Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-28",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T16:30:14.203Z",
+   "finishedAt": "2026-10-20T17:28:03.050Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-33",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T16:44:29.795Z",
+   "finishedAt": "2026-10-20T16:46:16.197Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-24",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T16:46:19.354Z",
+   "finishedAt": "2026-10-20T16:47:39.627Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-08",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T16:48:05.372Z",
+   "finishedAt": "2026-10-20T17:11:23.971Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-36",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T16:52:11.259Z",
+   "finishedAt": "2026-10-20T16:53:59.172Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-32",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T16:54:01.620Z",
+   "finishedAt": "2026-10-20T17:15:37.499Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-10",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T16:57:12.304Z",
+   "finishedAt": "2026-10-20T17:48:09.117Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-35",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T17:01:01.438Z",
+   "finishedAt": "2026-10-20T17:39:16.231Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-06",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T17:01:01.446Z",
+   "finishedAt": "2026-10-20T17:01:04.070Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-36",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T17:01:09.201Z",
+   "finishedAt": "2026-10-20T17:22:49.438Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-04",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T17:03:36.093Z",
+   "finishedAt": "2026-10-20T17:17:16.706Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-33",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T17:11:45.018Z",
+   "finishedAt": "2026-10-20T17:13:44.653Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-26",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T17:13:47.582Z",
+   "finishedAt": "2026-10-20T17:15:50.777Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-13",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T17:15:42.703Z",
+   "finishedAt": "2026-10-20T17:57:14.141Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-07",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T17:15:51.756Z",
+   "finishedAt": "2026-10-20T17:16:32.452Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-29",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T17:17:07.082Z",
+   "finishedAt": "2026-10-20T17:17:07.895Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-37",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T17:18:19.324Z",
+   "finishedAt": "2026-10-20T17:20:08.072Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-16",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T17:20:10.351Z",
+   "finishedAt": "2026-10-20T17:20:10.761Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-04",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T17:20:10.369Z",
+   "finishedAt": "2026-10-20T18:09:22.056Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-31",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T17:20:10.372Z",
+   "finishedAt": "2026-10-20T17:20:14.280Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-38",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T17:20:17.045Z",
+   "finishedAt": "2026-10-20T17:20:18.619Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-39",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T17:20:20.001Z",
+   "finishedAt": "2026-10-20T17:20:21.859Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-34",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T17:20:20.007Z",
+   "finishedAt": "2026-10-20T17:20:20.729Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-11",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T17:20:23.562Z",
+   "finishedAt": "2026-10-20T18:14:58.713Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-36",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T17:24:54.806Z",
+   "finishedAt": "2026-10-20T17:44:45.114Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-40",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T17:24:55.016Z",
+   "finishedAt": "2026-10-20T17:57:51.426Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-16",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T17:28:15.598Z",
+   "finishedAt": "2026-10-20T17:28:16.359Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-17",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T17:28:17.998Z",
+   "finishedAt": "2026-10-20T17:28:19.001Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-28",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T17:28:20.174Z",
+   "finishedAt": "2026-10-20T17:49:05.898Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-22",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T17:39:29.836Z",
+   "finishedAt": "2026-10-20T18:01:19.525Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-09",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T17:45:01.245Z",
+   "finishedAt": "2026-10-20T18:05:22.978Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-03",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T17:48:33.398Z",
+   "finishedAt": "2026-10-20T17:48:34.422Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-19",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T17:48:35.442Z",
+   "finishedAt": "2026-10-20T17:48:37.118Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-36",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T17:48:39.948Z",
+   "finishedAt": "2026-10-20T18:11:45.158Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-12",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T17:49:12.529Z",
+   "finishedAt": "2026-10-20T18:07:47.090Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-33",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T17:57:19.265Z",
+   "finishedAt": "2026-10-20T17:58:44.257Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-14",
+   "attemptNo": 7,
+   "startedAt": "2026-10-20T17:57:57.022Z",
+   "finishedAt": "2026-10-20T17:57:58.169Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-32",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T17:57:59.724Z",
+   "finishedAt": "2026-10-20T17:58:01.105Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-15",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T17:58:21.388Z",
+   "finishedAt": "2026-10-20T18:15:28.390Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-40",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T17:58:51.362Z",
+   "finishedAt": "2026-10-20T18:10:41.170Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-16",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:01:25.301Z",
+   "finishedAt": "2026-10-20T18:01:26.133Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-29",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T18:01:27.321Z",
+   "finishedAt": "2026-10-20T18:01:33.336Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-30",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:01:36.620Z",
+   "finishedAt": "2026-10-20T18:01:36.934Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-31",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:01:38.936Z",
+   "finishedAt": "2026-10-20T18:01:39.660Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-41",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T18:01:41.152Z",
+   "finishedAt": "2026-10-20T18:01:42.526Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-38",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T18:01:43.570Z",
+   "finishedAt": "2026-10-20T18:17:13.527Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-35",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:05:28.170Z",
+   "finishedAt": "2026-10-20T18:34:14.076Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-24",
+   "attemptNo": 7,
+   "startedAt": "2026-10-20T18:07:52.389Z",
+   "finishedAt": "2026-10-20T18:08:48.276Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-28",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:09:19.920Z",
+   "finishedAt": "2026-10-20T18:39:05.962Z",
+   "status": "failed"
+  },
+  {
+   "issue": "I-21",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:09:27.344Z",
+   "finishedAt": "2026-10-20T18:10:53.099Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-27",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:10:46.395Z",
+   "finishedAt": "2026-10-20T18:35:57.765Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-40",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:10:54.258Z",
+   "finishedAt": "2026-10-20T18:13:58.183Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-08",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T18:12:00.327Z",
+   "finishedAt": "2026-10-20T18:14:46.254Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-42",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T18:14:10.061Z",
+   "finishedAt": "2026-10-20T18:15:37.811Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-34",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:14:52.658Z",
+   "finishedAt": "2026-10-20T18:14:53.625Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-43",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T18:14:55.458Z",
+   "finishedAt": "2026-10-20T18:15:16.510Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-11",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:15:27.229Z",
+   "finishedAt": "2026-10-20T18:25:01.555Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-43",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T18:15:27.238Z",
+   "finishedAt": "2026-10-20T18:39:25.642Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-44",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T18:15:37.533Z",
+   "finishedAt": "2026-10-20T18:15:38.122Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-45",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T18:15:39.588Z",
+   "finishedAt": "2026-10-20T18:16:54.343Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-38",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:17:19.518Z",
+   "finishedAt": "2026-10-20T18:17:20.886Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-39",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T18:17:22.069Z",
+   "finishedAt": "2026-10-20T18:17:25.067Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-16",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T18:25:15.973Z",
+   "finishedAt": "2026-10-20T18:25:18.287Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-38",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:25:15.989Z",
+   "finishedAt": "2026-10-20T18:25:32.575Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-11",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:25:15.995Z",
+   "finishedAt": "2026-10-20T18:26:15.970Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-21",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T18:25:16.006Z",
+   "finishedAt": "2026-10-20T18:26:25.424Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-44",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T18:25:21.107Z",
+   "finishedAt": "2026-10-20T18:25:33.080Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-30",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:25:34.441Z",
+   "finishedAt": "2026-10-20T18:25:35.746Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-42",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T18:26:34.924Z",
+   "finishedAt": "2026-10-20T18:37:04.912Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-45",
+   "attemptNo": 2,
+   "startedAt": "2026-10-20T18:26:34.938Z",
+   "finishedAt": "2026-10-20T18:36:10.823Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-46",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T18:26:34.941Z",
+   "finishedAt": "2026-10-20T18:43:37.812Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-40",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:30:12.807Z",
+   "finishedAt": "2026-10-20T18:31:05.648Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-39",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:31:19.046Z",
+   "finishedAt": "2026-10-20T18:31:21.069Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-22",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T18:31:21.867Z",
+   "finishedAt": "2026-10-20T18:35:20.044Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-35",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:34:26.656Z",
+   "finishedAt": "2026-10-20T18:43:38.370Z",
+   "status": "cancelled"
+  },
+  {
+   "issue": "I-34",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:35:26.174Z",
+   "finishedAt": "2026-10-20T18:35:26.901Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-26",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T18:36:04.333Z",
+   "finishedAt": "2026-10-20T18:36:45.914Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-47",
+   "attemptNo": 1,
+   "startedAt": "2026-10-20T18:36:04.497Z",
+   "finishedAt": "2026-10-20T18:43:43.339Z",
+   "status": "cancelled"
+  },
+  {
+   "issue": "I-38",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T18:36:16.906Z",
+   "finishedAt": "2026-10-20T18:36:19.646Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-45",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:36:21.488Z",
+   "finishedAt": "2026-10-20T18:43:38.660Z",
+   "status": "cancelled"
+  },
+  {
+   "issue": "I-44",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:36:53.814Z",
+   "finishedAt": "2026-10-20T18:36:54.928Z",
+   "status": "superseded"
+  },
+  {
+   "issue": "I-42",
+   "attemptNo": 3,
+   "startedAt": "2026-10-20T18:37:13.012Z",
+   "finishedAt": "2026-10-20T18:43:43.131Z",
+   "status": "cancelled"
+  },
+  {
+   "issue": "I-12",
+   "attemptNo": 5,
+   "startedAt": "2026-10-20T18:39:21.616Z",
+   "finishedAt": "2026-10-20T18:39:48.252Z",
+   "status": "infra_error"
+  },
+  {
+   "issue": "I-10",
+   "attemptNo": 4,
+   "startedAt": "2026-10-20T18:39:31.844Z",
+   "finishedAt": "2026-10-20T18:43:41.004Z",
+   "status": "cancelled"
+  },
+  {
+   "issue": "I-32",
+   "attemptNo": 6,
+   "startedAt": "2026-10-20T18:39:31.849Z",
+   "finishedAt": "2026-10-20T18:39:34.454Z",
+   "status": "superseded"
+  }
+ ],
+ "prsOpenedAt": [
+  "2026-10-20T13:38:11Z",
+  "2026-10-20T13:50:55Z",
+  "2026-10-20T14:17:20Z",
+  "2026-10-20T14:25:15Z",
+  "2026-10-20T14:28:11Z",
+  "2026-10-20T14:29:07Z",
+  "2026-10-20T14:35:50Z",
+  "2026-10-20T14:41:35Z",
+  "2026-10-20T14:44:29Z",
+  "2026-10-20T14:51:11Z",
+  "2026-10-20T14:51:49Z",
+  "2026-10-20T14:52:49Z",
+  "2026-10-20T15:23:13Z",
+  "2026-10-20T15:29:29Z",
+  "2026-10-20T15:36:52Z",
+  "2026-10-20T16:04:02Z",
+  "2026-10-20T16:29:50Z",
+  "2026-10-20T17:00:29Z",
+  "2026-10-20T17:22:43Z",
+  "2026-10-20T17:57:47Z",
+  "2026-10-20T18:17:06Z",
+  "2026-10-20T18:35:53Z",
+  "2026-10-20T18:36:04Z",
+  "2026-10-20T18:37:01Z",
+  "2026-10-20T18:39:21Z"
+ ]
+}

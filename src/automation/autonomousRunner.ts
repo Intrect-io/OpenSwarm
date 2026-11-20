@@ -77,6 +77,7 @@ import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
 import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
+import { RunnerPauseControl } from './runnerPauseControl.js';
 import { providerSwitchViolation } from '../adapters/unattendedPolicy.js'; import { providerSwitchFamilyViolation } from '../adapters/reviewerIndependence.js';
 import {
   findPullRequestForBranch,
@@ -566,6 +567,8 @@ export class AutonomousRunner {
     () => (this.config.minFreeDiskGiB ?? 10) * 1024 ** 3,
   );
 
+  // Kill switch (AGT-4808): the durable pause table, read by the heartbeat, the candidate loop and executeDurably.
+  readonly pauses = new RunnerPauseControl(() => this.config.automationDbPath ?? defaultAutomationDbPath());
   // Issues whose Linear project can't be mapped to a local repo path. Recorded on
   // the first resolve failure so they aren't re-picked every heartbeat (which
   // starved other actionable tasks — they were top-priority but never runnable). (INT-1875)
@@ -1696,6 +1699,7 @@ export class AutonomousRunner {
       taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectPath, taskTitle: task.title },
     });
     if (this.stopping || signal?.aborted) return cancelled();
+    const paused = this.pauses.pausedResult(task, projectPath); if (paused) return paused; // AGT-4808, fresh read, fails closed
 
     let admission: RepositoryAdmissionPolicy;
     try {
@@ -1761,7 +1765,7 @@ export class AutonomousRunner {
         admission,
         successEffect: (result, claim) => buildCompletionEffect(task, result, claim.attemptNo),
         cancelEffect: (_result, claim) => buildCancellationEffect(task, claim.attemptNo),
-        retryCancellation: () => this.stopping,
+        retryCancellation: () => this.stopping || this.pauses.consumePauseCancel(task.id), // a `now` pause resumes after unpause
         resolveOperatorPark: (parkedTask, parkedResult, attemptNo) => planCoordinatorResolution({
           task: parkedTask,
           result: parkedResult,
@@ -2446,7 +2450,6 @@ export class AutonomousRunner {
     return repoRoot.split('/').pop() ?? repoRoot;
   }
 
-
   /** Send system message to dashboard LIVE LOG */
   private syslog(line: string): void {
     const safeLine = line.replace(/[\r\n]/g, '');
@@ -2790,7 +2793,6 @@ export class AutonomousRunner {
       // 0.05 Code-entity registry (Draft File Map / registryCheck) — throttled
       this.refreshCodeRegistries();
 
-
       // 0.1 Reconcile before pruning. Unknown/crash-recovery worktrees are never
       // deleted from a heartbeat without a terminal durable record.
       if (this.config.worktreeMode) {
@@ -2825,7 +2827,14 @@ export class AutonomousRunner {
         this.syslog(`✓ Monitors: ${checked} checked / ${active.length} active`);
       }
 
-      // 1. Check time window
+      // 1. Kill switch + anomaly auto-pause (AGT-4808, AGT-4809) before the holds below return, so a `now` pause
+      // cancels and logs during them. Free disk is measured once here (AGT-4785); low disk pauses the factory (`auto:disk`).
+      const disk = this.diskGate.evaluate();
+      const dispatchable = await this.pauses.apply(this.scheduler, (line) => this.syslog(line), { projects: this.config.allowedProjects, alert: reportToDiscord, diskLow: disk.pause ? disk.line : undefined });
+      if (disk.notice) { // before the time-window return, or a recovery seen on a blocked heartbeat is lost
+        console.warn(`[AutonomousRunner] ${disk.notice}`);
+        if (!disk.pause) await reportToDiscord(`✅ ${disk.notice}`);
+      }
       const timeCheck = checkWorkAllowed();
       if (!timeCheck.allowed) {
         console.log(`[AutonomousRunner] Blocked: ${timeCheck.reason}`);
@@ -2834,14 +2843,7 @@ export class AutonomousRunner {
       }
       this.syslog('✓ Time window: allowed');
 
-      // 1.1 Disk-space hold — after the worktree sweep above, which is what frees
-      // space, and before anything is fetched or claimed. One notice per change of
-      // state, not one per heartbeat. (AGT-4785)
-      const disk = this.diskGate.evaluate();
-      if (disk.notice) {
-        console.warn(`[AutonomousRunner] ${disk.notice}`);
-        await reportToDiscord(`${disk.pause ? '⚠️' : '✅'} ${disk.notice}`);
-      }
+      // 1.1 Disk-space hold (AGT-4785), measured above after the worktree sweep; the low reading's one alert is auto:disk's.
       if (disk.pause) {
         this.syslog(`⏸ Disk space hold: ${disk.line}`);
         return;
@@ -2863,7 +2865,8 @@ export class AutonomousRunner {
       // quota gate is irrelevant; it only spammed 401s and could wrongly skip codex
       // work. codex-responses self-protects via RateLimitError (scheduler pause).
 
-      // 2. Fetch tasks from Linear
+      // 2. Fetch tasks from Linear; a pause (or unreadable pause table) stops the heartbeat before it (AGT-4808)
+      if (!dispatchable) { this.syslog('⏸ Dispatch held (factory paused or pause table unreadable); heartbeat stops before fetch'); return; }
       this.syslog('⟳ Fetching tasks from Linear...');
       const fetchResult = await fetchLinearTasks();
       if (this.stopping) return;
@@ -3116,7 +3119,7 @@ export class AutonomousRunner {
       for (const { task, projectPath } of candidates) {
         if (this.stopping) return;
         if (enqueuedCount >= maxSlots) break;
-        if (!safeTasks.has(task.id)) continue;
+        if (!safeTasks.has(task.id) || this.pauses.blocks(projectPath)) continue;
         if (!this.canQueueProjectCandidate(projectPath)) {
           this.syslog(`  Project cap reached: ${projectPath}`);
           continue;
@@ -3579,7 +3582,7 @@ export class AutonomousRunner {
     });
     let result: PipelineResult;
     try {
-      result = await this.executeDurably(task, projectPath);
+      result = await this.pauses.guardSerial(task.id, projectPath, (signal) => this.executeDurably(task, projectPath, signal)); // `now` pause reaches serial runs
     } catch (err) {
       broadcastEvent({
         type: 'task:completed',
@@ -3772,9 +3775,6 @@ export class AutonomousRunner {
     );
   }
 
-
-
-
   updateAllowedProjects(paths: string[]): void {
     this.config.allowedProjects = paths;
     this.engine.updateAllowedProjects(paths);
@@ -3892,7 +3892,6 @@ export class AutonomousRunner {
       orchestratorSchedule: this.config.orchestratorSchedule,
     };
   }
-
 
   async getAdapterSummary() {
     const defaultAdapter = this.config.defaultAdapter ?? 'codex';

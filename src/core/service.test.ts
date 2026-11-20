@@ -113,13 +113,11 @@ vi.mock('../automation/ciWorker.js', () => ({
   stopCIWorker: vi.fn(),
 }));
 
-vi.mock('../automation/longRunningMonitor.js', () => ({
-  initMonitors: vi.fn(),
-}));
+vi.mock('../automation/longRunningMonitor.js', () => ({ initMonitors: vi.fn() }));
 
+vi.mock('../automation/factoryDigestService.js', () => ({ startConfiguredFactoryDigest: vi.fn(() => vi.fn()) })); // AGT-4810: returns its stop handle
 vi.mock('../automation/dailyReporter.js', () => ({
-  setLinearClient: vi.fn(),
-  setTeamId: vi.fn(),
+  setLinearClient: vi.fn(), setTeamId: vi.fn(),
   setDailyReporterDiscord: vi.fn(),
   startDailyReporter: vi.fn(),
 }));
@@ -144,10 +142,7 @@ vi.mock('../locale/index.js', () => ({
   }),
 }));
 
-vi.mock('../support/rateLimiter.js', () => ({
-  initRateLimiters: vi.fn(),
-  destroyRateLimiters: vi.fn(),
-}));
+vi.mock('../support/rateLimiter.js', () => ({ initRateLimiters: vi.fn(), destroyRateLimiters: vi.fn() }));
 
 vi.mock('../memory/compaction.js', () => ({
   compactMemoryTable: vi.fn(async () => ({
@@ -159,11 +154,7 @@ vi.mock('../memory/compaction.js', () => ({
   cleanupBackupFiles: vi.fn(async () => {}),
 }));
 
-vi.mock('croner', () => ({
-  Cron: vi.fn((_pattern, _fn) => ({
-    stop: vi.fn(),
-  })),
-}));
+vi.mock('croner', () => ({ Cron: vi.fn((_pattern, _fn) => ({ stop: vi.fn() })) }));
 
 describe('service', () => {
   const mockConfig: SwarmConfig = {
@@ -638,6 +629,15 @@ describe('service', () => {
   // ============================================
   // Single-instance guard (INT-2570)
   // ============================================
+
+  it('stops the daily factory digest with the service, so a stopped service stops posting (AGT-4810)', async () => {
+    const { startConfiguredFactoryDigest } = await import('../automation/factoryDigestService.js');
+    await startService(mockAutonomousConfig);
+    const stop = vi.mocked(startConfiguredFactoryDigest).mock.results[0].value as ReturnType<typeof vi.fn>;
+    expect(stop).not.toHaveBeenCalled();
+    await stopService();
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
 
   describe('single-instance guard (INT-2570)', () => {
     it('rejects a second start before it can initialize side effects', async () => {

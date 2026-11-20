@@ -353,6 +353,91 @@ async function svcAction(action) {
   setTimeout(fetchSvcStatus, 2000);
 }
 
+// ---- Factory kill switch (AGT-4808) ----
+// One button for the factory-wide pause. It writes the durable pause row the
+// CLI writes (`openswarm pause` / `openswarm unpause`); the daemon applies it
+// on its next heartbeat. Per-project pauses are shown in the title only.
+let factoryPaused = false;
+
+function renderFactoryPause(state) {
+  const btn = document.getElementById("factory-pause-btn");
+  if (!btn || btn.classList.contains("is-flashing")) return;
+  const pauses = (state && state.pauses) || [];
+  const global = pauses.find(function(p) { return p.scope === "*"; });
+  factoryPaused = !!global;
+  btn.textContent = factoryPaused ? "Resume factory" : "Pause factory";
+  const projects = pauses.filter(function(p) { return p.scope !== "*"; });
+  const lines = [];
+  if (global) lines.push("Factory paused (" + global.mode + ") by " + global.actor + ": " + global.reason);
+  projects.forEach(function(p) { lines.push("Paused: " + p.scope.split("/").pop() + " (" + p.mode + ")"); });
+  if (state && state.error) lines.push("Pause table unreadable: " + state.error);
+  btn.title = lines.length ? lines.join("\n") : "Stop claiming new work. In-flight runs finish. No restart needed.";
+}
+
+async function fetchFactoryPause() {
+  try {
+    const res = await fetch("/api/factory/pause");
+    // A 500 carries { pauses, error } when the pause table is unreadable: render
+    // it, so the operator sees the kill switch cannot be read instead of nothing.
+    let body = null;
+    try { body = await res.json(); } catch {}
+    if (!res.ok) {
+      const error = (body && body.error) || ("HTTP " + res.status);
+      renderFactoryPause({ pauses: (body && body.pauses) || [], error: error });
+      return;
+    }
+    renderFactoryPause(body);
+  } catch (e) {
+    renderFactoryPause({ pauses: [], error: e && e.message ? e.message : String(e) });
+  }
+}
+
+async function toggleFactoryPause() {
+  const btn = document.getElementById("factory-pause-btn");
+  const resuming = factoryPaused;
+  if (armButton(btn, resuming ? "Resume the factory?" : "Pause the factory?")) return;
+  const restLabel = resuming ? "Resume factory" : "Pause factory";
+  btn.disabled = true;
+  let failure = null;
+  let state = null;
+  try {
+    const res = await fetch(resuming ? "/api/factory/resume" : "/api/factory/pause", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(resuming ? {} : { mode: "drain", reason: "paused from the dashboard" }),
+    });
+    failure = await failureOf(res.clone());
+    if (!failure) state = await res.json();
+  } catch(e) {
+    failure = e.message;
+  }
+  btn.disabled = false;
+  if (failure) {
+    addLogLine({ taskId: "system", stage: "error", line: "Factory " + (resuming ? "resume" : "pause") + " failed: " + failure });
+    flashButton(btn, "Failed", true, restLabel, failure);
+    return;
+  }
+  addLogLine({ taskId: "system", stage: "service", line: resuming ? "Factory resumed" : "Factory paused (takes effect on the next heartbeat)" });
+  renderFactoryPause(state);
+}
+
+// ---- Factory digest (AGT-4810) ----
+// The same text the daemon posts to Discord once a day, read on demand when
+// the panel opens so a closed panel costs nothing.
+async function fetchFactoryDigest() {
+  const el = document.getElementById("digest-text");
+  if (!el) return;
+  try {
+    const res = await fetch("/api/factory/digest");
+    const failure = await failureOf(res.clone());
+    el.textContent = failure ? "Digest unavailable: " + failure : (await res.json()).text;
+  } catch (e) {
+    el.textContent = "Digest unavailable: " + e.message;
+  }
+}
+const digestPanel = document.getElementById("digest");
+if (digestPanel) digestPanel.addEventListener("toggle", function() { if (digestPanel.open) fetchFactoryDigest(); });
+
 // ---- Heartbeat trigger ----
 // POST /api/heartbeat answers 202 before the run starts; the run announces
 // itself with a "heartbeat" SSE event. Without a deadline on that signal a
@@ -1883,7 +1968,7 @@ async function fetchShellStatus() {
 // A dashboard with no daemon runner attached can serve pages but cannot run a
 // heartbeat or review PRs: those controls would only answer with an error.
 // Provider and thinking settings persist without a runner and remain usable.
-const DAEMON_CONTROL_IDS = ["hb-btn", "pr-proc-btn"];
+const DAEMON_CONTROL_IDS = ["hb-btn", "pr-proc-btn", "factory-pause-btn"];
 const NO_DAEMON_NOTE = "No daemon runner is attached to this dashboard";
 
 function syncDaemonControls() {
@@ -1966,6 +2051,7 @@ setInterval(fetchShellStatus, 15000);
 
 // Polling that starts right away.
 setInterval(fetchSvcStatus, 15000);
+setInterval(fetchFactoryPause, 15000);
 setInterval(fetchPRProcessorStatus, 60000);  // changes rarely
 setInterval(fetchStuckIssues, 60000);        // every call is a tracker API query
 setInterval(fetchKnowledgeData, 60000);
@@ -1976,6 +2062,7 @@ setInterval(fetchCoordination, 30000);
 // Secondary panels, three seconds after load.
 setTimeout(function() {
   fetchSvcStatus();
+  fetchFactoryPause();
   fetchPRProcessorStatus();
   fetchStuckIssues();
   fetchKnowledgeData();

@@ -46,7 +46,7 @@ export function normalizeProjectPath(path: string): string {
   return (process.platform === 'win32' ? normalized.toLowerCase() : normalized) || '/';
 }
 
-function isSameProjectOrDescendant(candidatePath: string, projectPath: string): boolean {
+export function isSameProjectOrDescendant(candidatePath: string, projectPath: string): boolean {
   const candidate = normalizeProjectPath(candidatePath);
   const project = normalizeProjectPath(projectPath);
   return candidate === project || candidate.startsWith(`${project}/`);

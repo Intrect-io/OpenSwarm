@@ -139,7 +139,8 @@ export class HostDiskGate {
       this.low = false;
       if (!recovered) return { pause: false };
       const free = health.scarcest ? ` (${formatGiB(health.scarcest.freeBytes)} free on ${health.scarcest.dir})` : '';
-      return { pause: false, notice: `Disk space recovered${free}; dispatch resumes.` };
+      // The automatic `auto:disk` factory pause (AGT-4809) is not lifted here; an operator lifts it.
+      return { pause: false, notice: `Disk space recovered${free}; the disk hold is lifted. An auto:disk factory pause stays until \`openswarm unpause\`.` };
     }
     const scarcest = health.scarcest!;
     const line = `${formatGiB(scarcest.freeBytes)} free on ${scarcest.dir}, below the ${formatGiB(floor)} floor`;
