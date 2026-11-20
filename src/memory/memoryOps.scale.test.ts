@@ -96,7 +96,13 @@ vi.mock('./memoryCore.js', () => ({
   getTable: () => table,
 }));
 
-const { cleanupExpired, consolidateMemories, withMemoryMutationLock } = await import('./memoryOps.js');
+const {
+  cleanupExpired,
+  consolidateMemories,
+  getRecentConversations,
+  selectNewestRows,
+  withMemoryMutationLock,
+} = await import('./memoryOps.js');
 
 afterEach(() => {
   state.rows = [];
@@ -296,3 +302,84 @@ function pairwiseReference(rows: FixtureRow[]): Array<{ kept: string; merged: st
 
   return groups;
 }
+
+describe('getRecentConversations', () => {
+  /** Chat journal row; everything else about it is irrelevant to the lookup. */
+  function chatRow(id: string, createdAt: number, channel: string): StoredRow {
+    return {
+      id,
+      type: 'journal',
+      repo: 'chat',
+      derivedFrom: channel,
+      metadata: '{}',
+      title: id,
+      content: `content ${id}`,
+      vector: [0],
+      importance: 0.5,
+      confidence: 0.7,
+      createdAt,
+      lastUpdated: createdAt,
+      lastAccessed: createdAt,
+      trust: 1,
+      expiresAt: memoryCore.PERMANENT_EXPIRY,
+    };
+  }
+
+  it('finds the newest messages even when they sit past the first 100,000 rows', async () => {
+    // The previous single `.limit(100_000)` read never reached these rows, so
+    // the newest conversation turns of a large store were silently dropped.
+    const boundary = 100_000;
+    const old = Array.from({ length: boundary }, (_, i) =>
+      chatRow(`old-${i}`, 1_000 + (i % 500), i % 2 === 0 ? 'chan-1' : 'chan-2'));
+    const newest = [
+      chatRow('new-a', 9_000, 'chan-1'),
+      chatRow('new-other-channel', 9_500, 'chan-2'),
+      chatRow('new-b', 9_100, 'chan-1'),
+    ];
+    state.rows = [...old, ...newest];
+
+    const recent = await getRecentConversations('chan-1', 3);
+    expect(recent.map((r) => r.id)).toEqual(['new-b', 'new-a', 'old-498']);
+  });
+});
+
+describe('selectNewestRows', () => {
+  it('matches a full stable sort while holding only the requested rows', async () => {
+    const rows = Array.from({ length: 257 }, (_, i) => ({
+      id: `r-${i}`,
+      // Many ties, so the stable tie-break is exercised.
+      createdAt: (i * 7919) % 31,
+      keep: i % 3 !== 0,
+    }));
+    const pages: number[] = [];
+    const pageTable = {
+      query: () => ({
+        offset: (offset: number) => ({
+          limit: (limit: number) => ({
+            toArray: async () => {
+              pages.push(offset);
+              return rows.slice(offset, offset + limit);
+            },
+          }),
+        }),
+      }),
+    };
+
+    const expected = rows
+      .filter((r) => r.keep)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 10)
+      .map((r) => r.id);
+    const selected = await selectNewestRows(pageTable, (r) => r.keep, 10, 16);
+
+    expect(selected.map((r) => r.id)).toEqual(expected);
+    // Every page was read: 257 rows in pages of 16 is 17 pages.
+    expect(pages).toHaveLength(17);
+  });
+
+  it('returns nothing for a non-positive limit without reading the table', async () => {
+    const query = vi.fn();
+    await expect(selectNewestRows({ query }, () => true, 0)).resolves.toEqual([]);
+    expect(query).not.toHaveBeenCalled();
+  });
+});
