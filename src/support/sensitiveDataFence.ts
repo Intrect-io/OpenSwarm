@@ -95,11 +95,11 @@ export function scanAddedText(file: string, addedLines: readonly string[]): Sens
  * Sensitive material the branch adds over its base. Empty means publish.
  * A git failure is reported as a finding so the caller fails closed.
  */
-export async function sensitiveDataOnBranch(worktreePath: string, baseRef: string): Promise<SensitiveDataFinding[]> {
+export async function sensitiveDataOnBranch(worktreePath: string, baseRef: string, head = 'HEAD'): Promise<SensitiveDataFinding[]> {
   const findings: SensitiveDataFinding[] = [];
   let added: string[];
   try {
-    added = (await git(worktreePath, 'diff', '--name-only', '--diff-filter=A', `${baseRef}...HEAD`)).split('\n').filter(Boolean);
+    added = (await git(worktreePath, 'diff', '--name-only', '--diff-filter=A', `${baseRef}...${head}`)).split('\n').filter(Boolean);
   } catch (error) {
     return [{ file: '<branch>', kind: 'opaque-spreadsheet', detail: `could not list added files: ${error instanceof Error ? error.message : String(error)}` }];
   }
@@ -112,7 +112,7 @@ export async function sensitiveDataOnBranch(worktreePath: string, baseRef: strin
     if (!TEXT_DATA_RE.test(file)) continue;
     let content: string;
     try {
-      content = await git(worktreePath, 'show', `HEAD:${file}`);
+      content = await git(worktreePath, 'show', `${head}:${file}`);
     } catch {
       continue;
     }
@@ -124,7 +124,7 @@ export async function sensitiveDataOnBranch(worktreePath: string, baseRef: strin
   // masked copies were byte-identical to their originals).
   const masked = added.filter((f) => /mask/i.test(f));
   if (masked.length > 0) {
-    const tree = (await git(worktreePath, 'ls-tree', '-r', 'HEAD').catch(() => ''))
+    const tree = (await git(worktreePath, 'ls-tree', '-r', head).catch(() => ''))
       .split('\n').filter(Boolean)
       .map((line) => { const [meta, path] = line.split('\t'); return { hash: meta.split(' ')[2], path }; });
     const byHash = new Map<string, string[]>();
@@ -151,7 +151,7 @@ export class SensitiveDataError extends Error {
   }
 }
 
-export async function assertNoSensitiveDataOnBranch(worktreePath: string, baseRef: string): Promise<void> {
-  const findings = await sensitiveDataOnBranch(worktreePath, baseRef);
+export async function assertNoSensitiveDataOnBranch(worktreePath: string, baseRef: string, head = 'HEAD'): Promise<void> {
+  const findings = await sensitiveDataOnBranch(worktreePath, baseRef, head);
   if (findings.length > 0) throw new SensitiveDataError(findings);
 }

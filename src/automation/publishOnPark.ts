@@ -454,7 +454,7 @@ const PERCENT_MARK = /\s\[\s*\d{1,3}%\]/g;
 const SUMMARY_CAP = 500;
 const SUMMARY_HEAD = 150;
 
-/** One line of a failure detail, bounded. Built for a draft PR body (AGT-4672); no caller since AGT-4786. */
+/** One line of a failure detail, bounded (AGT-4672). Used by the unfinished-run comment (AGT-4786). */
 export function summarizeFailure(detail: string | undefined): string {
   const flat = (detail ?? '')
     .replace(/\s+/g, ' ')
@@ -485,10 +485,9 @@ export function summarizeFailure(detail: string | undefined): string {
  * `reviewHook` builds the post-publication review for 1 and 3; 2 gets the
  * rolling-back variant.
  *
- * `opts` is kept for the call site's sake and is no longer read: `lifecycleFailed`
- * and `failureSummary` only fed the unfinished-run draft that this no longer opens.
- * `summarizeFailure` stays as a tested pure function for the tracker comment the
- * follow-up will write.
+ * An unfinished run's branch is pushed, with one summary comment and no PR, by
+ * `keepUnfinishedWorkOnRemote` (unfinishedRunBranch.ts) after the worktree is
+ * preserved, which is when its WIP commit exists.
  */
 export async function publishFinishedRun(
   worktreeInfo: WorktreeInfo | null | undefined,
@@ -497,8 +496,6 @@ export async function publishFinishedRun(
   durability: ExecutionDurabilityHooks | undefined,
   reviewHook: (rollbackOnRejection: boolean) => ApprovedPublicationHook | undefined,
   verify?: VerifyConfig,
-  // Not read (see above); typed so the call site keeps compiling.
-  _opts: { lifecycleFailed?: boolean; failureSummary?: string } = {},
 ): Promise<void> {
   const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, durability, reviewHook(false));
 

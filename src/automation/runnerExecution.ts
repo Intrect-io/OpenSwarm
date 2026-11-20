@@ -35,6 +35,7 @@ import {createWorktree, hasRecoverableWorktree, preserveWorktree, removeWorktree
 import type { WorktreeInfo } from '../support/worktreeManager.js';
 import type { ExecutionDurabilityHooks } from './durableRunCoordinator.js';
 import { publishFinishedRun } from './publishOnPark.js';
+import { keepUnfinishedWorkOnRemote } from './unfinishedRunBranch.js';
 import { buildPublicationReviewHook } from './publicationReviewHook.js';
 import { loadPublicationFreshReview, loadRepoMetadata } from '../support/repoMetadata.js';
 import { prepareAttemptBranch } from '../support/branchLineage.js';
@@ -76,7 +77,6 @@ import {
   registerDecomposition,
   reserveDailyCreations,
   releaseDailyReservation,
-  pickPipelineFailureDetail,
 } from './runnerState.js';
 import {
   buildTaskStateSyncComment,
@@ -904,7 +904,7 @@ export async function executePipeline(
   // shape (approved success). `success` and `finalStatus` are supplied by
   // multiple adapters, so treating either field alone as authoritative can
   // delete partial work when they disagree.
-  let keepWorktree = true;
+  let keepWorktree = true; let finished: PipelineResult | undefined; // AGT-4786: read by the finally below
 
   if (ctx.worktreeMode && task.issueId && task.issueIdentifier) {
     const lineage = await prepareAttemptBranch(projectPath, task.issueId, buildBranchName(task.issueIdentifier, task.title));
@@ -1232,13 +1232,13 @@ export async function executePipeline(
     const pipelineSignal = signal
       ? AbortSignal.any([signal, lifecycleAbort.signal])
       : lifecycleAbort.signal;
-    const result = await pipeline.run(task, actualPath, { signal: pipelineSignal, recovery: ctx.durability?.recovery });
+    const result = finished = await pipeline.run(task, actualPath, { signal: pipelineSignal, recovery: ctx.durability?.recovery });
     await settlePipelineEffects();
 
     // A stage ownership fence is part of execution correctness, not telemetry.
     // Even if an adapter reports approval after ignoring the abort signal, a
     // failed fence must prevent publication and preserve the worktree.
-    if (lifecycleFailure) {
+    if (lifecycleFailure) { finished = undefined; // AGT-4786: a run that lost ownership pushes nothing
       result.success = false;
       result.finalStatus = 'infra_error';
       result.failureDetail = lifecycleFailure.message;
@@ -1257,10 +1257,7 @@ export async function executePipeline(
       ? buildPublicationReviewHook({ task, result, roles, securityAudit: ctx.securityAudit, rollbackOnRejection })
       : undefined;
 
-    await publishFinishedRun(worktreeInfo, task, result, ctx.durability, reviewHook, ctx.verify, {
-      lifecycleFailed: Boolean(lifecycleFailure),
-      failureSummary: pickPipelineFailureDetail(result),
-    });
+    await publishFinishedRun(worktreeInfo, task, result, ctx.durability, reviewHook, ctx.verify);
 
     keepWorktree = !(result.success && result.finalStatus === 'approved');
     return result;
@@ -1273,7 +1270,7 @@ export async function executePipeline(
     // (keepWorktree=false) clean up as before.
     if (worktreeInfo) {
       const cleanup = keepWorktree
-        ? preserveWorktree(worktreeInfo, 'session did not succeed')
+        ? preserveWorktree(worktreeInfo, 'session did not succeed').then(() => finished && keepUnfinishedWorkOnRemote(worktreeInfo, task, finished, { source: taskSource })) // AGT-4786: branch + one comment, no PR; never for a run that lost ownership
         : removeWorktree(worktreeInfo);
       await cleanup.catch((err) => console.warn('[Worktree] Cleanup failed:', err));
     }
