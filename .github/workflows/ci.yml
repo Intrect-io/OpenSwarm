@@ -123,7 +123,7 @@ jobs:
   harness-gate:
     # AGT-4811: fixed, deterministic scenarios for harness changes (prompts,
     # guards, adapters, the worker sandbox). No model and no real gh.
-    # bubblewrap is installed so the sandboxed branch of the probe runs.
+    # bubblewrap is installed (and required) so the sandboxed branch of the probe runs.
     name: Harness gate (fixed scenarios)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -133,10 +133,18 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-      - name: Install bubblewrap (worker sandbox backend)
-        run: sudo apt-get install -y --no-install-recommends bubblewrap || echo "bubblewrap unavailable; the probe checks the fail-closed path"
+      # Fails closed: tests/workerReleaseProbe.test.ts requires a sandbox
+      # backend under CI, so a silently skipped install can no longer turn the
+      # loopback-only network assertion (#841) into a no-op. The composite
+      # action runs apt-get update first and does not swallow a failed install.
+      - uses: ./.github/actions/install-bubblewrap
+      # ubuntu-latest restricts unprivileged user namespaces through AppArmor,
+      # and bwrap cannot set up its uid map until that is lifted (see the
+      # verify-sandbox job below).
+      - name: Allow bubblewrap user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true  # absent on kernels without the AppArmor userns switch
       - run: npm ci --prefer-offline --no-audit --no-fund
-      - run: npm test -- --run tests/workerReleaseProbe.test.ts tests/pipelineEval.grading.test.ts src/adapters/tools.sandboxUnavailable.test.ts src/adapters/workerEnv.test.ts
+      - run: npm test -- --run tests/workerReleaseProbe.test.ts tests/pipelineEval.grading.test.ts tests/pipelineEval.helpers.test.ts src/adapters/tools.sandboxUnavailable.test.ts src/adapters/workerEnv.test.ts
 
   windows-process-tree:
     # POSIX process groups cannot exercise the Windows ownership contract. This

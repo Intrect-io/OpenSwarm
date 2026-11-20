@@ -36,6 +36,19 @@ function nonLoopbackIPv4(): string | undefined {
   return undefined;
 }
 
+/**
+ * In CI (the harness-gate job installs bubblewrap and lifts the AppArmor
+ * userns restriction) the #841 network assertion must actually run: a missing
+ * sandbox or a host without a non-loopback address would otherwise take a
+ * fail-closed or early-return branch and the gate would pass without checking
+ * loopback-only networking at all.
+ */
+function requireLiveProbe(ci: string | undefined, backend: string | null, host: string | undefined): void {
+  if (!ci) return;
+  if (!backend) throw new Error('CI must run the sandboxed probe, but no sandbox backend was found (install bubblewrap)');
+  if (!host) throw new Error('CI must run the network probe, but this runner has no non-loopback IPv4 address');
+}
+
 beforeEach(async () => {
   connections = 0;
   server = createServer((socket) => { connections++; socket.on('error', () => {}); socket.end('HTTP/1.1 201 Created\r\n\r\n'); });
@@ -79,6 +92,7 @@ const call = (command: string) => ({ id: 'tc-1', function: { name: 'bash', argum
 describe('a worker running scripts/release.sh that wraps `gh workflow run`', () => {
   it('starts 0 workflow runs: no token reaches gh and GitHub is unreachable', async () => {
     const host = nonLoopbackIPv4();
+    requireLiveProbe(process.env.CI, detectSandboxBackend(), host);
     const port = (server!.address() as { port: number }).port;
     const { cwd, log, shimDir } = probeRepo(host ?? '192.0.2.1', port);
     // The daemon's own environment carries credentials, as a real host's does.
@@ -109,6 +123,7 @@ describe('a worker running scripts/release.sh that wraps `gh workflow run`', () 
 
   it('the stand-in GitHub is reachable outside the worker shell (the probe can see a breach)', async () => {
     const host = nonLoopbackIPv4();
+    requireLiveProbe(process.env.CI, 'not needed', host);
     if (!host) return; // no non-loopback interface on this host: nothing to show
     const { cwd, log, shimDir } = probeRepo(host, (server!.address() as { port: number }).port);
     vi.stubEnv('PATH', `${shimDir}${path.delimiter}${process.env.PATH ?? ''}`);
@@ -121,4 +136,17 @@ describe('a worker running scripts/release.sh that wraps `gh workflow run`', () 
     expect(calls).toContain('net=reached');
     expect(connections).toBe(1);
   }, 20_000);
+});
+
+describe('requireLiveProbe', () => {
+  it('lets a local run without a sandbox or a routable address take the fallback branches', () => {
+    expect(() => requireLiveProbe(undefined, null, undefined)).not.toThrow();
+    expect(() => requireLiveProbe('', null, undefined)).not.toThrow();
+  });
+
+  it('fails a CI run that would skip the sandboxed or the network assertion', () => {
+    expect(() => requireLiveProbe('true', null, '10.0.0.2')).toThrow(/no sandbox backend/);
+    expect(() => requireLiveProbe('true', 'bwrap', undefined)).toThrow(/no non-loopback IPv4/);
+    expect(() => requireLiveProbe('true', 'bwrap', '10.0.0.2')).not.toThrow();
+  });
 });
