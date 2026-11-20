@@ -48,6 +48,7 @@ let githubRepos: string[] = [];
 let githubCheckTimer: NodeJS.Timeout | null = null;
 let prProcessor: PRProcessor | null = null;
 let memoryCompactionJob: Cron | null = null;
+let failureTaxonomyJob: Cron | null = null;
 let serviceInstanceLock: ServiceInstanceLock | null = null;
 
 /**
@@ -450,6 +451,18 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       for (const event of remote) await store.publish(event);
       console.log(`[Service] Coordination board registered (${config.autonomous.coordinationBoardIssueId})`);
     }
+    // Weekly failure taxonomy (AGT-4812): parks, rejections and operator questions
+    // grouped by cause, each repeating cause filed as a Backlog candidate for a
+    // person to approve. Same opt-in and project as the ledger retrospective.
+    if (config.autonomous.retrospectiveProjectId) {
+      const { startWeeklyFailureTaxonomy } = await import('../automation/failureTaxonomy.js');
+      const { getTaskSource } = await import('../automation/runnerExecution.js');
+      failureTaxonomyJob = startWeeklyFailureTaxonomy({
+        projectId: config.autonomous.retrospectiveProjectId,
+        getTaskSource: () => getTaskSource(),
+        dbPath: config.autonomous.automationDbPath,
+      });
+    }
     web.setWebRunner(runnerInstance);
     // Re-apply the persisted provider toggle: switchProvider() is in-memory only, so without this a
     // restart silently reverts to config.yaml's adapter. Reusing switchProvider keeps the role +
@@ -801,6 +814,9 @@ async function stopServiceLocked(): Promise<void> {
     githubCheckTimer = null;
     console.log('GitHub monitoring stopped');
   }
+
+  failureTaxonomyJob?.stop();
+  failureTaxonomyJob = null;
 
   // Stop memory compaction scheduler
   if (memoryCompactionJob) {
