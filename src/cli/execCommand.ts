@@ -44,9 +44,9 @@ import { resolveQuestionClass, type HumanQuestionClass } from '../coordination/h
 import { loadRepoMetadata, type RepoMetadata } from '../support/repoMetadata.js';
 import { RunLedger } from '../automation/runLedger.js';
 import { daemonAuthHeaders, daemonBaseUrl } from './daemonEndpoint.js';
+import { daemonPort } from '../core/daemonPort.js';
 import { WORK_SKIP_STATES } from './workSelect.js';
 
-const DAEMON_PORT = 3847;
 const HEALTH_TIMEOUT_MS = 3000;
 const SUBMIT_TIMEOUT_MS = 30_000;
 const DEFAULT_AWAIT_TIMEOUT_S = 3600;
@@ -539,7 +539,7 @@ async function daemonProbe(): Promise<DaemonProbeResult> {
   // Resolved before the try: a malformed host, or a token this build refuses to
   // send in plaintext to a remote host, is a configuration error — answering
   // "unhealthy" would send the caller into the local-child fallback instead.
-  const url = `${daemonBaseUrl(DAEMON_PORT)}/api/stats`;
+  const url = `${daemonBaseUrl(daemonPort())}/api/stats`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
   try {
@@ -553,7 +553,7 @@ async function daemonProbe(): Promise<DaemonProbeResult> {
 }
 
 async function postWorkToDaemon(repoPath: string, identifier: string): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(`${daemonBaseUrl(DAEMON_PORT)}/api/work`, {
+  const res = await fetch(`${daemonBaseUrl(daemonPort())}/api/work`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
     body: JSON.stringify({ issueIds: [identifier], projectPath: repoPath }),

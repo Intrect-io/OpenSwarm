@@ -17,7 +17,7 @@
 
 import type { CoordinationEvent } from '../coordination/coordinationStore.js';
 import type { CoordinationThread } from '../coordination/coordinationThreads.js';
-import { DAEMON_PORT } from './daemon.js';
+import { daemonPort } from '../core/daemonPort.js';
 import { DAEMON_TOKEN_ENV, daemonAuthHeaders, daemonBaseUrl, daemonHost, daemonScheme, isRemoteDaemon } from './daemonEndpoint.js';
 
 /** Matches attachHandler.ts: a daemon that answers /api/stats can still stall. */
@@ -150,7 +150,7 @@ function hostNotice(): string | null {
 }
 
 export async function runBoardCommand(opts: CoordinationCommandOptions = {}): Promise<number> {
-  const port = opts.port ?? DAEMON_PORT;
+  const port = opts.port ?? daemonPort();
   const doFetch = opts.fetchImpl ?? fetch;
   const query = opts.repository ? `?repository=${encodeURIComponent(opts.repository)}` : '';
   try {
@@ -170,7 +170,7 @@ export async function runBoardCommand(opts: CoordinationCommandOptions = {}): Pr
 }
 
 export async function runThreadsCommand(opts: CoordinationCommandOptions = {}): Promise<number> {
-  const port = opts.port ?? DAEMON_PORT;
+  const port = opts.port ?? daemonPort();
   const doFetch = opts.fetchImpl ?? fetch;
   // The route requires a repository; the working directory is the only
   // defensible default for a command run from inside a checkout.

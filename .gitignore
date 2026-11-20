@@ -5,6 +5,8 @@ node_modules
 dist/
 # desktop/dist holds the Tauri shell's committed static assets, not build output
 !desktop/dist/
+# Standalone bundles (scripts/build-standalone.sh) and the deploy check's install root
+/dist-standalone
 
 # Desktop shell (Tauri) build artifacts
 desktop/target/

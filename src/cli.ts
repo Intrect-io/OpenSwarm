@@ -17,7 +17,7 @@ import { initTelemetry, track } from './telemetry/telemetry.js';
 import { maybeAutoUpdate } from './support/updateNotifier.js';
 import { safeConsole } from './support/safeLog.js';
 import { atomicWriteFileSync } from './support/atomicFile.js';
-import { parsePositiveIntegerOption, parseTcpPortOption } from './cli/optionParsers.js';
+import { daemonPort, parsePositiveIntegerOption, parseTcpPortOption } from './cli/optionParsers.js';
 
 // Load .env so CLI commands (e.g. `auth login --provider linear` reading
 // LINEAR_OAUTH_CLIENT_ID) see the same env the daemon does. Idempotent; never
@@ -824,7 +824,7 @@ program
     }
     if (status.external) {
       console.log('OpenSwarm is running (externally managed — e.g. launchd).');
-      console.log('  port 3847 is responding; no PID file for this instance.');
+      console.log(`  port ${daemonPort()} is responding; no PID file for this instance.`);
       console.log(`  restart: launchctl kickstart -k gui/$UID/com.intrect.openswarm`);
       return;
     }
@@ -884,11 +884,11 @@ program
 program
   .command('board')
   .description('Show the coordination board: questions waiting on you, then recent activity')
-  .option('-p, --port <port>', 'Daemon port', parseTcpPortOption, 3847)
+  .option('-p, --port <port>', 'Daemon port (default: OPENSWARM_WEB_PORT or 3847)', parseTcpPortOption)
   .option('-r, --repository <path>', 'Limit to one repository')
   .option('-n, --limit <count>', 'Recent events to show', (v: string) => Number.parseInt(v, 10), 20)
   .option('--json', "Print the daemon's raw payload")
-  .action(async (opts: { port: number; repository?: string; limit: number; json?: boolean }) => {
+  .action(async (opts: { port?: number; repository?: string; limit: number; json?: boolean }) => {
     const { runBoardCommand } = await import('./cli/coordinationHandler.js');
     process.exitCode = await runBoardCommand(opts);
   });
@@ -896,12 +896,12 @@ program
 program
   .command('threads')
   .description('List coordination threads for a repository (defaults to the working directory)')
-  .option('-p, --port <port>', 'Daemon port', parseTcpPortOption, 3847)
+  .option('-p, --port <port>', 'Daemon port (default: OPENSWARM_WEB_PORT or 3847)', parseTcpPortOption)
   .option('-r, --repository <path>', 'Repository path (default: cwd)')
   .option('-s, --status <status>', 'Filter by status: open | resolved')
   .option('-n, --limit <count>', 'Maximum threads to list', (v: string) => Number.parseInt(v, 10))
   .option('--json', "Print the daemon's raw payload")
-  .action(async (opts: { port: number; repository?: string; status?: string; limit?: number; json?: boolean }) => {
+  .action(async (opts: { port?: number; repository?: string; status?: string; limit?: number; json?: boolean }) => {
     const { runThreadsCommand } = await import('./cli/coordinationHandler.js');
     process.exitCode = await runThreadsCommand(opts);
   });
@@ -911,14 +911,14 @@ program
 program
   .command('dash')
   .description('Open the web dashboard in a browser')
-  .option('-p, --port <port>', 'Port number', parseTcpPortOption, 3847)
+  .option('-p, --port <port>', 'Port number (default: OPENSWARM_WEB_PORT or 3847)', parseTcpPortOption)
   .option('--no-open', 'Start server without opening browser')
-  .action(async (opts: { port: number; open: boolean }) => {
+  .action(async (opts: { port?: number; open: boolean }) => {
     const { startWebServer, stopWebServer } = await import('./support/web.js');
     const { spawn } = await import('node:child_process');
     const { getOpenCommand } = await import('./auth/openBrowser.js');
     const { runDashCommand } = await import('./cli/dashHandler.js');
-    await runDashCommand(opts.port, opts.open, {
+    await runDashCommand(opts.port ?? daemonPort(), opts.open, {
       startWebServer,
       stopWebServer,
       spawnBrowser: (url) => {
@@ -1127,7 +1127,7 @@ async function launchChatTui(sessionId?: string): Promise<void> {
   } catch {
     // not a git repo — omit the branch
   }
-  await startInkTui({ version: VERSION, provider, model, port: 3847, cwd, branch, sessionId: resolvedSessionId, initialHistory, goal });
+  await startInkTui({ version: VERSION, provider, model, port: daemonPort(), cwd, branch, sessionId: resolvedSessionId, initialHistory, goal });
 }
 
 program.action(launchChatTui);

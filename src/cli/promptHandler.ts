@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, execFile } from 'node:child_process';
 import { expandPath } from '../core/config.js';
 import { DAEMON_HOST_ENV, daemonAuthHeaders, daemonBaseUrl, daemonHost, isRemoteDaemon } from './daemonEndpoint.js';
+import { daemonPort } from '../core/daemonPort.js';
 
 // Types
 
@@ -43,10 +44,9 @@ interface ExecTaskStatus {
 
 // Constants
 
-const SERVICE_PORT = 3847;
-/** Resolved per call: the host comes from the environment, which a test
- * (or an operator between commands) can change after this module loads. */
-const BASE_URL = () => daemonBaseUrl(SERVICE_PORT);
+/** Resolved per call: the host and port come from the environment, which a
+ * test (or an operator between commands) can change after this module loads. */
+const BASE_URL = () => daemonBaseUrl(daemonPort());
 const HEALTH_TIMEOUT_MS = 3000;
 const AUTO_START_TIMEOUT_MS = 30000;
 /** Submitting a task is a small JSON POST; it should never outlast this. */
@@ -244,7 +244,7 @@ export async function executePrompt(opts: ExecOptions): Promise<void> {
     // so the unreachable remote is reported instead (caught by openswarm
     // review, not self-caught).
     if (isRemoteDaemon()) {
-      console.error(`Error: no OpenSwarm daemon answered at ${daemonHost()}:${SERVICE_PORT}.`);
+      console.error(`Error: no OpenSwarm daemon answered at ${daemonHost()}:${daemonPort()}.`);
       console.error('Auto-start only applies to a local daemon — start it on that host, '
         + `or unset ${DAEMON_HOST_ENV} to use this machine.`);
       process.exit(1);

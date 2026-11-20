@@ -27,6 +27,7 @@ import { setDefaultAdapter } from '../adapters/index.js';
 import { readProviderOverride, formatProviderOverrideMismatchWarning } from './providerOverride.js';
 import { enrichTaskFromState, syncTaskStatesFromIssues } from '../taskState/store.js';
 import { probeDaemonPort } from '../cli/daemon.js';
+import { daemonPort } from './daemonPort.js';
 import { rotateServiceLogs } from '../support/logRotation.js';
 import { acquireServiceInstanceLock, type ServiceInstanceLock } from '../support/serviceInstanceLock.js';
 import {
@@ -114,9 +115,12 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
   // unlocked local state files, silently losing each other's failure-counter
   // writes so structurally-failing tasks never reached the STUCK threshold and
   // retried forever instead. (INT-2570)
-  if (await probeDaemonPort()) {
+  // OPENSWARM_WEB_PORT moves the probe and the server together, so a second
+  // instance on another port (the standalone smoke check) is not refused.
+  const port = daemonPort();
+  if (await probeDaemonPort(port)) {
     throw new Error(
-      'Another OpenSwarm instance is already serving port 3847 — refusing to start a duplicate. ' +
+      `Another OpenSwarm instance is already serving port ${port} — refusing to start a duplicate. ` +
       "Check for stray processes ('ps aux | grep dist/index.js') or restart the managed one " +
       "('launchctl kickstart -k gui/$UID/com.intrect.openswarm')."
     );
@@ -210,7 +214,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
 
   // Start web interface
   console.log('🌐 Starting web interface...');
-  await web.startWebServer(3847);
+  await web.startWebServer(port);
   console.log('✅ Web interface ready');
 
   // GitHub repo configuration

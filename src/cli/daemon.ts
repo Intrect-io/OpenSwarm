@@ -14,13 +14,13 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withFileLock } from '../support/fileLock.js';
+import { daemonPort } from '../core/daemonPort.js';
 
 const STATE_DIR = join(homedir(), '.config', 'openswarm');
 const LOG_DIR = join(STATE_DIR, 'logs');
 const PID_FILE = join(STATE_DIR, 'openswarm.pid');
 const LOG_FILE = join(LOG_DIR, 'openswarm.log');
 const START_LOCK_FILE = join(STATE_DIR, 'openswarm.start.lock');
-const DAEMON_PORT = 3847;
 /** launchd service label the install script (scripts/install-service.sh) bootstraps. */
 const LAUNCHD_LABEL = 'com.intrect.openswarm';
 
@@ -76,7 +76,7 @@ function readPidFile(): number | null {
  * a SECOND daemon working the same Linear queue in parallel (INT-2473).
  * The port answers for any daemon regardless of how it was started.
  */
-export async function probeDaemonPort(port = DAEMON_PORT, timeoutMs = 800): Promise<boolean> {
+export async function probeDaemonPort(port = daemonPort(), timeoutMs = 800): Promise<boolean> {
   try {
     // Deliberately loopback, not daemonBaseUrl(): this asks whether THIS
     // machine's port is already taken, so that start/stop does not spawn a
@@ -140,7 +140,7 @@ async function startDaemonLocked(): Promise<{ pid: number; logFile: string }> {
   // started daemon. Spawning another would double-process the same task queue.
   if (await probeDaemonPort()) {
     throw new Error(
-      `OpenSwarm is already serving port ${DAEMON_PORT} (externally managed — e.g. launchd). ` +
+      `OpenSwarm is already serving port ${daemonPort()} (externally managed — e.g. launchd). ` +
       `Not spawning a duplicate. Use 'launchctl kickstart -k gui/$UID/com.intrect.openswarm' to restart it.`
     );
   }
@@ -289,7 +289,7 @@ export async function stopExternalDaemon(timeoutMs = 10_000): Promise<ExternalSt
     if (!(await probeDaemonPort())) return { outcome: 'stopped' };
     await new Promise((r) => setTimeout(r, 200));
   }
-  return { outcome: 'failed', detail: `daemon still answering port ${DAEMON_PORT} after ${timeoutMs}ms` };
+  return { outcome: 'failed', detail: `daemon still answering port ${daemonPort()} after ${timeoutMs}ms` };
 }
 
 /**
@@ -353,4 +353,4 @@ export async function getDaemonStatusFull(): Promise<DaemonStatus> {
 }
 
 export const DAEMON_PATHS = { STATE_DIR, LOG_DIR, PID_FILE, LOG_FILE } as const;
-export { LAUNCHD_LABEL, DAEMON_PORT };
+export { LAUNCHD_LABEL };
