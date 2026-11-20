@@ -24,6 +24,9 @@ vi.mock('../automation/runnerExecution.js', async () => {
 
 import { startWebServer, stopWebServer } from './web.js';
 
+import { AUTH, useTestDaemonToken } from './daemonToken.testing.js';
+
+useTestDaemonToken();
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = createServer();
@@ -87,7 +90,7 @@ describe('POST /api/plan/dispatch decomposition limits (AGT-4123)', () => {
   async function dispatch(tasks: ReturnType<typeof subTasks>) {
     return fetch(`http://127.0.0.1:${port}/api/plan/dispatch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH },
       body: JSON.stringify({ goal: 'Ship the feature', subTasks: tasks }),
     });
   }

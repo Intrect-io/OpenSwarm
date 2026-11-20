@@ -29,6 +29,18 @@ export interface ExecTaskEntry {
 /** Read by the GET /api/exec/:taskId route in web.ts. */
 export const execTasks = new Map<string, ExecTaskEntry>();
 
+/**
+ * The OS fence for exec tasks' bash tool. An exec task runs the same worker as
+ * the autonomous runner, so it gets the same `autonomous.workerSandbox`; it
+ * used to get none at all, running with the daemon's privileges. Defaults to
+ * `on`, the config default. (AGT-4814)
+ */
+let execWorkerSandbox: 'on' | 'off' = 'on';
+
+export function setExecWorkerSandbox(mode: 'on' | 'off'): void {
+  execWorkerSandbox = mode;
+}
+
 export function cleanupExecTask(taskId: string): void {
   setTimeout(() => { execTasks.delete(taskId); }, 3600000); // 1 hour
 }
@@ -82,6 +94,7 @@ export function startExecTask(
         stages,
         maxIterations: 3,
         roles: Object.keys(roles).length > 0 ? roles as any : undefined,
+        workerSandbox: execWorkerSandbox,
       });
 
       pipelineInstance.on('stage:start', ({ stage }: { stage: string }) => {

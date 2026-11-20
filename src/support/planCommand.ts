@@ -19,6 +19,7 @@
 
 import { runPlanner, type SubTask } from './planner.js';
 import { daemonPort } from '../core/daemonPort.js';
+import { daemonAuthHeaders } from '../cli/daemonEndpoint.js';
 
 
 export interface PlanIO {
@@ -143,7 +144,7 @@ async function dispatch(
   try {
     const res = await fetch(`http://127.0.0.1:${daemonPort()}/api/plan/dispatch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
       body: JSON.stringify({ goal, projectPath, subTasks }),
     });
     if (!res.ok) {

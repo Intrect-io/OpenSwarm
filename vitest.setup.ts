@@ -91,3 +91,7 @@ process.env.OPENSWARM_TASK_STATE_FILE = join(tmpdir(), 'openswarm-test-task-stat
 process.env.OPENSWARM_DAILY_PACE_FILE = join(tmpdir(), 'openswarm-test-pace', workerScope, 'daily-pace.json');
 process.env.OPENSWARM_PROJECT_SELECTION_FILE = join(tmpdir(), 'openswarm-test-pace', workerScope, 'project-selection.json');
 process.env.OPENSWARM_BUS_DIR = join(tmpdir(), 'openswarm-test-bus', workerScope);
+// A test that boots the service creates the daemon API token (AGT-4814); keep
+// it out of the operator's ~/.config/openswarm/daemon, and keep the CLI-side
+// tests from reading the operator's real token.
+process.env.OPENSWARM_DAEMON_TOKEN_DIR = join(tmpdir(), 'openswarm-test-daemon-token', workerScope);

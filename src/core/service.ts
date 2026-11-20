@@ -212,6 +212,15 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     console.log('⏭ Discord not configured — skipping');
   }
 
+  // Every mutating API call needs this token, loopback included (AGT-4814).
+  const { ensureDaemonToken } = await import('../support/daemonToken.js');
+  const token = ensureDaemonToken();
+  console.log(token.source === 'env'
+    ? '🔑 API token: OPENSWARM_WEB_TOKEN'
+    : `🔑 API token: ${token.path} (${token.source === 'created' ? 'created' : 'reused'}, mode 0600)`);
+  const { setExecWorkerSandbox } = await import('../support/webExecTasks.js');
+  setExecWorkerSandbox(config.autonomous?.workerSandbox ?? 'on');
+
   // Start web interface
   console.log('🌐 Starting web interface...');
   await web.startWebServer(port);

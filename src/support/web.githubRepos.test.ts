@@ -14,6 +14,9 @@ vi.mock('./atomicFile.js', () => ({ atomicWriteFileSync: mocks.atomicWriteFileSy
 
 import { getWebServerPort, setWebRunner, startWebServer, stopWebServer } from './web.js';
 
+import { AUTH, useTestDaemonToken } from './daemonToken.testing.js';
+
+useTestDaemonToken();
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const socket = createServer();
@@ -65,7 +68,7 @@ describe('GitHub repository routes', () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: 'GH_TOKEN not configured' });
     const cloneResponse = await fetch(`${base}/api/repos/clone`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fullName: 'Acme/Project' }),
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...AUTH }, body: JSON.stringify({ fullName: 'Acme/Project' }),
     });
     expect(cloneResponse.status).toBe(503);
     expect(await cloneResponse.json()).toEqual({ error: 'GH_TOKEN not configured' });
@@ -132,16 +135,16 @@ describe('GitHub repository routes', () => {
     setWebRunner(runner);
     mocks.execFile.mockImplementation((_command: string, _args: string[], callback: (error: Error | null) => void) => callback(null));
     const base = await serverUrl();
-    const malformed = await fetch(`${base}/api/repos/clone`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fullName: '../escape' }) });
+    const malformed = await fetch(`${base}/api/repos/clone`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...AUTH }, body: JSON.stringify({ fullName: '../escape' }) });
     expect(malformed.status).toBe(400);
-    const response = await fetch(`${base}/api/repos/clone`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fullName: 'Acme/Project' }) });
+    const response = await fetch(`${base}/api/repos/clone`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...AUTH }, body: JSON.stringify({ fullName: 'Acme/Project' }) });
     expect(response.status).toBe(201);
     const destination = join(workspace, 'Project');
     expect(mocks.execFile).toHaveBeenCalledWith('git', ['clone', 'https://github.com/Acme/Project.git', destination], expect.any(Function));
     expect(mocks.atomicWriteFileSync).toHaveBeenCalled();
     expect(runner.registerProjectPath).toHaveBeenCalledWith('Project', destination);
     mkdirSync(destination);
-    const conflict = await fetch(`${base}/api/repos/clone`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fullName: 'Acme/Project' }) });
+    const conflict = await fetch(`${base}/api/repos/clone`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...AUTH }, body: JSON.stringify({ fullName: 'Acme/Project' }) });
     expect(conflict.status).toBe(409);
     expect(existsSync(destination)).toBe(true);
   });

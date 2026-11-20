@@ -5,6 +5,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createServer } from 'node:net';
 import { startWebServer, stopWebServer } from './web.js';
 
+import { AUTH, useTestDaemonToken } from './daemonToken.testing.js';
+
+useTestDaemonToken();
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = createServer();
@@ -23,7 +26,7 @@ describe('POST /api/heartbeat without a runner', () => {
   it('refuses with 503 and says why', async () => {
     const port = await freePort();
     await startWebServer(port);
-    const res = await fetch(`http://127.0.0.1:${port}/api/heartbeat`, { method: 'POST' });
+    const res = await fetch(`http://127.0.0.1:${port}/api/heartbeat`, { method: 'POST', headers: AUTH });
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: 'No daemon runner is attached to this dashboard' });
   });

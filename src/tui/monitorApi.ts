@@ -4,6 +4,7 @@
 // mappers (monitorRows.ts) turn these into tables. Default daemon port 3847.
 // ============================================
 
+import { daemonAuthHeaders } from '../cli/daemonEndpoint.js';
 import { projectsToTable, pipelineToTable, stuckToTable, issuesToTable, type Table } from './monitorRows.js';
 
 const base = (port: number) => `http://127.0.0.1:${port}`;
@@ -51,7 +52,9 @@ export async function fetchStuck(port: number, signal?: AbortSignal): Promise<Ta
 export async function fetchIssues(port: number, signal?: AbortSignal): Promise<Table> {
   const res = await fetch(`${base(port)}/graphql`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    // The issues query goes over POST /graphql, which the daemon gates like a
+    // mutation, so it carries the daemon token. (AGT-4814)
+    headers: { 'Content-Type': 'application/json', ...daemonAuthHeaders() },
     signal: timeoutSignal(signal),
     body: JSON.stringify({
       query: '{ issues(filter: { limit: 50 }) { issues { id title status priority } total } }',

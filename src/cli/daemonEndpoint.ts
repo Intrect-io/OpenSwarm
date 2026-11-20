@@ -13,6 +13,8 @@
 // machine, so it is opt-in and the value is validated rather than pasted into
 // a template literal.
 
+import { readClientDaemonToken } from '../support/daemonToken.js';
+
 /** Where the daemon lives when nothing overrides it. */
 export const DEFAULT_DAEMON_HOST = '127.0.0.1';
 
@@ -73,7 +75,11 @@ export const DAEMON_TOKEN_ENV = 'OPENSWARM_DAEMON_TOKEN';
  * or `Authorization: Bearer`; the bare header avoids its parsing entirely.
  */
 export function daemonAuthHeaders(): Record<string, string> {
-  const token = process.env[DAEMON_TOKEN_ENV]?.trim();
+  // The local token file authorizes this machine's daemon only, so it is never
+  // sent to a remote OPENSWARM_DAEMON_HOST; that one needs the env token.
+  const token = isRemoteDaemon()
+    ? process.env[DAEMON_TOKEN_ENV]?.trim()
+    : readClientDaemonToken();
   return token ? { 'x-openswarm-token': token } : {};
 }
 

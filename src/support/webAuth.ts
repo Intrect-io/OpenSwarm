@@ -11,6 +11,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isAuthorizedTailscalePeer, isLoopbackAddress, isTailscaleLocalEnd } from './tailscaleNetwork.js';
 import { isGraphQLRequest } from '../issues/graphql/server.js';
+import { activeDaemonToken } from './daemonToken.js';
 
 // CORS origin allowlist — hostname-strict match (no substring/prefix pitfalls)
 export function isAllowedOrigin(origin: string): boolean {
@@ -89,7 +90,9 @@ export function extractBearerToken(header: string | undefined): string | null {
 }
 
 export function hasValidWebToken(req: IncomingMessage): boolean {
-  const configuredToken = process.env.OPENSWARM_WEB_TOKEN?.trim();
+  // OPENSWARM_WEB_TOKEN when the operator set one, else the token the daemon
+  // created at start (support/daemonToken.ts).
+  const configuredToken = activeDaemonToken();
   if (!configuredToken) return false;
 
   const presentedToken =
@@ -135,10 +138,17 @@ export function isTrustedLocalOrigin(req: IncomingMessage): boolean {
   return (sameHost || loopbackAlias) && getEffectivePort(originUrl) === getEffectivePort(hostUrl);
 }
 
+/**
+ * A mutation needs the daemon token, loopback included. Loopback alone used to
+ * be enough, and a worker's sandboxed shell is on loopback too: from inside a
+ * worker, `curl -X POST 127.0.0.1:3847/api/exec` started work the daemon would
+ * never fence. A browser's same-host Origin proves nothing about who sent it
+ * either. Allowlisted Tailscale peers keep their explicit, opt-in trust.
+ * (AGT-4814)
+ */
 export function isAuthorizedMutation(req: IncomingMessage): boolean {
   if (hasValidWebToken(req)) return true;
-  return (isLoopbackAddress(req.socket.remoteAddress) && isTrustedLocalOrigin(req))
-    || isTrustedTailscaleRequest(req);
+  return isTrustedTailscaleRequest(req);
 }
 
 export function isAuthorizedLocalRead(req: IncomingMessage): boolean {

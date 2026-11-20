@@ -12,6 +12,9 @@ vi.mock('../core/providerOverride.js', () => ({
 
 import { setWebRunner, startWebServer, stopWebServer } from './web.js';
 
+import { AUTH, useTestDaemonToken } from './daemonToken.testing.js';
+
+useTestDaemonToken();
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = createServer();
@@ -40,7 +43,7 @@ describe('POST /api/provider persistence (INT-3284)', () => {
     await startWebServer(port);
     const res = await fetch(`http://127.0.0.1:${port}/api/provider`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH },
       body: JSON.stringify({ provider: 'openrouter' }),
     });
     expect(res.status).toBe(200);
@@ -66,7 +69,7 @@ describe('POST /api/provider persistence (INT-3284)', () => {
     await startWebServer(port);
     const res = await fetch(`http://127.0.0.1:${port}/api/provider`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH },
       body: JSON.stringify({ provider: 'gpt' }),
     });
     expect(res.status).toBe(200);
@@ -92,7 +95,7 @@ describe('POST /api/provider persistence (INT-3284)', () => {
     await startWebServer(port);
     const res = await fetch(`http://127.0.0.1:${port}/api/provider`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH },
       body: JSON.stringify({ provider: 'claude' }),
     });
     expect(res.status).toBe(403);

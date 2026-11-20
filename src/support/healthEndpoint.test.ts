@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { buildHealthPayload, getCachedHealthPayload, startHealthCache, stopHealthCache } from './healthEndpoint.js';
 
+import { AUTH, useTestDaemonToken } from './daemonToken.testing.js';
+
+useTestDaemonToken();
 const lifecycle = vi.hoisted(() => ({
   pollers: [] as NodeJS.Timeout[],
 }));
@@ -143,19 +146,19 @@ describe('GET /api/health over the live server', () => {
       const port = getWebServerPort();
       const base = `http://127.0.0.1:${port}`;
 
-      const badJson = await fetch(`${base}/api/work`, { method: 'POST', body: '{not json' });
+      const badJson = await fetch(`${base}/api/work`, { method: 'POST', headers: AUTH, body: '{not json' });
       expect(badJson.status).toBe(400);
 
       const missingPath = await fetch(`${base}/api/work`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...AUTH },
         body: JSON.stringify({ issueIds: ['x'] }),
       });
       expect(missingPath.status).toBe(400);
 
       const badIds = await fetch(`${base}/api/work`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...AUTH },
         body: JSON.stringify({ projectPath: '/tmp', issueIds: [42] }),
       });
       expect(badIds.status).toBe(400);

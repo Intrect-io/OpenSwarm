@@ -237,9 +237,9 @@ describe('isAuthorizedMutation / isAuthorizedLocalRead', () => {
     expect(isAuthorizedLocalRead(r)).toBe(true);
   });
 
-  it('accept loopback with a trusted origin', () => {
+  it('let loopback with a trusted origin read, but not mutate without the token (AGT-4814)', () => {
     const r = req({ remote: '127.0.0.1', origin: 'http://localhost:3847', host: 'localhost:3847' });
-    expect(isAuthorizedMutation(r)).toBe(true);
+    expect(isAuthorizedMutation(r)).toBe(false);
     expect(isAuthorizedLocalRead(r)).toBe(true);
   });
 
@@ -256,7 +256,8 @@ describe('isAuthorizedMutation / isAuthorizedLocalRead', () => {
     // have locked every localhost browser out to fix the remote one.
     const r = req({ remote: '::ffff:127.0.0.1', origin: 'http://localhost:3847', host: 'localhost:3847' });
     expect(isAuthorizedLocalRead(r)).toBe(true);
-    expect(isAuthorizedMutation(r)).toBe(true);
+    // Mutations need the token on loopback too (AGT-4814).
+    expect(isAuthorizedMutation(r)).toBe(false);
   });
 
   it('lets an allowlisted Tailscale ULA peer read without a token', () => {
