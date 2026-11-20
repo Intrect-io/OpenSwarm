@@ -735,6 +735,14 @@ export type AutonomousStartupConfig = {
    */
   spend?: { maxCostUsdPerDay?: number; unknownAttemptCostUsd?: number };
   /**
+   * Spend budgets (AGT-4807). `perProjectDailyUsd` is the daily ceiling for
+   * every project whose `openswarm.json` sets none (`automation.maxCostUsdPerDay`
+   * wins when set); a project over it stops dispatching until 00:00 UTC and
+   * alerts once. `perIssueUsd` caps what one issue may spend since an operator
+   * last resumed it; past it the issue parks NEEDS_HUMAN with one comment.
+   */
+  budget?: { perProjectDailyUsd?: number; perIssueUsd?: number };
+  /**
    * Run unattended work on delegated CLI adapters (claude/codex/cursor) even
    * though OpenSwarm's publication fence, protected files and credential-free
    * shell do not reach them (AGT-4444). Default false: the daemon refuses to

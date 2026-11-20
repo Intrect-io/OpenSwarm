@@ -418,6 +418,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       workerSandbox: config.autonomous.workerSandbox,
       minFreeDiskGiB: config.autonomous.minFreeDiskGiB, // AGT-4785
       spend: config.autonomous.spend,
+      budget: config.autonomous.budget, // AGT-4807
       allowDelegatedAdapters: config.autonomous.allowDelegatedAdapters, // AGT-4444: a provider switch meets the same policy
       periodicReviews: config.autonomous.periodicReviews,
       orchestrator: config.autonomous.orchestrator,
