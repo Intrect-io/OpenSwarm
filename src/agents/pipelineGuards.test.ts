@@ -932,7 +932,7 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
   describe('callerCheck', () => {
     it('blocks a removed public symbol with a surviving caller', async () => {
       writeFileSync(join(repo, 'api.ts'), 'export function read_bank_accounts() {}\n');
-      writeFileSync(join(repo, 'consumer.ts'), 'read_bank_accounts();\n');
+      writeFileSync(join(repo, 'consumer.ts'), "import { read_bank_accounts } from './api';\nread_bank_accounts();\n");
       execFileSync('git', ['add', 'api.ts', 'consumer.ts'], { cwd: repo });
       execFileSync('git', ['commit', '-m', 'add api'], { cwd: repo });
       writeFileSync(join(repo, 'api.ts'), 'export function fetch_bank_accounts() {}\n');
@@ -956,11 +956,11 @@ describe('pipelineGuards — INT-2388 deterministic guards', () => {
 
     it('does not report when callers are updated, and is disabled by default', async () => {
       writeFileSync(join(repo, 'api.ts'), 'export function read_bank_accounts() {}\n');
-      writeFileSync(join(repo, 'consumer.ts'), 'read_bank_accounts();\n');
+      writeFileSync(join(repo, 'consumer.ts'), "import { read_bank_accounts } from './api';\nread_bank_accounts();\n");
       execFileSync('git', ['add', 'api.ts', 'consumer.ts'], { cwd: repo });
       execFileSync('git', ['commit', '-m', 'add api'], { cwd: repo });
       writeFileSync(join(repo, 'api.ts'), 'export function fetch_bank_accounts() {}\n');
-      writeFileSync(join(repo, 'consumer.ts'), 'fetch_bank_accounts();\n');
+      writeFileSync(join(repo, 'consumer.ts'), "import { fetch_bank_accounts } from './api';\nfetch_bank_accounts();\n");
       const enabled = await runGuards(mockWorker(['api.ts', 'consumer.ts']), repo, { callerCheck: true });
       expect(guardIssues(enabled, 'callerCheck')).toEqual([]);
       const disabled = await runGuards(mockWorker(['api.ts']), repo, { callerCheck: false });
