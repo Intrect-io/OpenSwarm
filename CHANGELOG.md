@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking
+
+- **The daemon refuses to start when the reviewer resolves to the worker's model family (AGT-4806).** The check follows what actually runs: an adapter's dropped model falls back to its default, the built-in deepseek → glm worker escalation, `adapterRouting.fallbacks`, execute-mode fan-out candidates, and the `local` adapter's unknown default all count. A persisted provider override or a dashboard provider switch that would break independence is refused the same way. A config whose worker and reviewer both resolve to one family (for example `claude-haiku-4-5` and `claude-sonnet-4`) must move the reviewer to another vendor's model, or set `autonomous.allowSameFamilyReview: true` to accept a same-family review.
+
 ### Changed
 
 - **An unfinished run's work reaches the remote, with one comment and still no pull request (AGT-4786 follow-up to #844).** After the worktree is preserved, a `failed`, `rejected`, `infra_error` or `rate_limited` run pushes its swarm branch, once the write-scope and sensitive-data fences pass against the branch ref, and posts one summary comment on the issue (status, branch, commits ahead of the base, what ended the run), keyed per session. A fence refusal keeps the branch local and the comment says why. Runs that already have a PR, park for an operator, or have an unknown sandbox outcome are left alone. `publishFinishedRun` loses its unused `opts` argument. **Not in this change:** a `[partial]` title with `Refs` for approved-but-incomplete runs (there is no completeness verdict to read yet) and deferring an approved publish that overlaps an open sibling PR.

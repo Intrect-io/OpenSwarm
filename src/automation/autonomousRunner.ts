@@ -77,7 +77,7 @@ import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
 import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
-import { providerSwitchViolation } from '../adapters/unattendedPolicy.js';
+import { providerSwitchViolation } from '../adapters/unattendedPolicy.js'; import { providerSwitchFamilyViolation } from '../adapters/reviewerIndependence.js';
 import {
   findPullRequestForBranch,
   inspectWorktreeRecovery,
@@ -4020,7 +4020,7 @@ export class AutonomousRunner {
    * process (the dashboard toggle, `openswarm provider`) ask this before `switchProvider`.
    */
   providerSwitchViolation(adapter: AdapterName): string | null {
-    return providerSwitchViolation(adapter, this.config.allowDelegatedAdapters);
+    return providerSwitchViolation(adapter, this.config.allowDelegatedAdapters) ?? providerSwitchFamilyViolation(adapter); // nor same-family review (#886)
   }
 
   switchProvider(adapter: AdapterName): void {

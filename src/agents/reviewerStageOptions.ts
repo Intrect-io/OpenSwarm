@@ -11,6 +11,7 @@ import { broadcastEvent } from '../core/eventHub.js';
 import { getDiffText } from '../support/gitTracker.js';
 import { refusedUntrackedPaths } from '../support/worktreeEphemeralOps.js';
 import { isEphemeralWorktreeArtifact } from '../support/worktreeEphemeral.js';
+import { UNSAFE_BINARY_DATA_RE } from '../support/unsafeBinaryData.js';
 import { enforcedFileScope, filesOutsideWriteScope } from '../orchestration/writeScope.js';
 import { withoutBookkeeping } from './siblingWorkFormat.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
@@ -87,13 +88,16 @@ export async function publishableReviewView(
 ): Promise<{ files: string[]; excludeFromDiff: string[]; outsideScope: number }> {
   const refused = await refusedUntrackedPaths(projectPath).catch(() => [] as string[]);
   const refusedSet = new Set(refused);
-  const committable = filesChanged.filter((file) => !refusedSet.has(file) && !isEphemeralWorktreeArtifact(file));
+  // Binary data files (.duckdb/.parquet/.pkl/.pt) are unstaged before the
+  // commit (guardUnsafeBinaryStaging), so they are not what the commit accepts. (#886 review)
+  const unsafeBinary = filesChanged.filter((file) => UNSAFE_BINARY_DATA_RE.test(file));
+  const committable = filesChanged.filter((file) => !refusedSet.has(file) && !isEphemeralWorktreeArtifact(file) && !UNSAFE_BINARY_DATA_RE.test(file));
   const scope = enforcedFileScope(task);
   const outside = scope ? filesOutsideWriteScope(withoutBookkeeping(committable), scope) : [];
   const outsideSet = new Set(outside);
   return {
     files: committable.filter((file) => !outsideSet.has(file)),
-    excludeFromDiff: [...refused, ...filesChanged.filter((file) => isEphemeralWorktreeArtifact(file)), ...outside],
+    excludeFromDiff: [...refused, ...filesChanged.filter((file) => isEphemeralWorktreeArtifact(file)), ...unsafeBinary, ...outside],
     outsideScope: outside.length,
   };
 }

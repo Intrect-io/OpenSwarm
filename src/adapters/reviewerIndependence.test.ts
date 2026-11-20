@@ -6,6 +6,8 @@ import {
   collectReviewerFamilyViolations,
   modelFamily,
   type ReviewerIndependenceConfig,
+  compatibleModel,
+  providerSwitchFamilyViolation,
 } from './reviewerIndependence.js';
 import { loadConfig } from '../core/config.js';
 import { CLAUDE_DEFAULT_MODEL } from './claude.js';
@@ -126,7 +128,9 @@ describe('collectReviewerFamilyViolations (AGT-4806)', () => {
 
   it('checks a jobProfile that replaces the stage models', () => {
     const violations = collectReviewerFamilyViolations(config({
-      defaultRoles: { worker: { model: 'gpt-5.6-terra' }, reviewer: { adapter: 'openrouter', model: 'deepseek/deepseek-v4-flash' } },
+      // The worker runs on openrouter, which keeps the profile's deepseek id; on
+      // codex-responses that id would be dropped for the gpt default. (#886 review)
+      defaultRoles: { worker: { adapter: 'openrouter', model: 'openai/gpt-5' }, reviewer: { adapter: 'openrouter', model: 'deepseek/deepseek-v4-flash' } },
       jobProfiles: [{ name: 'light', roles: { worker: 'deepseek/deepseek-v4-flash' } }],
     }));
     expect(violations[0]).toMatch(/^autonomous\.jobProfiles\[light\]: .* is the same model family/);
@@ -181,5 +185,52 @@ describe('assertIndependentReviewer (AGT-4806)', () => {
       log.mockRestore();
       warn.mockRestore();
     }
+  });
+});
+
+describe('the check follows what actually runs (#886 review)', () => {
+  it('pins compatibleModel to modelCompat for the adapters it mirrors', async () => {
+    const { mapModelForProvider } = await import('./modelCompat.js');
+    for (const adapter of ['codex', 'codex-responses', 'cc-router', 'claude'] as const) {
+      for (const model of ['gpt-5.6-terra', 'anthropic/claude-sonnet-4', 'claude-sonnet-4', 'deepseek/deepseek-v4-flash']) {
+        expect(compatibleModel(adapter, model)).toBe(mapModelForProvider(adapter, model, 'reviewer'));
+      }
+    }
+  });
+
+  it('sees a reviewer model the adapter drops for its own default', () => {
+    expect(collectReviewerFamilyViolations(config({
+      defaultRoles: { worker: { model: 'gpt-5.6-terra' }, reviewer: { model: 'anthropic/claude-sonnet-4' } },
+    }))).toHaveLength(1);
+  });
+
+  it('counts the built-in deepseek → glm escalation as a worker model', () => {
+    expect(collectReviewerFamilyViolations(config({
+      defaultRoles: { worker: { adapter: 'openrouter', model: 'deepseek/deepseek-v4-flash' }, reviewer: { adapter: 'openrouter', model: 'z-ai/glm-5.3' } },
+    }))).toHaveLength(1);
+  });
+
+  it('counts routing fallbacks and execute-mode fan-out candidates as worker models', () => {
+    const roles = { worker: { adapter: 'openrouter', model: 'deepseek/deepseek-v4-pro' }, reviewer: { model: 'gpt-5.6-sol' } };
+    expect(collectReviewerFamilyViolations(config({ defaultRoles: roles }))).toEqual([]);
+    expect(collectReviewerFamilyViolations(config({ defaultRoles: roles, adapterRouting: { fallbacks: ['codex-responses'] } })).length).toBeGreaterThan(0);
+    expect(collectReviewerFamilyViolations(config({
+      defaultRoles: { ...roles, worker: { ...roles.worker, fanout: { mode: 'execute', candidates: [{ adapter: 'gpt', model: 'gpt-5.6-terra' }] } } },
+    })).length).toBeGreaterThan(0);
+  });
+
+  it('treats the local adapter default as unknown', () => {
+    expect(collectReviewerFamilyViolations(config({
+      defaultRoles: { worker: { adapter: 'local' }, reviewer: { adapter: 'openrouter', model: 'deepseek/deepseek-v4-pro' } },
+    }))).toHaveLength(1);
+  });
+
+  it('refuses a provider switch that would put the reviewer in the worker\'s family', () => {
+    const independent = config({
+      defaultRoles: { worker: { adapter: 'openrouter', model: 'deepseek/deepseek-v4-pro' }, reviewer: { adapter: 'codex-responses', model: 'gpt-5.6-sol' } },
+    });
+    expect(collectReviewerFamilyViolations(independent)).toEqual([]);
+    expect(providerSwitchFamilyViolation('codex-responses', independent)).toMatch(/model family/);
+    expect(providerSwitchFamilyViolation('openrouter', independent)).toBeNull();
   });
 });

@@ -54,6 +54,40 @@ export const ADAPTER_DEFAULT_MODELS: Readonly<Record<string, string>> = {
 /** The adapter the config falls back to when it names none (config.ts). */
 const DEFAULT_ADAPTER = 'codex-responses';
 
+/**
+ * Adapters whose default is not a fixed id: `local` runs whatever model its
+ * server reports first. Their default counts as unknown. (#886 review)
+ */
+const VARIABLE_DEFAULT_ADAPTERS: ReadonlySet<string> = new Set(['local']);
+
+/** The worker's built-in second opinion (workerEscalation.ts), applied even with no escalateModel set. */
+export const IMPLICIT_WORKER_ESCALATION: Readonly<Record<string, string>> = {
+  'deepseek/deepseek-v4-flash': 'z-ai/glm-5.3-flash',
+};
+
+/**
+ * The model an adapter will actually run for a configured id, mirroring
+ * modelCompat's mapModelForProvider: an id the adapter cannot run is dropped
+ * and the adapter's default runs instead. The test pins this mirror to
+ * mapModelForProvider. (#886 review: `adapter: codex-responses` with a
+ * reviewer of `anthropic/claude-sonnet-4` read as independent, then ran the
+ * worker's gpt default.)
+ */
+export function compatibleModel(adapter: string, model: string | undefined): string | undefined {
+  const current = (model ?? '').trim();
+  if (!current) return undefined;
+  if (adapter === 'codex' || adapter === 'codex-responses' || adapter === 'cc-router') return current.startsWith('gpt-') ? current : undefined;
+  if (adapter === 'cursor') return undefined;
+  if (adapter === 'claude') return /^(?:claude-|sonnet|opus|haiku)/i.test(current) ? current : undefined;
+  return current;
+}
+
+function resolvedModel(adapter: string, model: string | undefined): string {
+  return compatibleModel(adapter, model)
+    ?? (VARIABLE_DEFAULT_ADAPTERS.has(adapter) ? undefined : ADAPTER_DEFAULT_MODELS[adapter])
+    ?? `${adapter} default model`;
+}
+
 /** The model family of a model id, or null when the table cannot name it. */
 export function modelFamily(model: string | undefined): string | null {
   if (!model) return null;
@@ -68,6 +102,8 @@ interface RoleLike {
   adapter?: string;
   model?: string;
   escalateModel?: string;
+  /** Fan-out candidates run as the worker in execute mode. */
+  fanout?: { enabled?: boolean; mode?: string; candidates?: Array<{ adapter?: string; model?: string }> };
 }
 type RolesLike = { worker?: RoleLike; reviewer?: RoleLike } & Record<string, unknown>;
 
@@ -76,6 +112,8 @@ export interface ReviewerIndependenceConfig {
   adapter?: string;
   autonomous?: {
     allowSameFamilyReview?: boolean;
+    /** Adapters the worker falls back to on quota/infra/capability failures. */
+    adapterRouting?: { fallbacks?: readonly string[] };
     defaultRoles?: RolesLike;
     projectAgents?: Array<{ projectPath: string; roles?: RolesLike }>;
     models?: { worker?: string; reviewer?: string };
@@ -97,12 +135,16 @@ function pairs(config: ReviewerIndependenceConfig): ResolvedPair[] {
     // Legacy `models:` block, as getRolesForProject converts it.
     : { worker: { model: autonomous.models?.worker }, reviewer: { model: autonomous.models?.reviewer } };
   const out: ResolvedPair[] = [{ where: autonomous.defaultRoles ? 'autonomous.defaultRoles' : 'autonomous (default roles)', ...base }];
+  // Per-project roles merge onto defaultRoles; without defaultRoles the runner
+  // merges them onto roles with no model (the adapter default), not onto the
+  // legacy `models:` block (getRolesForProject). (#886 review)
+  const projectBase = autonomous.defaultRoles ? base : { worker: {}, reviewer: {} };
   for (const agent of autonomous.projectAgents ?? []) {
     if (!agent.roles?.worker && !agent.roles?.reviewer) continue;
     out.push({
       where: `autonomous.projectAgents[${agent.projectPath}].roles`,
-      worker: { ...base.worker, ...agent.roles.worker },
-      reviewer: { ...base.reviewer, ...agent.roles.reviewer },
+      worker: { ...projectBase.worker, ...agent.roles.worker },
+      reviewer: { ...projectBase.reviewer, ...agent.roles.reviewer },
     });
   }
   // A job profile replaces the stage MODEL only; the adapter stays the role's.
@@ -119,11 +161,26 @@ function pairs(config: ReviewerIndependenceConfig): ResolvedPair[] {
   return out;
 }
 
-/** Every model a role can run: its model (or its adapter's default) and its escalation model. */
-function roleModels(role: RoleLike, topAdapter: string | undefined): string[] {
+/**
+ * Every model a role can run: its model as its adapter runs it (or the adapter's
+ * default), its escalation model, and — for the worker — the built-in
+ * escalation, the routing fallbacks and the execute-mode fan-out candidates.
+ */
+function roleModels(role: RoleLike, topAdapter: string | undefined, worker?: { fallbacks?: readonly string[] }): string[] {
   const adapter = role.adapter ?? topAdapter ?? DEFAULT_ADAPTER;
-  const primary = role.model ?? ADAPTER_DEFAULT_MODELS[adapter] ?? `${adapter} default model`;
-  return role.escalateModel ? [primary, role.escalateModel] : [primary];
+  const primary = resolvedModel(adapter, role.model);
+  const models = [primary];
+  const escalate = role.escalateModel ?? (worker ? IMPLICIT_WORKER_ESCALATION[primary] : undefined);
+  if (escalate) models.push(resolvedModel(adapter, escalate));
+  if (worker) {
+    for (const fallback of worker.fallbacks ?? []) models.push(resolvedModel(fallback, role.model));
+    if (role.fanout?.enabled !== false && role.fanout?.mode === 'execute') {
+      for (const candidate of role.fanout.candidates ?? []) {
+        models.push(resolvedModel(candidate.adapter ?? adapter, candidate.model ?? role.model));
+      }
+    }
+  }
+  return [...new Set(models)];
 }
 
 function describeModel(model: string): string {
@@ -144,7 +201,7 @@ export function collectReviewerFamilyViolations(config: ReviewerIndependenceConf
     // model whatever its `enabled` says (publicationReviewBudget.ts). Only a
     // disabled worker means nothing in this scope is produced to review.
     if (worker.enabled === false) continue;
-    const workerModels = roleModels(worker, config.adapter);
+    const workerModels = roleModels(worker, config.adapter, { fallbacks: autonomous.adapterRouting?.fallbacks ?? [] });
     const reviewerModels = roleModels(reviewer, config.adapter);
     for (const reviewerModel of reviewerModels) {
       const reviewerFamily = modelFamily(reviewerModel);
@@ -171,4 +228,45 @@ export function assertIndependentReviewer(config: ReviewerIndependenceConfig): v
     + 'Give the reviewer a model from another family (set defaultRoles.reviewer.adapter/model, e.g. an openrouter '
     + 'model of another vendor), or set autonomous.allowSameFamilyReview: true to accept a same-family review.',
   );
+}
+
+/**
+ * The same check for the roles a provider switch would produce: the switch
+ * re-points every role to `adapter` and keeps only models that adapter runs
+ * (autonomousRunner.applyProviderConfig). A persisted override is applied after
+ * the startup check, and the dashboard toggle at any time, so both are checked
+ * here. (#886 review)
+ */
+export function reviewerFamilyViolationsForProvider(config: ReviewerIndependenceConfig, adapter: string): string[] {
+  const autonomous = config.autonomous;
+  if (!autonomous) return [];
+  const repoint = (roles: RolesLike | undefined): RolesLike | undefined => roles && {
+    ...roles,
+    ...(roles.worker ? { worker: { ...roles.worker, adapter } } : {}),
+    ...(roles.reviewer ? { reviewer: { ...roles.reviewer, adapter } } : {}),
+  };
+  return collectReviewerFamilyViolations({
+    adapter,
+    autonomous: {
+      ...autonomous,
+      defaultRoles: repoint(autonomous.defaultRoles),
+      projectAgents: autonomous.projectAgents?.map((agent) => ({ ...agent, roles: repoint(agent.roles) })),
+    },
+  });
+}
+
+let registered: ReviewerIndependenceConfig | null = null;
+
+/** The daemon registers its config once at start, for checks that run later (a provider switch). */
+export function registerReviewerIndependenceConfig(config: ReviewerIndependenceConfig | null): void {
+  registered = config;
+}
+
+/** Why switching the autonomous runner to `adapter` would break reviewer independence, or null. */
+export function providerSwitchFamilyViolation(adapter: string, config: ReviewerIndependenceConfig | null = registered): string | null {
+  if (!config) return null;
+  const violations = reviewerFamilyViolationsForProvider(config, adapter);
+  return violations.length > 0
+    ? `the reviewer would share the worker's model family (AGT-4806): ${violations.join('; ')}`
+    : null;
 }

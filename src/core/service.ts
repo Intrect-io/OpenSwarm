@@ -300,7 +300,11 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     const { assertUnattendedAdapters, providerSwitchViolation } = await import('../adapters/unattendedPolicy.js');
     assertUnattendedAdapters(config);
     // A reviewer from the worker's model family shares its blind spots. (AGT-4806)
-    (await import('../adapters/reviewerIndependence.js')).assertIndependentReviewer(config);
+    const reviewerIndependence = await import('../adapters/reviewerIndependence.js');
+    reviewerIndependence.assertIndependentReviewer(config);
+    // A provider switch re-points every role later (override below, dashboard
+    // toggle any time); it is checked against the same rule. (#886 review)
+    reviewerIndependence.registerReviewerIndependenceConfig(config);
     const heartbeatEnabled = config.autonomous.enabled === true;
     console.log(heartbeatEnabled
       ? '[Service] Autonomous mode auto-start enabled'
@@ -454,6 +458,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     // file must not keep the daemon from starting, so it is ignored loudly instead. (AGT-4444)
     const refusedOverride = providerOverride
       ? providerSwitchViolation(providerOverride, config.autonomous.allowDelegatedAdapters)
+        ?? (await import('../adapters/reviewerIndependence.js')).providerSwitchFamilyViolation(providerOverride, config)
       : null;
     if (providerOverride && refusedOverride) {
       console.warn(`[Service] Ignoring provider override '${providerOverride.replace(/[\r\n]/g, '')}': ${refusedOverride}. `

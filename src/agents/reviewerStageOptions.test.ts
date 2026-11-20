@@ -248,8 +248,9 @@ describe('the reviewer sees only what the commit would carry (AGT-4806)', () => 
     writeFileSync(join(repo, '.venv', 'lib', 'site.py'), 'x = 1\n'); // ephemeral artifact
     mkdirSync(join(repo, 'unrelated'), { recursive: true });
     writeFileSync(join(repo, 'unrelated', 'other.py'), 'y = 2\n'); // outside the reserved write scope
+    writeFileSync(join(repo, 'cache.parquet'), 'PAR1'); // unstaged before the commit (guardUnsafeBinaryStaging)
 
-    const rejected = ['node_modules', 'adapter.py.bak', '.venv/lib/site.py', 'unrelated/other.py'];
+    const rejected = ['node_modules', 'adapter.py.bak', '.venv/lib/site.py', 'unrelated/other.py', 'cache.parquet'];
     const ctx = context(repo);
     ctx.task = { ...ctx.task, fileScope: ['adapter.py', 'tests/test_contracts.py'], fileScopeSource: 'declared' } as typeof ctx.task;
     ctx.workerResult = workerResult({ filesChanged: ['tests/test_contracts.py', 'adapter.py', ...rejected] });
