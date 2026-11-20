@@ -21,7 +21,7 @@ interface MockState {
   updated: Array<{ id: string; patch: UpdateEntityInput }>;
   statusChanges: Array<{ id: string; status: string }>;
   registerShouldThrowFor: Set<string>;
-  listCalls: Array<{ limit: number; offset: number }>;
+  listCalls: Array<{ limit: number; afterId?: string }>;
 }
 
 const state: MockState = {
@@ -46,14 +46,13 @@ vi.mock('./sqliteStore.js', () => ({
   LIST_ENTITIES_MAX_LIMIT: 2,
   getRegistryStore: () => ({
     inTransaction: (fn: () => unknown) => fn(),
-    listEntities: (filter?: { limit?: number; offset?: number }) => {
-      const limit = filter?.limit ?? state.existingEntities.length;
-      const offset = filter?.offset ?? 0;
-      state.listCalls.push({ limit, offset });
-      return {
-        entities: state.existingEntities.slice(offset, offset + limit),
-        total: state.existingEntities.length,
-      };
+    // Keyset pages ordered by id, like the real store.
+    listEntitySyncPage: (_projectId: string, afterId: string | undefined, limit: number) => {
+      state.listCalls.push({ limit, afterId });
+      return [...state.existingEntities]
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .filter((entity) => afterId === undefined || entity.id > afterId)
+        .slice(0, limit);
     },
     registerEntity: (input: RegisterEntityInput) => {
       if (state.registerShouldThrowFor.has(input.name)) {
@@ -438,7 +437,7 @@ describe('entity scanner coverage extensions', () => {
     expect(state.statusChanges).toEqual([{ id: 'src/gone.ts::goneFn', status: 'broken' }]);
   });
 
-  it('reconciles every page when the registry exceeds one listEntities page', async () => {
+  it('reconciles every page when the registry exceeds one sync page', async () => {
     await writeProjectFile('src/keep.ts', 'export function keepFn(): void {\n  return;\n}\n');
 
     // With LIST_ENTITIES_MAX_LIMIT mocked to 2, five stale entities force 3+ pages.
@@ -463,8 +462,8 @@ describe('entity scanner coverage extensions', () => {
     const result = await scanRepository(tmp, 'test-project', { allowNonRepo: true });
 
     expect(state.listCalls.length).toBeGreaterThan(1);
-    expect(state.listCalls[0]).toEqual({ limit: 2, offset: 0 });
-    expect(state.listCalls[1]).toEqual({ limit: 2, offset: 2 });
+    expect(state.listCalls[0]).toEqual({ limit: 2, afterId: undefined });
+    expect(state.listCalls[1]).toEqual({ limit: 2, afterId: 'src/stale0.ts::stale0' });
     expect(result.removed).toBe(5);
     expect(state.statusChanges.map((c) => c.id).sort()).toEqual([
       'src/stale0.ts::stale0',

@@ -57,6 +57,67 @@ describe('SqliteRegistryStore safe queries', () => {
   });
 });
 
+describe('SqliteRegistryStore bounded scanner and issue reads (AGT-3470)', () => {
+  it('walks every entity of a project in keyset pages of the light sync shape', () => {
+    const registry = createStore();
+    const ids: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      ids.push(registry.registerEntity({
+        projectId: 'p', kind: 'function', name: `fn${i}`, filePath: `src/f${i}.ts`,
+        lineStart: i + 1, signature: `fn${i}()`, hasTests: i % 2 === 0, author: 'scanner',
+      }).id);
+    }
+    registry.registerEntity({ projectId: 'other', kind: 'function', name: 'foreign', filePath: 'src/x.ts' });
+    registry.addTag(ids[0], 'layer', 'api');
+
+    const seen: string[] = [];
+    let afterId: string | undefined;
+    let pages = 0;
+    for (;;) {
+      const page = registry.listEntitySyncPage('p', afterId, 3);
+      pages++;
+      seen.push(...page.map((row) => row.id));
+      if (page.length < 3) break;
+      afterId = page.at(-1)!.id;
+    }
+
+    expect(pages).toBe(3);
+    expect(seen).toEqual([...ids].sort());
+    const first = registry.listEntitySyncPage('p', undefined, 100).find((row) => row.qualifiedName === 'src/f0.ts::fn0');
+    // Only the compared columns, with the same null→undefined mapping as CodeEntity.
+    expect(first).toEqual({
+      id: ids[0], qualifiedName: 'src/f0.ts::fn0', filePath: 'src/f0.ts', status: 'active',
+      author: 'scanner', lineStart: 1, lineEnd: undefined, signature: 'fn0()', hasTests: true,
+      testFile: undefined, complexityScore: undefined, riskLevel: expect.any(String),
+    });
+    expect(Object.keys(first!)).not.toContain('tags');
+  });
+
+  it('clamps the sync page to the store query cap', () => {
+    const registry = createStore();
+    registry.registerEntity({ projectId: 'p', kind: 'function', name: 'only', filePath: 'src/a.ts' });
+    expect(registry.listEntitySyncPage('p', undefined, LIST_ENTITIES_MAX_LIMIT * 10)).toHaveLength(1);
+    expect(registry.listEntitySyncPage('p', undefined, 0)).toHaveLength(1);
+  });
+
+  it('bounds issue-linked entities in SQL and keeps link order', () => {
+    const registry = createStore();
+    const linked = Array.from({ length: 5 }, (_, i) =>
+      registry.registerEntity({ projectId: 'p', kind: 'function', name: `l${i}`, filePath: `src/l${i}.ts` }));
+    for (const entity of linked) registry.linkIssue(entity.id, 'INT-9');
+    registry.addTag(linked[0].id, 'layer', 'api');
+
+    const limited = registry.getEntitiesByIssueId('INT-9', 'p', 3);
+    expect(limited).toHaveLength(3);
+    expect(registry.getEntitiesByIssueId('INT-9', 'p')).toHaveLength(5);
+    expect(registry.getEntitiesByIssueId('INT-9', 'p', 0)).toEqual([]);
+    // Batch hydration still fills tags and links.
+    const first = registry.getEntitiesByIssueId('INT-9', 'p').find((entity) => entity.id === linked[0].id);
+    expect(first?.tags).toEqual([{ tag: 'layer', value: 'api' }]);
+    expect(first?.linkedIssueIds).toEqual(['INT-9']);
+  });
+});
+
 describe('SqliteRegistryStore.getStats (AGT-4668)', () => {
   type Input = Parameters<SqliteRegistryStore['registerEntity']>[0];
 
