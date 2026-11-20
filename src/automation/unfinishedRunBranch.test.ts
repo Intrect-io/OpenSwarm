@@ -37,6 +37,9 @@ function repoWithBranch(files: Record<string, string>): { repo: string; remote: 
   return { repo, remote, branch };
 }
 
+// The local bare remote is not a GitHub repo; say there is no open PR on it.
+const noOpenPr = async () => null;
+
 const infra = { success: false, finalStatus: 'infra_error' as const, sessionId: 's-1', failureDetail: 'verify: ENOSPC: no space left on device' };
 
 describe('shouldKeepUnfinishedOnRemote', () => {
@@ -67,7 +70,7 @@ describe('keepUnfinishedWorkOnRemote', () => {
     const addComment = vi.fn(async () => {});
     const gh = vi.fn();
 
-    const outcome = await keepUnfinishedWorkOnRemote({ originalPath: repo, branchName: branch }, { issueId: 'uuid-1', issueIdentifier: 'AGT-1' }, infra, { source: { addComment } });
+    const outcome = await keepUnfinishedWorkOnRemote({ originalPath: repo, branchName: branch }, { issueId: 'uuid-1', issueIdentifier: 'AGT-1' }, infra, { source: { addComment }, openPullRequest: noOpenPr });
 
     expect(outcome).toMatchObject({ pushed: true, commitsAhead: 1, commented: true });
     expect(git(remote, 'branch', '--list', branch).trim()).toContain(branch);
@@ -77,8 +80,53 @@ describe('keepUnfinishedWorkOnRemote', () => {
     expect(body).toContain('Run ended `infra_error`. No pull request.');
     expect(body).toContain(`\`${branch}\` (1 commit ahead of \`origin/main\`), pushed`);
     expect(body).toContain('ENOSPC');
-    expect(key).toBe('unfinished-run:uuid-1:s-1');
+    expect(key).toBe(`unfinished-run:uuid-1:${git(repo, 'rev-parse', branch).trim()}`);
     expect(gh).not.toHaveBeenCalled();
+  });
+
+  it('never pushes WIP onto a branch an open pull request tracks', async () => {
+    const { repo, remote, branch } = repoWithBranch({ 'a.ts': 'export const a = 1;\n' });
+    const addComment = vi.fn(async () => {});
+    const openPullRequest = vi.fn(async () => 'https://github.com/o/r/pull/7');
+
+    const outcome = await keepUnfinishedWorkOnRemote({ originalPath: repo, branchName: branch }, { issueId: 'uuid-pr' }, infra, { source: { addComment }, openPullRequest });
+
+    expect(openPullRequest).toHaveBeenCalledWith(repo, branch);
+    expect(outcome.pushed).toBe(false);
+    expect(outcome.heldReason).toContain('https://github.com/o/r/pull/7');
+    expect(git(remote, 'branch', '--list', branch).trim()).toBe('');
+    expect(String((addComment.mock.calls[0] as unknown[])[1])).toContain('was not pushed');
+  });
+
+  it('keeps the branch local when the open-PR lookup cannot answer (fail closed)', async () => {
+    const { repo, remote, branch } = repoWithBranch({ 'a.ts': 'export const a = 1;\n' });
+    const outcome = await keepUnfinishedWorkOnRemote(
+      { originalPath: repo, branchName: branch }, { issueId: 'uuid-gh' }, infra,
+      { source: null, openPullRequest: async () => { throw new Error('gh: not authenticated'); } },
+    );
+    expect(outcome.pushed).toBe(false);
+    expect(outcome.heldReason).toContain('gh: not authenticated');
+    expect(git(remote, 'branch', '--list', branch).trim()).toBe('');
+  });
+
+  it('keeps the branch local when the WIP commit carries unsafe binary data', async () => {
+    const { repo, remote, branch } = repoWithBranch({ 'a.ts': 'x\n', 'features.parquet': 'PAR1' });
+    const openPullRequest = vi.fn(noOpenPr);
+    const outcome = await keepUnfinishedWorkOnRemote({ originalPath: repo, branchName: branch }, { issueId: 'uuid-bin' }, infra, { source: null, openPullRequest });
+    expect(outcome.pushed).toBe(false);
+    expect(outcome.heldReason).toContain('features.parquet');
+    expect(git(remote, 'branch', '--list', branch).trim()).toBe('');
+  });
+
+  it('a retried run with no new commits reuses the comment key, so it does not repeat the comment', async () => {
+    const { repo, branch } = repoWithBranch({ 'a.ts': 'export const a = 1;\n' });
+    const addComment = vi.fn(async () => {});
+    const deps = { source: { addComment }, openPullRequest: noOpenPr };
+    await keepUnfinishedWorkOnRemote({ originalPath: repo, branchName: branch }, { issueId: 'uuid-r' }, { ...infra, sessionId: 's-1' }, deps);
+    await keepUnfinishedWorkOnRemote({ originalPath: repo, branchName: branch }, { issueId: 'uuid-r' }, { ...infra, sessionId: 's-2' }, deps);
+    const keys = addComment.mock.calls.map((call) => (call as unknown[])[2]);
+    expect(keys[0]).toBe(keys[1]);
+    expect(keys[0]).not.toContain('s-1');
   });
 
   it('keeps the branch local when the sensitive-data fence refuses it, and says why', async () => {

@@ -9,12 +9,17 @@
 // commitAndCreatePRWithHead. This is that follow-up.
 //
 // After the worktree is preserved, an unfinished run:
-// - pushes its swarm branch, once the same two fences the PR path uses pass
-//   (write scope and sensitive data, both checked against the branch ref, so
-//   they work whether or not preserveWorktree kept the directory);
+// - pushes its swarm branch, once the fences the PR path uses pass (write
+//   scope, sensitive data and unsafe binary data, all checked against the
+//   branch ref, so they work whether or not preserveWorktree kept the
+//   directory). The WIP commit runs with --no-verify and no staging guard, so
+//   the binary check here is the only one that sees it;
+// - never pushes onto a branch an open pull request tracks: a retry of an
+//   issue that already has a reviewed PR would otherwise land failed WIP on
+//   it. A lookup that cannot answer keeps the branch local (fail closed);
 // - posts one summary comment on the issue: what ended the run, the branch,
-//   and how far it is ahead of the base. Keyed per session so a retried post
-//   does not duplicate it.
+//   and how far it is ahead of the base. Keyed per issue and branch head, so
+//   neither a retried post nor a retried run with no new commits repeats it.
 // No PR. A fence refusal keeps the branch local and says why in the comment.
 // Never throws: the run's outcome is already decided.
 
@@ -25,6 +30,8 @@ import type { WorktreeInfo } from '../support/worktreeManager.js';
 import { resolveBaseRef } from '../support/worktreeManager.js';
 import { assertBranchWithinWriteScope } from '../support/publicationScopeFence.js';
 import { assertNoSensitiveDataOnBranch } from '../support/sensitiveDataFence.js';
+import { unsafeBinaryDataOnBranch } from '../support/unsafeBinaryData.js';
+import { gh } from '../support/ghPullRequests.js';
 import { summarizeFailure } from './publishOnPark.js';
 import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeScope.js';
 import type { ITaskSource } from './taskSource.js';
@@ -55,6 +62,10 @@ export interface UnfinishedBranchDeps {
   source?: Pick<ITaskSource, 'addComment'> | null;
   checkScope?: (repoPath: string, baseRef: string, fileScope: readonly string[] | undefined, head: string) => Promise<void>;
   checkSensitive?: (repoPath: string, baseRef: string, head: string) => Promise<void>;
+  /** Unsafe binary data (.duckdb/.parquet/.pkl/.pt) the branch adds over its base. */
+  unsafeBinary?: (repoPath: string, baseRef: string, head: string) => Promise<string[]>;
+  /** URL of an open pull request whose head is this branch, or null. Throws when it cannot tell. */
+  openPullRequest?: (repoPath: string, branch: string) => Promise<string | null>;
 }
 
 export interface UnfinishedBranchOutcome {
@@ -69,6 +80,12 @@ interface UnfinishedTask {
   issueIdentifier?: string;
   fileScope?: string[];
   fileScopeSource?: FileScopeSource;
+}
+
+async function defaultOpenPullRequest(repoPath: string, branch: string): Promise<string | null> {
+  const raw = await gh(repoPath, 'pr', 'list', '--head', branch, '--state', 'open', '--json', 'url', '--limit', '1');
+  const rows = JSON.parse(raw || '[]') as Array<{ url?: string }>;
+  return rows.find((row) => row.url)?.url ?? null;
 }
 
 async function defaultGit(cwd: string, ...args: string[]): Promise<string> {
@@ -111,14 +128,29 @@ export async function keepUnfinishedWorkOnRemote(
   const repo = info.originalPath;
   const branch = info.branchName;
   let baseRef = 'the base branch';
+  let headSha: string | undefined;
   try {
     const base = await (deps.resolveBase ?? resolveBaseRef)(repo);
     baseRef = base.ref;
     outcome.commitsAhead = parseInt((await git(repo, 'rev-list', '--count', `${base.ref}..${branch}`)).trim(), 10) || 0;
+    headSha = (await git(repo, 'rev-parse', '--verify', `${branch}^{commit}`).catch(() => '')).trim() || undefined;
     if (outcome.commitsAhead > 0) {
       try {
         await (deps.checkScope ?? assertBranchWithinWriteScope)(repo, base.ref, enforcedFileScope(task), branch);
         await (deps.checkSensitive ?? assertNoSensitiveDataOnBranch)(repo, base.ref, branch);
+        const binaries = await (deps.unsafeBinary ?? unsafeBinaryDataOnBranch)(repo, base.ref, branch);
+        if (binaries.length > 0) {
+          throw new Error(`the branch carries unsafe binary data the PR path never publishes (INT-2430): ${binaries.join(', ')}`);
+        }
+        let openPr: string | null;
+        try {
+          openPr = await (deps.openPullRequest ?? defaultOpenPullRequest)(repo, branch);
+        } catch (error) {
+          throw new Error(`could not check for an open pull request on the branch, so it was not pushed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (openPr) {
+          throw new Error(`an open pull request (${openPr}) already tracks this branch; pushing unfinished work would land on it`);
+        }
         await git(repo, 'push', '-u', base.remote, `${branch}:${branch}`, '--force-with-lease');
         outcome.pushed = true;
       } catch (error) {
@@ -140,7 +172,7 @@ export async function keepUnfinishedWorkOnRemote(
         pushed: outcome.pushed,
         heldReason: outcome.heldReason,
         failure: result.failureDetail,
-      }), `unfinished-run:${task.issueId}:${result.sessionId}`);
+      }), `unfinished-run:${task.issueId}:${headSha ?? result.sessionId}`);
       outcome.commented = true;
     } catch (error) {
       console.warn(`[Runner] Unfinished-run comment failed for ${task.issueIdentifier ?? task.issueId}:`, error);
