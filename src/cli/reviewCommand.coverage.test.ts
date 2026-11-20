@@ -52,6 +52,9 @@ const runReviewerMock = vi.fn();
 vi.mock('../agents/reviewer.js', () => ({
   runReviewer: runReviewerMock,
 }));
+// The default review path reads the registry default for its budget (AGT-4313
+// review); the real registry pulls in every adapter and child_process.execFile.
+vi.mock('../adapters/index.js', () => ({ getDefaultAdapterName: () => 'codex' }));
 
 // The advisor is a second model on the same diff; it is injected here so the
 // integration (does reviewCommand actually route the merged result, and does a
