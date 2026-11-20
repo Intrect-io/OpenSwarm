@@ -451,6 +451,11 @@ export type ProjectAgentConfig = {
    */
   setup?: string[];
   /**
+   * Definition of Ready gate (AGT-4805): a Todo issue needs acceptance criteria, an out-of-scope
+   * note and a verify command before it is claimed. Absent = on; `false` opts this project out.
+   */
+  requireDefinitionOfReady?: boolean;
+  /**
    * Standing goal for every task in this project (AGT-4662). The draft, worker,
    * reviewer and planner all read it, and the draft may decline a task that
    * cannot serve it before any worktree is created.
@@ -730,12 +735,26 @@ export type AutonomousStartupConfig = {
    */
   spend?: { maxCostUsdPerDay?: number; unknownAttemptCostUsd?: number };
   /**
+   * Spend budgets (AGT-4807). `perProjectDailyUsd` is the daily ceiling for
+   * every project whose `openswarm.json` sets none (`automation.maxCostUsdPerDay`
+   * wins when set); a project over it stops dispatching until 00:00 UTC and
+   * alerts once. `perIssueUsd` caps what one issue may spend since an operator
+   * last resumed it; past it the issue parks NEEDS_HUMAN with one comment.
+   */
+  budget?: { perProjectDailyUsd?: number; perIssueUsd?: number };
+  /**
    * Run unattended work on delegated CLI adapters (claude/codex/cursor) even
    * though OpenSwarm's publication fence, protected files and credential-free
    * shell do not reach them (AGT-4444). Default false: the daemon refuses to
    * start when such an adapter is configured.
    */
   allowDelegatedAdapters?: boolean;
+  /**
+   * Accept a reviewer from the worker's own model family (AGT-4806). Default
+   * false: the daemon refuses to start when the reviewer's resolved model
+   * family is the worker's, or cannot be shown to differ.
+   */
+  allowSameFamilyReview?: boolean;
   periodicReviews?: Array<{ profile: 'permissions' | 'hygiene' | 'security' | 'review'; schedule: string; adapter?: 'codex' | 'cc-router' | 'cursor' }>;
   /** Explicit high-capability project supervisor. */
   orchestrator?: OrchestratorConfig;

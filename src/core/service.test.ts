@@ -204,7 +204,7 @@ describe('service', () => {
     autonomous: {
       // These tests exercise boot behaviour on adapter 'claude'; the adapter
       // policy itself is covered in unattendedPolicy.test.ts. (AGT-4444)
-      allowDelegatedAdapters: true,
+      allowDelegatedAdapters: true, allowSameFamilyReview: true, // on 'claude' both roles run the claude default (#886)
       enabled: true,
       pairMode: true,
       schedule: '*/30 * * * *',
@@ -809,7 +809,7 @@ describe('service', () => {
       const configWithAutonomous: SwarmConfig = {
         ...mockConfig,
         autonomous: {
-          allowDelegatedAdapters: true,
+          allowDelegatedAdapters: true, allowSameFamilyReview: true, // this test starts the service; the policies have their own tests
           enabled: true,
           pairMode: true,
           schedule: '*/30 * * * *',

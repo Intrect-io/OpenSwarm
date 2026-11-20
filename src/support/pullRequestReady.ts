@@ -65,3 +65,33 @@ export async function readyReusedPullRequest(
   }
   await markPullRequestReady(worktreePath, prUrl);
 }
+
+/** The `## Risk: …` section changeRiskSection renders, up to the next heading. */
+const RISK_SECTION = /^## Risk: (?:low|medium|high)\n(?:(?!## )[^\n]*\n?)*/m;
+
+/** Put `section` into `body` in place of its `## Risk:` section, or append it. Pure. */
+export function withRiskSection(body: string, section: string): string {
+  const block = `${section.trimEnd()}\n`;
+  if (RISK_SECTION.test(body)) {
+    return body.replace(RISK_SECTION, (match: string, offset: number) => (offset + match.length < body.length ? `${block}\n` : block));
+  }
+  return `${body.trimEnd()}\n\n${block}`;
+}
+
+/**
+ * Show the change's risk on a PR that was reused instead of created (#884 review,
+ * AGT-4804). A run that parked first opens its draft without a risk section, and
+ * the later approved publication reuses that PR, so without this the class never
+ * reached the PR the merge policy reads. Best-effort: the publication itself
+ * already succeeded, so a failed edit is a warning, not a retryable failure.
+ */
+export async function upsertPullRequestRiskSection(worktreePath: string, prUrl: string, section: string): Promise<void> {
+  try {
+    const body = await gh(worktreePath, 'pr', 'view', prUrl, '--json', 'body', '--jq', '.body');
+    const next = withRiskSection(body.replace(/\n$/, ''), section);
+    if (next.trimEnd() === body.trimEnd()) return;
+    await gh(worktreePath, 'pr', 'edit', prUrl, '--body', next);
+  } catch (error) {
+    console.warn(`[Worktree] Could not update the risk section on ${prUrl}:`, error instanceof Error ? error.message : error);
+  }
+}

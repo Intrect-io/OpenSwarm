@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { getResumedTaskFiles } from './worktreeResumeFiles.js';
 import { stagePreservableWorktreeChanges, purgeTrackedEphemeralArtifacts } from './worktreeEphemeralOps.js';
 import { getInstanceId } from './healthEndpoint.js';
-import { readyReusedPullRequest } from './pullRequestReady.js';
+import { readyReusedPullRequest, upsertPullRequestRiskSection } from './pullRequestReady.js';
 import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from './processLiveness.js';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import Database from 'better-sqlite3';
@@ -19,7 +19,7 @@ import { runConventionalCommitGuard } from '../agents/pipelineGuards.js';
 import type { VerifyConfig } from '../core/types.js';
 import { regressedAgainstFreshBase } from './publicationRegressionProbe.js';
 import { publicationCommitSubject } from './publicationCommitMessage.js';
-import { changeShapeSection } from './publicationChangeShape.js';
+import { changeRiskSection, changeShapeSection, publicationRisk, type ChangeRisk } from './publicationChangeShape.js';
 import { baseFreshnessSection, probeBaseFreshness } from './publicationBaseFreshness.js';
 import { publicationClaimEvidence } from './publicationClaimEvidence.js';
 import { loadRepoMetadata } from './repoMetadata.js';
@@ -1046,13 +1046,13 @@ async function findOpenPullRequestUrl(worktreePath: string, branchName: string):
 }
 
 /** PR URL plus the immutable commit this publication call pushed. */
-export type PublishedPullRequest = { prUrl: string; headSha: string };
+export type PublishedPullRequest = { prUrl: string; headSha: string; risk?: ChangeRisk };
 export async function commitAndCreatePRWithHead(
   info: WorktreeInfo,
   title: string,
   issueIdentifier: string,
   description: string,
-  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig } = {},
+  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig; protectedFiles?: string[] } = {},
 ): Promise<PublishedPullRequest> {
   const { worktreePath, branchName } = info;
 
@@ -1168,7 +1168,7 @@ export async function commitAndCreatePRWithHead(
     );
   }
 
-  // If PR already exists, just return the URL
+  const risk = await publicationRisk(info.originalPath, worktreePath, base.ref, options.protectedFiles); // AGT-4804; then reuse an open PR if one exists
   const existing = await findOpenPullRequestUrl(worktreePath, branchName)
     .catch((e) => { console.warn(`[Worktree] PR list check failed for ${branchName}:`, e); return ''; });
 
@@ -1188,7 +1188,7 @@ export async function commitAndCreatePRWithHead(
       const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
       await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
     }
-    return { prUrl: existing, headSha };
+    await upsertPullRequestRiskSection(worktreePath, existing, changeRiskSection(risk)); return { prUrl: existing, headSha, risk }; // #884 review
   }
 
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
@@ -1218,7 +1218,7 @@ export async function commitAndCreatePRWithHead(
   const basePrBody = [
     '## Summary',
     description || `${issueIdentifier}: ${title}`,
-    ...(shapeSection ? ['', shapeSection] : []),
+    ...(shapeSection ? ['', shapeSection] : []), '', changeRiskSection(risk),
     ...(freshnessSection ? ['', freshnessSection] : []),
     ...(overlapSection ? ['', overlapSection] : []),
     ...(duplicateSection ? ['', duplicateSection] : []),
@@ -1254,10 +1254,10 @@ export async function commitAndCreatePRWithHead(
     // The winner may have opened it as a draft (a parked run does). Losing the
     // race must not turn a reviewed publication into a hidden draft. Reuses the
     // duplicate set already computed above rather than re-querying. `regressed`
-    // was computed above too, before this branch even knew whether it would
-    // create or reuse a PR — a merged-result regression (AGT-4465) must block
+    // was computed above too, before this branch knew whether it would create or reuse a PR — a merged-result regression (AGT-4465) must block
     // promotion here exactly as it does on the non-raced path.
     if (!options.draft && !conflicting && !regressed && claimEvidence.ready) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
+    await upsertPullRequestRiskSection(worktreePath, url, changeRiskSection(risk)); // #884 review: the raced PR lacks the risk section too
   }
 
   // Register PR ownership for conflict auto-resolution
@@ -1276,7 +1276,7 @@ export async function commitAndCreatePRWithHead(
     }
   }
 
-  return { prUrl: url, headSha };
+  return { prUrl: url, headSha, risk };
 }
 
 /** Backwards-compatible URL-only publication surface. */

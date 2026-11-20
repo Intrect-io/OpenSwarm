@@ -93,6 +93,19 @@ const RepoMetadataSchema = z.object({
      * as they stood (AGT-4263).
      */
     freshReview: z.boolean().default(true),
+    /**
+     * Per-project change-risk rules (AGT-4804), added on top of the default
+     * classifier in `changeRisk.ts`. Globs; `**` spans directories.
+     */
+    risk: z.object({
+      highPaths: z.array(z.string().min(1)).optional(),
+      mediumPaths: z.array(z.string().min(1)).optional(),
+      protectedPaths: z.array(z.string().min(1)).optional(),
+      lowMaxFiles: z.number().int().min(0).optional(),
+      lowMaxLines: z.number().int().min(0).optional(),
+      mediumMaxFiles: z.number().int().min(0).optional(),
+      mediumMaxLines: z.number().int().min(0).optional(),
+    }).optional(),
   }).optional(),
   /** Free-form notes the swarm should keep in mind. */
   notes: z.string().optional(),
@@ -173,6 +186,19 @@ export async function saveRepoMetadata(repoPath: string, meta: RepoMetadata): Pr
  * a missing/malformed file yields `undefined` (the caller then falls back to an
  * effort-derived or default timeout). Never throws. (INT-2415)
  */
+/**
+ * The repository's `publication.risk` rules, or undefined (the default
+ * classifier then applies alone). Never throws: an unreadable file must not
+ * make a change look safer, and the default rules are the conservative ones.
+ */
+export async function loadPublicationRiskRules(repoPath: string): Promise<NonNullable<RepoMetadata['publication']>['risk']> {
+  try {
+    return (await loadRepoMetadata(repoPath))?.publication?.risk;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Whether published PRs from this repository get the fresh review. On by
  * default; a repository turns it off with `publication.freshReview: false`.

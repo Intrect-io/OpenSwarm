@@ -233,8 +233,7 @@ const ProjectRolesOverrideSchema = z.object({
 const ProjectAgentConfigSchema = z.object({
   /** Project path */
   projectPath: z.string().min(1),
-  /** Linear project ID */
-  linearProjectId: z.string().optional(),
+  linearProjectId: z.string().optional(), // Linear project ID
   generatedOutputRules: z.array(z.object({
     command: z.string().min(1),
     outputs: z.array(z.string().min(1)).min(1),
@@ -243,6 +242,7 @@ const ProjectAgentConfigSchema = z.object({
   goal: z.string().trim().min(1).max(MAX_PROJECT_GOAL_CHARS).optional(),
   /** Dependency install commands run before the worker, network open, no credentials (AGT-4798) */
   setup: z.array(z.string().trim().min(1)).optional(),
+  requireDefinitionOfReady: z.boolean().optional(), // Definition of Ready gate (AGT-4805): absent = on, false opts out
   /** Per-role configuration override */
   roles: ProjectRolesOverrideSchema,
 });
@@ -483,9 +483,9 @@ const AutonomousConfigSchema = z.object({
    */
   workerSandbox: z.enum(['on', 'off']).default('on'),
   /** Daemon-wide daily spend ceiling across repositories, and the estimate per attempt with no recorded cost (runLedgerCost.ts) */
-  spend: z.object({ maxCostUsdPerDay: z.number().positive().optional(), unknownAttemptCostUsd: z.number().min(0).optional() }).optional(),
+  spend: z.object({ maxCostUsdPerDay: z.number().positive().optional(), unknownAttemptCostUsd: z.number().min(0).optional() }).optional(), budget: z.object({ perProjectDailyUsd: z.number().positive().optional(), perIssueUsd: z.number().positive().optional() }).optional(), // budget: AGT-4807
   /** Accept delegated CLI adapters (claude/codex/cursor) for unattended work despite the missing fences (AGT-4444) */
-  allowDelegatedAdapters: z.boolean().default(false),
+  allowDelegatedAdapters: z.boolean().default(false), allowSameFamilyReview: z.boolean().default(false), // the latter: AGT-4806, reviewerIndependence.ts
   /** Free disk space (GiB) below which dispatch pauses; 0 switches the check off (AGT-4785) */
   minFreeDiskGiB: z.number().min(0).default(10),
   /** Network for the worker's shell: loopback only (default) or open (AGT-4798) */
@@ -897,8 +897,8 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       adapterRouting: raw.autonomous.adapterRouting,
       workerSandbox: raw.autonomous.workerSandbox,
       workerNetwork: raw.autonomous.workerNetwork,
-      minFreeDiskGiB: raw.autonomous.minFreeDiskGiB, spend: raw.autonomous.spend,
-      allowDelegatedAdapters: raw.autonomous.allowDelegatedAdapters,
+      minFreeDiskGiB: raw.autonomous.minFreeDiskGiB, spend: raw.autonomous.spend, budget: raw.autonomous.budget,
+      allowDelegatedAdapters: raw.autonomous.allowDelegatedAdapters, allowSameFamilyReview: raw.autonomous.allowSameFamilyReview,
       periodicReviews: raw.autonomous.periodicReviews,
       orchestrator: raw.autonomous.orchestrator,
       orchestratorSchedule: raw.autonomous.orchestratorSchedule,

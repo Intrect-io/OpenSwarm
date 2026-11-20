@@ -102,7 +102,7 @@ export interface RepositoryAdmissionPolicy {
   unknownScopeAdmission?: 'serialize' | 'admit';
   maxAttemptsPerHour?: number;
   maxFailuresPerHour?: number;
-  maxCostUsdPerDay?: number; globalMaxCostUsdPerDay?: number; unknownAttemptCostUsd?: number; // runLedgerCost.ts
+  maxCostUsdPerDay?: number; globalMaxCostUsdPerDay?: number; unknownAttemptCostUsd?: number; maxCostUsdPerIssue?: number; // runLedgerCost.ts
   circuitCooldownMs?: number;
 }
 
@@ -707,7 +707,7 @@ export class DurableRunCoordinator {
 
     let result: PipelineResult;
     try {
-      result = await executor(hooks, leaseAbortController.signal);
+      result = this.ledger.issueBudgetPark(task, projectPath, admission?.maxCostUsdPerIssue, claim, admission?.unknownAttemptCostUsd) ?? await executor(hooks, leaseAbortController.signal); // AGT-4807
     } catch (error) {
       clearInterval(renewTimer);
       this.ledger.recordAttemptResult(claim, {
@@ -794,7 +794,7 @@ export class DurableRunCoordinator {
         // to is disabled by default and the `log` event has no subscriber in
         // the daemon. Without this the row could not say what `bsDetector`
         // objected to on three cgf-portal tasks (AGT-4439).
-        guardWarnings: result.guardWarnings,
+        guardWarnings: result.guardWarnings, changeRisk: result.changeRisk, // risk class: AGT-4804
       },
       maxFailuresPerHour: options.admission?.maxFailuresPerHour,
       circuitCooldownMs: options.admission?.circuitCooldownMs,

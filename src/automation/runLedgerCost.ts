@@ -20,6 +20,7 @@
 //     money spent, not a claim about the run).
 
 import type Database from 'better-sqlite3';
+import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 
 /** Estimate per cost-less attempt when there is no recent known cost to average. */
 export const DEFAULT_UNKNOWN_ATTEMPT_COST_USD = 0.1;
@@ -145,4 +146,153 @@ export function unknownCostRatio(db: Database.Database, now: number, windowMs = 
   `).get(now - windowMs) as { attempts: number; unknown: number | null };
   const unknown = row.unknown ?? 0;
   return { attempts: row.attempts, unknown, ratio: row.attempts > 0 ? unknown / row.attempts : 0 };
+}
+
+// ============================================
+// Budgets (AGT-4807): one alert per tripped project day, and a per-issue cap
+// ============================================
+//
+// On 2026-10-20 single issues were retried up to 18 times (AGT-4787). The daily
+// ceilings above stop a project, but they did so silently, and nothing capped
+// what one issue may spend.
+
+/** NEEDS_HUMAN code for an issue whose own spend reached `autonomous.budget.perIssueUsd`. */
+export const ISSUE_BUDGET_PARK_REASON = 'issue_budget_exhausted';
+
+/** Where a budget alert goes. The daemon's notifier by default; tests replace it. */
+export type BudgetAlertSink = (message: string) => void | Promise<void>;
+
+const defaultBudgetAlertSink: BudgetAlertSink = async (message) => {
+  // Loaded lazily: the notifier lives with the runner, and this module is also
+  // loaded by the CLI and tests, which must not pull the runner in.
+  const { reportToDiscord } = await import('./runnerExecution.js');
+  await reportToDiscord(message);
+};
+
+let budgetAlertSink: BudgetAlertSink = defaultBudgetAlertSink;
+
+/** Replace the alert sink (tests); `undefined` restores the notifier. */
+export function setBudgetAlertSink(sink: BudgetAlertSink | undefined): void {
+  budgetAlertSink = sink ?? defaultBudgetAlertSink;
+}
+
+const alertTables = new WeakSet<Database.Database>();
+
+function ensureAlertTable(db: Database.Database): void {
+  if (alertTables.has(db)) return;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_budget_alerts (
+      scope TEXT NOT NULL,
+      day_start INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (scope, day_start)
+    )
+  `);
+  alertTables.add(db);
+}
+
+/**
+ * Alert once per scope and UTC day that its daily budget tripped. The row is
+ * written in the caller's transaction (the claim), so two daemons racing on
+ * the same project still produce one row, and the alert is sent after the
+ * current tick so a rolled-back claim cannot have alerted first.
+ */
+function alertOncePerDay(db: Database.Database, scope: string, reason: string, now: number): void {
+  ensureAlertTable(db);
+  const inserted = db.prepare(`
+    INSERT OR IGNORE INTO automation_budget_alerts(scope, day_start, reason, created_at) VALUES (?, ?, ?, ?)
+  `).run(scope, utcDayStart(now), reason, now);
+  if (inserted.changes !== 1) return;
+  const sink = budgetAlertSink;
+  setImmediate(() => {
+    Promise.resolve(sink(`[OpenSwarm] ${reason} — dispatch for ${scope} is paused until 00:00 UTC.`))
+      .catch((err) => console.warn('[Budget] Alert delivery failed:', err instanceof Error ? err.message : err));
+  });
+}
+
+/**
+ * `costCeilingReason`, plus the one alert per tripped day. The claim path calls
+ * this one; the alert is a side effect `costCeilingReason` itself stays free of.
+ */
+export function costCeilingReasonWithAlert(
+  db: Database.Database,
+  options: CostCeilingOptions,
+  projectPath: string,
+  now: number,
+): string | null {
+  const reason = costCeilingReason(db, options, projectPath, now);
+  if (reason) alertOncePerDay(db, reason.startsWith('daemon-wide') ? 'daemon-wide' : projectPath, reason, now);
+  return reason;
+}
+
+/**
+ * What one issue has spent since an operator last lifted ITS BUDGET PARK. Only
+ * a resume of an `issue_budget_exhausted` park resets the count: every other
+ * resume (idle fill, an ephemeral-path park, an answered question) also writes
+ * `operator_resumed`, and letting those reset it would let the AGT-4787 retry
+ * loop spend forever. The attempt now being claimed is excluded:
+ * it has spent nothing yet, and counting it at the estimate would park an
+ * issue for money it never spent.
+ */
+export function issueSpend(
+  db: Database.Database,
+  issueId: string,
+  now: number,
+  options: { excludeAttemptNo?: number; unknownAttemptCostUsd?: number } = {},
+): DailySpend {
+  const resumed = db.prepare(`
+    SELECT MAX(created_at) AS at FROM automation_events
+    WHERE issue_id = ? AND kind = 'operator_resumed'
+      AND json_extract(data_json, '$.parkedUnder') = ?
+  `).get(issueId, ISSUE_BUDGET_PARK_REASON) as { at: number | null };
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(cost_usd), 0) AS known,
+           SUM(CASE WHEN cost_usd IS NULL
+                     AND COALESCE(result_status, '') NOT IN (${NO_SPEND_STATUSES.map(() => '?').join(', ')})
+                    THEN 1 ELSE 0 END) AS unknown
+    FROM automation_attempts
+    WHERE issue_id = ? AND started_at >= ? AND attempt_no != ?
+      AND COALESCE(result_status, '') != 'operator_remediated'
+  `).get(...NO_SPEND_STATUSES, issueId, resumed.at ?? 0, options.excludeAttemptNo ?? -1) as { known: number; unknown: number | null };
+  const unknownAttempts = row.unknown ?? 0;
+  const estimate = unknownAttempts > 0 ? unknownAttemptEstimateUsd(db, now, options.unknownAttemptCostUsd) : 0;
+  return { knownUsd: row.known, unknownAttempts, totalUsd: row.known + unknownAttempts * estimate, estimatePerUnknownUsd: estimate };
+}
+
+function usd(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+/**
+ * The park for an issue over its budget, or null. Returned in place of running
+ * the pipeline: the coordinator parks the run NEEDS_HUMAN under
+ * `ISSUE_BUDGET_PARK_REASON`, and the runner posts the one tracker comment
+ * every operator park gets, carrying the spend below. The attempt records a
+ * cost of zero — it ran no model — so the park itself adds no spend.
+ */
+export function issueBudgetPark(
+  spend: DailySpend,
+  capUsd: number | undefined,
+  task: { issueId?: string; id: string; issueIdentifier?: string; title: string },
+  projectPath: string,
+): PipelineResult | null {
+  if (capUsd == null || spend.totalUsd < capUsd) return null;
+  const unknown = spend.unknownAttempts > 0
+    ? ` — ${usd(spend.knownUsd)} recorded plus ${spend.unknownAttempts} attempt(s) without a recorded cost at ~${usd(spend.estimatePerUnknownUsd)} each`
+    : '';
+  const reason = `[OpenSwarm] This issue has spent ${usd(spend.totalUsd)} of its ${usd(capUsd)} budget`
+    + ` (autonomous.budget.perIssueUsd)${unknown}. Raise the budget or narrow the issue, then dispatch it from the dashboard issue board to resume; moving it back to Todo alone does not lift a budget park.`;
+  return {
+    success: false,
+    sessionId: `issue-budget-${Date.now()}`,
+    stages: [],
+    finalStatus: 'failed',
+    totalDuration: 0,
+    iterations: 0,
+    totalCost: { costUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, durationMs: 0 },
+    failureDetail: reason,
+    operatorPark: { code: ISSUE_BUDGET_PARK_REASON, reason },
+    taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectPath, taskTitle: task.title },
+  };
 }

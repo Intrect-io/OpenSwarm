@@ -90,6 +90,8 @@ export interface AutonomousConfig {
   minFreeDiskGiB?: number;
   /** Daemon-wide spend ceiling and unknown-cost estimate (round-1 redteam B-F2, runLedgerCost.ts). */
   spend?: { maxCostUsdPerDay?: number; unknownAttemptCostUsd?: number };
+  /** Per-project daily and per-issue spend budgets (AGT-4807, runLedgerCost.ts). */
+  budget?: { perProjectDailyUsd?: number; perIssueUsd?: number };
   /** Operator opt-in to delegated CLI adapters; the runner reads it when the provider is switched (AGT-4444). */
   allowDelegatedAdapters?: boolean;
   /** Periodic read-only repository review jobs. */

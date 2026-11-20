@@ -66,9 +66,9 @@ export async function guardUnsafeBinaryStaging(worktreePath: string): Promise<vo
  * runs no guard on purpose because unstaging there would strip a file from the
  * only copy that outlives the worktree. Gate the *push* on this instead.
  */
-export async function unsafeBinaryDataOnBranch(worktreePath: string, baseRef: string): Promise<string[]> {
+export async function unsafeBinaryDataOnBranch(worktreePath: string, baseRef: string, head = 'HEAD'): Promise<string[]> {
   try {
-    const files = toLines(await git(worktreePath, 'diff', '--name-only', `${baseRef}...HEAD`));
+    const files = toLines(await git(worktreePath, 'diff', '--name-only', `${baseRef}...${head}`));
     return files.filter((f) => UNSAFE_BINARY_DATA_RE.test(f));
   } catch {
     return [UNRESOLVED_BASE];

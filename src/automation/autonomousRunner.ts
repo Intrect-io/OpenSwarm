@@ -77,7 +77,7 @@ import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState, upsertTaskState } from '../taskState/store.js';
 import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
-import { providerSwitchViolation } from '../adapters/unattendedPolicy.js';
+import { providerSwitchViolation } from '../adapters/unattendedPolicy.js'; import { providerSwitchFamilyViolation } from '../adapters/reviewerIndependence.js';
 import {
   findPullRequestForBranch,
   inspectWorktreeRecovery,
@@ -137,7 +137,7 @@ import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
 import { scopeDeclineComment, scopeDeclineMarker } from './draftGrooming.js';
-import { evaluateReadiness, formatReadinessSummary, partitionByReadiness, verdictFromDraft } from './readinessGate.js';
+import { evaluateReadiness, formatReadinessSummary, verdictFromDraft } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
 import { isScopeDeclined } from '../agents/draftScope.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
 import { completeParentIfChildrenDone as completeParentLocally, buildTaskStateSyncComment } from '../taskState/store.js';
@@ -1358,12 +1358,12 @@ export class AutonomousRunner {
         // The same-fingerprint infra circuit parks a run so that an operator
         // changes something before it runs again; a free slot changes nothing.
         // Resuming it by idle fill re-runs a known-broken environment every
-        // heartbeat (AGT-4306). Only an explicit dispatch or a tracker Todo
+        // heartbeat (AGT-4306). Only an explicit dispatch (board/work API)
         // lifts that park — the resume paths that carry an operator's hand.
         const isInfraCircuitPark = durableRun?.lastErrorCode === INFRA_CIRCUIT_PARK_REASON
           // A blocker the reviewer confirmed is a claim about the task text; a
           // free slot re-runs the same text into the same confirmed claim
-          // (AGT-4535). Explicit dispatch or a tracker Todo lifts it.
+          // (AGT-4535). Only an explicit dispatch lifts it; Todo alone does not.
           || durableRun?.lastErrorCode === VERIFIED_WORKER_BLOCKER_PARK_REASON
           || durableRun?.lastErrorCode === RECOVERY_ADVISOR_PARK_REASON
           || durableRun?.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON;
@@ -1729,7 +1729,7 @@ export class AutonomousRunner {
         // independent safety boundaries.
         maxAttemptsPerHour: metadata?.automation?.maxAttemptsPerHour,
         maxFailuresPerHour: metadata?.automation?.maxFailuresPerHour ?? 6,
-        maxCostUsdPerDay: metadata?.automation?.maxCostUsdPerDay, globalMaxCostUsdPerDay: this.config.spend?.maxCostUsdPerDay, unknownAttemptCostUsd: this.config.spend?.unknownAttemptCostUsd,
+        maxCostUsdPerDay: metadata?.automation?.maxCostUsdPerDay ?? this.config.budget?.perProjectDailyUsd, globalMaxCostUsdPerDay: this.config.spend?.maxCostUsdPerDay, unknownAttemptCostUsd: this.config.spend?.unknownAttemptCostUsd, maxCostUsdPerIssue: this.config.budget?.perIssueUsd, // budget: AGT-4807
         circuitCooldownMs: (metadata?.automation?.circuitCooldownMinutes ?? 60) * 60_000,
       };
     } catch (error) {
@@ -2933,9 +2933,9 @@ export class AutonomousRunner {
       // state: a Backlog issue must not reach `filterAlreadyProcessed`, whose idle fill would lift
       // a park on it. (AGT-4784)
       const skipConfig = this.config.skip ?? DEFAULT_AGENT_SKIP;
-      const { ready: readyTasks, held: notReady } = partitionByReadiness(tasks, {
-        exclusionLabels: skipConfig.labels,
-        includeBacklog: this.config.includeBacklog ?? false,
+      const { ready: readyTasks, held: notReady } = await partitionByDefinitionOfReady(tasks, {
+        exclusionLabels: skipConfig.labels, includeBacklog: this.config.includeBacklog ?? false,
+        definitionOfReady: definitionOfReadyHooks(this.config.projectAgents, getTaskSource(), (t) => this.resolveProjectPath(t)), // AGT-4805
       });
       for (const line of formatReadinessSummary(notReady)) this.syslog(line);
       const { eligible: agentTasks, skipped: humanOwned } = partitionHumanOwned(readyTasks, skipConfig);
@@ -4020,7 +4020,7 @@ export class AutonomousRunner {
    * process (the dashboard toggle, `openswarm provider`) ask this before `switchProvider`.
    */
   providerSwitchViolation(adapter: AdapterName): string | null {
-    return providerSwitchViolation(adapter, this.config.allowDelegatedAdapters);
+    return providerSwitchViolation(adapter, this.config.allowDelegatedAdapters) ?? providerSwitchFamilyViolation(adapter); // nor same-family review (#886)
   }
 
   switchProvider(adapter: AdapterName): void {

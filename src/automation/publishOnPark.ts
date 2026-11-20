@@ -22,11 +22,13 @@
 //
 // Split out of runnerExecution.ts, which sits on the 1500-line pre-commit cap.
 
+import type { ChangeRisk } from '../support/changeRisk.js';
 import { broadcastEvent } from '../core/eventHub.js';
 import { enforcedFileScope, type FileScopeSource } from '../orchestration/writeScope.js';
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { SensitiveDataError } from '../support/sensitiveDataFence.js';
 import { commitAndCreatePRWithHead, type WorktreeInfo } from '../support/worktreeManager.js';
+import { computeProtectedFiles } from '../agents/protectedFiles.js';
 import type { PipelineResult } from '../agents/pairPipelineTypes.js';
 import { WORKER_NO_CHANGES_PARK_REASON, WORKER_NO_CHANGES_STATEMENT_PREFIX } from '../agents/pairPipelineTypes.js';
 import type { VerifyConfig } from '../core/types.js';
@@ -57,6 +59,8 @@ export interface PublishableResult extends StageBoundaryResults {
   success?: boolean;
   finalStatus?: string;
   prUrl?: string;
+  /** Risk class of the published diff (AGT-4804), recorded with the attempt. */
+  changeRisk?: ChangeRisk;
   workerResult?: { executionOutcomeUnknown?: boolean; noChangesReason?: string };
   operatorPark?: { code: string; reason: string };
 }
@@ -347,10 +351,13 @@ export async function publishApprovedWork(
           task.title,
           task.issueIdentifier || '',
           task.description || '',
-          { fileScope: enforcedFileScope(task), verify },
+          // The grader files the worker was told not to edit (base tests, verify
+          // config): a change to one is high risk on the PR (AGT-4804, #884 review).
+          { fileScope: enforcedFileScope(task), verify, protectedFiles: await computeProtectedFiles(worktreeInfo.originalPath, task) },
         );
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;
+        if (publication.risk) result.changeRisk = publication.risk;
         const publicationRecorded = await durability?.onPublication(prUrl, headSha) ?? true;
         if (!publicationRecorded) {
           throw new Error('Durable lease fence rejected publication attachment');
@@ -450,7 +457,7 @@ const PERCENT_MARK = /\s\[\s*\d{1,3}%\]/g;
 const SUMMARY_CAP = 500;
 const SUMMARY_HEAD = 150;
 
-/** One line of a failure detail, bounded. Built for a draft PR body (AGT-4672); no caller since AGT-4786. */
+/** One line of a failure detail, bounded (AGT-4672). Used by the unfinished-run comment (AGT-4786). */
 export function summarizeFailure(detail: string | undefined): string {
   const flat = (detail ?? '')
     .replace(/\s+/g, ' ')
@@ -481,10 +488,9 @@ export function summarizeFailure(detail: string | undefined): string {
  * `reviewHook` builds the post-publication review for 1 and 3; 2 gets the
  * rolling-back variant.
  *
- * `opts` is kept for the call site's sake and is no longer read: `lifecycleFailed`
- * and `failureSummary` only fed the unfinished-run draft that this no longer opens.
- * `summarizeFailure` stays as a tested pure function for the tracker comment the
- * follow-up will write.
+ * An unfinished run's branch is pushed, with one summary comment and no PR, by
+ * `keepUnfinishedWorkOnRemote` (unfinishedRunBranch.ts) after the worktree is
+ * preserved, which is when its WIP commit exists.
  */
 export async function publishFinishedRun(
   worktreeInfo: WorktreeInfo | null | undefined,
@@ -493,8 +499,6 @@ export async function publishFinishedRun(
   durability: ExecutionDurabilityHooks | undefined,
   reviewHook: (rollbackOnRejection: boolean) => ApprovedPublicationHook | undefined,
   verify?: VerifyConfig,
-  // Not read (see above); typed so the call site keeps compiling.
-  _opts: { lifecycleFailed?: boolean; failureSummary?: string } = {},
 ): Promise<void> {
   const parkedPublished = await publishParkedIfNeeded(worktreeInfo, task, result, durability, reviewHook(false));
 

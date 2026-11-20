@@ -6,6 +6,8 @@ vi.mock('../support/worktreeManager.js', () => ({ commitAndCreatePRWithHead }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
 // The worktrees here are fake paths; the gate itself is tested in testRemovalGate.test.ts.
 vi.mock('./testRemovalGate.js', () => ({ TEST_REMOVAL_PARK_REASON: 'active_tests_removed', testRemovalHold: async () => null }));
+const computeProtectedFiles = vi.hoisted(() => vi.fn(async () => [] as string[]));
+vi.mock('../agents/protectedFiles.js', () => ({ computeProtectedFiles }));
 
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishFinishedRun, publishParkedIfNeeded, publishParkedWork, publishStuckWork, shouldPublishParkedWork, summarizeFailure } from './publishOnPark.js';
@@ -429,7 +431,7 @@ describe('an unfinished run opens no pull request (AGT-4786)', () => {
       commitAndCreatePRWithHead.mockResolvedValue(pr);
       const result: { success: boolean; finalStatus: string; prUrl?: string; failureDetail?: string } = { success: false, finalStatus, failureDetail: 'tests red' };
 
-      await publishFinishedRun(info, task, result, undefined, noHook, undefined, { failureSummary: 'reviewer: the new route has no test' });
+      await publishFinishedRun(info, task, result, undefined, noHook);
 
       expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
       expect(result).toEqual({ success: false, finalStatus, failureDetail: 'tests red' });
@@ -485,7 +487,7 @@ describe('an unfinished run opens no pull request (AGT-4786)', () => {
     it('publishes nothing for a lifecycle-fence failure', async () => {
       const result = { success: false, finalStatus: 'infra_error', failureDetail: 'lease lost' };
 
-      await publishFinishedRun(info, task, result, undefined, noHook, undefined, { lifecycleFailed: true });
+      await publishFinishedRun(info, task, result, undefined, noHook);
 
       expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
     });
@@ -512,5 +514,32 @@ describe('an unfinished run opens no pull request (AGT-4786)', () => {
       expect(commitAndCreatePRWithHead).not.toHaveBeenCalled();
       expect(hook).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('the approved publication records its risk class on the run (AGT-4804)', () => {
+  const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-2', issueId: 'AGT-2' };
+  const publishable = { id: 'task-2', issueIdentifier: 'AGT-2', title: 'Risky' };
+
+  it('copies the publisher\'s class onto the result the ledger stores', async () => {
+    const risk = { level: 'high', reasons: ['CI: `.github/workflows/ci.yml`'], files: 1, lines: 3 };
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/10', headSha: 'head-10', risk });
+    const result: { success: boolean; finalStatus: string; prUrl?: string; changeRisk?: unknown } = { success: true, finalStatus: 'approved' };
+
+    await publishApprovedWork(info, publishable, result, undefined);
+
+    expect(result.changeRisk).toEqual(risk);
+  });
+});
+
+describe('approved publication carries the protected files to the risk class (#884 review, AGT-4804)', () => {
+  it('passes the worker\'s protected grader files to the publisher', async () => {
+    computeProtectedFiles.mockResolvedValueOnce(['src/a.test.ts', 'vitest.config.ts']);
+    commitAndCreatePRWithHead.mockResolvedValue({ prUrl: 'https://github.com/o/r/pull/77', headSha: 'head-77' });
+    const info = { worktreePath: '/tmp/w', originalPath: '/tmp/r', branchName: 'swarm/AGT-7', issueId: 'AGT-7' };
+    const result: { success: boolean; finalStatus: string; prUrl?: string } = { success: true, finalStatus: 'approved' };
+    await publishApprovedWork(info, { id: 'task-7', issueIdentifier: 'AGT-7', title: 'Risky' }, result, undefined, async () => {});
+    expect(computeProtectedFiles).toHaveBeenCalledWith('/tmp/r', expect.objectContaining({ title: 'Risky' }));
+    expect(commitAndCreatePRWithHead.mock.calls[0][4]).toMatchObject({ protectedFiles: ['src/a.test.ts', 'vitest.config.ts'] });
   });
 });

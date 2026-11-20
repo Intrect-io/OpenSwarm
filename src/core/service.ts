@@ -299,6 +299,12 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     // loop has none of OpenSwarm's fences. (AGT-4444)
     const { assertUnattendedAdapters, providerSwitchViolation } = await import('../adapters/unattendedPolicy.js');
     assertUnattendedAdapters(config);
+    // A reviewer from the worker's model family shares its blind spots. (AGT-4806)
+    const reviewerIndependence = await import('../adapters/reviewerIndependence.js');
+    reviewerIndependence.assertIndependentReviewer(config);
+    // A provider switch re-points every role later (override below, dashboard
+    // toggle any time); it is checked against the same rule. (#886 review)
+    reviewerIndependence.registerReviewerIndependenceConfig(config);
     const heartbeatEnabled = config.autonomous.enabled === true;
     console.log(heartbeatEnabled
       ? '[Service] Autonomous mode auto-start enabled'
@@ -418,6 +424,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
       workerSandbox: config.autonomous.workerSandbox,
       minFreeDiskGiB: config.autonomous.minFreeDiskGiB, // AGT-4785
       spend: config.autonomous.spend,
+      budget: config.autonomous.budget, // AGT-4807
       allowDelegatedAdapters: config.autonomous.allowDelegatedAdapters, // AGT-4444: a provider switch meets the same policy
       periodicReviews: config.autonomous.periodicReviews,
       orchestrator: config.autonomous.orchestrator,
@@ -451,6 +458,7 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     // file must not keep the daemon from starting, so it is ignored loudly instead. (AGT-4444)
     const refusedOverride = providerOverride
       ? providerSwitchViolation(providerOverride, config.autonomous.allowDelegatedAdapters)
+        ?? (await import('../adapters/reviewerIndependence.js')).providerSwitchFamilyViolation(providerOverride, config)
       : null;
     if (providerOverride && refusedOverride) {
       console.warn(`[Service] Ignoring provider override '${providerOverride.replace(/[\r\n]/g, '')}': ${refusedOverride}. `

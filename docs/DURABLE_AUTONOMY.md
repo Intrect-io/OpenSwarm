@@ -121,6 +121,37 @@ An optional `automation` block in `openswarm.json` controls admission:
 Unreadable or invalid policy is an infrastructure failure, not permission to
 run with guessed defaults.
 
+### Spend budgets
+
+The daemon config sets two budgets (AGT-4807). They are read from the run
+ledger's recorded attempt costs. An attempt with no recorded cost counts at
+the same estimate the daily ceilings use. The usage ledger
+(`~/.openswarm/usage/*.jsonl`) is not the source: only the agentic-loop
+adapters write it, so Claude CLI runs never appear there, and it is per host
+while the run ledger is shared by every daemon that claims from it. Days are
+UTC, as in both ledgers.
+
+```yaml
+autonomous:
+  budget:
+    perProjectDailyUsd: 20   # used when openswarm.json sets no automation.maxCostUsdPerDay
+    perIssueUsd: 5
+```
+
+- **Project daily budget:** a project at or over it gets no claims until
+  00:00 UTC. The first refusal of the day sends **one** notifier alert per
+  project, deduplicated in the ledger (`automation_budget_alerts`), so
+  several daemons sharing one ledger still alert once. A repository's own
+  `automation.maxCostUsdPerDay` takes precedence. The daemon-wide
+  `autonomous.spend.maxCostUsdPerDay` also alerts once a day.
+- **Issue budget:** counts what one issue has spent since its budget park was
+  last lifted (other resumes do not reset it). When the issue is at or over the budget, its next claim parks
+  it as `NEEDS_HUMAN` (`issue_budget_exhausted`) without running anything.
+  The park adds no spend of its own. The tracker gets the one operator-park
+  comment, which shows the spend. An explicit dispatch (the dashboard issue
+  board) resumes it and starts a fresh budget. Moving the issue back to Todo
+  alone does not lift this park, and neither does a free idle-fill slot.
+
 A separate `publication` block decides what happens to the pull requests the
 swarm publishes from this repository. Worker attempts run only deterministic
 guards and verification; the agentic fresh review (`openswarm pr review
@@ -149,6 +180,45 @@ nothing about the code and undoes nothing.
 That draft flag is load-bearing downstream: the reconciler treats a draft PR on
 a run's branch as work still in progress and returns the run to the queue,
 rather than reading an open PR as delivery and completing the issue.
+
+### Change risk class
+
+Every publication classifies the diff it commits as `low`, `medium` or `high`
+(AGT-4804, `src/support/changeRisk.ts`). It prints the class on the PR under
+`## Risk: <level>` and stores it in the attempt's `result_json` as
+`changeRisk`. The classifier is deterministic. It reads only the
+`git diff --numstat` of the branch against its base, never the issue text or
+a model.
+
+- **high:** any of these:
+  - deploy or infra paths (`Dockerfile`, compose, `infra/`, `*.tf`, `wrangler.toml`, release scripts);
+  - CI (`.github/workflows/`, `.githooks/`);
+  - migrations (`migrations/`, `*.sql`);
+  - auth and secret paths (`auth`, `secret`, `credential`, `key`, `token`, `.env*`, `*.pem`);
+  - a protected path;
+  - more than 20 files or 600 changed lines.
+- **medium:** dependency manifests or lockfiles, binary files, more than 5 files or 150 lines, or a diff that cannot be read (unknown is never `low`).
+- **low:** everything else.
+
+Documentation files do not trip the deploy/infra and CI rules. A large docs-only change is capped at `medium`.
+
+A repository adds its own rules. The rules are read from the operator's checkout, not from the worktree the worker edited:
+
+```json
+{
+  "publication": {
+    "risk": {
+      "highPaths": ["src/billing/**"],
+      "mediumPaths": ["src/ui/**"],
+      "protectedPaths": ["src/orders/**"],
+      "lowMaxFiles": 5, "lowMaxLines": 150,
+      "mediumMaxFiles": 20, "mediumMaxLines": 600
+    }
+  }
+}
+```
+
+Rules only add to the defaults. A project cannot mark a default high-risk path as low.
 
 ## Operations
 

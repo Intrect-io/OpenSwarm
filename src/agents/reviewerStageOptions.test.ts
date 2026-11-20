@@ -234,3 +234,43 @@ describe('the reviewer stage carries the project goal (AGT-4662)', () => {
     expect(plain.projectGoal).toBeUndefined();
   });
 });
+
+describe('the reviewer sees only what the commit would carry (AGT-4806)', () => {
+  it('builds a prompt that names no path the commit rejects', async () => {
+    // A reviewer shown files the commit would drop raised phantom findings; one cost a worker iteration $3.35.
+    const repo = repoWithWorkerEdits();
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'osw-reviewer-outside-')));
+    repos.push(outside);
+    mkdirSync(join(outside, 'node_modules'), { recursive: true });
+    symlinkSync(join(outside, 'node_modules'), join(repo, 'node_modules')); // refused untracked: escaping symlink
+    writeFileSync(join(repo, 'adapter.py.bak'), 'stale copy\n'); // refused untracked: agent scratch
+    mkdirSync(join(repo, '.venv', 'lib'), { recursive: true });
+    writeFileSync(join(repo, '.venv', 'lib', 'site.py'), 'x = 1\n'); // ephemeral artifact
+    mkdirSync(join(repo, 'unrelated'), { recursive: true });
+    writeFileSync(join(repo, 'unrelated', 'other.py'), 'y = 2\n'); // outside the reserved write scope
+    writeFileSync(join(repo, 'cache.parquet'), 'PAR1'); // unstaged before the commit (guardUnsafeBinaryStaging)
+
+    const rejected = ['node_modules', 'adapter.py.bak', '.venv/lib/site.py', 'unrelated/other.py', 'cache.parquet'];
+    const ctx = context(repo);
+    ctx.task = { ...ctx.task, fileScope: ['adapter.py', 'tests/test_contracts.py'], fileScopeSource: 'declared' } as typeof ctx.task;
+    ctx.workerResult = workerResult({ filesChanged: ['tests/test_contracts.py', 'adapter.py', ...rejected] });
+
+    const options = await buildReviewerStageOptions({ config, context: ctx, prefix: 'p' });
+    const prompt = buildReviewerPrompt(options);
+
+    for (const path of rejected) expect(prompt).not.toContain(path);
+    // The worker's real work is still there, file list and patch both.
+    expect(options.workerResult.filesChanged).toEqual(['tests/test_contracts.py', 'adapter.py']);
+    expect(prompt).toContain('+class A2FixedExpense:');
+    // The reviewer is told files were withheld and why, without being shown them.
+    expect(prompt).toContain('1 changed file(s) outside the reserved write scope are not shown');
+  });
+
+  it('applies no scope rule when the scope is only inferred, as the publication fence does', async () => {
+    const repo = repoWithWorkerEdits();
+    const ctx = context(repo);
+    ctx.task = { ...ctx.task, fileScope: ['adapter.py'], fileScopeSource: 'inferred' } as typeof ctx.task;
+    const options = await buildReviewerStageOptions({ config, context: ctx, prefix: 'p' });
+    expect(options.workerResult.filesChanged).toEqual(['tests/test_contracts.py', 'adapter.py']);
+  });
+});
