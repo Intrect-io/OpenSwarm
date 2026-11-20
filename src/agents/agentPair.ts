@@ -136,6 +136,8 @@ export type PairSessionStatus =
 export interface PairSession {
   id: string;
   taskId: string;
+  /** Linear issue UUID when the session is backed by a real issue (AGT-4055). */
+  linearIssueId?: string;
   taskTitle: string;
   taskDescription: string;
   projectPath: string;
@@ -171,6 +173,8 @@ export interface PairModelConfig {
  */
 export interface CreatePairSessionOptions {
   taskId: string;
+  /** Linear issue UUID; omit for a session typed in by hand with no issue behind it. */
+  linearIssueId?: string;
   taskTitle: string;
   taskDescription: string;
   projectPath: string;
@@ -196,6 +200,7 @@ export function createPairSession(options: CreatePairSessionOptions): PairSessio
   const session: PairSession = {
     id: randomUUID().slice(0, 8),
     taskId: options.taskId,
+    linearIssueId: options.linearIssueId,
     taskTitle: options.taskTitle,
     taskDescription: options.taskDescription,
     projectPath: options.projectPath,

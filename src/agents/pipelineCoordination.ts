@@ -6,6 +6,7 @@
 // so the pipeline keeps to its own job and stays under the module size cap.
 
 import type { PipelineContext } from './pairPipelineTypes.js';
+import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { assignCallSign, type AgentRole } from '../coordination/agentNames.js';
 import { taskEventKey } from '../orchestration/decisionEngine.js';
 import { t } from '../locale/index.js';
@@ -37,10 +38,21 @@ export function stageCorrelationId(
 // stage keeps one identity across its iterations. Bounded so a long-lived
 // daemon does not grow it forever.
 interface AgentIdentity { name: string; address: string }
+
+/**
+ * The part of a run the board identity is derived from. The daemon pipeline
+ * passes its full PipelineContext; the interactive Discord /pair flow, which
+ * never builds one, passes just these fields (AGT-4055).
+ */
+export interface CoordinationSubject {
+  task: Pick<TaskItem, 'id' | 'issueId' | 'issueIdentifier'>;
+  projectPath: string;
+  config?: Pick<PipelineContext['config'], 'runMetadata'>;
+}
 const agentIdentities = new Map<string, AgentIdentity>();
 const IDENTITY_CAP = 500;
 
-function identityKey(context: PipelineContext, role: AgentRole): string {
+function identityKey(context: CoordinationSubject, role: AgentRole): string {
   // Deliberately NOT scoped by session id. A retry opens a fresh session, and
   // if that changed the handle then an answer addressed to the first attempt
   // would sit in an inbox nobody reads. One (repo, task, role) is one
@@ -62,7 +74,7 @@ function identityKey(context: PipelineContext, role: AgentRole): string {
  * both the self-naming and the suffix: a collision now resolves to a different
  * handle, never a decorated one.
  */
-function agentIdentity(context: PipelineContext, role: AgentRole): AgentIdentity {
+function agentIdentity(context: CoordinationSubject, role: AgentRole): AgentIdentity {
   const key = identityKey(context, role);
   const existing = agentIdentities.get(key);
   if (existing) return existing;
@@ -92,7 +104,7 @@ export function assignedAgentName(context: PipelineContext, role: AgentRole): st
 }
 
 /** The board identity an agent publishes under, shared with its MCP tools. */
-export function coordinationContextFor(context: PipelineContext, role: AgentRole) {
+export function coordinationContextFor(context: CoordinationSubject, role: AgentRole) {
   const taskId = taskEventKey(context.task);
   const callSign = agentIdentity(context, role);
   const cell = repositoryCell(context.projectPath);

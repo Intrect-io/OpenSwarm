@@ -17,6 +17,8 @@ import * as worker from '../agents/worker.js';
 import * as reviewer from '../agents/reviewer.js';
 import * as pairMetrics from '../agents/pairMetrics.js';
 import * as pairWebhook from '../agents/pairWebhook.js';
+import { coordinationContextFor } from '../agents/pipelineCoordination.js';
+import type { CoordinationToolContext } from '../coordination/coordinationTools.js';
 
 import {
   pairModeConfig,
@@ -34,6 +36,29 @@ import { safeConsole as console } from '../support/safeLog.js';
 import { sanitizeAndBoundTerminalText, sanitizeTerminalText } from '../tui/sanitize.js';
 
 const DISCORD_CONTENT_LIMIT = 1900;
+
+/**
+ * Coordination-board identity for a Discord /pair agent (AGT-4055).
+ *
+ * Only sessions backed by a Linear issue get one. The board is keyed by the
+ * issue UUID, the same key the daemon pipeline uses, so a Discord run and a
+ * daemon run on one issue are the same participants and their messages meet.
+ * A session typed in by hand has no issue behind it; it gets no coordination
+ * tools rather than a synthetic id nobody else would ever address.
+ *
+ * v1 visibility: what these agents publish lands on the coordination board
+ * (dashboard / CLI) only. It is not echoed into the Discord thread.
+ */
+export function pairCoordinationContext(
+  session: Pick<agentPair.PairSession, 'taskId' | 'linearIssueId' | 'projectPath'>,
+  role: 'worker' | 'reviewer',
+): CoordinationToolContext | undefined {
+  if (!session.linearIssueId) return undefined;
+  return coordinationContextFor({
+    task: { id: session.linearIssueId, issueId: session.linearIssueId, issueIdentifier: session.taskId },
+    projectPath: session.projectPath,
+  }, role);
+}
 
 /** Bound and neutralize untrusted text before Discord thread posting. */
 function neutralizeForDiscord(text: string, max = DISCORD_CONTENT_LIMIT): string {
@@ -235,6 +260,7 @@ async function handlePairStart(msg: Message, taskId?: string): Promise<void> {
 
   await startPairSession(msg, {
     taskId: task.identifier || task.id,
+    linearIssueId: typeof task.id === 'string' ? task.id : undefined,
     taskTitle: task.title,
     taskDescription: task.description || '',
     projectPath,
@@ -256,12 +282,14 @@ async function handlePairRun(msg: Message, taskId: string, project: string): Pro
   // Fetch issue info from Linear
   let taskTitle = taskId;
   let taskDescription = '';
+  let linearIssueId: string | undefined;
 
   try {
     const issue = await linear.getIssue(taskId);
     if (issue) {
       taskTitle = issue.title;
       taskDescription = issue.description || '';
+      linearIssueId = issue.id;
     }
   } catch {
     // Continue even if Linear lookup fails (use taskId as title)
@@ -269,6 +297,7 @@ async function handlePairRun(msg: Message, taskId: string, project: string): Pro
 
   await startPairSession(msg, {
     taskId,
+    linearIssueId,
     taskTitle,
     taskDescription,
     projectPath,
@@ -385,6 +414,7 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       previousFeedback,
       timeoutMs: 300000, // 5 minutes
       issueIdentifier: session.taskId,
+      coordinationContext: pairCoordinationContext(session, 'worker'),
     });
 
     session = agentPair.getPairSession(sessionId);
@@ -437,6 +467,7 @@ async function runPairLoop(sessionId: string, thread: ThreadChannel): Promise<vo
       workerResult,
       projectPath: session.projectPath,
       timeoutMs: 300000, // 5 minutes
+      coordinationContext: pairCoordinationContext(session, 'reviewer'),
     });
 
     session = agentPair.getPairSession(sessionId);
