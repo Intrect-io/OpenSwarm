@@ -69,6 +69,7 @@ import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
 import { listHeldIssueIds } from './execHold.js';
 import { inputFingerprint, mayRedispatch } from './dispatchFingerprint.js';
 import { HostDiskGate, dispatchWritePaths, isHostResourceError } from '../support/hostHealth.js';
+import { reclaimWorktreesUnderDiskPressure } from './diskPressureReclaim.js';
 import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from '../agents/pairPipelineTypes.js';
 import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
@@ -2798,10 +2799,8 @@ export class AutonomousRunner {
       this.syslog('✓ Time window: allowed');
 
       // 1.1 Disk-space hold (AGT-4785), measured above after the worktree sweep; the low reading's one alert is auto:disk's.
-      if (disk.pause) {
-        this.syslog(`⏸ Disk space hold: ${disk.line}`);
-        return;
-      }
+      // A measured low (not an unconfirmed-ENOSPC hold) also reclaims pushed RETRY_AT/CANCELLED worktrees, or nothing frees space (AGT-4816).
+      if (disk.pause) { this.syslog(`⏸ Disk space hold: ${disk.line}`); if (!disk.hold) await reclaimWorktreesUnderDiskPressure({ durableRuns: this.durableRuns, projects: this.config.allowedProjects, spaceRecovered: () => !this.diskGate.belowFloor(), runningWorktreePaths: this.scheduler.getRunningTasks().map((r) => `${r.projectPath}/worktree/${r.task.issueId}`), stopping: () => this.stopping, log: (line) => this.syslog(`♻ ${line}`) }); return; }
 
       // 1.2 Rate-limit hold — skip the heartbeat while a 429 pause is still active.
       // Cleared implicitly once the clock passes rateLimitUntil. (INT-1906)
