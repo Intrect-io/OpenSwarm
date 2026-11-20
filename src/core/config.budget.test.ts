@@ -41,3 +41,26 @@ describe('autonomous.budget (AGT-4807)', () => {
     }
   });
 });
+
+// AGT-4810 review: the digest borrowed dailyReporter.schedule; it has its own key now.
+describe('autonomous.factoryDigest (AGT-4810)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.DISCORD_TOKEN = 't';
+    process.env.DISCORD_CHANNEL_ID = 'c';
+    process.env.LINEAR_API_KEY = 'k';
+    process.env.LINEAR_TEAM_ID = 'team';
+    vi.mocked(existsSync).mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    for (const key of ['DISCORD_TOKEN', 'DISCORD_CHANNEL_ID', 'LINEAR_API_KEY', 'LINEAR_TEAM_ID']) delete process.env[key];
+  });
+
+  it('carries autonomous.factoryDigest.schedule through loadConfig, and leaves it unset by default', () => {
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: { factoryDigest: { schedule: '30 0 * * *' } } }));
+    expect(loadConfig('/tmp/config.json').autonomous?.factoryDigest).toEqual({ schedule: '30 0 * * *' });
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({ ...base, autonomous: {} }));
+    expect(loadConfig('/tmp/config.json').autonomous?.factoryDigest).toBeUndefined();
+  });
+});

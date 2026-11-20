@@ -412,10 +412,10 @@ const AutonomousConfigSchema = z.object({
   automationDbPath: z.string().min(1).optional(),
   /** Linear project the daemon files its own retrospective issues into; unset = lane off. */
   retrospectiveProjectId: z.string().min(1).optional(),
+  factoryDigest: z.object({ schedule: z.string().min(1).optional() }).optional(), // AGT-4810: cron in UTC; unset = 00:05 UTC
   automationLeaseMs: z.number().int().min(60_000).max(24 * 60 * 60_000).default(10 * 60_000),
   shutdownGraceMs: z.number().int().min(0).max(5 * 60_000).default(30_000),
-  /** Default role configuration */
-  defaultRoles: DefaultRolesConfigSchema,
+  defaultRoles: DefaultRolesConfigSchema, // default role configuration
   loopAdvisor: z.object({
     mode: z.enum(['off', 'shadow', 'active']).default('off'),
     adapter: AdapterNameSchema.optional(), model: z.string().min(1).optional(),
@@ -852,7 +852,7 @@ function transformConfig(raw: RawConfig): SwarmConfig {
       maxConcurrentPerProject: raw.autonomous.maxConcurrentPerProject,
       automationLedgerMode: raw.autonomous.automationLedgerMode,
       automationDbPath: raw.autonomous.automationDbPath ? expandPath(raw.autonomous.automationDbPath) : undefined,
-      retrospectiveProjectId: raw.autonomous.retrospectiveProjectId,
+      retrospectiveProjectId: raw.autonomous.retrospectiveProjectId, factoryDigest: raw.autonomous.factoryDigest,
       automationLeaseMs: raw.autonomous.automationLeaseMs,
       shutdownGraceMs: raw.autonomous.shutdownGraceMs,
       defaultRoles: raw.autonomous.defaultRoles,

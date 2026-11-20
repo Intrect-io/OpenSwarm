@@ -19,8 +19,7 @@ import { PRProcessor, type PRProcessorConfig } from '../automation/prProcessor.j
 import { startCIWorker, stopCIWorker } from '../automation/ciWorker.js';
 import { initMonitors } from '../automation/longRunningMonitor.js';
 import * as dailyReporter from '../automation/dailyReporter.js';
-import { startFactoryDigest } from '../automation/factoryDigest.js';
-import { defaultAutomationDbPath } from '../automation/automationDbPath.js';
+import { startConfiguredFactoryDigest } from '../automation/factoryDigestService.js';
 import { initLocale, t } from '../locale/index.js';
 import { initRateLimiters, destroyRateLimiters } from '../support/rateLimiter.js';
 import { compactMemoryTable, shouldCompact, cleanupBackupFiles } from '../memory/compaction.js';
@@ -49,6 +48,7 @@ let githubCheckTimer: NodeJS.Timeout | null = null;
 let prProcessor: PRProcessor | null = null;
 let memoryCompactionJob: Cron | null = null;
 let failureTaxonomyJob: Cron | null = null;
+let factoryDigestStop: (() => void) | null = null;
 let serviceInstanceLock: ServiceInstanceLock | null = null;
 
 /**
@@ -562,16 +562,10 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
     console.log(`[Service] Daily reporter started (schedule: ${config.dailyReporter.schedule || '18:00 daily'})`);
   }
 
-  // Daily factory digest (AGT-4810): runs, questions, spend, pauses and KPIs from
-  // the automation database, one Discord post a day. Same schedule as the daily
-  // reporter when one is configured, otherwise 09:00.
+  // Daily factory digest (AGT-4810): runs, questions, spend, pauses and KPIs for
+  // the previous UTC day, one Discord post a day on its own UTC schedule.
   if (config.autonomous) {
-    const autonomous = config.autonomous;
-    startFactoryDigest({
-      schedule: config.dailyReporter?.schedule || '0 9 * * *',
-      dbPath: () => autonomous.automationDbPath ?? defaultAutomationDbPath(),
-      send: async (text) => { await discord.sendToChannel(text); },
-    });
+    factoryDigestStop = startConfiguredFactoryDigest(config.autonomous, async (text) => { await discord.sendToChannel(text); });
   }
 
   // Sweep attachments once on the way up as well. The daily job is the only
@@ -817,6 +811,8 @@ async function stopServiceLocked(): Promise<void> {
 
   failureTaxonomyJob?.stop();
   failureTaxonomyJob = null;
+  factoryDigestStop?.();
+  factoryDigestStop = null;
 
   // Stop memory compaction scheduler
   if (memoryCompactionJob) {
