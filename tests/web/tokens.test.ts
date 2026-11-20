@@ -203,7 +203,7 @@ describe('server-rendered legacy pages (AGT-4201)', () => {
   const pages = [
     join(__dirname, '..', '..', 'src', 'issues', 'issueBoardHtml.ts'),
   ];
-  const markupSources = [...pages, join(ROOT, 'js', 'supervisor.js')];
+  const markupSources = [...pages, join(ROOT, 'js', 'supervisor.js'), join(ROOT, 'js', 'supervisorPanels.js')];
 
   it('link tokens.css, boot the theme first, and offer a toggle', () => {
     for (const file of pages) {

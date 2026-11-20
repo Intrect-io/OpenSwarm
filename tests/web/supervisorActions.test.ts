@@ -1,4 +1,5 @@
-// The Supervisor page runs one classic script (web/static/js/supervisor.js),
+// The Supervisor page runs classic scripts (web/static/js/supervisor.js and
+// supervisorPanels.js),
 // so a source-shape assertion cannot tell whether a failed Stop still reads as
 // sent. Run the real page and script in jsdom with a scripted fetch and a
 // hand-driven clock.
@@ -9,13 +10,19 @@ import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
 
 const STATIC = join(__dirname, '..', '..', 'web', 'static');
-const SCRIPT_TAG = '<script src="/static/js/supervisor.js"></script>';
-/** The page with its script inlined: jsdom does not fetch /static/ assets. */
+// Both classic scripts, in load order: the panels declare what supervisor.js's
+// init code calls (AGT-4868).
+const SCRIPTS = ['supervisorPanels.js', 'supervisor.js'];
+/** The page with its scripts inlined: jsdom does not fetch /static/ assets. */
 function pageSource(): string {
-  const html = readFileSync(join(STATIC, 'supervisor.html'), 'utf8');
-  if (!html.includes(SCRIPT_TAG)) throw new Error('supervisor.html no longer loads supervisor.js');
-  const script = readFileSync(join(STATIC, 'js', 'supervisor.js'), 'utf8');
-  return html.replace(SCRIPT_TAG, () => `<script>${script}</script>`);
+  let html = readFileSync(join(STATIC, 'supervisor.html'), 'utf8');
+  for (const name of SCRIPTS) {
+    const tag = `<script src="/static/js/${name}"></script>`;
+    if (!html.includes(tag)) throw new Error(`supervisor.html no longer loads ${name}`);
+    const script = readFileSync(join(STATIC, 'js', name), 'utf8');
+    html = html.replace(tag, () => `<script>${script}</script>`);
+  }
+  return html;
 }
 const PROVIDERS = ['codex', 'openrouter'];
 
