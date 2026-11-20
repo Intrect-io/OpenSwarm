@@ -110,3 +110,23 @@ describe('repo snapshot read is symlink-safe and size-bounded (AGT-3467)', () =>
     expect(existsSync(missing)).toBe(false);
   });
 });
+
+describe('repoSnapshotDirRefused (#883 review)', () => {
+  it('is true only for a .openswarm that exists and is not a plain directory', async () => {
+    const { repoSnapshotDirRefused } = await import('./graphqlExporter.js');
+    const { mkdtempSync, mkdirSync, symlinkSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const root = mkdtempSync(join(tmpdir(), 'snapdir-'));
+    try {
+      const plain = join(root, 'plain'); mkdirSync(join(plain, '.openswarm'), { recursive: true });
+      const none = join(root, 'none'); mkdirSync(none);
+      const linked = join(root, 'linked'); mkdirSync(linked); symlinkSync(join(root, 'plain', '.openswarm'), join(linked, '.openswarm'));
+      expect(repoSnapshotDirRefused(plain)).toBe(false);
+      expect(repoSnapshotDirRefused(none)).toBe(false);
+      expect(repoSnapshotDirRefused(linked)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

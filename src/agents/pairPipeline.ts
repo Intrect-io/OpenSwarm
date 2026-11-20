@@ -31,7 +31,7 @@ import {
   buildReflectionFeedback,
   DEFAULT_MAX_REFLECTIONS,
 } from './reflection.js';
-import { hasRepoSnapshot, scanAndCache } from '../knowledge/index.js';
+import { hasRepoSnapshot, repoSnapshotDirRefused, scanAndCache } from '../knowledge/index.js';
 import * as workerAgent from './worker.js';
 import type { WorkerOptions } from './worker.js';
 import { buildTaskPrefix } from './pipelineTaskPrefix.js';
@@ -138,7 +138,11 @@ export class PairPipeline extends EventEmitter {
     const maxIterations = this.config.maxIterations ?? 3;
 
     // Ensure repo graph snapshot exists (first-time scan if needed)
-    if (!hasRepoSnapshot(projectPath)) {
+    // A symlinked .openswarm is refused by the export, so scanning would
+    // repeat in full on every run without ever producing a snapshot.
+    if (!hasRepoSnapshot(projectPath) && repoSnapshotDirRefused(projectPath)) {
+      safeConsole.warn(`[Pipeline] ${projectPath}/.openswarm is not a plain directory; skipping the repo scan`);
+    } else if (!hasRepoSnapshot(projectPath)) {
       safeConsole.log(`[Pipeline] No repo snapshot found, scanning ${projectPath}...`);
       try {
         await scanAndCache(projectPath);

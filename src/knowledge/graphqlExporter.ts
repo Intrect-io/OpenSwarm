@@ -3,7 +3,7 @@
 // 에이전트가 컨텍스트 윈도우 없이도 저장소를 완전히 이해할 수 있는 정적 파일 생성
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { KnowledgeGraph } from './graph.js';
 import type { GraphNode, GraphEdge } from './types.js';
 import { pinChildDirectory, writeFileInPinnedDirectory } from '../support/containedWrite.js';
@@ -465,12 +465,22 @@ function plainSnapshotPath(projectPath: string): string | null {
  * keeps a file that grows after `fstat` from being read whole.
  */
 function readSnapshotBounded(snapshotPath: string): string | null {
+  // `O_NOFOLLOW` covers only the last component. `.openswarm` itself could be
+  // swapped for a link between the lstat check and the open, so its identity
+  // is taken before the open and compared after it, and the opened file must
+  // still be the one at the path. (#883 review)
+  const dir = dirname(snapshotPath);
+  const dirBefore = lstatSync(dir);
   // O_NONBLOCK: a FIFO swapped in after the lstat check would otherwise block
   // this open forever; fstat below then rejects it as not a regular file.
   const fd = openSync(snapshotPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = fstatSync(fd);
     if (!info.isFile() || info.size > MAX_REPO_SNAPSHOT_BYTES) return null;
+    const dirAfter = lstatSync(dir);
+    const atPath = lstatSync(snapshotPath);
+    if (!dirAfter.isDirectory() || dirAfter.ino !== dirBefore.ino || dirAfter.dev !== dirBefore.dev
+      || atPath.ino !== info.ino || atPath.dev !== info.dev) return null;
     const buffer = Buffer.alloc(Math.min(info.size, MAX_REPO_SNAPSHOT_BYTES) + 1);
     let length = 0;
     while (length < buffer.length) {
@@ -483,6 +493,21 @@ function readSnapshotBounded(snapshotPath: string): string | null {
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * True when `.openswarm` exists but is not a plain directory (a symlink). The
+ * export refuses to write through it, so a caller that rescans whenever the
+ * snapshot is missing would rescan the whole repository on every run. (#883 review)
+ */
+export function repoSnapshotDirRefused(projectPath: string): boolean {
+  const dir = join(projectPath, '.openswarm');
+  try {
+    lstatSync(dir);
+  } catch {
+    return false;
+  }
+  return !isRegularEntry(dir, 'directory');
 }
 
 // 스냅샷이 존재하는지 확인 — a symlinked snapshot counts as absent, so the

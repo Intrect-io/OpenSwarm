@@ -25,7 +25,7 @@ export type { ImpactAnalysis, ProjectSummary } from './types.js';
 export type * from './types.js';
 
 // GraphQL exporter
-export { exportRepoGraph, hasRepoSnapshot, loadRepoSnapshot, snapshotAgeMinutes } from './graphqlExporter.js';
+export { exportRepoGraph, hasRepoSnapshot, loadRepoSnapshot, repoSnapshotDirRefused, snapshotAgeMinutes } from './graphqlExporter.js';
 export type { RepoSnapshot } from './graphqlExporter.js';
 
 // Repository knowledge management

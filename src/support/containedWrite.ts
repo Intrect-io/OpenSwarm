@@ -96,6 +96,15 @@ export function writeFileInPinnedDirectory(dir: PinnedDirectory, fileName: strin
       throw new Error(`Refusing to write through ${dir.path}: temporary file is not the one written`);
     }
     renameSync(temporary, target);
+    // Node has no renameat, so a directory moved and relinked between the
+    // check above and the rename can still carry the file elsewhere. That
+    // cannot be prevented here, but it is detected: the directory must still
+    // be the pinned one and the target must be the inode just written. (#895 review)
+    assertStillPinned(dir);
+    const landed = lstatSync(target);
+    if (!landed.isFile() || !sameInode(landed, written)) {
+      throw new Error(`Refusing to write through ${dir.path}: the written file did not land in the pinned directory`);
+    }
     return target;
   } catch (error) {
     if (fd !== undefined) closeSync(fd);
