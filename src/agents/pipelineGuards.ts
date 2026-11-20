@@ -5,7 +5,8 @@
 
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, join, normalize, relative, resolve } from 'node:path';
+import { join } from 'node:path';
+import { containedProjectPath, partitionChangedPaths } from './guardPaths.js';
 import { promisify } from 'node:util';
 import type { WorkerResult } from './agentPair.js';
 import type { PipelineGuardsConfig } from '../core/types.js';
@@ -379,7 +380,7 @@ export async function getAddedLinesForFile(projectPath: string, filePath: string
     // Fall through to untracked-new handling below.
   }
 
-  if (!isNew) return '';
+  if (!isNew || !containedProjectPath(projectPath, filePath)) return '';
   try {
     return await readFile(join(projectPath, filePath), 'utf8');
   } catch {
@@ -533,14 +534,6 @@ async function literalExistsInHeadSource(projectPath: string, literal: string): 
   }
 }
 
-function normalizeEvidencePath(projectPath: string, filePath: string): string | null {
-  const cleaned = normalize(filePath).replace(/\\/g, '/').replace(/^\.\//, '');
-  const absolute = isAbsolute(cleaned) ? cleaned : resolve(projectPath, cleaned);
-  const rel = normalize(relative(projectPath, absolute)).replace(/\\/g, '/');
-  if (rel.startsWith('../') || rel === '..' || isAbsolute(rel)) return null;
-  return rel;
-}
-
 async function hasExternalContractEvidence(
   workerResult: WorkerResult,
   projectPath: string,
@@ -551,7 +544,7 @@ async function hasExternalContractEvidence(
   const fileRefs = new Map<string, Set<number>>();
   let match: RegExpExecArray | null;
   while ((match = EVIDENCE_FILE_REF_RE.exec(text))) {
-    const normalized = normalizeEvidencePath(projectPath, match[1]);
+    const normalized = containedProjectPath(projectPath, match[1]);
     if (!normalized) continue;
     const lineNo = parseInt(match[2], 10);
     const lines = fileRefs.get(normalized) ?? new Set<number>();
@@ -928,11 +921,12 @@ export async function runGuards(
 ): Promise<GuardsRunResult> {
   const results: GuardResult[] = [];
   // Keep the original result for reporting/publication, but never feed
-  // generated pytest/venv artifacts into guards that open changed files.
-  const guardWorkerResult = {
-    ...workerResult,
-    filesChanged: workerResult.filesChanged.filter((file) => !isEphemeralWorktreeArtifact(file)),
-  };
+  // generated pytest/venv artifacts — or paths that escape the project
+  // (absolute, `..`, symlinked out) — into guards that open changed files.
+  // Reported, not blocking: a tracked symlink pointing outside is legitimate.
+  const { contained, escaped } = partitionChangedPaths(projectPath, workerResult.filesChanged.filter((file) => !isEphemeralWorktreeArtifact(file)));
+  const guardWorkerResult = { ...workerResult, filesChanged: contained };
+  if (escaped.length > 0) results.push({ passed: false, guard: 'pathContainment', blocking: false, issues: escaped.slice(0, 20).map((file) => `Changed path escapes the project: ${file}`) });
 
   if (config.qualityGate) {
     console.warn('[Guard:qualityGate] Deprecated: use autonomous.verify baseline-diff verification instead.');
