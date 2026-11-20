@@ -30,6 +30,7 @@ import { copyIsolatedPath } from './isolatedPath.js';
 import { hasEditableInstallInto, rebasePythonEnvironment } from '../verify/pythonEnvironment.js';
 import { assertBranchWithinWriteScope } from './publicationScopeFence.js';
 import { commitStagedForPublication } from './publicationCommit.js';
+import { issueLinkLine, publicationTitle, syncPullRequestCoverage, type PublicationCoverage } from './publicationCoverage.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1053,7 +1054,8 @@ export async function commitAndCreatePRWithHead(
   title: string,
   issueIdentifier: string,
   description: string,
-  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig; protectedFiles?: string[] } = {},
+  // `coverage`: only 'complete' earns `Closes` and the bare title; unset is unknown = partial (AGT-4786).
+  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig; protectedFiles?: string[]; coverage?: PublicationCoverage } = {},
 ): Promise<PublishedPullRequest> {
   const { worktreePath, branchName } = info;
 
@@ -1189,7 +1191,7 @@ export async function commitAndCreatePRWithHead(
       const stillDuplicated = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
       await readyReusedPullRequest(worktreePath, existing, issueIdentifier, stillDuplicated.length);
     }
-    await upsertPullRequestRiskSection(worktreePath, existing, changeRiskSection(risk)); await ensureVersionLabel(worktreePath, existing, title); return { prUrl: existing, headSha, risk }; // #884 review
+    await upsertPullRequestRiskSection(worktreePath, existing, changeRiskSection(risk)); await ensureVersionLabel(worktreePath, existing, title); await syncPullRequestCoverage(worktreePath, existing, title, issueIdentifier, options.coverage); return { prUrl: existing, headSha, risk }; // #884 review; AGT-4786
   }
 
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
@@ -1224,7 +1226,7 @@ export async function commitAndCreatePRWithHead(
     ...[shapeSection, changeRiskSection(risk), freshnessSection, overlapSection, duplicateSection, versionLabel.bodySection].filter(Boolean).flatMap((s) => ['', s]),
     '',
     '## Linear',
-    `Closes ${issueIdentifier}`,
+    issueLinkLine(issueIdentifier, options.coverage), // `Closes` only for complete coverage (AGT-4786)
     '',
     '---',
     '🤖 Generated with [OpenSwarm](https://github.com/Intrect-io/OpenSwarm)',
@@ -1232,7 +1234,7 @@ export async function commitAndCreatePRWithHead(
   const claimEvidence = publicationClaimEvidence(basePrBody, headSha);
   const prBody = claimEvidence.section ? `${basePrBody}\n\n${claimEvidence.section}` : basePrBody;
 
-  const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody, ...versionLabel.createArgs];
+  const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', publicationTitle(title, options.coverage), '--body', prBody, ...versionLabel.createArgs];
   // Draft when the work never earned a review: a duplicate implementation must
   // not masquerade as the sole one, and work published because a run parked
   // (AGT-4076) never reached a reviewer at all.
@@ -1257,7 +1259,7 @@ export async function commitAndCreatePRWithHead(
     // was computed above too, before this branch knew whether it would create or reuse a PR — a merged-result regression (AGT-4465) must block
     // promotion here exactly as it does on the non-raced path.
     if (!options.draft && !conflicting && !regressed && claimEvidence.ready) await readyReusedPullRequest(worktreePath, url, issueIdentifier, duplicates.length);
-    await upsertPullRequestRiskSection(worktreePath, url, changeRiskSection(risk)); await ensureVersionLabel(worktreePath, url, title); // #884 review: the raced PR lacks the risk section too
+    await upsertPullRequestRiskSection(worktreePath, url, changeRiskSection(risk)); await ensureVersionLabel(worktreePath, url, title); await syncPullRequestCoverage(worktreePath, url, title, issueIdentifier, options.coverage); // #884 review: the raced PR lacks the risk section too
   }
 
   // Register PR ownership for conflict auto-resolution
@@ -1280,10 +1282,8 @@ export async function commitAndCreatePRWithHead(
 }
 
 /** Backwards-compatible URL-only publication surface. */
-export async function commitAndCreatePR(
-  info: WorktreeInfo, title: string, issueIdentifier: string, description: string,
-  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig } = {},
-): Promise<string> {
+export async function commitAndCreatePR(info: WorktreeInfo, title: string, issueIdentifier: string, description: string,
+  options: { draft?: boolean; committedOnly?: boolean; fileScope?: string[]; verify?: VerifyConfig } = {}): Promise<string> {
   return (await commitAndCreatePRWithHead(info, title, issueIdentifier, description, options)).prUrl;
 }
 

@@ -391,10 +391,12 @@ export const REVIEWER_FORMAT_REPAIR_PROMPT =
   'Restate the conclusion you already reached as exactly one fenced JSON block of this shape:\n\n' +
   '```json\n' +
   '{"decision": "approve" | "revise" | "reject", "feedback": "<one-paragraph summary>", ' +
-  '"issues": ["<file:line — concrete defect>"], "suggestions": ["<concrete change>"]}\n' +
+  '"issues": ["<file:line — concrete defect>"], "suggestions": ["<concrete change>"], ' +
+  '"coverage": "complete" | "partial"}\n' +
   '```\n\n' +
   'Use "approve" only if your review found nothing that must change. If you found any defect, ' +
-  'the decision is "revise" or "reject" and every defect goes in "issues".';
+  'the decision is "revise" or "reject" and every defect goes in "issues". "coverage" is "complete" ' +
+  'only if the change delivers everything the issue asks for, otherwise "partial".';
 
 /**
  * Run Reviewer agent (full review with Sonnet)

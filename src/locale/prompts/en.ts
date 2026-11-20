@@ -676,11 +676,14 @@ After review, output results in the following JSON format:
   "feedback": "Overall feedback (1-3 sentences)",
   "issues": ["List of found issues (empty array if none)"],
   "suggestions": ["List of improvement suggestions (empty array if none)"],
-  "recommendedActions": [{ "type": "test|refactor|bug|docs|perf", "title": "Short follow-up to file as its own issue", "location": "file:line (optional)" }]
+  "recommendedActions": [{ "type": "test|refactor|bug|docs|perf", "title": "Short follow-up to file as its own issue", "location": "file:line (optional)" }],
+  "coverage": "partial"
 }
 \`\`\`
 
 \`recommendedActions\` are concrete follow-ups worth tracking as separate issues (NOT blockers for this change). Use an empty array if none.
+
+\`coverage\` states whether this change delivers the WHOLE issue as written in the Original Task above — every defect, item and requirement it lists — not just the Definition of Done items you checked: \`"complete"\` only if nothing the issue asks for is left, otherwise \`"partial"\` (e.g. it fixes 2 of the 15 listed defects). It is independent of \`decision\`: a correct change that covers part of the issue is \`"approve"\` with \`"partial"\`. The PR closes the issue only when you say \`"complete"\`; a missing value is published as partial.
 
 `;
   },

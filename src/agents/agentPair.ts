@@ -105,6 +105,8 @@ export interface ReviewResult extends ExecutionBoundarySignals {
   costInfo?: CostInfo;
   /** Reviewer-recommended follow-ups, filed as sub-issues on approve (INT-1704). */
   recommendedActions?: RecommendedAction[];
+  /** Whether the change covers the whole issue; undefined = unknown, published as partial (AGT-4786). */
+  coverage?: 'complete' | 'partial';
 }
 
 /**

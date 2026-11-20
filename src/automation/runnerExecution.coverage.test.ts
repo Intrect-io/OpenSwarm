@@ -77,7 +77,7 @@ vi.mock('../support/planner.js', () => ({
   runPlanner: plannerRunPlanner,
   formatPlannerResult: plannerFormatPlannerResult,
 }));
-vi.mock('./unfinishedRunBranch.js', () => ({ keepUnfinishedWorkOnRemote }));
+vi.mock('./unfinishedRunBranch.js', () => ({ keepUnfinishedWorkOnRemote })); vi.mock('./siblingOverlapDefer.js', () => ({ deferForSiblingOverlap: async () => false })); // AGT-4786 gate: own tests
 vi.mock('../support/worktreeManager.js', () => ({
   createWorktree,
   commitAndCreatePR,

@@ -44,9 +44,11 @@ export async function ghWithTimeout(cwd: string, timeoutMs: number, ...args: str
 // Real incident: STONKS STO-1400 (PR #224 merged + PR #226 left open, CONFLICTING)
 // and STO-1454 (PR #221 merged + PR #228 left open, CONFLICTING) sat undetected
 // until a human noticed the "File overlap with in-flight work" comment and ran
-// `git merge-tree` by hand. Every OpenSwarm PR body literally contains
+// `git merge-tree` by hand. An OpenSwarm PR that claims the whole issue carries
 // `Closes <issueIdentifier>`, so a GitHub body search finds siblings regardless of
-// branch name or merge state.
+// branch name or merge state. A `[partial]` PR carries `Refs` instead (AGT-4786)
+// and is deliberately not found: it does not claim the issue, so it neither makes
+// a later PR a duplicate nor counts as the issue's delivery.
 
 /** Other PRs (any state) whose body already closes this Linear issue, excluding
  *  this branch's own PR. Best-effort — any gh failure returns [] rather than

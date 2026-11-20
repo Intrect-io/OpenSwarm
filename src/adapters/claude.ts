@@ -21,6 +21,7 @@ import { extractResultFromStreamJson } from '../agents/cliStreamParser.js';
 import { t } from '../locale/index.js';
 import { extractSummary, withExecutionEvidence } from './resultParsing.js';
 import { writeClaudeMcpConfig } from './memoryMcp.js';
+import { parseReviewCoverage } from '../support/publicationCoverage.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { buildClaudeEnvOverlay, inheritsUserSettings } from './claudeEnv.js';
 import { extractClaudeRunUsage, recordCliRunUsage } from './cliUsageAttribution.js';
@@ -443,6 +444,7 @@ function normalizeReviewResult(parsed: any): ReviewResult { // eslint-disable-li
     feedback: parsed.feedback || t('common.fallback.noFeedback'),
     issues: Array.isArray(parsed.issues) ? parsed.issues : [],
     suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : [],
+    ...(parseReviewCoverage(parsed.coverage) ? { coverage: parseReviewCoverage(parsed.coverage) } : {}), // AGT-4786
   };
 }
 

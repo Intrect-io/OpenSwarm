@@ -15,6 +15,7 @@ vi.mock('../support/worktreeManager.js', () => ({
   resolveBaseRef: async () => ({ remote: 'origin', branch: 'main', ref: 'main' }),
 }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent: vi.fn() }));
+vi.mock('./siblingOverlapDefer.js', () => ({ deferForSiblingOverlap: async () => false })); // its own tests: publishOnPark.overlapDefer.test.ts
 
 import { publishApprovedWork } from './publishOnPark.js';
 import { collectWorktreeTestCaseDeltas, TEST_REMOVAL_PARK_REASON, testRemovalHold } from './testRemovalGate.js';

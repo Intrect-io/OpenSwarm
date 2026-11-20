@@ -12,6 +12,7 @@ import type { FileOverlap } from './fileOverlap.js';
 export interface OpenPRFileOverlap extends FileOverlap {
   number: number;
   url: string;
+  headRefName: string;
 }
 
 /**
@@ -45,6 +46,12 @@ export async function findOpenPRFileOverlaps(
     /** Issues whose runs a worker currently holds; undefined when unknowable. */
     activeIssueIdentifiers?: readonly string[];
   } = {},
+  /**
+   * `throwOnLookupFailure`: rethrow when GitHub cannot be asked instead of
+   * answering "no overlap". The pre-worker check is fail-open on purpose; the
+   * approved-publication overlap gate must tell "none" from "unknown" (AGT-4786).
+   */
+  lookup: { throwOnLookupFailure?: boolean } = {},
 ): Promise<OpenPRFileOverlap[]> {
   // A documentation path is never ownership (AGT-4422): the requirements
   // ledger every cgf-portal PR updates made one open hand PR supersede every
@@ -76,10 +83,11 @@ export async function findOpenPRFileOverlaps(
         console.log(`[Worktree] Open PR #${pr.number} (${pr.headRefName}) shares ${shared.length} of ${planned.size} planned files — below the ownership threshold, not a duplicate: ${shared.join(', ')}`);
         continue;
       }
-      overlaps.push({ number: pr.number, url: pr.url, label: `PR #${pr.number} (${pr.headRefName})`, files: shared });
+      overlaps.push({ number: pr.number, url: pr.url, headRefName: pr.headRefName, label: `PR #${pr.number} (${pr.headRefName})`, files: shared });
     }
     return overlaps;
   } catch (err) {
+    if (lookup.throwOnLookupFailure) throw err;
     console.warn('[Worktree] Preflight open-PR overlap check skipped:', err);
     return [];
   }
