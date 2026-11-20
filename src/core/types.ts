@@ -451,6 +451,11 @@ export type ProjectAgentConfig = {
    */
   setup?: string[];
   /**
+   * Definition of Ready gate (AGT-4805): a Todo issue needs acceptance criteria, an out-of-scope
+   * note and a verify command before it is claimed. Absent = on; `false` opts this project out.
+   */
+  requireDefinitionOfReady?: boolean;
+  /**
    * Standing goal for every task in this project (AGT-4662). The draft, worker,
    * reviewer and planner all read it, and the draft may decline a task that
    * cannot serve it before any worktree is created.

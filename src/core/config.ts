@@ -233,8 +233,7 @@ const ProjectRolesOverrideSchema = z.object({
 const ProjectAgentConfigSchema = z.object({
   /** Project path */
   projectPath: z.string().min(1),
-  /** Linear project ID */
-  linearProjectId: z.string().optional(),
+  linearProjectId: z.string().optional(), // Linear project ID
   generatedOutputRules: z.array(z.object({
     command: z.string().min(1),
     outputs: z.array(z.string().min(1)).min(1),
@@ -243,6 +242,7 @@ const ProjectAgentConfigSchema = z.object({
   goal: z.string().trim().min(1).max(MAX_PROJECT_GOAL_CHARS).optional(),
   /** Dependency install commands run before the worker, network open, no credentials (AGT-4798) */
   setup: z.array(z.string().trim().min(1)).optional(),
+  requireDefinitionOfReady: z.boolean().optional(), // Definition of Ready gate (AGT-4805): absent = on, false opts out
   /** Per-role configuration override */
   roles: ProjectRolesOverrideSchema,
 });
