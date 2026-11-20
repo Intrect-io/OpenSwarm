@@ -23,7 +23,8 @@
  *   contract as `usageLedger.recordUsage`.
  */
 
-import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { appendFileSync, chmodSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { redactSecrets } from './secretRedaction.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -173,7 +174,12 @@ export function createSessionRecorder(input: {
   const path = join(dir, `${name}.jsonl`);
 
   try {
-    mkdirSync(dir, { recursive: true });
+    // Private to this user: transcripts hold tool output, which can hold
+    // whatever a command printed. mkdir's mode only applies to directories it
+    // creates, so both levels are set explicitly. (AGT-4608)
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    tightenMode(sessionLogDir(), 0o700);
+    tightenMode(dir, 0o700);
   } catch {
     // An unwritable state directory is not a reason to fail the agent.
     return undefined;
@@ -188,10 +194,12 @@ export function createSessionRecorder(input: {
   const write = (event: SessionLogEvent): void => {
     const clipped = clipEvent(event);
     if (clipped.truncated) truncatedEvents += 1;
-    const line = `${JSON.stringify({ seq: seq++, ts: new Date().toISOString(), ...clipped })}\n`;
+    // Secret-shaped values never reach the file; the replacement carries no
+    // quote or backslash, so the line stays valid JSON. (AGT-4608)
+    const line = `${redactSecrets(JSON.stringify({ seq: seq++, ts: new Date().toISOString(), ...clipped }))}\n`;
     bytes += Buffer.byteLength(line);
     try {
-      appendFileSync(path, line);
+      appendFileSync(path, line, { mode: 0o600 });
     } catch {
       // Disk full, permissions revoked mid-run: stop counting on it, keep going.
       droppedEvents += 1;
@@ -226,6 +234,51 @@ export function createSessionRecorder(input: {
       write({ type: 'end', ...summary, truncatedEvents, droppedEvents, bytes });
     },
   };
+}
+
+/** chmod a real directory or file (never through a link) when its mode is wider. */
+function tightenMode(path: string, mode: number): void {
+  const info = lstatSync(path);
+  if (info.isSymbolicLink()) return;
+  if ((info.mode & 0o777 & ~mode) !== 0) chmodSync(path, mode);
+}
+
+/**
+ * Close transcripts written before AGT-4608 to other local users: directories
+ * 0700, files 0600. Run once at daemon start. Returns how many entries it
+ * changed. Never throws.
+ */
+export function tightenSessionLogPermissions(dir = sessionLogDir()): number {
+  let changed = 0;
+  const visit = (path: string, depth: number): void => {
+    let info;
+    try {
+      info = lstatSync(path);
+    } catch {
+      return;
+    }
+    if (info.isSymbolicLink()) return;
+    const want = info.isDirectory() ? 0o700 : 0o600;
+    if ((info.mode & 0o777 & ~want) !== 0) {
+      try {
+        chmodSync(path, want);
+        changed += 1;
+      } catch {
+        // Not ours to change; leave it.
+      }
+    }
+    if (info.isDirectory() && depth < 2) {
+      let entries: string[] = [];
+      try {
+        entries = readdirSync(path);
+      } catch {
+        return;
+      }
+      for (const entry of entries) visit(join(path, entry), depth + 1);
+    }
+  };
+  visit(dir, 0);
+  return changed;
 }
 
 /**

@@ -218,6 +218,10 @@ async function startServiceLocked(config: SwarmConfig): Promise<void> {
   console.log(token.source === 'env'
     ? '🔑 API token: OPENSWARM_WEB_TOKEN'
     : `🔑 API token: ${token.path} (${token.source === 'created' ? 'created' : 'reused'}, mode 0600)`);
+  // Transcripts written before AGT-4608 were 0644 in 0755 directories.
+  const { tightenSessionLogPermissions } = await import('../support/sessionLog.js');
+  const tightened = tightenSessionLogPermissions();
+  if (tightened > 0) console.log(`🔒 Session transcripts: tightened ${tightened} entries to 0700/0600`);
   const { setExecWorkerSandbox } = await import('../support/webExecTasks.js');
   setExecWorkerSandbox(config.autonomous?.workerSandbox ?? 'on');
 
