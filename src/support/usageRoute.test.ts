@@ -56,6 +56,14 @@ describe('usage HTTP handler', () => {
   it('returns 400 for an invalid axis or filter value', async () => {
     expect((await fetch(`${baseUrl}/api/usage?by=bad`)).status).toBe(400);
     expect((await fetch(`${baseUrl}/api/usage?by=stage&project=`)).status).toBe(400);
-    expect((await fetch(`${baseUrl}/api/usage?by=stage&project=MissingProject`)).status).toBe(400);
+  });
+
+  it('answers a valid axis with a value absent from the window with an empty 200', async () => {
+    const response = await fetch(`${baseUrl}/api/usage?since=24h&by=stage&project=MissingProject`);
+    expect(response.status).toBe(200);
+    const body = await response.json() as { rows: unknown[]; total: { calls: number } };
+    expect(body.rows).toEqual([]);
+    expect(body.total.calls).toBe(0);
+    expect((await fetch(`${baseUrl}/api/usage?by=stage&bogus=x`)).status).toBe(400);
   });
 });

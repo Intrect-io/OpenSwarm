@@ -61,6 +61,19 @@ describe('usage ledger', () => {
     expect(parseUsageQuery(new URLSearchParams('by=stage&stage=worker')).ok).toBe(false);
   });
 
+  it('returns an empty aggregate for a filter value absent from the window, and still rejects an unknown axis', () => {
+    const now = Date.parse('2026-09-02T03:00:00.000Z');
+    recordUsage(record({ ts: '2026-09-02T02:00:00.000Z', stage: 'worker', cwd: '/work/OpenSwarm' }));
+    const absent = queryUsage({ since: '24h', by: 'stage', filters: { project: 'AgedOut' }, now });
+    expect(absent.ok).toBe(true);
+    if (absent.ok) {
+      expect(absent.aggregate.rows).toEqual([]);
+      expect(absent.aggregate.total.calls).toBe(0);
+    }
+    expect(queryUsage({ since: '24h', by: 'stage', filters: { bogus: 'x' }, now }).ok).toBe(false);
+    expect(queryUsage({ since: '24h', by: 'stage', filters: { stage: 'worker' }, now }).ok).toBe(false);
+  });
+
   it('filters before grouping so a drilldown total exactly matches its parent row', () => {
     const now = Date.parse('2026-09-02T03:00:00.000Z');
     recordUsage(record({ ts: '2026-09-02T02:00:00.000Z', stage: 'worker', cwd: '/work/OpenSwarm' }));

@@ -1,4 +1,5 @@
-// The Supervisor page runs one classic script (web/static/js/supervisor.js),
+// The Supervisor page runs classic scripts (web/static/js/supervisor.js and
+// supervisorPanels.js),
 // so a source-shape assertion cannot tell whether a failed Stop still reads as
 // sent. Run the real page and script in jsdom with a scripted fetch and a
 // hand-driven clock.
@@ -9,13 +10,19 @@ import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
 
 const STATIC = join(__dirname, '..', '..', 'web', 'static');
-const SCRIPT_TAG = '<script src="/static/js/supervisor.js"></script>';
-/** The page with its script inlined: jsdom does not fetch /static/ assets. */
+// Both classic scripts, in load order: the panels declare what supervisor.js's
+// init code calls (AGT-4868).
+const SCRIPTS = ['supervisorPanels.js', 'supervisor.js'];
+/** The page with its scripts inlined: jsdom does not fetch /static/ assets. */
 function pageSource(): string {
-  const html = readFileSync(join(STATIC, 'supervisor.html'), 'utf8');
-  if (!html.includes(SCRIPT_TAG)) throw new Error('supervisor.html no longer loads supervisor.js');
-  const script = readFileSync(join(STATIC, 'js', 'supervisor.js'), 'utf8');
-  return html.replace(SCRIPT_TAG, () => `<script>${script}</script>`);
+  let html = readFileSync(join(STATIC, 'supervisor.html'), 'utf8');
+  for (const name of SCRIPTS) {
+    const tag = `<script src="/static/js/${name}"></script>`;
+    if (!html.includes(tag)) throw new Error(`supervisor.html no longer loads ${name}`);
+    const script = readFileSync(join(STATIC, 'js', name), 'utf8');
+    html = html.replace(tag, () => `<script>${script}</script>`);
+  }
+  return html;
 }
 const PROVIDERS = ['codex', 'openrouter'];
 
@@ -374,5 +381,41 @@ describe('Factory kill switch button (AGT-4808 review H)', () => {
     const btn = page.doc.getElementById('factory-pause-btn') as HTMLButtonElement;
     expect(btn.textContent).toBe('Resume factory');
     expect(btn.title).toContain('Factory paused (drain) by auto:disk: low disk');
+  });
+});
+
+describe('Repositories panel keeps its list when a reload fails (AGT-4005 review)', () => {
+  const ALPHA = [{ name: 'alpha-repo', path: '/work/alpha-repo', enabled: true, prs: [], running: [], queued: [], pending: [] }];
+
+  it('reloadProjectList rejects on a non-OK answer and leaves the rendered list intact', async () => {
+    let projectsStatus = 200;
+    const page = load((url) => (url === '/api/projects'
+      ? (projectsStatus === 200 ? { status: 200, body: ALPHA } : { status: 500, body: { error: 'boom' } })
+      : undefined));
+    await page.settle();
+    // Seed through the same path a successful clone takes.
+    await call(page, 'reloadProjectList');
+    const list = page.doc.getElementById('project-list')!;
+    expect(list.textContent).toContain('alpha-repo');
+    projectsStatus = 500;
+    await expect(call(page, 'reloadProjectList') as Promise<void>).rejects.toThrow('HTTP 500');
+    expect(list.textContent).toContain('alpha-repo');
+  });
+
+  it('pickRepo shows an error and keeps the list when the refresh fails', async () => {
+    let projectsStatus = 200;
+    const page = load((url) => (url === '/api/projects'
+      ? (projectsStatus === 200 ? { status: 200, body: ALPHA } : { status: 500, body: { error: 'boom' } })
+      : undefined));
+    await page.settle();
+    await call(page, 'reloadProjectList');
+    projectsStatus = 500;
+    const item = page.doc.createElement('div');
+    item.setAttribute('data-path', '/work/beta-repo');
+    await call(page, 'pickRepo', item);
+    expect(page.doc.getElementById('project-list')!.textContent).toContain('alpha-repo');
+    const alert = page.doc.querySelector('#repo-picker-list .picker-error');
+    expect(alert?.textContent).toContain('Add failed');
+    expect(alert?.textContent).toContain('HTTP 500');
   });
 });

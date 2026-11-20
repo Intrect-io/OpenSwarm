@@ -286,8 +286,9 @@ export function queryUsage(query: UsageQuery): UsageQueryResult {
   const records = readUsage({ since, until: now });
   if (query.filters) {
     for (const [axis, value] of Object.entries(query.filters)) {
+      // A value absent from the window is an empty drill, not a bad request:
+      // the row the client clicked can age out between two refreshes.
       if (!isUsageGroupKey(axis) || axis === query.by) return { ok: false, error: `invalid usage filter axis '${axis}'` };
-      if (!records.some((record) => groupKeyOf(record, axis) === value)) return { ok: false, error: `unknown usage filter value '${value}' for '${axis}'` };
     }
   }
   const filtered = query.filters ? filterUsage(records, query.filters) : records;
