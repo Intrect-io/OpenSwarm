@@ -2865,7 +2865,8 @@ export class AutonomousRunner {
       // quota gate is irrelevant; it only spammed 401s and could wrongly skip codex
       // work. codex-responses self-protects via RateLimitError (scheduler pause).
 
-      // 2. Fetch tasks from Linear
+      // 2. Fetch tasks from Linear; a pause (or unreadable pause table) stops the heartbeat before it (AGT-4808)
+      if (!dispatchable) { this.syslog('⏸ Dispatch held (factory paused or pause table unreadable); heartbeat stops before fetch'); return; }
       this.syslog('⟳ Fetching tasks from Linear...');
       const fetchResult = await fetchLinearTasks();
       if (this.stopping) return;
@@ -2874,7 +2875,7 @@ export class AutonomousRunner {
         await reportToDiscord(`⚠️ Linear fetch failed: ${fetchResult.error}`);
         return;
       }
-      let tasks = dispatchable ? await this.reconcileStalledInProgress(fetchResult.tasks) : fetchResult.tasks; // paused: do not demote parked runs
+      let tasks = await this.reconcileStalledInProgress(fetchResult.tasks);
       await this.reconcileMergedPublications(tasks).catch((error) => {
         console.warn('[AutonomousRunner] Merge reconciliation failed:', error);
       });
@@ -2916,7 +2917,6 @@ export class AutonomousRunner {
       if (this.stopping) return;
       await this.reconcileDurableArtifacts(tasks);
       if (this.stopping) return;
-      if (!dispatchable) { this.syslog('⏸ Dispatch held (factory paused or pause table unreadable); maintenance only'); await this.maybeRunLedgerRetrospective(); return; } // AGT-4808: no grooming, idle fill or dispatch
 
       this.lastFetchedTasks = tasks;
       this.syslog(`✓ Found ${tasks.length} tasks from Linear`);

@@ -92,8 +92,9 @@ export class RunnerPauseControl {
   /**
    * Read the table once per heartbeat and act on it. Returns false when nothing
    * may be dispatched this heartbeat (a global pause, or an unreadable table);
-   * `blocks()` then answers true for every repository, so the caller can keep
-   * its maintenance running and only skip dispatch.
+   * `blocks()` then answers true for every repository. The heartbeat returns
+   * before its tracker fetch on false (AGT-4808); fetch-free upkeep before it
+   * (worktree sweep, monitors) still runs.
    * `now` pauses cancel matching in-flight runs through the scheduler's abort
    * path, the same one disabling a project uses; `drain` pauses let them finish.
    */

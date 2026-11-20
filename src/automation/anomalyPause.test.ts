@@ -405,6 +405,16 @@ describe('replay of the 2026-10-20 run', () => {
     expect(fixture.prsOpenedAt.filter((t) => Date.parse(t) > result.trip.at)).toHaveLength(23);
   });
 
+  // PR #877's own replay, kept: the all-PR signal at its default, with the
+  // draft signal (added in review, above) switched off so this one is measured.
+  it('with the defaults, trips on PR rate at the third PR, 39 minutes into the PR flood', () => {
+    const result = firstTrip({ ...DEFAULT_ANOMALY_THRESHOLDS, maxDraftPrsPerHour: 1_000 })!;
+    expect(result.trip.signal).toBe('pr_rate');
+    expect(new Date(result.trip.at).toISOString()).toBe('2026-10-20T14:17:20.000Z');
+    expect(result.minutesAfterFirstPr).toBeCloseTo(39.15, 1);
+    expect(fixture.prsOpenedAt.filter((t) => Date.parse(t) > result.trip.at)).toHaveLength(22);
+  });
+
   /**
    * The acceptance line, through the path the daemon runs: the fixture is fed
    * into a real ledger database as time advances, and `RunnerPauseControl.apply`

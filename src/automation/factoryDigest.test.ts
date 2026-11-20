@@ -176,7 +176,7 @@ describe('computeFactoryDigest against hand counts', () => {
     expect(formatFactoryDigest(d)).toContain('UTC day 2026-11-14 (2026-11-14T00:00Z → 2026-11-15T00:00Z)');
   });
 
-  it('renders unmeasured figures as such, never as a number', () => {
+  it('renders not-measured KPIs as such, never as a number', () => {
     const text = formatFactoryDigest(readFactoryDigest(fixtureDb(), T + D));
     expect(text).toMatch(/\*\*Runs merged\*\*: not measured \(the automation database records no merge/);
     expect(text).toContain('Done with a PR 2 (tracker state; merge not verified), published not Done 1, parked runs 1 in window / 1 now');
@@ -194,7 +194,7 @@ describe('computeFactoryDigest against hand counts', () => {
     expect(text).not.toMatch(/human minute: 0/);
   });
 
-  it('a missing database is an empty digest, and the stand-in database is closed', () => {
+  it('a missing database is an empty digest, not an error', () => {
     const close = vi.spyOn(Database.prototype, 'close');
     const d = readFactoryDigest(join(tmpdir(), 'openswarm-digest-missing', 'none.db'), T);
     expect(close).toHaveBeenCalledTimes(1);

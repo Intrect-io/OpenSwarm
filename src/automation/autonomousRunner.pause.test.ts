@@ -93,7 +93,7 @@ describe('heartbeat honours the factory pause (AGT-4808)', () => {
     return log.mock.calls.map((c: unknown[]) => String(c[0])).filter((l: string) => l.startsWith('[HB]'));
   }
 
-  it('a global pause holds dispatch but keeps heartbeat maintenance running, and lifting it resumes (review E)', async () => {
+  it('a global pause set after start stops the next heartbeat before fetch, and lifting it resumes', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const { runner, internal, fetchTasks } = await setup();
     await runner.heartbeat();
@@ -103,15 +103,14 @@ describe('heartbeat honours the factory pause (AGT-4808)', () => {
     store.set({ actor: 'cli:test', reason: 'incident' });
     await runner.heartbeat();
     await runner.heartbeat();
-    // Maintenance (the fetch that feeds merge/tracker/artifact reconciliation) still ran.
-    expect(fetchTasks).toHaveBeenCalledTimes(3);
+    expect(fetchTasks).toHaveBeenCalledTimes(1);
     const pauseLines = heartbeatLines(log).filter((l) => l.includes('⏸ Paused (factory, drain)'));
     expect(pauseLines).toHaveLength(2); // once per heartbeat
     expect(runner.pauses.blocks(root)).toBe(true); // candidate dispatch reads this
 
     store.clear();
     await runner.heartbeat();
-    expect(fetchTasks).toHaveBeenCalledTimes(4);
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
     expect(runner.pauses.blocks(root)).toBe(false);
     store.close();
     internal.durableRuns.close();
@@ -133,7 +132,8 @@ describe('heartbeat honours the factory pause (AGT-4808)', () => {
     store.set({ actor: 'cli:test', reason: 'incident' });
     await runner.heartbeat();
     expect(internal.heartbeatParallel).not.toHaveBeenCalled();
-    expect(retrospective).toHaveBeenCalledTimes(1);
+    expect(fetchTasks).not.toHaveBeenCalled(); // the pause returns before the fetch (PR #877's semantics)
+    expect(retrospective).not.toHaveBeenCalled();
     expect(heartbeatLines(log).some((l) => l.includes('Dispatch held'))).toBe(true);
     store.clear();
     await runner.heartbeat();
