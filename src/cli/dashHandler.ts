@@ -18,11 +18,22 @@ export interface DashDeps {
   log: (message: string) => void;
   logError: (message: string, error: unknown) => void;
   setExitCode: (code: number) => void;
+  /**
+   * Sets up the API token the server accepts (AGT-4814). Mutations need it on
+   * loopback too, so without one every dashboard action would be refused.
+   * Defaults to the daemon's own `ensureDaemonToken`.
+   */
+  ensureToken?: () => { source: 'env' | 'file' | 'created'; path: string };
 }
 
 export async function runDashCommand(port: number, open: boolean, deps: DashDeps): Promise<void> {
+  const ensureToken = deps.ensureToken ?? (await import('../support/daemonToken.js')).ensureDaemonToken;
+  const token = ensureToken();
   await deps.startWebServer(port);
   deps.log(`Dashboard running at http://localhost:${port}`);
+  deps.log(token.source === 'env'
+    ? 'Dashboard actions ask once for the API token: paste OPENSWARM_WEB_TOKEN.'
+    : `Dashboard actions ask once for the API token: paste the contents of ${token.path}.`);
 
   if (open) {
     const url = `http://localhost:${port}`;
