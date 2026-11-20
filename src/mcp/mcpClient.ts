@@ -508,10 +508,18 @@ async function discoverMcpTools(registry: Record<string, ServerConfig>): Promise
   const defs: ToolDefinition[] = [];
   const routing: Record<string, McpToolRoute> = {};
   let droppedTotal = 0;
-  for (const tools of perServer) {
+  for (const [index, tools] of perServer.entries()) {
     for (const { definition, route } of tools) {
       const name = definition.function.name;
-      if (routing[name]) continue;
+      if (routing[name]) {
+        // Within one server duplicates were already dropped, so this is a cross-server
+        // collision (server "a_" + tool "b" vs server "a" + tool "_b"). Keep the first.
+        const kept = entries.find(([, cfg]) => cfg === routing[name].cfg)?.[0] ?? '?';
+        console.warn(
+          `[MCP] tool name "${name}" from server "${entries[index][0]}" collides with server "${kept}" — kept "${kept}"`,
+        );
+        continue;
+      }
       if (defs.length >= MAX_DISCOVERED_TOOLS) {
         droppedTotal++;
         continue;

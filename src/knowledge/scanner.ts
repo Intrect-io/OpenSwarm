@@ -162,8 +162,7 @@ export async function scanProject(
   // Budget reasons go first: a repo with many size/depth reasons would
   // otherwise push them past the 50-entry cut.
   const unique = Array.from(new Set(incompleteReasons));
-  const isBudget = (reason: string) => / budget \d+ reached$/.test(reason);
-  graph.incompleteReasons = [...unique.filter(isBudget), ...unique.filter(r => !isBudget(r))].slice(0, 50);
+  graph.incompleteReasons = [...unique.filter(isBudgetReason), ...unique.filter(r => !isBudgetReason(r))].slice(0, 50);
   return graph;
 }
 
@@ -174,9 +173,20 @@ export async function incrementalUpdate(
   graph: KnowledgeGraph,
   projectPath: string,
   changedFiles: string[],
+  options: Pick<ScanOptions, 'maxFiles' | 'maxNodes'> = {},
 ): Promise<void> {
   const deadline = Date.now() + MAX_INCREMENTAL_UPDATE_MS;
   const root = await realpath(projectPath);
+  // A graph that a full scan cut at a budget must not keep growing through
+  // refreshes: new files would bypass the budget and land as orphan nodes whose
+  // parent directory was never walked. Existing nodes are still refreshed.
+  const maxFiles = Math.max(0, options.maxFiles ?? MAX_SCAN_FILES);
+  const maxNodes = Math.max(1, options.maxNodes ?? MAX_SCAN_NODES);
+  const budgetCapped = graph.incomplete && graph.incompleteReasons.some(isBudgetReason);
+  let sourceFileCount = budgetCapped
+    ? graph.getNodesByType('module').length + graph.getNodesByType('test_file').length
+    : 0;
+  let skippedNew = 0;
   for (const file of changedFiles) {
     if (Date.now() >= deadline) throw new Error(`Incremental graph update exceeded ${MAX_INCREMENTAL_UPDATE_MS}ms`);
     const candidate = resolve(root, file);
@@ -219,6 +229,10 @@ export async function incrementalUpdate(
 
       await parseImports(graph, projectPath, node);
     } else {
+      if (budgetCapped && (graph.nodeCount >= maxNodes || sourceFileCount >= maxFiles)) {
+        skippedNew++;
+        continue;
+      }
       // New file: add node
       try {
         const fullPath = join(projectPath, relPath);
@@ -234,6 +248,7 @@ export async function incrementalUpdate(
           metrics: computeMetrics(content, language),
         };
         graph.addNode(node);
+        sourceFileCount++;
 
         // Contains edge with parent directory
         const parentDir = dirname(relPath);
@@ -248,9 +263,17 @@ export async function incrementalUpdate(
     }
   }
 
+  if (skippedNew > 0) {
+    console.warn(`[Scanner] Graph is at its scan budget — skipped ${skippedNew} new file(s) in incremental update`);
+  }
+
   // Re-run test mapping
   mapTestsToModules(graph);
   graph.scannedAt = Date.now();
+}
+
+function isBudgetReason(reason: string): boolean {
+  return / budget \d+ reached$/.test(reason);
 }
 
 // Internal: Directory Walking

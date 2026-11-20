@@ -27,6 +27,12 @@ export interface FixRepositoryContext {
   sharedPaths: string[];
   repoMemories: RepoMemoryBrief[];
   dependencyGraphAvailable: boolean;
+  /**
+   * True when the scan stopped at a limit (budget, depth, timeout, size). Files it
+   * never reached are missing from dependencyMap, so the dependents/imports of the
+   * files it did reach are a lower bound, not an authoritative list.
+   */
+  dependencyGraphIncomplete?: boolean;
   dependencyMap: Record<string, FixDependencyMapEntry>;
   preflight: { ready: boolean; issues: string[] };
 }
@@ -179,6 +185,7 @@ export async function buildFixRepositoryContext(
 
   const dependencyMap: Record<string, FixDependencyMapEntry> = {};
   let dependencyGraphAvailable = false;
+  let dependencyGraphIncomplete = false;
   try {
     // Fix planning must describe the exact audit worktree, not a possibly stale
     // graph persisted for another branch or an older canonical checkout.
@@ -192,6 +199,7 @@ export async function buildFixRepositoryContext(
       };
     }
     dependencyGraphAvailable = Object.keys(dependencyMap).length > 0;
+    dependencyGraphIncomplete = graph.incomplete;
   } catch {
     dependencyGraphAvailable = false;
   }
@@ -212,6 +220,7 @@ export async function buildFixRepositoryContext(
     sharedPaths: sharedPaths.map((path) => toRelative(canonicalRoot, join(canonicalRoot, path))),
     repoMemories,
     dependencyGraphAvailable,
+    dependencyGraphIncomplete,
     dependencyMap,
     preflight: { ready: issues.length === 0, issues },
   };
@@ -316,7 +325,11 @@ function buildFixUnit(
 /** Merge related audit areas into fix units; independent components may run in parallel. */
 export function planFixUnits(targets: FixPlanningTarget[], context: FixRepositoryContext): FixUnit[] {
   if (targets.length === 0) return [];
-  const graphCoversTargets = context.dependencyGraphAvailable && targets.every((target) =>
+  // An incomplete graph cannot prove independence: a caller in an unscanned file
+  // is simply absent, so an empty dependents list would read as "no callers".
+  // Treat it like a partial graph — one repository-wide, non-graph-backed unit.
+  const graphCoversTargets = context.dependencyGraphAvailable && !context.dependencyGraphIncomplete
+    && targets.every((target) =>
     target.area.files.every((file) => context.dependencyMap[file] !== undefined));
   if (!graphCoversTargets) return [buildFixUnit(targets, context, false)];
 
@@ -361,6 +374,7 @@ export function workerContextForFixUnit(unit: FixUnit, context: FixRepositoryCon
       verificationCommands: context.verificationCommands,
       sharedPaths: context.sharedPaths,
       dependencyGraphAvailable: unit.dependencyGraphBacked,
+      dependencyGraphIncomplete: context.dependencyGraphIncomplete === true,
     },
   };
 }

@@ -58,21 +58,46 @@ function readRow(row: StoredRow): Record<string, unknown> {
   return { ...row, vector: vectorFromArray(new Float32Array(row.vector)) };
 }
 
-const selectRows = (rows: StoredRow[], limit: number) => ({
-  toArray: async () => rows.slice(0, limit).map(readRow),
-});
+/** Every query the code under test built, so pushdown can be asserted. */
+const queries: Array<{ where?: string; columns?: string[] }> = [];
+
+/**
+ * Evaluates the two predicate shapes memoryOps sends: an id lookup, and the
+ * recent-conversations `"type" = '…' AND ("repo" = '…' OR …)` filter.
+ */
+function matches(predicate: string): (row: StoredRow) => boolean {
+  const typeClause = /"type" = '([^']*)'/.exec(predicate);
+  if (typeClause) {
+    const repos = [...predicate.matchAll(/"repo" = '([^']*)'/g)].map((match) => match[1]);
+    return (row) => row.type === typeClause[1] && repos.includes(row.repo);
+  }
+  const ids = [...predicate.matchAll(/'([^']*)'/g)].map((match) => match[1].replace(/''/g, "'"));
+  return (row) => ids.includes(row.id);
+}
+
+interface QuerySpec { where?: string; columns?: string[]; offset?: number; limit?: number }
+
+/** Lance-like chainable query: where/select/offset/limit in any order, then toArray. */
+function query(spec: QuerySpec = {}) {
+  return {
+    where: (predicate: string) => query({ ...spec, where: predicate }),
+    select: (columns: string[]) => query({ ...spec, columns }),
+    offset: (offset: number) => query({ ...spec, offset }),
+    limit: (limit: number) => query({ ...spec, limit }),
+    toArray: async () => {
+      queries.push({ where: spec.where, columns: spec.columns });
+      const rows = spec.where ? state.rows.filter(matches(spec.where)) : state.rows;
+      const start = spec.offset ?? 0;
+      return rows.slice(start, start + (spec.limit ?? rows.length)).map((row) => {
+        const read = readRow(row);
+        return spec.columns ? Object.fromEntries(spec.columns.map((column) => [column, read[column]])) : read;
+      });
+    },
+  };
+}
 
 const table = {
-  query: () => ({
-    offset: (offset: number) => ({
-      limit: (limit: number) => ({ toArray: async () => state.rows.slice(offset, offset + limit).map(readRow) }),
-    }),
-    where: (predicate: string) => {
-      const ids = [...predicate.matchAll(/'([^']*)'/g)].map((match) => match[1].replace(/''/g, "'"));
-      return { limit: (limit: number) => selectRows(state.rows.filter((row) => ids.includes(row.id)), limit) };
-    },
-    limit: (limit: number) => selectRows(state.rows, limit),
-  }),
+  query: () => query(),
   update: async ({ where, values }: { where: string; values: Record<string, unknown> }) => {
     const [id] = [...where.matchAll(/'([^']*)'/g)].map((match) => match[1].replace(/''/g, "'"));
     const row = state.rows.find((candidate) => candidate.id === id);
@@ -85,7 +110,7 @@ const table = {
     state.rows = state.rows.filter((row) => !ids.includes(row.id));
   },
   // The pre-fix implementation read through `.search(...).limit(10_000)`.
-  search: () => ({ limit: (limit: number) => selectRows(state.rows, limit) }),
+  search: () => ({ limit: (limit: number) => ({ toArray: async () => state.rows.slice(0, limit).map(readRow) }) }),
   name: 'cognitive_memory',
 };
 
@@ -107,6 +132,7 @@ const {
 afterEach(() => {
   state.rows = [];
   state.deleted = [];
+  queries.length = 0;
 });
 
 /** Deterministic pseudo-random unit vector, centred on zero so unrelated
@@ -341,6 +367,26 @@ describe('getRecentConversations', () => {
     const recent = await getRecentConversations('chan-1', 3);
     expect(recent.map((r) => r.id)).toEqual(['new-b', 'new-a', 'old-498']);
   });
+
+  it('pushes the type/repo filter down and never reads the vector column', async () => {
+    state.rows = [
+      chatRow('chat-1', 2_000, 'chan-1'),
+      { ...chatRow('discord-1', 3_000, 'chan-1'), repo: 'discord' },
+      { ...chatRow('not-journal', 9_000, 'chan-1'), type: 'belief' },
+      { ...chatRow('other-repo', 9_000, 'chan-1'), repo: 'alpha' },
+    ];
+
+    const recent = await getRecentConversations('chan-1', 10);
+
+    expect(recent.map((r) => r.id)).toEqual(['discord-1', 'chat-1']);
+    expect(queries.length).toBeGreaterThan(0);
+    for (const q of queries) {
+      expect(q.where).toBe(`"type" = 'journal' AND ("repo" = 'chat' OR "repo" = 'discord')`);
+      expect(q.columns).toBeDefined();
+      expect(q.columns).not.toContain('vector');
+      expect(q.columns).toEqual(expect.arrayContaining(['id', 'createdAt', 'derivedFrom', 'metadata']));
+    }
+  });
 });
 
 describe('selectNewestRows', () => {
@@ -375,6 +421,29 @@ describe('selectNewestRows', () => {
     expect(selected.map((r) => r.id)).toEqual(expected);
     // Every page was read: 257 rows in pages of 16 is 17 pages.
     expect(pages).toHaveLength(17);
+  });
+
+  it('counts a row once when an offset shift returns it on two pages', async () => {
+    const rows = Array.from({ length: 8 }, (_, i) => ({ id: `r-${i}`, createdAt: 100 + i }));
+    // A concurrent insert at the head shifts every row down by one between
+    // pages, so the last row of page one is read again at the top of page two.
+    const pageTable = {
+      query: () => ({
+        offset: (offset: number) => ({
+          limit: (limit: number) => ({
+            toArray: async () => {
+              const start = offset === 0 ? 0 : offset - 1;
+              return rows.slice(start, start + limit);
+            },
+          }),
+        }),
+      }),
+    };
+
+    const selected = await selectNewestRows(pageTable, () => true, 8, 4);
+    const ids = selected.map((r) => r.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(['r-7', 'r-6', 'r-5', 'r-4', 'r-3', 'r-2', 'r-1', 'r-0']);
   });
 
   it('returns nothing for a non-positive limit without reading the table', async () => {

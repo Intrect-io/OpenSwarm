@@ -49,11 +49,12 @@ async function main(): Promise<void> {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [SEARCH_TOOL] }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     if (req.params.name !== 'search_memory') {
       return { content: [{ type: 'text', text: `Unknown tool: ${req.params.name}` }], isError: true };
     }
-    return searchMemory(req.params.arguments);
+    // A cancelled request releases its slot like a deadline does.
+    return searchMemory(req.params.arguments, extra.signal);
   });
 
   await server.connect(new StdioServerTransport());

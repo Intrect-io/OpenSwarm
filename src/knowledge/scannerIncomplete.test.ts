@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { KnowledgeGraph } from './graph.js';
 import { buildSnapshot } from './graphqlExporter.js';
-import { scanProject } from './scanner.js';
+import { incrementalUpdate, scanProject } from './scanner.js';
 import { SerializedGraphSchema } from './types.js';
 
 let tmp: string;
@@ -169,5 +169,38 @@ describe('knowledge scan incompleteness', () => {
     // root + src + 3 modules = 5 nodes, exactly at both budgets.
     expect(graph.nodeCount).toBe(5);
     expect(graph.incomplete).toBe(false);
+  });
+
+  it('does not grow a budget-capped graph through incremental updates, but refreshes existing files', async () => {
+    for (let i = 0; i < 12; i++) {
+      await writeProjectFile(`src/m${i}.ts`, `export const m${i} = ${i};\n`);
+    }
+    const graph = await scanProject(tmp, 'test-project', { maxNodes: 6 });
+    expect(graph.incomplete).toBe(true);
+    const reasons = [...graph.incompleteReasons];
+    const before = graph.nodeCount;
+    expect(before).toBeLessThanOrEqual(6);
+    const existing = graph.getNodesByType('module')[0].id;
+
+    await writeProjectFile('src/zz_new.ts', 'export const fresh = 1;\n');
+    await writeProjectFile(existing, 'export const a = 1;\nexport const b = 2;\nexport const c = 3;\n');
+    await incrementalUpdate(graph, tmp, ['src/zz_new.ts', existing], { maxNodes: 6 });
+
+    expect(graph.hasNode('src/zz_new.ts')).toBe(false);
+    expect(graph.nodeCount).toBe(before);
+    expect(graph.getNode(existing)?.metrics?.exportCount).toBe(3);
+    expect(graph.incomplete).toBe(true);
+    expect(graph.incompleteReasons).toEqual(reasons);
+  });
+
+  it('still adds new files through incremental updates when the graph is complete', async () => {
+    await writeProjectFile('src/app.ts', 'export const app = 1;\n');
+    const graph = await scanProject(tmp, 'test-project', { maxNodes: 3 });
+    expect(graph.incomplete).toBe(false);
+
+    await writeProjectFile('src/extra.ts', 'export const extra = 1;\n');
+    await incrementalUpdate(graph, tmp, ['src/extra.ts'], { maxNodes: 3 });
+
+    expect(graph.hasNode('src/extra.ts')).toBe(true);
   });
 });

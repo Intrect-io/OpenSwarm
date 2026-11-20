@@ -625,3 +625,34 @@ describe('discovery tool-count bounds', () => {
     warn.mockRestore();
   });
 });
+
+describe('discovery cross-server name collisions', () => {
+  it('warns with both server names and routes the collided name to the kept server', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Server "a_" + tool "b" and server "a" + tool "_b" both qualify to "a___b".
+    clientMock.listTools.mockResolvedValue({
+      tools: [
+        { name: 'b', inputSchema: { type: 'object', properties: {} } },
+        { name: '_b', inputSchema: { type: 'object', properties: {} } },
+      ],
+    });
+
+    const defs = await initMcpTools({
+      a_: { transport: 'stdio', command: 'mock-mcp-first' },
+      a: { transport: 'stdio', command: 'mock-mcp-second' },
+    });
+    const names = defs.map((d) => d.function.name);
+
+    expect(names.filter((n) => n === 'a___b')).toHaveLength(1);
+    expect(warn.mock.calls.some(([msg]) => {
+      const text = String(msg);
+      return text.includes('"a___b"') && text.includes('server "a"') && text.includes('server "a_"');
+    })).toBe(true);
+
+    clientMock.callTool.mockResolvedValue({ content: [{ type: 'text', text: 'ok' }] });
+    await expect(callMcpTool('a___b', {})).resolves.toEqual({ content: 'ok', isError: false });
+    // Server "a_" was kept, so the call goes out under its own tool name "b".
+    expect(clientMock.callTool).toHaveBeenCalledWith(expect.objectContaining({ name: 'b' }));
+    warn.mockRestore();
+  });
+});
