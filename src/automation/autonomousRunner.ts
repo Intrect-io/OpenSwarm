@@ -942,8 +942,8 @@ export class AutonomousRunner {
         // Host resource failures (ENOSPC) pause all dispatch through the disk gate with one
         // notice instead of a per-task backoff that fails the same way next time (AGT-4785).
         const resource = isHostResourceError(detail) ? this.diskGate.resourceFailure(detail) : undefined;
-        if (resource?.pause) { // confirmed by measurement; the heartbeat's auto:disk pause sends the one alert (#849 review)
-          console.error(`[Scheduler] ${taskCtx} stopped dispatch after a host resource failure: ${detail}`);
+        if (resource?.pause) { // a measured low alerts via the heartbeat's auto:disk pause; an unconfirmed report is a timed hold (#849 review)
+          console.error(`[Scheduler] ${taskCtx} stopped dispatch after a host resource failure: ${detail}`); if (resource.hold && resource.notice) await reportToDiscord(`⚠️ ${resource.notice}`);
         } else if (task.issueId) { // includes an ENOSPC report the measurement did not confirm: ordinary infra backoff
           // Fixed mid-range backoff — we intentionally don't bump failure counts,
           // so there's no attempt number to scale by.
@@ -2828,7 +2828,7 @@ export class AutonomousRunner {
       // 1. Kill switch + anomaly auto-pause (AGT-4808, AGT-4809) before the holds below return, so a `now` pause
       // cancels and logs during them. Free disk is measured once here (AGT-4785); low disk pauses the factory (`auto:disk`).
       const disk = this.diskGate.evaluate();
-      const dispatchable = await this.pauses.apply(this.scheduler, (line) => this.syslog(line), { projects: this.config.allowedProjects, alert: reportToDiscord, diskLow: disk.pause ? disk.line : undefined });
+      const dispatchable = await this.pauses.apply(this.scheduler, (line) => this.syslog(line), { projects: this.config.allowedProjects, alert: reportToDiscord, diskLow: disk.pause && !disk.hold ? disk.line : undefined }); // a timed ENOSPC hold is not a factory pause
       if (disk.notice) { // before the time-window return, or a recovery seen on a blocked heartbeat is lost
         console.warn(`[AutonomousRunner] ${disk.notice}`);
         if (!disk.pause) await reportToDiscord(`✅ ${disk.notice}`);

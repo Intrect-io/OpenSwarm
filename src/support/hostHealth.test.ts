@@ -172,13 +172,20 @@ describe('HostDiskGate', () => {
     expect(g.evaluate()).toEqual({ pause: false });
   });
 
-  it('does not pause on a reported ENOSPC when the disk measures fine, and says so once', () => {
+  // PR #849's own case, kept after review: the unconfirmed report holds dispatch for a
+  // while and lifts itself; it is a timed `hold`, never the operator-lifted auto:disk pause.
+  it('holds dispatch after a reported ENOSPC even though the disk measures fine, then resumes once', () => {
+    let clock = 1_000;
     const lines: string[] = [];
-    const g = new HostDiskGate(() => [tmpdir()], () => UNDER, (line) => lines.push(line));
-    expect(g.resourceFailure('No space left on device')).toEqual({ pause: false });
-    expect(g.resourceFailure('No space left on device')).toEqual({ pause: false });
+    const g = new HostDiskGate(() => [tmpdir()], () => UNDER, (line) => lines.push(line), { now: () => clock, holdMs: 60_000 });
+    expect(g.resourceFailure('No space left on device')).toMatchObject({ pause: true, hold: true, notice: expect.stringContaining('Dispatch paused') });
+    expect(g.resourceFailure('No space left on device').notice).toBeUndefined();
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('not confirmed by a free-space measurement');
+    clock += 30_000;
+    expect(g.evaluate()).toEqual({ pause: true, hold: true, line: 'Host resource failure: No space left on device' });
+    clock += 30_001;
+    expect(g.evaluate()).toMatchObject({ pause: false, notice: expect.stringContaining('recovered') });
     expect(g.evaluate()).toEqual({ pause: false });
   });
 
@@ -200,7 +207,7 @@ describe('HostDiskGate', () => {
     const g = new HostDiskGate(() => [tmpdir()], () => floor.value, () => undefined);
     expect(g.evaluate().pause).toBe(true);
     floor.value = UNDER;
-    expect(g.resourceFailure('No space left on device')).toEqual({ pause: false });
+    expect(g.resourceFailure('No space left on device')).toMatchObject({ pause: true, hold: true });
     expect(g.evaluate()).toMatchObject({ pause: false, notice: expect.stringContaining('recovered') });
   });
 
