@@ -298,3 +298,46 @@ describe('risk guard: medium and above need a human approval on the head', () =>
     expectLoadBearing('review-completeness', medium(approved, { review: null }));
   });
 });
+
+describe('steward fail-closed gaps found in review (#911, #912)', () => {
+  const at = (minute: number) => `2026-11-15T00:${String(minute).padStart(2, '0')}:00Z`;
+  const medium = (prReviews: StewardSnapshot['prReviews']) =>
+    baseline({ risk: { level: 'medium', headSha: HEAD }, prReviews });
+
+  it('a person who requested changes on the head blocks a medium PR another person approved', () => {
+    expectLoadBearing('risk', medium([
+      { login: 'alice', userType: 'User', state: 'CHANGES_REQUESTED', commitId: HEAD, submittedAt: at(1) },
+      { login: 'bob', userType: 'User', state: 'APPROVED', commitId: HEAD, submittedAt: at(2) },
+    ]));
+    const decision = evaluateMergeSteward(medium([
+      { login: 'alice', userType: 'User', state: 'CHANGES_REQUESTED', commitId: HEAD, submittedAt: at(1) },
+      { login: 'bob', userType: 'User', state: 'APPROVED', commitId: HEAD, submittedAt: at(2) },
+    ]));
+    expect(decision.results.find((r) => r.guard === 'risk')?.reason).toContain('changes requested by alice');
+  });
+
+  it('a changes request later replaced by the same person\'s approval no longer blocks', () => {
+    expect(evaluateMergeSteward(medium([
+      { login: 'alice', userType: 'User', state: 'CHANGES_REQUESTED', commitId: HEAD, submittedAt: at(1) },
+      { login: 'alice', userType: 'User', state: 'APPROVED', commitId: HEAD, submittedAt: at(2) },
+    ])).mergeable).toBe(true);
+  });
+
+  it('an approval whose reviewer has an unreadable review timestamp does not count', () => {
+    expectLoadBearing('risk', medium([
+      { login: 'alice', userType: 'User', state: 'CHANGES_REQUESTED', commitId: HEAD, submittedAt: 'not-a-date' },
+      { login: 'alice', userType: 'User', state: 'APPROVED', commitId: HEAD, submittedAt: at(2) },
+    ]));
+  });
+
+  it('a risk class outside low/medium/high is refused, not read as medium', () => {
+    const human = { login: 'alice', userType: 'User', state: 'APPROVED' as const, commitId: HEAD, submittedAt: at(1) };
+    const odd = baseline({ risk: { level: 'LOW' as never, headSha: HEAD }, prReviews: [human] });
+    expectLoadBearing('risk', odd);
+  });
+
+  it('an unknown list of sibling PRs is refused, an empty one is not', () => {
+    expectLoadBearing('sibling-overlap', baseline({ siblings: null }));
+    expect(evaluateMergeSteward(baseline({ siblings: [] })).mergeable).toBe(true);
+  });
+});

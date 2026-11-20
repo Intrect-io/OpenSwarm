@@ -94,8 +94,11 @@ export interface StewardSnapshot extends StewardFileList {
   requiredChecks: readonly string[];
   checks: readonly StewardCheck[];
   risk: StewardRisk | null;
-  /** Other open swarm PRs in the same repository. */
-  siblings: readonly StewardSiblingPr[];
+  /**
+   * Other open swarm PRs in the same repository, or null when the list could not
+   * be read in full. An empty array is a complete answer: there are none.
+   */
+  siblings: readonly StewardSiblingPr[] | null;
   review: StewardReview | null;
   completeness: StewardCompleteness | null;
 }
@@ -162,6 +165,11 @@ const requiredChecksGuard: StewardGuard = {
  * the PR author and is not one of the factory's own accounts. COMMENTED reviews do
  * not change a reviewer's standing (GitHub semantics); a later CHANGES_REQUESTED or
  * DISMISSED withdraws an earlier approval.
+ *
+ * A person whose standing is CHANGES_REQUESTED blocks the merge outright, whoever
+ * else approved: the steward must not be looser than branch protection. A review
+ * whose timestamp cannot be parsed makes its reviewer's order unknowable, so that
+ * reviewer's approval does not count. (#912 review)
  */
 export function humanApprovalOnHead(s: StewardSnapshot): { approvedBy: string[]; reason: string } {
   if (s.automationAccounts.length === 0) {
@@ -170,15 +178,32 @@ export function humanApprovalOnHead(s: StewardSnapshot): { approvedBy: string[];
   const automation = new Set(s.automationAccounts.map((login) => login.toLowerCase()));
   const author = s.author.toLowerCase();
   const latest = new Map<string, StewardPrReview>();
-  const ordered = [...s.prReviews].sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
+  const unordered = new Set<string>();
+  for (const review of s.prReviews) {
+    if (Number.isNaN(Date.parse(review.submittedAt))) unordered.add(review.login.toLowerCase());
+  }
+  const ordered = [...s.prReviews]
+    .filter((review) => !Number.isNaN(Date.parse(review.submittedAt)))
+    .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
   for (const review of ordered) {
     if (review.state === 'COMMENTED' || review.state === 'PENDING') continue;
     latest.set(review.login.toLowerCase(), review);
+  }
+  const blockedBy = [...latest.entries()]
+    .filter(([login, review]) => review.state === 'CHANGES_REQUESTED' && review.userType === 'User'
+      && login !== author && !automation.has(login))
+    .map(([, review]) => review.login);
+  if (blockedBy.length > 0) {
+    return { approvedBy: [], reason: `changes requested by ${blockedBy.join(', ')}` };
   }
   const approvedBy: string[] = [];
   const ignored: string[] = [];
   for (const [login, review] of latest) {
     if (review.state !== 'APPROVED') continue;
+    if (unordered.has(login)) {
+      ignored.push(`${review.login} has a review with an unreadable timestamp`);
+      continue;
+    }
     if (review.commitId !== s.headSha) ignored.push(`${review.login} approved ${short(review.commitId)}, not the head`);
     else if (review.userType !== 'User') ignored.push(`${review.login} is ${review.userType ?? 'of unknown type'}`);
     else if (login === author) ignored.push(`${review.login} is the PR author`);
@@ -192,11 +217,14 @@ export function humanApprovalOnHead(s: StewardSnapshot): { approvedBy: string[];
   };
 }
 
+const RISK_LEVELS: ReadonlySet<string> = new Set<StewardRiskLevel>(['low', 'medium', 'high']);
+
 const riskGuard: StewardGuard = {
   name: 'risk',
   check(s) {
     const name = 'risk';
     if (!s.risk || s.risk.level === null) return fail(name, 'risk class unknown');
+    if (!RISK_LEVELS.has(s.risk.level)) return fail(name, `risk class ${JSON.stringify(s.risk.level)} is not low, medium or high`);
     if (s.risk.headSha !== s.headSha) {
       return fail(name, `risk was classified on ${short(s.risk.headSha)}, not the head ${short(s.headSha)}`);
     }
@@ -221,6 +249,7 @@ const siblingOverlapGuard: StewardGuard = {
     const name = 'sibling-overlap';
     const own = readableFiles(s);
     if (own === null) return fail(name, 'this PR\'s changed-file list is unknown or truncated');
+    if (s.siblings === null) return fail(name, 'the list of open sibling PRs is unknown or truncated');
     const ownSet = new Set(own);
     const problems: string[] = [];
     for (const sibling of s.siblings) {
