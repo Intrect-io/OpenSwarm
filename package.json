@@ -82,7 +82,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.17",
     "@types/ws": "^8.18.2",
-    "@vitest/coverage-v8": "^4.0.18",
+    "@vitest/coverage-v8": "^4.1.12",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "bun-types": "^1.1.0",
@@ -92,7 +92,7 @@
     "playwright": "^1.47.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.12"
   },
   "engines": {
     "node": ">=22"
