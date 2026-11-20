@@ -144,8 +144,9 @@ autonomous:
   last lifted (other resumes do not reset it). When the issue is at or over the budget, its next claim parks
   it as `NEEDS_HUMAN` (`issue_budget_exhausted`) without running anything.
   The park adds no spend of its own. The tracker gets the one operator-park
-  comment, which shows the spend. Moving the issue back to Todo resumes it
-  and starts a fresh budget.
+  comment, which shows the spend. An explicit dispatch (the dashboard issue
+  board) resumes it and starts a fresh budget. Moving the issue back to Todo
+  alone does not lift this park, and neither does a free idle-fill slot.
 
 A separate `publication` block decides what happens to the pull requests the
 swarm publishes from this repository. Worker attempts run only deterministic
