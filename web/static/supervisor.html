@@ -200,6 +200,14 @@
             oninput="filterRepos(this.value)" onkeydown="if(event.key==='Escape')closeRepoPicker()">
         </div>
         <div id="repo-picker-list" class="dialog-body"></div>
+        <div class="dialog-foot gh-connect-foot">
+          <button id="gh-connect-toggle" class="btn btn-secondary btn-sm" type="button" aria-expanded="false" aria-controls="gh-connect">Connect GitHub repo</button>
+          <div id="gh-connect" hidden>
+            <input id="gh-search" class="input" type="text" placeholder="Search your GitHub repositories…" aria-label="Search GitHub repositories" autocomplete="off">
+            <p id="gh-status" class="gh-status" role="status" aria-live="polite" hidden></p>
+            <div id="gh-repo-list" class="gh-repo-list"></div>
+          </div>
+        </div>
         <div id="scan-paths-section" class="dialog-foot">
           <div class="dialog-section-title">Scan paths</div>
           <div id="scan-paths-list"></div>
@@ -237,6 +245,7 @@
 
   </main>
   <script src="/static/js/supervisor.js"></script>
+  <script src="/static/js/githubConnect.js"></script>
   <script type="module">
     import { mountShell } from '/static/js/shell.mjs';
     mountShell(document);

@@ -569,6 +569,18 @@ tr.is-failed .c-title { text-decoration: line-through; text-decoration-color: va
 .repo-item-path { flex: 1; color: var(--fg-muted); font-family: var(--font-mono); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .repo-item-badge { flex-shrink: 0; padding: 0 var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-full); font-size: var(--text-xs); color: var(--fg-muted); }
 .fb-row { border-color: var(--border) !important; }
+
+/* Connect GitHub repo (AGT-4005): search + clone inside the Add dialog. */
+.gh-connect-foot #gh-connect { margin-top: var(--space-2); }
+.gh-connect-foot #gh-search { width: 100%; }
+.gh-repo-list { max-height: 240px; overflow-y: auto; margin-top: var(--space-2); }
+.gh-repo { cursor: default; padding-left: 0; padding-right: 0; }
+.gh-repo:hover { background: transparent; }
+.gh-repo-text { flex: 1; min-width: 0; }
+.gh-repo[data-state="failed"] .gh-repo-note { color: var(--danger); white-space: normal; }
+.gh-status { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--fg-muted); }
+.gh-status[data-tone="danger"] { color: var(--danger); }
+.fb-row { border-color: var(--border) !important; }
 .fb-row:hover { background: var(--bg-hover); }
 
 .scan-path-row { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) 0; font-size: var(--text-xs); }
