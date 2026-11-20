@@ -15,6 +15,9 @@ vi.mock('node:child_process', async () => {
 
 import { startWebServer, stopWebServer } from './web.js';
 
+import { AUTH, useTestDaemonToken } from './daemonToken.testing.js';
+
+useTestDaemonToken();
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const s = createServer();
@@ -57,8 +60,8 @@ describe('/api/service/* systemctl bounds (AGT-3408)', () => {
     await startWebServer(port);
 
     await fetch(`http://127.0.0.1:${port}/api/service/status`);
-    await fetch(`http://127.0.0.1:${port}/api/service/stop`, { method: 'POST' });
-    await fetch(`http://127.0.0.1:${port}/api/service/restart`, { method: 'POST' });
+    await fetch(`http://127.0.0.1:${port}/api/service/stop`, { method: 'POST', headers: AUTH });
+    await fetch(`http://127.0.0.1:${port}/api/service/restart`, { method: 'POST', headers: AUTH });
 
     expect(execFileMock).toHaveBeenCalledTimes(3);
     for (const call of execFileMock.mock.calls) {
@@ -83,7 +86,7 @@ describe('/api/service/* systemctl bounds (AGT-3408)', () => {
     const port = await freePort();
     await startWebServer(port);
 
-    const res = await fetch(`http://127.0.0.1:${port}/api/service/stop`, { method: 'POST' });
+    const res = await fetch(`http://127.0.0.1:${port}/api/service/stop`, { method: 'POST', headers: AUTH });
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: expect.any(String) });
   });
@@ -93,7 +96,7 @@ describe('/api/service/* systemctl bounds (AGT-3408)', () => {
     const port = await freePort();
     await startWebServer(port);
 
-    const res = await fetch(`http://127.0.0.1:${port}/api/service/restart`, { method: 'POST' });
+    const res = await fetch(`http://127.0.0.1:${port}/api/service/restart`, { method: 'POST', headers: AUTH });
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: expect.any(String) });
   });

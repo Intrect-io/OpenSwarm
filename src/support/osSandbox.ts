@@ -17,6 +17,7 @@
 // project's `setup` step, which runs with the network open, and a test can
 // still start a local server. `workerNetwork: open` restores the old behaviour.
 
+import { daemonTokenDir } from './daemonToken.js';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { scratchpadDir } from './scratchpad.js';
@@ -30,6 +31,17 @@ export interface SandboxSpec {
    * loopback (a test that starts a local server), never another host.
    */
   allowNetwork: boolean;
+  /**
+   * Directories the command may not read at all. The daemon's API token lives
+   * in one (support/daemonToken.ts): a worker that could read it could call
+   * the daemon's mutating API from its shell. (AGT-4814)
+   */
+  hiddenRoots?: string[];
+}
+
+/** The directories hidden from every sandboxed command that exist on this host. */
+export function defaultHiddenRoots(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string[] {
+  return [daemonTokenDir(env, home)].filter((dir) => existsSync(dir));
 }
 
 /**
@@ -92,7 +104,9 @@ export function buildMacSandboxProfile(spec: SandboxSpec): string {
     ? ' (allow network*)'
     : ' (allow network-bind (local ip "localhost:*")) (allow network-inbound (local ip "localhost:*"))'
       + ' (allow network-outbound (remote ip "localhost:*"))';
-  return `(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read)${network} (allow file-write* ${writes})`;
+  // Later rules win in a sandbox profile, so the deny follows the read-all allow.
+  const hidden = (spec.hiddenRoots ?? []).map((root) => ` (deny file-read* file-write* (subpath ${schemeString(root)}))`).join('');
+  return `(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read)${network} (allow file-write* ${writes})${hidden}`;
 }
 
 /**
@@ -103,6 +117,9 @@ export function buildMacSandboxProfile(spec: SandboxSpec): string {
 export function buildBwrapArgs(spec: SandboxSpec): string[] {
   const args = ['--ro-bind', '/', '/'];
   for (const root of spec.writableRoots) args.push('--bind', root, root);
+  // An empty tmpfs over a hidden directory: inside the sandbox it exists and
+  // holds nothing. (AGT-4814)
+  for (const root of spec.hiddenRoots ?? []) args.push('--tmpfs', root);
   if (!spec.allowNetwork) args.push('--unshare-net');
   args.push('--dev', '/dev', '--proc', '/proc', '--die-with-parent', '--');
   return args;
@@ -120,6 +137,7 @@ export function wrapForSandbox(
   backend: SandboxBackend | null = detectSandboxBackend(),
 ): SandboxedCommand | null {
   if (argv.length === 0) throw new Error('wrapForSandbox: empty argv');
+  spec = { ...spec, hiddenRoots: spec.hiddenRoots ?? defaultHiddenRoots() };
   if (backend === 'sandbox-exec') {
     return { file: '/usr/bin/sandbox-exec', args: ['-p', buildMacSandboxProfile(spec), ...argv] };
   }

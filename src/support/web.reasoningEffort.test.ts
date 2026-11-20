@@ -11,6 +11,9 @@ vi.mock('./reasoningEffortOverride.js', () => ({
 
 import { setWebRunner, startWebServer, stopWebServer } from './web.js';
 
+import { AUTH, useTestDaemonToken } from './daemonToken.testing.js';
+
+useTestDaemonToken();
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -45,7 +48,7 @@ describe('/api/reasoning-effort', () => {
 
     const update = await fetch(`http://127.0.0.1:${port}/api/reasoning-effort`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH },
       body: JSON.stringify({ effort: 'high' }),
     });
     expect(update.status).toBe(200);
@@ -58,7 +61,7 @@ describe('/api/reasoning-effort', () => {
     await startWebServer(port);
     const response = await fetch(`http://127.0.0.1:${port}/api/reasoning-effort`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...AUTH },
       body: JSON.stringify({ effort: 'max' }),
     });
     expect(response.status).toBe(400);

@@ -59,6 +59,47 @@ fn private_web_token_at(path: &std::path::Path) -> Result<Option<String>, String
     Ok(token)
 }
 
+/// Where the daemon keeps the token it creates for local clients (AGT-4814):
+/// `$OPENSWARM_DAEMON_TOKEN_DIR/token`, else `$XDG_CONFIG_HOME/openswarm/daemon/token`,
+/// else `~/.config/openswarm/daemon/token` — the same rule as the daemon's
+/// `src/support/daemonToken.ts`.
+pub(crate) fn daemon_token_file_path() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("OPENSWARM_DAEMON_TOKEN_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir).join("token"));
+        }
+    }
+    let config_home = match std::env::var("XDG_CONFIG_HOME") {
+        Ok(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
+        _ => PathBuf::from(std::env::var("HOME").ok()?).join(".config"),
+    };
+    Some(config_home.join("openswarm").join("daemon").join("token"))
+}
+
+/// The daemon's token file, when it exists and only this user can read it.
+/// A group- or world-readable file is refused with the fix, not used.
+pub(crate) fn private_token_file_at(path: &std::path::Path) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).map_err(|e| e.to_string())?.permissions().mode();
+        if mode & 0o077 != 0 {
+            return Err(format!(
+                "{} holds the daemon token but is readable by others (mode {:o}); run chmod 600 on it",
+                path.display(),
+                mode & 0o777
+            ));
+        }
+    }
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let token = raw.trim().to_string();
+    Ok(if token.is_empty() { None } else { Some(token) })
+}
+
 fn default_server_url() -> String {
     crate::flavor::server_url().to_string()
 }
@@ -137,6 +178,25 @@ mod tests {
         std::fs::write(&path, r#"{"server_url":"http://127.0.0.1:3847"}"#).unwrap();
         assert_eq!(super::private_web_token_at(&path).unwrap(), None);
         assert_eq!(super::private_web_token_at(&dir.join("missing.json")).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_daemon_token_file_is_used_only_when_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("openswarm-token-file-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        std::fs::write(&path, "abc123\n").unwrap();
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = super::private_token_file_at(&path).unwrap_err();
+        assert!(err.contains("chmod 600") && !err.contains("abc123"), "{err}");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(super::private_token_file_at(&path).unwrap().as_deref(), Some("abc123"));
+        assert_eq!(super::private_token_file_at(&dir.join("missing")).unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

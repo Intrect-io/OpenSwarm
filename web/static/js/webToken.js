@@ -158,8 +158,10 @@
     var label = document.createElement('span');
     // The message names the cause and the fix. A bare "Forbidden" told the
     // operator nothing, which is half of why this looked like a dead daemon.
-    label.textContent = 'This daemon requires an access token. Paste OPENSWARM_WEB_TOKEN to load data '
-      + '(Dismiss stops asking until you reload):';
+    // Changes need the token on localhost too (AGT-4814): the daemon keeps it
+    // in ~/.config/openswarm/daemon/token unless OPENSWARM_WEB_TOKEN is set.
+    label.textContent = 'This daemon requires an access token. Paste OPENSWARM_WEB_TOKEN, or the contents of '
+      + '~/.config/openswarm/daemon/token on the daemon host (Dismiss stops asking until you reload):';
     label.style.cssText = 'flex:1 1 320px';
 
     var input = document.createElement('input');

@@ -84,16 +84,25 @@ pub(crate) struct AdeActionOutcome {
 }
 
 /// Where the token comes from: the client config's `web_token`, then the
-/// environment. A config file anyone else can read is refused, not used.
+/// environment, then the token file the daemon creates for local clients
+/// (AGT-4814). A file anyone else can read is refused, not used.
 pub(crate) fn daemon_token() -> Result<String, String> {
     if let Some(token) = crate::client_config::private_web_token()? {
         return Ok(token);
     }
-    std::env::var("OPENSWARM_WEB_TOKEN")
+    if let Some(token) = std::env::var("OPENSWARM_WEB_TOKEN")
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
-        .ok_or_else(|| "no daemon token: set \"web_token\" in the desktop config.json (mode 0600) or OPENSWARM_WEB_TOKEN".into())
+    {
+        return Ok(token);
+    }
+    if let Some(path) = crate::client_config::daemon_token_file_path() {
+        if let Some(token) = crate::client_config::private_token_file_at(&path)? {
+            return Ok(token);
+        }
+    }
+    Err("no daemon token: start the daemon (it writes ~/.config/openswarm/daemon/token), or set \"web_token\" in the desktop config.json (mode 0600) or OPENSWARM_WEB_TOKEN".into())
 }
 
 fn scrub(text: &str, token: &str) -> String {
