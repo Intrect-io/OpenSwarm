@@ -49,5 +49,11 @@ export async function reviewPublishedPullRequest(input: {
     gateRan: result.gateRan,
     changesRequested: result.changesRequested,
     ...(result.partialFindingsPosted ? { partialFindingsPosted: true } : {}),
+    ...(result.reviewedSha ? { reviewedSha: result.reviewedSha } : {}),
+    ...(result.decision ? { decision: result.decision } : {}),
+    // The fresh CLI review is never given the issue text, so whatever it says
+    // about coverage is no evidence of completeness. Only a review that was
+    // handed the issue may store coverage (no such caller exists yet).
+    coverage: null,
   };
 }

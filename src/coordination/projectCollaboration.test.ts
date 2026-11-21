@@ -532,6 +532,13 @@ describe('HTTP and supervisor integration', () => {
     expect((await route(`/api/coordination/channels/${key}/read`, 'POST', { throughSeq: 1 })).data.readSeq).toBe(1);
     expect((await route(`/api/coordination/channels/${key}/read`, 'POST', { throughSeq: -1 })).status).toBe(400);
   });
+  it('serves channel messages sent in the same millisecond in the order they were sent', () => {
+    const first = send(); const second = send({ idempotencyKey: 'second' });
+    // Same created_at, and ids that sort the wrong way: only insertion order can keep FIFO.
+    channelDatabase().prepare('UPDATE coordination_channel_deliveries SET created_at=1, id=? WHERE id=?').run('zz-first', first.id);
+    channelDatabase().prepare('UPDATE coordination_channel_deliveries SET created_at=1, id=? WHERE id=?').run('aa-second', second.id);
+    expect(pendingCoordinatorMessages(key).map((item) => item.id)).toEqual(['zz-first', 'aa-second']);
+  });
   it('stops picking queued messages after disable and recovers unknown disabled-project runs without executing', async () => {
     let enabled = true;
     const first = send(); const second = send({ idempotencyKey: 'second' });

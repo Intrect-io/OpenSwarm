@@ -592,7 +592,7 @@ describe('PRProcessor.freshReview (INT-3282)', () => {
     // the caller can exit 2 rather than reporting a rejection. (INT-3914)
     // changesRequested is the reviewer's own objection, separate from `success`
     // — which is also false when the review merely broke. (AGT-4270)
-    expect(result).toEqual({ success: true, error: undefined, iterations: 0, gateRan: true, changesRequested: false });
+    expect(result).toEqual({ success: true, error: undefined, iterations: 0, gateRan: true, changesRequested: false, reviewedSha: 'headsha1234567', decision: 'approve' });
 
     // Origin must match the PR's own repo before anything is fetched — a
     // `--repo`/`--number owner/repo#n` override could otherwise point this

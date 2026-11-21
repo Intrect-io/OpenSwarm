@@ -9,12 +9,14 @@ import { join } from 'node:path';
 import { Command } from 'commander';
 import { afterEach, describe, expect, it } from 'vitest';
 import { assertReadOnlyGhArgs, type GhRunner, type StewardLedgerEvidence } from '../automation/mergeStewardSnapshot.js';
+import type { StewardVerdictRecord } from '../automation/stewardVerdictLedger.js';
 import { parsePrRef, registerStewardCommand, runStewardCommand } from './stewardCommand.js';
 
 const REPO = 'acme/widgets';
 const HEAD = 'c'.repeat(40);
 const BODY = '## Summary\nx\n\n## Risk: low\nok\n\n## Linear\nCloses AGT-1\n';
 const LEDGER: StewardLedgerEvidence = { issueId: 'u1', identifier: 'AGT-1', state: 'DONE', headSha: HEAD, changeRiskLevel: 'low' };
+const VERDICT: StewardVerdictRecord = { prUrl: `https://github.com/${REPO}/pull/5`, reviewedSha: HEAD, verdict: 'approve', coverage: null, recordedAt: '2026-11-21T00:00:00.000Z' };
 
 function fakeGh(opts: { failView?: boolean; failingCheck?: boolean } = {}): { gh: GhRunner; calls: string[][] } {
   const calls: string[][] = [];
@@ -59,7 +61,7 @@ function harness(opts: Parameters<typeof fakeGh>[0] = {}, grant: Record<string, 
   const err: string[] = [];
   const fake = fakeGh(opts);
   const deps = {
-    gh: fake.gh, ledger: () => LEDGER, logPath, mergeGrantsPath,
+    gh: fake.gh, ledger: () => LEDGER, verdictLookup: () => VERDICT, logPath, mergeGrantsPath,
     out: (l: string) => out.push(l), err: (l: string) => err.push(l), now: () => new Date('2026-11-21T00:00:00Z'),
   };
   const log = () => (existsSync(logPath) ? readFileSync(logPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);

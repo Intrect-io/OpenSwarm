@@ -3,12 +3,13 @@
 // Dependencies: vitest
 // Test Status: passing
 
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { evaluateMergeSteward } from './mergeStewardGuards.js';
+import { recordStewardVerdict, type StewardVerdictRecord } from './stewardVerdictLedger.js';
 import {
   StewardSnapshotError,
   assertReadOnlyGhArgs,
@@ -17,10 +18,10 @@ import {
   latestChangeRiskLevel,
   mapHeadCheckRuns,
   parseRiskSection,
-  reviewEvidence,
   riskEvidence,
   type GhRunner,
   type StewardLedgerEvidence,
+  type StewardVerdictLookup,
 } from './mergeStewardSnapshot.js';
 
 const REPO = 'acme/widgets';
@@ -30,6 +31,19 @@ const OLD = 'b'.repeat(40);
 const BODY = ['## Summary', 'did it', '', '## Risk: low', '1 file(s), 3 line(s); no high- or medium-risk path.', '', '## Linear', 'Closes AGT-1', ''].join('\n');
 
 const LEDGER: StewardLedgerEvidence = { issueId: 'uuid-1', identifier: 'AGT-1', state: 'DONE', headSha: HEAD, changeRiskLevel: 'low' };
+const PR_URL = `https://github.com/${REPO}/pull/7`;
+const VERDICT: StewardVerdictRecord = { prUrl: PR_URL, reviewedSha: HEAD, verdict: 'approve', coverage: null, recordedAt: '2026-11-21T00:00:00.000Z' };
+const APPROVED: StewardVerdictLookup = () => VERDICT;
+
+const tmpDirs: string[] = [];
+afterEach(() => {
+  for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+const tmpDir = (prefix: string) => {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
+};
 
 interface FakeOptions {
   view?: Record<string, unknown>;
@@ -86,9 +100,9 @@ function fakeGh(o: FakeOptions = {}): { gh: GhRunner; calls: string[][] } {
 
 const GRANTED = () => ({ granted: true, reason: `${REPO} granted by test` });
 
-const build = (o: FakeOptions = {}, ledger: StewardLedgerEvidence | null = LEDGER) => {
+const build = (o: FakeOptions = {}, ledger: StewardLedgerEvidence | null = LEDGER, verdictLookup: StewardVerdictLookup = APPROVED) => {
   const fake = fakeGh(o);
-  return { fake, result: buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => ledger, readGrant: GRANTED }) };
+  return { fake, result: buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => ledger, verdictLookup, readGrant: GRANTED }) };
 };
 
 describe('mergeStewardSnapshot: checks and required checks', () => {
@@ -256,30 +270,71 @@ describe('mergeStewardSnapshot: risk and reviewer fallbacks', () => {
     expect(latestChangeRiskLevel(['not json', '{}'])).toBeNull();
   });
 
-  it('reviewer verdict: Closes on a non-partial, non-draft PR bound to the ledger head; otherwise missing or unknown', () => {
-    const pr = { body: BODY, title: 'feat: thing', isDraft: false };
-    expect(reviewEvidence(LEDGER, pr)).toMatchObject({ review: { verdict: 'approve', headSha: HEAD }, completeness: { verdict: 'complete', headSha: HEAD } });
-    expect(reviewEvidence(null, pr)).toMatchObject({ review: null, completeness: null });
-    expect(reviewEvidence(LEDGER, { ...pr, isDraft: true }).review?.verdict).toBe('unknown');
-    expect(reviewEvidence(LEDGER, { ...pr, title: '[partial] feat: thing' }).completeness?.verdict).toBe('partial');
-    expect(reviewEvidence(LEDGER, { ...pr, body: BODY.replace('Closes AGT-1', 'Refs AGT-1') })).toMatchObject({ review: { verdict: 'unknown' }, completeness: { verdict: 'partial' } });
-    expect(reviewEvidence(LEDGER, { ...pr, body: BODY.replace('Closes AGT-1', 'Closes AGT-99') }).review?.verdict).toBe('unknown');
-  });
-
-  it('a run that was not cleanly published (e.g. a review rollback) proves no approval, whatever the body says', () => {
-    const pr = { body: BODY, title: 'feat: thing', isDraft: false };
-    for (const state of ['NEEDS_RECONCILE', 'NEEDS_HUMAN', 'PUBLISHING', 'RETRY_AT']) {
-      expect(reviewEvidence({ ...LEDGER, state }, pr).review?.verdict, state).toBe('unknown');
-    }
-    expect(reviewEvidence({ ...LEDGER, state: 'SYNC_PENDING' }, pr).review?.verdict).toBe('approve');
-  });
-
-  it('a PR with no ledger row is refused for want of a reviewer verdict', async () => {
-    const { snapshot } = await build({}, null).result;
+  it('a PR with no ledger row is refused even with a stored approve', async () => {
+    const { snapshot, notes } = await build({}, null).result;
     const decision = evaluateMergeSteward(snapshot);
     expect(decision.mergeable).toBe(false);
-    expect(decision.blockedBy.join('\n')).toMatch(/no reviewer verdict recorded/);
+    expect(decision.blockedBy.join('\n')).toMatch(/review-completeness: reviewer verdict is unknown/);
     expect(decision.blockedBy.join('\n')).toMatch(/risk is medium/);
+    expect(notes.join('\n')).toContain('no ledger run binds this PR to a published head');
+  });
+
+  it('a PR with no stored verdict is refused for want of a reviewer verdict', async () => {
+    const { snapshot } = await build({}, LEDGER, () => null).result;
+    const decision = evaluateMergeSteward(snapshot);
+    expect(decision.blockedBy).toContainEqual(expect.stringMatching(/^review-completeness: no reviewer verdict recorded/));
+  });
+});
+
+describe('mergeStewardSnapshot: stored reviewer verdict (AGT-4803)', () => {
+  const reviewResult = (snapshot: Parameters<typeof evaluateMergeSteward>[0]) =>
+    evaluateMergeSteward(snapshot).results.find((r) => r.guard === 'review-completeness');
+
+  it('refuses a PR whose stored verdict is for an older head', async () => {
+    const { snapshot, notes } = await build({}, LEDGER, () => ({ ...VERDICT, reviewedSha: OLD })).result;
+    const decision = evaluateMergeSteward(snapshot);
+    expect(decision.mergeable).toBe(false);
+    expect(decision.blockedBy).toEqual([expect.stringMatching(/^review-completeness: review was for bbbbbbbbbbbb, not the head aaaaaaaaaaaa/)]);
+    expect(notes).toContain(`stored verdict is for ${OLD}, head is ${HEAD}`);
+  });
+
+  it('the default lookup reads the automation DB and names a stale verdict', async () => {
+    const dbPath = join(tmpDir('steward-verdicts-'), 'automation.db');
+    recordStewardVerdict({ prUrl: PR_URL, reviewedSha: OLD, decision: 'approve' }, dbPath);
+    const previous = process.env.OPENSWARM_AUTOMATION_DB;
+    process.env.OPENSWARM_AUTOMATION_DB = dbPath;
+    try {
+      const fake = fakeGh();
+      const stale = await buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => LEDGER, readGrant: GRANTED });
+      expect(stale.notes).toContain(`stored verdict is for ${OLD}, head is ${HEAD}`);
+      expect(reviewResult(stale.snapshot)?.pass).toBe(false);
+
+      recordStewardVerdict({ prUrl: PR_URL, reviewedSha: HEAD, decision: 'approve' }, dbPath);
+      const fresh = await buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fakeGh().gh, ledger: () => LEDGER, readGrant: GRANTED });
+      expect(evaluateMergeSteward(fresh.snapshot).mergeable).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.OPENSWARM_AUTOMATION_DB;
+      else process.env.OPENSWARM_AUTOMATION_DB = previous;
+    }
+  });
+
+  it('an approve at the head with every other piece of evidence is mergeable', async () => {
+    const { snapshot } = await build().result;
+    expect(snapshot.review).toEqual({ verdict: 'approve', headSha: HEAD });
+    expect(snapshot.completeness).toEqual({ verdict: 'complete', headSha: HEAD });
+    expect(evaluateMergeSteward(snapshot).mergeable).toBe(true);
+  });
+
+  it('a ledger run at another head refuses on the review guard', async () => {
+    const { snapshot, notes } = await build({}, { ...LEDGER, headSha: OLD }).result;
+    expect(reviewResult(snapshot)?.pass).toBe(false);
+    expect(notes).toContain(`ledger run published ${OLD}, head is ${HEAD}`);
+  });
+
+  it('a verdict lookup that throws is noted as unreadable and refuses', async () => {
+    const { snapshot, notes } = await build({}, LEDGER, () => { throw new Error('database is locked'); }).result;
+    expect(reviewResult(snapshot)).toMatchObject({ pass: false, reason: 'reviewer verdict is unknown' });
+    expect(notes.join('\n')).toMatch(/stored reviewer verdict unreadable \(database is locked\)/);
   });
 });
 
@@ -288,7 +343,7 @@ describe('mergeStewardSnapshot: operator merge grant (AGT-4414)', () => {
     const seen: string[] = [];
     const fake = fakeGh();
     const denied = await buildStewardSnapshot({
-      repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => LEDGER,
+      repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => LEDGER, verdictLookup: APPROVED,
       readGrant: (repo) => { seen.push(repo); return { granted: false, reason: 'no grants file at /x' }; },
     });
     expect(seen).toEqual([REPO]);
@@ -304,7 +359,7 @@ describe('mergeStewardSnapshot: operator merge grant (AGT-4414)', () => {
   it('a throwing grant reader grants nothing', async () => {
     const fake = fakeGh();
     const { snapshot } = await buildStewardSnapshot({
-      repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => LEDGER,
+      repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => LEDGER, verdictLookup: APPROVED,
       readGrant: () => { throw new Error('boom'); },
     });
     expect(snapshot.mergeGrant).toEqual({ granted: false, reason: 'grant lookup failed (boom)' });
@@ -315,7 +370,7 @@ describe('mergeStewardSnapshot: operator merge grant (AGT-4414)', () => {
 describe('ledger lookup (read-only SQLite)', () => {
   const makeDb = async () => {
     const { default: Database } = await import('better-sqlite3');
-    const path = join(mkdtempSync(join(tmpdir(), 'steward-ledger-')), 'automation.db');
+    const path = join(tmpDir('steward-ledger-'), 'automation.db');
     const db = new Database(path);
     db.exec(`CREATE TABLE automation_runs (issue_id TEXT PRIMARY KEY, identifier TEXT, state TEXT NOT NULL, pr_url TEXT, head_sha TEXT, updated_at INTEGER NOT NULL);
       CREATE TABLE automation_attempts (issue_id TEXT NOT NULL, attempt_no INTEGER NOT NULL, result_json TEXT);`);
@@ -336,13 +391,14 @@ describe('ledger lookup (read-only SQLite)', () => {
 
   it('a missing database is no evidence; a broken one is reported as unreadable', async () => {
     expect(await createLedgerLookup(join(tmpdir(), 'steward-no-such-dir', 'x.db'))('u')).toBeNull();
-    const broken = join(mkdtempSync(join(tmpdir(), 'steward-broken-')), 'automation.db');
+    const broken = join(tmpDir('steward-broken-'), 'automation.db');
     writeFileSync(broken, 'not a database');
     await expect(createLedgerLookup(broken)('u')).rejects.toThrow();
     const fake = fakeGh();
-    const { notes, snapshot } = await buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fake.gh, ledger: createLedgerLookup(broken), readGrant: GRANTED });
+    const { notes, snapshot } = await buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fake.gh, ledger: createLedgerLookup(broken), verdictLookup: APPROVED, readGrant: GRANTED });
     expect(notes.join('\n')).toMatch(/ledger unreadable/);
-    expect(snapshot.review).toBeNull();
+    expect(snapshot.review?.verdict).toBe('unknown');
+    expect(evaluateMergeSteward(snapshot).mergeable).toBe(false);
   });
 });
 
@@ -360,15 +416,44 @@ describe('read-only gh allowlist', () => {
   });
 });
 
+/**
+ * Every module-loading statement: static imports, `export ... from` re-exports
+ * (which load a module just as an import does) and dynamic `import()`.
+ */
+function moduleLoadStatements(source: string): string[] {
+  return source.match(/(?:^\s*(?:import|export)\s[^;]*?from\s+['"][^'"]+['"]|^\s*import\s+['"][^'"]+['"]|import\(\s*['"][^'"]+['"]\s*\))/gm) ?? [];
+}
+
 describe('no code path that could merge', () => {
+  it('extracts re-exports and side-effect imports as well as imports', () => {
+    const found = moduleLoadStatements([
+      "import { a } from './a.js';",
+      "export * from './b.js';",
+      "export { c } from './c.js';",
+      'export {\n  d,\n  e,\n} from "./d.js";',
+      "export type { F } from './f.js';",
+      "import './side-effect.js';",
+      "const g = await import('./g.js');",
+      'export const notALoad = 1;',
+    ].join('\n'));
+    for (const mod of ['./a.js', './b.js', './c.js', './d.js', './f.js', './side-effect.js', './g.js']) {
+      expect(found.some((line) => line.includes(mod)), mod).toBe(true);
+    }
+    expect(found).toHaveLength(7);
+  });
+
   it('has no code path that could merge: the collector and the steward command import nothing that can', () => {
-    for (const rel of ['./mergeStewardSnapshot.ts', './mergeGrant.ts', '../cli/stewardCommand.ts']) {
+    for (const rel of [
+      './mergeStewardSnapshot.ts', './mergeStewardEvidence.ts', './stewardVerdictLedger.ts', './automationDbPath.ts',
+      '../support/sqliteWal.ts', './mergeGrant.ts', '../cli/stewardCommand.ts',
+    ]) {
       const source = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
-      const imports = source.match(/(?:^\s*import\s[^;]*?from\s+'[^']+'|import\('[^']+'\))/gm) ?? [];
+      const imports = moduleLoadStatements(source);
       const allowed = [
         "'./mergeStewardGuards.js'", "'./mergeGrant.js'", "'../automation/mergeGrant.js'",
         "'../support/branchNaming.js'", "'better-sqlite3'",
-        "'commander'", "'node:fs'", "'node:os'", "'node:path'",
+        "'./mergeStewardEvidence.js'", "'./stewardVerdictLedger.js'", "'./automationDbPath.js'", "'../support/sqliteWal.js'",
+        "'commander'", "'node:fs'", "'node:os'", "'node:path'", "'node:module'",
         "'../automation/mergeStewardSnapshot.js'", "'../automation/mergeStewardGuards.js'",
         "'../automation/automationDbPath.js'", "'../support/ghPullRequests.js'",
       ];

@@ -24,7 +24,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import type { GhRunner, StewardLedgerLookup } from '../automation/mergeStewardSnapshot.js';
+import type { GhRunner, StewardLedgerLookup, StewardVerdictLookup } from '../automation/mergeStewardSnapshot.js';
 
 export interface StewardCommandOptions {
   dryRun?: boolean;
@@ -36,6 +36,8 @@ export interface StewardCommandOptions {
 export interface StewardCommandDeps {
   gh?: GhRunner;
   ledger?: StewardLedgerLookup;
+  /** Stored reviewer verdicts; defaults to the steward verdict ledger in the same database as the run ledger. */
+  verdictLookup?: StewardVerdictLookup;
   logPath?: string;
   /** Operator merge grants file; defaults to `defaultMergeGrantsPath()` (OPENSWARM_MERGE_GRANTS or ~/.openswarm). */
   mergeGrantsPath?: string;
@@ -121,20 +123,20 @@ export async function runStewardCommand(
   const logPath = deps.logPath ?? stewardDecisionLogPath();
   const at = (deps.now ?? (() => new Date()))().toISOString();
   const gh = deps.gh ?? defaultGh();
-  const { buildStewardSnapshot, createLedgerLookup } = await import('../automation/mergeStewardSnapshot.js');
+  const { buildStewardSnapshot, createLedgerLookup, createVerdictLookup } = await import('../automation/mergeStewardSnapshot.js');
   const { evaluateMergeSteward, formatStewardAudit, formatStewardDecision } = await import('../automation/mergeStewardGuards.js');
   const { readMergeGrant } = await import('../automation/mergeGrant.js');
   const grantsPath = deps.mergeGrantsPath;
   let repo = parsed.repo ?? '';
   try {
     repo = await resolveRepo(gh, parsed.repo);
-    let ledger = deps.ledger;
-    if (!ledger) {
-      const { defaultAutomationDbPath } = await import('../automation/automationDbPath.js');
-      ledger = createLedgerLookup(opts.ledger ?? defaultAutomationDbPath());
-    }
+    const { defaultAutomationDbPath } = await import('../automation/automationDbPath.js');
+    // Run ledger and verdict ledger are read from the same database.
+    const dbPath = opts.ledger ?? defaultAutomationDbPath();
+    const ledger = deps.ledger ?? createLedgerLookup(dbPath);
+    const verdictLookup = deps.verdictLookup ?? createVerdictLookup(dbPath);
     const { snapshot, prUrl, notes } = await buildStewardSnapshot({
-      repo, prNumber: parsed.prNumber, gh, ledger, automationAccounts: opts.automationAccount ?? [],
+      repo, prNumber: parsed.prNumber, gh, ledger, verdictLookup, automationAccounts: opts.automationAccount ?? [],
       readGrant: (r) => readMergeGrant(r, grantsPath !== undefined ? { path: grantsPath } : {}),
     });
     const decision = evaluateMergeSteward(snapshot, { dryRun: true });

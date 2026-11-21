@@ -21,6 +21,11 @@ import {
   type PublicationReviewOutcome,
   type ReviewVerdictStoreLike,
 } from './reviewVerdictStore.js';
+import {
+  isFullCommitSha,
+  recordStewardVerdict,
+  type StewardVerdictWriter,
+} from './stewardVerdictLedger.js';
 import type { DefaultRolesConfig, SecurityAuditConfig } from '../core/types.js';
 import type { PublishableResult, PublishableTask } from './publishOnPark.js';
 
@@ -64,6 +69,51 @@ export interface PublicationReviewHookInput {
    * the starting point for whoever picks the draft up.
    */
   rollbackOnRejection: boolean;
+  /** Steward verdict writer (AGT-4803); defaults to the automation database. Injected by tests. */
+  stewardVerdictWriter?: StewardVerdictWriter;
+}
+
+/**
+ * Record the reviewer's verdict for the merge steward, bound to the commit it
+ * read. Only when that commit IS the published head: a verdict for an older sha
+ * says nothing about what would be merged. Best-effort; never fails the hook.
+ *
+ * Fail-closed: 'approve' is stored only when the whole outcome agrees
+ * (`success === true` and `gateRan === true`). An approve the outcome contradicts
+ * is stored as 'reject' rather than skipped, so it also replaces any earlier
+ * approve row for the same commit. Coverage is stored only when the outcome
+ * says the review was given the issue text (`issueTextProvided === true`).
+ */
+function recordStewardEvidence(
+  writer: StewardVerdictWriter,
+  prUrl: string,
+  headSha: string,
+  review: PublicationReviewOutcome,
+): void {
+  const { reviewedSha, decision } = review;
+  if (!decision) {
+    console.log(`[Runner] No steward verdict recorded for ${prUrl}: the review reached no decision`);
+    return;
+  }
+  if (!isFullCommitSha(reviewedSha)) {
+    console.log(`[Runner] No steward verdict recorded for ${prUrl}: no full reviewed sha`);
+    return;
+  }
+  if (reviewedSha !== headSha) {
+    console.log(`[Runner] No steward verdict recorded for ${prUrl}: reviewed ${reviewedSha.slice(0, 12)} is not head ${headSha.slice(0, 12)}`);
+    return;
+  }
+  const consistentApprove = decision === 'approve' && review.success === true && review.gateRan === true;
+  if (decision === 'approve' && !consistentApprove) {
+    console.log(`[Runner] Steward verdict for ${prUrl} stored as reject: approve without success and a gate run`);
+  }
+  const stored = decision === 'approve' && !consistentApprove ? 'reject' : decision;
+  const coverage = review.issueTextProvided === true ? review.coverage ?? null : null;
+  try {
+    writer({ prUrl, reviewedSha, decision: stored, coverage });
+  } catch (err) {
+    console.warn('[Runner] Could not record the steward verdict:', err instanceof Error ? err.message : err);
+  }
 }
 
 /** Why the reviewer produced no verdict, said on the PR instead of only in a log nobody keeps. */
@@ -116,6 +166,7 @@ export function buildPublicationReviewHook(
   worktreeInfo: { originalPath: string; worktreePath?: string };
 }) => Promise<void> {
   const { task, result, roles, securityAudit, workerSandbox, rollbackOnRejection, verdictStore } = input;
+  const stewardWriter: StewardVerdictWriter = input.stewardVerdictWriter ?? ((v) => { recordStewardVerdict(v); });
   return async ({ prUrl, headSha, worktreeInfo }) => {
     // Only the park path may skip on the in-process key. The approved path's
     // whole job is to ACT on the verdict, and this cache remembers "seen", not
@@ -170,6 +221,8 @@ export function buildPublicationReviewHook(
       // approve, which is the single direction this must never be wrong in.
       recordStoredVerdict(store, storeKey, review);
     }
+    // Fresh or replayed alike; the in-process dedup return above never gets here.
+    recordStewardEvidence(stewardWriter, prUrl, headSha, review);
     const status = review.success ? 'approved' : review.gateRan ? 'changes requested' : 'did not run';
     broadcastEvent({
       type: 'log',

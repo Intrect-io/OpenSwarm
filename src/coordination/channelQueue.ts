@@ -100,7 +100,7 @@ export function findChannelDeliveryByKey(repoKey: string, key: string): ChannelD
 
 export function pendingCoordinatorMessages(repoKey: string): ChannelDelivery[] {
   return (channelDatabase().prepare(`SELECT * FROM coordination_channel_deliveries
-    WHERE repo_key=? AND recipient IS NULL AND status='queued' ORDER BY created_at,id LIMIT 50`).all(repoKey) as DeliveryRow[]).map(delivery);
+    WHERE repo_key=? AND recipient IS NULL AND status='queued' ORDER BY created_at,rowid LIMIT 50`).all(repoKey) as DeliveryRow[]).map(delivery);
 }
 export function processingCoordinatorProjects(): string[] {
   return (channelDatabase().prepare(`SELECT DISTINCT repo_key FROM coordination_channel_deliveries
@@ -185,7 +185,7 @@ export function consumeChannelTaskInbox(repoKey: string, taskId: string, actor: 
   const db = channelDatabase();
   return db.transaction(() => {
     const rows = db.prepare(`SELECT * FROM coordination_channel_deliveries WHERE repo_key=? AND task_id=?
-      AND recipient=? AND status='queued' ORDER BY created_at,id LIMIT 50`).all(repoKey, taskId, actor) as DeliveryRow[];
+      AND recipient=? AND status='queued' ORDER BY created_at,rowid LIMIT 50`).all(repoKey, taskId, actor) as DeliveryRow[];
     return rows.flatMap((row) => {
       const runId = claimChannelDelivery(row.id);
       if (!runId) return [];
