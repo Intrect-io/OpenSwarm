@@ -658,11 +658,14 @@ ${verificationSection}
   "feedback": "전체적인 피드백 (1-3문장)",
   "issues": ["발견된 문제점 목록 (없으면 빈 배열)"],
   "suggestions": ["개선 제안 목록 (없으면 빈 배열)"],
-  "recommendedActions": [{ "type": "test|refactor|bug|docs|perf", "title": "별도 이슈로 등록할 후속 작업", "location": "file:line (선택)" }]
+  "recommendedActions": [{ "type": "test|refactor|bug|docs|perf", "title": "별도 이슈로 등록할 후속 작업", "location": "file:line (선택)" }],
+  "coverage": "partial"
 }
 \`\`\`
 
 \`recommendedActions\`는 이번 변경의 blocker가 아니라 별도 이슈로 추적할 만한 구체적 후속 작업이다. 없으면 빈 배열.
+
+\`coverage\`는 이 변경이 위 Original Task에 적힌 이슈 전체 — 이슈가 나열한 모든 결함·항목·요구사항 — 를 전달하는지 밝힌다. 네가 확인한 완료 정의 항목만이 기준이 아니다. 이슈가 요구한 것이 하나도 남지 않았을 때만 \`"complete"\`, 아니면 \`"partial"\`(예: 나열된 결함 15건 중 2건만 고침). \`decision\`과 독립이다: 올바르지만 이슈의 일부만 다룬 변경은 \`"approve"\` + \`"partial"\`이다. PR은 네가 \`"complete"\`라고 할 때만 이슈를 닫고, 값이 없으면 partial로 게시된다.
 
 `;
   },

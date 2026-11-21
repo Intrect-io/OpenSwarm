@@ -10,6 +10,8 @@ const computeProtectedFiles = vi.hoisted(() => vi.fn(async () => [] as string[])
 vi.mock('../agents/protectedFiles.js', () => ({ computeProtectedFiles }));
 const coverageRatchetHold = vi.hoisted(() => vi.fn());
 vi.mock('./coverageRatchetGate.js', () => ({ COVERAGE_DROP_PARK_REASON: 'coverage_dropped', coverageRatchetHold }));
+// The sibling-overlap gate has its own tests (publishOnPark.overlapDefer.test.ts); here it never defers.
+vi.mock('./siblingOverlapDefer.js', () => ({ deferForSiblingOverlap: async () => false }));
 
 import { PublicationScopeMismatchError } from '../support/publicationScopeFence.js';
 import { PUBLICATION_SCOPE_PARK_REASON, WORKER_NO_CHANGES_PARK_REASON, publishApprovedWork, publishFinishedRun, publishParkedIfNeeded, publishParkedWork, publishStuckWork, shouldPublishParkedWork, summarizeFailure } from './publishOnPark.js';

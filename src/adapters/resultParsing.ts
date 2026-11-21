@@ -11,6 +11,7 @@
 
 import type { CliRunResult, WorkerResult, ReviewResult } from './types.js';
 import { t } from '../locale/index.js';
+import { coverageFromText, parseReviewCoverage } from '../support/publicationCoverage.js';
 import { DECISION_PHRASE, DECLARED_NON_APPROVAL, NON_APPROVAL_SIGNAL, declaredVerdict } from './reviewerDeclarations.js';
 
 /** JSON-first worker parse: fenced ```json block, else a `"success"`-anchored object. */
@@ -85,6 +86,7 @@ function extractReviewerResultJson(text: string): ReviewResult | null {
         ? parsed.suggestions.filter((v: unknown): v is string => typeof v === 'string')
         : [],
       recommendedActions: parseRecommendedActions(parsed.recommendedActions),
+      ...(parseReviewCoverage(parsed.coverage) ? { coverage: parseReviewCoverage(parsed.coverage) } : {}),
       ...(typeof parsed.codename === 'string' && parsed.codename.trim()
         ? { codename: parsed.codename.trim().slice(0, 40) }
         : {}),
@@ -132,12 +134,14 @@ function extractReviewerFromText(text: string): { result: ReviewResult; explicit
   const declared = declaredVerdict(text);
   const explicit = declared !== null;
   const decision: ReviewResult['decision'] = declared ?? 'revise';
+  const coverage = coverageFromText(text);
   return {
     result: {
       decision,
       feedback: extractSummary(text),
       issues: extractBulletsAfter(text, /issues?:/i),
       suggestions: extractBulletsAfter(text, /suggestions?:/i),
+      ...(coverage ? { coverage } : {}),
     },
     explicit,
   };

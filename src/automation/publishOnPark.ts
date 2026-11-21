@@ -39,6 +39,8 @@ import { TEST_REMOVAL_PARK_REASON, testRemovalHold } from './testRemovalGate.js'
 import { COVERAGE_DROP_PARK_REASON, coverageRatchetHold } from './coverageRatchetGate.js';
 import { recordFactorySignal } from './anomalyPause.js';
 import { normalizeProjectPath } from '../orchestration/taskScheduler.js';
+import { deferForSiblingOverlap } from './siblingOverlapDefer.js';
+import { approvedCoverage, type ReviewCoverage } from '../support/publicationCoverage.js';
 
 /**
  * Every PR this daemon opens feeds the PR-rate anomaly signals (AGT-4809), with
@@ -73,7 +75,11 @@ export interface PublishableResult extends StageBoundaryResults {
   /** Risk class of the published diff (AGT-4804), recorded with the attempt. */
   changeRisk?: ChangeRisk;
   workerResult?: { executionOutcomeUnknown?: boolean; noChangesReason?: string };
+  /** The verdict the run ended on; its `coverage` decides `Closes` vs `Refs` (AGT-4786). */
+  reviewResult?: StageBoundaryResults['reviewResult'] & { decision?: string; coverage?: ReviewCoverage };
   operatorPark?: { code: string; reason: string };
+  /** Set when an approved publish is deferred behind an open sibling PR (AGT-4786). */
+  retryAt?: number;
 }
 
 /** The fields these paths read off the task. */
@@ -369,6 +375,9 @@ export async function publishApprovedWork(
     // Before the lease fence: `beforePublish` moves the run to PUBLISHING, and a
     // held run must park from where it is, not from a publication it never made.
     if (await holdBeforePublication(worktreeInfo.worktreePath, task, result)) return;
+    // Also before the fence, for the same reason: an approved run whose files
+    // overlap an open sibling swarm PR opens none and is retried later (AGT-4786).
+    if (await deferForSiblingOverlap(worktreeInfo, task, result)) return;
     const publishAllowed = await durability?.beforePublish() ?? true;
     if (!publishAllowed) {
       result.success = false;
@@ -390,7 +399,8 @@ export async function publishApprovedWork(
           task.description || '',
           // The grader files the worker was told not to edit (base tests, verify
           // config): a change to one is high risk on the PR (AGT-4804, #884 review).
-          { fileScope: enforcedFileScope(task), verify, protectedFiles: await computeProtectedFiles(worktreeInfo.originalPath, task) },
+          // `coverage`: `Closes` only when the approving verdict said complete (AGT-4786).
+          { fileScope: enforcedFileScope(task), verify, protectedFiles: await computeProtectedFiles(worktreeInfo.originalPath, task), coverage: approvedCoverage(result.reviewResult) },
         );
         const { prUrl, headSha } = publication;
         result.prUrl = prUrl;
