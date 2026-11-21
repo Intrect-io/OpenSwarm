@@ -372,6 +372,15 @@ export async function applyBacklogGrooming(
       continue;
     }
 
+    // Only Done or Backlog, even for a decision that skipped the parser's whitelist (AGT-4603).
+    const requestedState: string = decision.closeState ?? 'Done';
+    if (requestedState !== 'Done' && requestedState !== 'Backlog') {
+      applied.skippedProtected++;
+      log(`${label(decision)}: state change refused, target ${requestedState} is not Done or Backlog`);
+      await comment(decision.issueId, formatGroomingComment(decision, `no mutation performed (target state ${requestedState} is not allowed).`));
+      continue;
+    }
+
     // Never transition an issue whose work is still in flight on an open PR.
     // A failed lookup counts as "has an open PR" (fail safe).
     let openPrs: string[];
