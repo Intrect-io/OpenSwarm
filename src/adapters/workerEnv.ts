@@ -50,8 +50,14 @@ const INHERITED_KEYS = new Set([
 /**
  * Tool homes and caches that live under the real HOME. They are pointed back at
  * the real directories (when present and not already set) so an isolated HOME
- * does not force a cold toolchain or a re-download on every command. None of
- * them is where the tool keeps a login.
+ * does not force a cold toolchain or a re-download on every command.
+ *
+ * Two of them do reach a login (AGT-4817): CARGO_HOME exposes
+ * $CARGO_HOME/credentials(.toml), cargo's registry token; and XDG_CACHE_HOME
+ * exposes ~/.cache/huggingface/token, because HF_HOME is not inherited and
+ * huggingface_hub defaults it to $XDG_CACHE_HOME/huggingface. The Hugging Face
+ * token path is re-pointed by buildWorkerShellEnv; both files are also hidden
+ * inside the OS sandbox (support/osSandbox.ts defaultHiddenPaths).
  */
 function realToolHomes(home: string): Record<string, string> {
   const library = path.join(home, 'Library', 'Caches');
@@ -135,6 +141,11 @@ export function buildWorkerShellEnv(
     XDG_STATE_HOME: path.join(workerHome, '.local', 'state'),
     GH_CONFIG_DIR: ghConfigDir,
     GH_PROMPT_DISABLED: '1',
+    // XDG_CACHE_HOME is the real cache, so huggingface_hub would find the
+    // operator's token at ~/.cache/huggingface/token. Point it at a file that
+    // does not exist and turn off the implicit token. (AGT-4817)
+    HF_TOKEN_PATH: path.join(workerHome, '.cache', 'huggingface', 'token'),
+    HF_HUB_DISABLE_IMPLICIT_TOKEN: '1',
     GIT_TERMINAL_PROMPT: '0',
     // An empty credential.helper at command-line precedence clears every helper
     // configured in the system or global config (osxkeychain included).
