@@ -914,6 +914,13 @@ Memory types: `belief` · `strategy` · `user_model` · `system_pattern` · `con
 
 Background: decay, consolidation, contradiction detection, distillation.
 
+Maintenance scans the table in pages. Statistics read only the id, type, repo
+and importance columns, and consolidation loads one (type, repo) bucket at a
+time. Compaction (`openswarm memory compact`, or the daemon's periodic
+maintenance) is the exception: it rebuilds the table in memory and refuses a
+store with more than 100,000 records rather than truncate it. That cap is an
+accepted limit.
+
 **Embeddings** run locally via `@huggingface/transformers` (ONNX, no external
 service). The default is `Xenova/multilingual-e5-base` (768d, int8), stored text is
 embedded as a `passage:` and searches as a `query:` per the E5 asymmetric

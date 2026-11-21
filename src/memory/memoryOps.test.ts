@@ -6,6 +6,32 @@ const state = {
   maxInFlightUpdates: 0,
 };
 
+/** Matches the id lookup and the `"type" = '…' AND "repo" = '…'` bucket filter. */
+function recordMatches(pred: string): (row: any) => boolean {
+  const type = /"type" = '([^']*)'/.exec(pred)?.[1];
+  const repo = /"repo" = '([^']*)'/.exec(pred)?.[1];
+  if (type !== undefined) return (row) => row.type === type && row.repo === repo;
+  const id = /id = '([^']+)'/.exec(pred)?.[1];
+  return (row) => row.id === id;
+}
+
+/** Lance-like chainable query over state.records: where/select/offset/limit, then toArray. */
+function recordQuery(spec: { where?: string; columns?: string[]; offset?: number; limit?: number } = {}): any {
+  return {
+    where: (where: string) => recordQuery({ ...spec, where }),
+    select: (columns: string[]) => recordQuery({ ...spec, columns }),
+    offset: (offset: number) => recordQuery({ ...spec, offset }),
+    limit: (limit: number) => recordQuery({ ...spec, limit }),
+    toArray: async () => {
+      let rows = [...state.records.values()];
+      if (spec.where) rows = rows.filter(recordMatches(spec.where));
+      const start = spec.offset ?? 0;
+      return rows.slice(start, start + (spec.limit ?? rows.length)).map((row) =>
+        spec.columns ? Object.fromEntries(spec.columns.map((column) => [column, row[column]])) : { ...row });
+    },
+  };
+}
+
 vi.mock('./memoryCore.js', () => ({
   EMBEDDING_DIM: 4,
   PERMANENT_EXPIRY: Number.MAX_SAFE_INTEGER,
@@ -17,18 +43,7 @@ vi.mock('./memoryCore.js', () => ({
   embedPassage: vi.fn(async () => [0.1, 0.2, 0.3, 0.4]),
   fetchAllTableRows: async () => [...state.records.values()].map((r) => ({ ...r })),
   getTable: () => ({
-    query: () => ({
-      where: (pred: string) => ({
-        limit: () => ({
-          toArray: async () => {
-            const match = /id = '([^']+)'/.exec(pred);
-            const id = match?.[1];
-            const row = id ? state.records.get(id) : undefined;
-            return row ? [{ ...row }] : [];
-          },
-        }),
-      }),
-    }),
+    query: () => recordQuery(),
     update: async ({ where, values }: { where: string; values: Record<string, any> }) => {
       const match = /id = '([^']+)'/.exec(where);
       const id = match?.[1];
@@ -126,14 +141,16 @@ describe('withMemoryMutationLock', () => {
 
 describe('concurrent reviseMemory and consolidateMemories', () => {
   it('keeps Lance updates from concurrent RMW ops from overlapping', async () => {
+    // Both vectors equal embedPassage's mock output, so the pair stays a
+    // duplicate whether the revision (which re-embeds 'keep') runs first or not.
     seed('keep', {
-      vector: [1, 0, 0, 0],
+      vector: [0.1, 0.2, 0.3, 0.4],
       importance: 0.95,
       confidence: 0.95,
       content: 'shared',
     });
     seed('dup', {
-      vector: [1, 0, 0, 0],
+      vector: [0.1, 0.2, 0.3, 0.4],
       importance: 0.2,
       confidence: 0.2,
       content: 'shared',
@@ -145,7 +162,8 @@ describe('concurrent reviseMemory and consolidateMemories', () => {
     ]);
 
     expect(revised).toBe(true);
-    expect(consolidated.merged).toBeGreaterThanOrEqual(0);
+    // The paged bucket scan runs against this mock, so the duplicate is merged.
+    expect(consolidated).toEqual({ merged: 1, groups: [{ kept: 'keep', merged: ['dup'] }] });
     expect(state.maxInFlightUpdates).toBe(1);
     expect(state.records.get('keep')?.content).toBeTruthy();
     expect(() => JSON.parse(state.records.get('keep')!.metadata)).not.toThrow();

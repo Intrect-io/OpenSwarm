@@ -226,6 +226,56 @@ export function parseWorkerResponses(text: string, known: ReadonlySet<string>): 
   return seen;
 }
 
+type CliEvent = { type?: unknown; result?: unknown; item?: { type?: unknown; text?: unknown }; message?: { content?: unknown } } | null;
+
+/** Text content of a Claude `assistant` event's message, or '' when it has none. */
+function assistantText(event: NonNullable<CliEvent>): string {
+  const content = event.message?.content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((block): block is { type: 'text'; text: string } => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text)
+    .join('\n');
+}
+
+/**
+ * The final answer text of a CLI adapter's JSON event stream, or `undefined`
+ * when `output` is not one. Claude `--output-format stream-json` ends with a
+ * `result` event; a stream cut off before it still has its `assistant`
+ * messages. Codex `exec --json` carries `item.completed` / `agent_message`.
+ * Only the final message counts: tool results and earlier turns can quote
+ * `F<n>: fixed` lines that are not the worker's answer.
+ */
+export function cliEventFinalText(output: string): string | undefined {
+  // Told apart by its lines, not its first character: retained output whose
+  // head was dropped starts with a plain-text marker (outputRetention.ts).
+  let events = 0;
+  let other = 0;
+  let result: string | undefined;
+  let agentMessage: string | undefined;
+  let assistant: string | undefined;
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let event: CliEvent = null;
+    try {
+      event = trimmed.startsWith('{') ? JSON.parse(trimmed) : null;
+    } catch {
+      // not an event line
+    }
+    if (typeof event?.type !== 'string') {
+      other += 1;
+      continue;
+    }
+    events += 1;
+    if (event.type === 'result' && typeof event.result === 'string') result = event.result;
+    else if (event.type === 'item.completed' && event.item?.type === 'agent_message' && typeof event.item.text === 'string') agentMessage = event.item.text;
+    else if (event.type === 'assistant') assistant = assistantText(event) || assistant;
+  }
+  if (events === 0 || other > events) return undefined;
+  return result ?? agentMessage ?? assistant ?? '';
+}
+
 /** Raw output carries the JSON report with its newlines escaped; restore them. */
 function unescapeJsonNewlines(text: string): string {
   return text.replace(/(?<!\\)\\r\\n|(?<!\\)\\[nr]/g, '\n').replace(/(?<!\\)\\t/g, '\t');
@@ -358,10 +408,19 @@ export function recordWorkerResponses(
   // answers off, so the full output fills in. On the JSON path the output
   // holds the report with its newlines escaped (`\n`), so it is unescaped
   // first, and the parsed summary (real newlines) is the cleaner source.
-  const answers = mergeAnswers(
-    parseWorkerResponses(input.summary ?? '', known),
-    parseWorkerResponses(unescapeJsonNewlines(input.output ?? ''), known),
-  );
+  //
+  // A CLI adapter that could not parse its own event stream hands back the
+  // raw NDJSON as `output` and a summary scraped from it. Then only the
+  // stream's final message is read: the other events (tool results, earlier
+  // turns) are not the worker's answer. A stream with no final message leaves
+  // only the summary.
+  const eventText = cliEventFinalText(input.output ?? '');
+  const answers = eventText !== undefined
+    ? parseWorkerResponses(eventText ? unescapeJsonNewlines(eventText) : input.summary ?? '', known)
+    : mergeAnswers(
+      parseWorkerResponses(input.summary ?? '', known),
+      parseWorkerResponses(unescapeJsonNewlines(input.output ?? ''), known),
+    );
   for (const f of open) {
     const answer = answers.get(f.id);
     f.lastWorkerResponse = answer
@@ -542,8 +601,9 @@ export function describeLedgerStop(
  * starts again at F1, and the parsers here ignore `prev-F<n>`, so an old F1
  * is never read as the new F1. Idempotent; only ids this ledger issued.
  *
- * Known gap: the ledger itself is not persisted across a process restart, so
- * a resumed task starts with an empty ledger and only this renamed text.
+ * A daemon run also persists the ledger itself (`findingLedgerStore.ts`), so
+ * a resumed task continues the same ids; the rename stays, because a run whose
+ * store was unavailable starts again at F1.
  */
 export function markPriorSessionIds(text: string, ledger: FindingLedger | undefined): string {
   if (!ledger || ledger.findings.length === 0 || !text) return text;

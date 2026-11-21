@@ -1,6 +1,15 @@
 // ============================================
 // OpenSwarm - Memory Compaction
 // ============================================
+//
+// Accepted limit: one compaction rewrites at most COMPACTION_MAX_SURVIVORS
+// (100,000) candidate records. The rewrite replaces the table with a single
+// overwrite built from the deduplicated set, so the survivors (and their
+// vectors) must be held in memory at once; a store past the bound refuses
+// compaction before any mutation instead of truncating it. Streaming the
+// rebuild is not implemented. The other maintenance passes (expiry cleanup,
+// consolidation, statistics, recent conversations) scan in pages and are not
+// bound by this cap.
 
 import {
   getDb,
@@ -35,6 +44,7 @@ const COMPACTION_SCAN_PAGE_SIZE = LEGACY_MIGRATION_PAGE_SIZE;
  * this client has no table rename, so the whole survivor set has to be
  * materialized (≈ EMBEDDING_DIM floats per record). Exceeding this bound refuses
  * the compaction before any mutation rather than truncating the candidate set.
+ * This is the accepted limit for compaction (see the module header).
  */
 const COMPACTION_MAX_SURVIVORS = 100_000;
 
