@@ -8,7 +8,9 @@ import { ambientCredentialKeys } from '../cli/sandboxExecutorCommand.js';
 import {
   assertOpenPathIdentity,
   assertSecretMaskWitnesses,
+  commonGitMountable,
   discoverWorkspaceSecretMasks,
+  planSupportMounts,
   SANDBOX_BWRAP_ISOLATION_ARGS,
   SANDBOX_BWRAP_LAUNCHER_ARGS,
   SANDBOX_CHILD_IDENTITY_PROBE,
@@ -304,6 +306,29 @@ describe('sandbox executor Git and dependency support boundary', () => {
     await writeFile(join(workspace, '.git'), `gitdir: ${siblingGitDir}\n`);
 
     await expect(validatedGitCommonDirectory(workspace)).resolves.toBeUndefined();
+  });
+
+  it('mounts the common git objects read-only', async () => {
+    const { root, main, workspace } = await linkedFixture();
+    const commonGit = await validatedGitCommonDirectory(workspace);
+    const dependency = join(workspace, 'node_modules');
+    const plan = planSupportMounts({
+      workspace, commonGit, dependencyTargets: [dependency], dotGitKind: 'file', allowedRoots: [root],
+    });
+
+    // Order is the bind fd order: common dir, dependencies, then the .git pointer.
+    expect(plan).toEqual([
+      { path: join(main, '.git'), writable: false, kind: 'directory' },
+      { path: dependency, writable: false, kind: 'directory' },
+      { path: join(workspace, '.git'), writable: false, kind: 'file' },
+    ]);
+    expect(plan.some((mount) => mount.writable)).toBe(false);
+    expect(commonGitMountable(workspace, commonGit, [root])).toBe(true);
+    // Outside every allowed root, or inside the workspace, it is not mounted at all.
+    expect(planSupportMounts({ workspace, commonGit, dependencyTargets: [], dotGitKind: 'file', allowedRoots: [workspace] })
+      .map((mount) => mount.path)).toEqual([join(workspace, '.git')]);
+    expect(commonGitMountable(workspace, commonGit, [workspace])).toBe(false);
+    expect(commonGitMountable(workspace, join(workspace, '.git'), [root])).toBe(false);
   });
 
   it('mounts only local or same-relative-path dependencies from the validated main checkout', async () => {

@@ -22,6 +22,7 @@ import { rebasePythonEnvironment } from './pythonEnvironment.js';
 import { pinTrustedTestConfig } from './trustedConfig.js';
 import { resourceAwareTestCommand, testResourceShellPrefix, withTestResourceBudget } from '../support/testResourceBudget.js';
 import { logVerifySandboxUsage } from './diskUsage.js';
+import { addStrictHeadWorktree, releaseHeadSandbox, strandedHeadWorktree } from './headSandbox.js';
 
 const OUTPUT_TAIL_BYTES = 8 * 1024;
 const FINGERPRINT_BYTES = 4 * 1024 * 1024;
@@ -710,20 +711,28 @@ async function createHeadSandbox(
   projectPath: string,
   commands: VerifyCommand[],
   scratchRoot?: string, baseRef?: string, shareObjects = true,
-): Promise<{ root: string; project: string }> {
+): Promise<{ root: string; project: string; worktree?: string }> {
   const root = await createVerifySandboxRoot('.openswarm-verify-head-', scratchRoot);
   const project = join(root, 'worktree');
+  let worktree: string | undefined;
   try {
     const headCommit = await git(projectPath, ['rev-parse', 'HEAD']);
     // A full copy of the pack cost ~0.5 GB per run and filled the disk (AGT-4785).
     // `--shared` reads the source objects through objects/info/alternates instead.
     // The OS sandbox binds `/` read-only and only the sandbox root writable, so
     // verified code can read but never write or prune the source object store;
-    // gc.auto=0 keeps the clone from ever repacking. The strict companion mounts
-    // only the workspace, so it keeps an independent full copy.
-    const objects = shareObjects ? ['--shared', '-c', 'gc.auto=0'] : ['--no-hardlinks'];
-    await git(projectPath, ['clone', '--quiet', ...objects, '--no-checkout', projectPath, project]);
-    await git(project, ['checkout', '--quiet', '--detach', headCommit]);
+    // gc.auto=0 keeps the clone from ever repacking. The strict companion gets a
+    // detached worktree whose common dir it mounts read-only, like the base side;
+    // a full copy remains only when it would not mount that dir.
+    const fallback = shareObjects ? undefined
+      : await addStrictHeadWorktree(projectPath, project, headCommit, scratchRoot ? [scratchRoot] : []);
+    if (!shareObjects && !fallback) worktree = project;
+    else {
+      if (fallback) console.warn(`[Verify] strict head sandbox falls back to a full copy: ${fallback}`);
+      const objects = shareObjects ? ['--shared', '-c', 'gc.auto=0'] : ['--no-hardlinks'];
+      await git(projectPath, ['clone', '--quiet', ...objects, '--no-checkout', projectPath, project]);
+      await git(project, ['checkout', '--quiet', '--detach', headCommit]);
+    }
     const sharedPaths = await verificationSharedPaths(projectPath, commands);
     const ignoredLinks = await validateSandboxSymlinks(projectPath, sharedPaths, true);
     // Mirror the source working tree exactly, including deletions and renames,
@@ -756,10 +765,10 @@ async function createHeadSandbox(
     await validateSandboxSymlinks(project, sharedPaths);
     if (baseRef) await pinTrustedTestConfig(projectPath, project, baseRef);
     logVerifySandboxUsage(root, 'create'); // fire-and-forget (AGT-4801)
-    return { root, project };
+    return { root, project, worktree };
   } catch (error) {
     logVerifySandboxUsage(root, 'remove');
-    await rm(root, { recursive: true, force: true });
+    await releaseHeadSandbox(projectPath, root, worktree ?? strandedHeadWorktree(error));
     throw error;
   }
 }
@@ -939,7 +948,7 @@ async function runVerifyInSlot(options: RunVerifyOptions): Promise<VerifyEvidenc
       });
     } finally {
       logVerifySandboxUsage(sandbox.root, 'remove');
-      await rm(sandbox.root, { recursive: true, force: true });
+      await releaseHeadSandbox(options.projectPath, sandbox.root, sandbox.worktree);
     }
   }
   return evidence;
