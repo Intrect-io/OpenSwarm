@@ -12,16 +12,17 @@
 // Policy, measured on cgf-portal (2026-09-17, AGT-4387): a worker needs to
 // write its worktree, the temp dir, and the package-manager caches (uv, npm,
 // cargo). Wrangler's directories are excluded: they hold its credentials. Everything else — other repos, ~/.ssh, the
-// daemon's own state and credentials — stays read-only. The worker's network
+// daemon's own state and credentials — stays read-only, and the credential
+// stores tools read on their own are not readable at all (AGT-4817). The worker's network
 // is loopback-only by default (AGT-4798): dependency installs belong to the
 // project's `setup` step, which runs with the network open, and a test can
 // still start a local server. `workerNetwork: open` restores the old behaviour.
 
 import { daemonTokenDir } from './daemonToken.js';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { scratchpadDir } from './scratchpad.js';
-import { join } from 'node:path';
+import { dirname, join, parse, relative, isAbsolute } from 'node:path';
 
 export interface SandboxSpec {
   /** Directories the command may write to. Others are read-only. */
@@ -34,14 +35,167 @@ export interface SandboxSpec {
   /**
    * Directories the command may not read at all. The daemon's API token lives
    * in one (support/daemonToken.ts): a worker that could read it could call
-   * the daemon's mutating API from its shell. (AGT-4814)
+   * the daemon's mutating API from its shell. (AGT-4814) The others hold the
+   * operator's logins (AGT-4817). See defaultHiddenPaths.
    */
   hiddenRoots?: string[];
+  /** Single files the command may not read at all (AGT-4817). */
+  hiddenFiles?: string[];
 }
 
-/** The directories hidden from every sandboxed command that exist on this host. */
-export function defaultHiddenRoots(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string[] {
-  return [daemonTokenDir(env, home)].filter((dir) => existsSync(dir));
+/** What the sandbox hides: whole directories, and single files inside directories it leaves readable. */
+export interface HiddenPaths {
+  dirs: string[];
+  files: string[];
+}
+
+/** True when `child` is `parent` or lies under it. */
+function isWithin(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+/** The realpath of each candidate that exists, without duplicates. */
+function existingReal(candidates: Array<string | undefined>): string[] {
+  const out: string[] = [];
+  for (const candidate of candidates) {
+    if (!candidate || !existsSync(candidate)) continue;
+    try {
+      const real = realpathSync(candidate);
+      if (!out.includes(real)) out.push(real);
+    } catch { /* vanished between the checks */ }
+  }
+  return out;
+}
+
+/**
+ * The directory of the ssh-agent socket, when hiding it cannot take the
+ * sandbox down with it: it must exist and must not be the filesystem root, the
+ * home dir, a temp root, or a directory that holds a writable root (a tmpfs
+ * over it would mask the worktree). The worker env drops SSH_AUTH_SOCK, but a
+ * path-based unix socket stays connectable under --unshare-net, so a shell
+ * that knows the path could still sign with the operator's keys.
+ */
+function sshAgentSocketDir(env: NodeJS.ProcessEnv, home: string, writableRoots: readonly string[]): string | null {
+  const sock = env.SSH_AUTH_SOCK?.trim();
+  if (!sock || !isAbsolute(sock)) return null;
+  const [dir] = existingReal([dirname(sock)]);
+  if (!dir) return null;
+  return safeToHideDir(dir, env, home, writableRoots) ? dir : null;
+}
+
+/**
+ * Whether a tmpfs over `dir` leaves the sandbox usable: not the filesystem
+ * root, the home dir or a temp root, and not a directory that holds a
+ * writable root (it would mask the worktree).
+ */
+function safeToHideDir(dir: string, env: NodeJS.ProcessEnv, home: string, writableRoots: readonly string[]): boolean {
+  const refused = existingReal([parse(dir).root, home, tmpdir(), env.TMPDIR, '/tmp']);
+  if (refused.includes(dir)) return false;
+  return !existingReal([...writableRoots]).some((root) => isWithin(root, dir));
+}
+
+/**
+ * Well-known ssh-agent sockets under $XDG_RUNTIME_DIR (systemd user unit,
+ * gnome-keyring, gcr, gpg-agent). A daemon run by systemd usually has no
+ * SSH_AUTH_SOCK of its own while the operator's agent still listens here.
+ */
+const RUNTIME_AGENT_SOCKETS = ['ssh-agent.socket', join('keyring', 'ssh'), join('gcr', 'ssh'), join('gnupg', 'S.gpg-agent.ssh')];
+
+/**
+ * Everything hidden from every sandboxed command, as it exists on this host.
+ * Fail-closed, with no knob to turn it off. Each entry is included only when
+ * it exists, resolved through realpath (sandbox-exec matches the real path; a
+ * dotfile symlinked into a dotfiles repo is hidden at its target). A file
+ * candidate that turns out to be a directory is hidden as a directory, since
+ * bwrap cannot bind /dev/null over one.
+ *
+ * - dirs: the daemon token dir (AGT-4814), ~/.ssh (keys), gh's config dir
+ *   (its OAuth token), ~/.docker (registry logins in config.json), and the
+ *   ssh-agent socket's directory when that is safe to hide.
+ * - files: cargo's registry token ($CARGO_HOME and ~/.cargo `credentials` and
+ *   `credentials.toml`; ~/.cargo/registry stays a writable cache), the Hugging
+ *   Face token and the `stored_tokens` file next to it, which huggingface_hub
+ *   0.25+ fills with every login ($HF_TOKEN_PATH, $HF_HOME,
+ *   $XDG_CACHE_HOME/huggingface and ~/.cache/huggingface; ~/.cache stays a
+ *   writable cache), ~/.netrc, ~/.npmrc, the $SSH_AUTH_SOCK socket itself, and
+ *   the well-known agent sockets under $XDG_RUNTIME_DIR.
+ *
+ * A path inside a hidden directory is not listed again.
+ *
+ * Limits, on purpose (AGT-4817):
+ * - The set is a snapshot taken when each command starts. A credential written
+ *   later (an operator `huggingface-cli login` or `cargo login`) is not hidden
+ *   from a sandbox that is already running, including a background process an
+ *   earlier command left behind. Pre-creating the missing paths as mount points
+ *   would write empty files into the operator's real home.
+ * - Hiding an agent socket refuses connect() only on Linux (a /dev/null bind
+ *   over the socket inode). On macOS it is not verified that the file deny
+ *   also refuses a unix socket connect when the network is open. An agent socket at some other
+ *   path the daemon does not know (e.g. /tmp/ssh-XXXX/agent.N with no
+ *   SSH_AUTH_SOCK) stays reachable.
+ * - Linux: the sandbox shares the host pid namespace (no --unshare-pid, so
+ *   background jobs survive between bash calls). On a host without an
+ *   AppArmor/Yama restriction on /proc/<pid>/root, a command could reach
+ *   /proc/<same-uid host pid>/root/<path> and read the host's view of a hidden
+ *   path. This host refuses it (EACCES); the sandbox alone does not.
+ */
+export function defaultHiddenPaths(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+  writableRoots: readonly string[] = [],
+): HiddenPaths {
+  const configHome = env.XDG_CONFIG_HOME?.trim() || join(home, '.config');
+  const cacheHome = env.XDG_CACHE_HOME?.trim() || join(home, '.cache');
+  const dirs = existingReal([
+    daemonTokenDir(env, home),
+    join(home, '.ssh'),
+    env.GH_CONFIG_DIR?.trim(),
+    join(configHome, 'gh'),
+    join(home, '.config', 'gh'),
+    env.DOCKER_CONFIG?.trim(),
+    join(home, '.docker'),
+  ]);
+  const agentDir = sshAgentSocketDir(env, home, writableRoots);
+  if (agentDir && !dirs.includes(agentDir)) dirs.push(agentDir);
+  const cargoHomes = [env.CARGO_HOME?.trim(), join(home, '.cargo')].filter((d): d is string => !!d);
+  const hfTokens = [
+    env.HF_TOKEN_PATH?.trim(),
+    env.HF_HOME?.trim() ? join(env.HF_HOME.trim(), 'token') : undefined,
+    join(cacheHome, 'huggingface', 'token'),
+    join(home, '.cache', 'huggingface', 'token'),
+  ].filter((f): f is string => !!f);
+  const runtimeDir = env.XDG_RUNTIME_DIR?.trim();
+  const sock = env.SSH_AUTH_SOCK?.trim();
+  const fileCandidates = existingReal([
+    ...cargoHomes.flatMap((d) => [join(d, 'credentials'), join(d, 'credentials.toml')]),
+    // huggingface_hub keeps stored_tokens next to the token file.
+    ...hfTokens.flatMap((token) => [token, join(dirname(token), 'stored_tokens')]),
+    join(home, '.netrc'),
+    join(home, '.npmrc'),
+    sock && isAbsolute(sock) ? sock : undefined,
+    ...(runtimeDir && isAbsolute(runtimeDir) ? RUNTIME_AGENT_SOCKETS.map((s) => join(runtimeDir, s)) : []),
+  ]);
+  const files: string[] = [];
+  for (const path of fileCandidates) {
+    let isDir: boolean;
+    try {
+      isDir = statSync(path).isDirectory();
+    } catch {
+      continue; // vanished between the checks
+    }
+    if (isDir) {
+      // An odd HF_TOKEN_PATH or SSH_AUTH_SOCK naming the home dir or a parent
+      // of the worktree must not mask the sandbox; such a path is skipped.
+      if (!dirs.includes(path) && safeToHideDir(path, env, home, writableRoots)) dirs.push(path);
+    } else {
+      files.push(path);
+    }
+  }
+  return {
+    dirs: dirs.filter((dir) => !dirs.some((other) => other !== dir && isWithin(dir, other))),
+    files: files.filter((file) => !dirs.some((dir) => isWithin(file, dir))),
+  };
 }
 
 /**
@@ -103,6 +257,28 @@ function schemeString(path: string): string {
 }
 
 /**
+ * The directories a macOS profile must keep from being renamed so a hidden
+ * path keeps its name. Seatbelt checks a path as it is when accessed, and a
+ * rename only against its own source and destination: `mv ~/.cache/huggingface
+ * ~/.cache/hf && cat ~/.cache/hf/token` would slip past a literal deny on the
+ * token. So every ancestor of a hidden path that lies inside a writable root,
+ * the writable root itself included (it could be moved into another writable
+ * root on the same volume), is denied file-write* as a literal: it cannot be
+ * renamed, moved or removed, while files inside it can still be created.
+ * (AGT-4817)
+ */
+function protectedAncestors(hidden: readonly string[], writableRoots: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const path of hidden) {
+    for (let dir = dirname(path); dir !== dirname(dir); dir = dirname(dir)) {
+      if (!writableRoots.some((root) => isWithin(dir, root))) continue;
+      if (!out.includes(dir)) out.push(dir);
+    }
+  }
+  return out;
+}
+
+/**
  * The macOS profile: deny by default, read everything, write only under the
  * given roots. `(allow process*)` and `(allow sysctl-read)` are what a shell
  * and a toolchain need to start at all; `/dev/null` and `/dev/tty` keep
@@ -122,7 +298,19 @@ export function buildMacSandboxProfile(spec: SandboxSpec): string {
     : ' (allow network-bind (local ip "localhost:*")) (allow network-inbound (local ip "localhost:*"))'
       + ' (allow network-outbound (remote ip "localhost:*"))';
   // Later rules win in a sandbox profile, so the deny follows the read-all allow.
-  const hidden = (spec.hiddenRoots ?? []).map((root) => ` (deny file-read* file-write* (subpath ${schemeString(root)}))`).join('');
+  // A hidden path under a writable root (a token in ~/.cache) stays hidden.
+  const hiddenRoots = spec.hiddenRoots ?? [];
+  const hiddenFiles = spec.hiddenFiles ?? [];
+  // Every rule here only denies, so their order among themselves is free.
+  const hidden = [
+    // A hard link would give a hidden file a second name the literal does not match.
+    ...hiddenRoots.map((root) => ` (deny file-link (subpath ${schemeString(root)}))`),
+    ...hiddenFiles.map((file) => ` (deny file-link (literal ${schemeString(file)}))`),
+    ...protectedAncestors([...hiddenRoots, ...hiddenFiles], spec.writableRoots)
+      .map((dir) => ` (deny file-write* (literal ${schemeString(dir)}))`),
+    ...hiddenRoots.map((root) => ` (deny file-read* file-write* (subpath ${schemeString(root)}))`),
+    ...hiddenFiles.map((file) => ` (deny file-read* file-write* (literal ${schemeString(file)}))`),
+  ].join('');
   return `(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read)${network} (allow file-write* ${writes})${hidden}`;
 }
 
@@ -136,7 +324,12 @@ export function buildBwrapArgs(spec: SandboxSpec): string[] {
   for (const root of spec.writableRoots) args.push('--bind', root, root);
   // An empty tmpfs over a hidden directory: inside the sandbox it exists and
   // holds nothing. (AGT-4814)
+  // Both come after every writable --bind: a later mount covers an earlier
+  // one, so a hidden path under a writable root (a token in ~/.cache) stays
+  // hidden. (AGT-4814, AGT-4817)
   for (const root of spec.hiddenRoots ?? []) args.push('--tmpfs', root);
+  // An empty read-only file over a hidden file. (AGT-4817)
+  for (const file of spec.hiddenFiles ?? []) args.push('--ro-bind', '/dev/null', file);
   if (!spec.allowNetwork) args.push('--unshare-net');
   args.push('--dev', '/dev', '--proc', '/proc', '--die-with-parent', '--');
   return args;
@@ -154,7 +347,8 @@ export function wrapForSandbox(
   backend: SandboxBackend | null = detectSandboxBackend(),
 ): SandboxedCommand | null {
   if (argv.length === 0) throw new Error('wrapForSandbox: empty argv');
-  spec = { ...spec, hiddenRoots: spec.hiddenRoots ?? defaultHiddenRoots() };
+  const hidden = spec.hiddenRoots && spec.hiddenFiles ? null : defaultHiddenPaths(process.env, homedir(), spec.writableRoots);
+  spec = { ...spec, hiddenRoots: spec.hiddenRoots ?? hidden?.dirs, hiddenFiles: spec.hiddenFiles ?? hidden?.files };
   if (backend === 'sandbox-exec') {
     return { file: '/usr/bin/sandbox-exec', args: ['-p', buildMacSandboxProfile(spec), ...argv] };
   }

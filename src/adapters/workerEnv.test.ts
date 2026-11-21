@@ -10,7 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { buildWorkerShellEnv, resetWorkerHomeForTests } from './workerEnv.js';
@@ -97,6 +97,19 @@ describe('worker shell HOME', () => {
     expect(first.HOME).toBe(second.HOME);
     expect(first.HOME).not.toBe(realHome);
     rmSync(first.HOME!, { recursive: true, force: true });
+  });
+});
+
+describe('worker shell Hugging Face token (AGT-4817)', () => {
+  it('points the Hugging Face token path at a missing file inside the worker home', () => {
+    mkdirSync(path.join(realHome, '.cache', 'huggingface'), { recursive: true });
+    writeFileSync(path.join(realHome, '.cache', 'huggingface', 'token'), 'hf_fake\n');
+    const env = build({ PATH: '/usr/bin' });
+    expect(env.HF_TOKEN_PATH?.startsWith(workerHome + path.sep)).toBe(true);
+    expect(existsSync(env.HF_TOKEN_PATH!)).toBe(false);
+    expect(env.HF_HUB_DISABLE_IMPLICIT_TOKEN).toBe('1');
+    // The cache itself stays the real one, so downloads are not repeated.
+    expect(env.XDG_CACHE_HOME).toBe(path.join(realHome, '.cache'));
   });
 });
 
