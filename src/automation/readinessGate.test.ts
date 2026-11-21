@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { evaluateReadiness, formatReadinessSummary, partitionByReadiness, projectSkipLabelsHook, verdictFromDraft } from './readinessGate.js';
+import { evaluateReadiness, exclusionLabelledIds, exclusionLabelsForProject, formatReadinessSummary, partitionByReadiness, projectSkipLabelsHook, verdictFromDraft } from './readinessGate.js';
 import { holdBeforeClaim, recordDraftOutcome, resetPreClaimHoldMemo } from './preClaimHold.js';
 import { partitionByDefinitionOfReady } from './definitionOfReady.js';
 import { scopePromptParts } from '../agents/draftScope.js';
@@ -195,5 +195,51 @@ describe('pre-claim hold for every project (AGT-4784)', () => {
     expect(held.get('label:global-skip')).toEqual(['AX-10']);
     // No project sets any: no hook, no per-task lookup.
     expect(projectSkipLabelsHook([{ projectPath: '/repos/other' }])).toBeUndefined();
+  });
+});
+
+describe('exclusion-labelled ids for post-claim sweeps (AGT-4784)', () => {
+  const agents = [
+    { projectPath: '/repos/cgf-portal', linearProjectId: 'proj-ax', skipLabels: ['Maintenance'] },
+    { projectPath: '/repos/other' },
+  ];
+
+  it('excludes a task carrying a global label, ignoring case and padding, keyed by issueId', async () => {
+    const ids = await exclusionLabelledIds(
+      [{ id: 'a', issueId: 'uuid-a', title: 't', labels: ['  Out-Of-Scope '] }, { id: 'b', title: 't', labels: ['other'] }],
+      ['out-of-scope'],
+    );
+    expect([...ids]).toEqual(['uuid-a']);
+  });
+
+  it('excludes a task carrying its project label, found via linearProject.id', async () => {
+    const hook = projectSkipLabelsHook(agents);
+    const ids = await exclusionLabelledIds([
+      { id: 'a', title: 't', labels: ['maintenance'], linearProject: { id: 'proj-ax' } },
+      { id: 'b', title: 't', labels: ['maintenance'], linearProject: { id: 'proj-other' } },
+    ], [], hook);
+    expect([...ids]).toEqual(['a']);
+  });
+
+  it('fails closed: a throwing project lookup counts as excluded', async () => {
+    const ids = await exclusionLabelledIds([{ id: 'a', title: 't', labels: ['x'] }], undefined, async () => {
+      throw new Error('lookup failed');
+    });
+    expect(ids.has('a')).toBe(true);
+  });
+
+  it('leaves a clean task out of the set', async () => {
+    const ids = await exclusionLabelledIds(
+      [{ id: 'a', title: 't', labels: ['bug'], linearProject: { id: 'proj-ax' } }, { id: 'b', title: 't' }],
+      ['out-of-scope'],
+      projectSkipLabelsHook(agents),
+    );
+    expect(ids.size).toBe(0);
+  });
+
+  it('merges the owning project skipLabels into the global labels for grooming', () => {
+    expect(exclusionLabelsForProject(['global'], agents, '/repos/cgf-portal/sub')).toEqual(['global', 'Maintenance']);
+    expect(exclusionLabelsForProject(['global'], agents, '/repos/other')).toEqual(['global']);
+    expect(exclusionLabelsForProject(undefined, agents, undefined)).toEqual([]);
   });
 });

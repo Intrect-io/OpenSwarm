@@ -200,6 +200,7 @@ describe('applyBacklogGrooming additional branches', () => {
       skippedUnknown: 0,
       skippedOpenPr: 0,
       skippedByCap: 0,
+      skippedProtected: 0,
     });
     expect(src.addComment).not.toHaveBeenCalled();
   });

@@ -140,7 +140,7 @@ import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
 import { cachedDraftReusable, currentDraftActivity, draftActivityStamp, holdBeforeClaim, recordDraftOutcome, type IssueActivity } from './preClaimHold.js';
-import { formatReadinessSummary, projectSkipLabelsHook } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
+import { exclusionCheck, exclusionLabelsForProject, formatReadinessSummary, projectSkipLabelsHook } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
 import { isScopeDeclined } from '../agents/draftScope.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
 import { completeParentIfChildrenDone as completeParentLocally } from '../taskState/store.js'; import { transitionWithReason } from './trackerTransition.js'; import { releaseDependentsInTracker } from './dependentRelease.js';
@@ -2433,9 +2433,9 @@ export class AutonomousRunner {
       }
       successfulPlannerRuns++;
       const validIssueIds = new Set(groupTasks.map(task => task.issueId || task.id));
-      const applied = await applyBacklogGrooming(source, result, mode, validIssueIds, { mutationBudget });
+      const applied = await applyBacklogGrooming(source, result, mode, validIssueIds, { mutationBudget, trustedIssues: new Map(groupTasks.map(t => [t.issueId || t.id, { state: t.linearState, labels: t.labels }])), exclusionLabels: exclusionLabelsForProject((this.config.skip ?? DEFAULT_AGENT_SKIP).labels, this.config.projectAgents, projectPath) }); // AGT-4784
       for (const issueId of applied.movedIssueIds) moved.add(issueId);
-      this.syslog(`✓ Backlog grooming: ${result.decisions.length} decision(s), ${applied.commented} comment(s), ${applied.failedComments} comment failure(s), ${applied.updatedDescriptions} description update(s), ${applied.moved} moved, ${applied.skippedUnknown} unknown skipped, ${applied.skippedOpenPr} open-PR skipped, ${applied.skippedByCap} over the cap`);
+      this.syslog(`✓ Backlog grooming: ${result.decisions.length} decision(s), ${applied.commented} comment(s), ${applied.failedComments} comment failure(s), ${applied.updatedDescriptions} description update(s), ${applied.moved} moved, ${applied.skippedUnknown} unknown skipped, ${applied.skippedOpenPr} open-PR skipped, ${applied.skippedByCap} over the cap, ${applied.skippedProtected} protected`);
       for (const decision of result.decisions.slice(0, 5)) {
         this.syslog(`  ${summarizeGroomingDecision(decision)}`);
       }
@@ -2463,12 +2463,12 @@ export class AutonomousRunner {
    * right before the write so a person's later move is never overwritten.
    */
   private async reconcileMergedPublications(tasks: TaskItem[], now = Date.now()): Promise<void> {
-    const source = getTaskSource();
-    if (source?.kind !== 'linear') return;
+    const source = getTaskSource(); if (source?.kind !== 'linear') return;
     if (now - this.lastMergedPublicationSweepAt < AutonomousRunner.MERGED_PUBLICATION_SWEEP_INTERVAL_MS) return;
     this.lastMergedPublicationSweepAt = now;
 
     const candidates = planMergedPublicationChecks(tasks, {
+      isExcluded: await exclusionCheck(tasks, this.config.skip ?? DEFAULT_AGENT_SKIP, this.config.projectAgents, (t: TaskItem) => this.resolveProjectPath(t)), // AGT-4784
       publishedPrUrl: (issueId) => this.durableRuns.getRun(issueId)?.prUrl ?? undefined,
       isSchedulerOwned: (issueId) => this.scheduler.isTaskQueued(issueId) || this.scheduler.isTaskRunning(issueId),
     });
@@ -2545,11 +2545,11 @@ export class AutonomousRunner {
   }
 
   private async reconcileStalledInProgress(tasks: TaskItem[], now = Date.now()): Promise<TaskItem[]> {
-    const source = getTaskSource();
-    if (source?.kind !== 'linear') return tasks;
+    const source = getTaskSource(); if (source?.kind !== 'linear') return tasks;
 
     const staleAfterMs = (this.config.stalledInProgressHours ?? 6) * 60 * 60_000;
     const candidates = planStalledInProgress(tasks, {
+      isExcluded: await exclusionCheck(tasks, this.config.skip ?? DEFAULT_AGENT_SKIP, this.config.projectAgents, (t: TaskItem) => this.resolveProjectPath(t)), // AGT-4784
       now,
       staleAfterMs,
       hasOpenSwarmClaim: (issueId) =>

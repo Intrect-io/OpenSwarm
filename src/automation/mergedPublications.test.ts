@@ -19,6 +19,16 @@ describe('merged publications sweep (AGT-4409)', () => {
     expect(plan.map((c) => c.task.id)).toEqual(['A']);
   });
 
+  it('merged-publication reconciliation skips an exclusion-labelled issue', () => {
+    const tasks = [task('A', 'In Review'), task('B', 'In Review')];
+    const plan = planMergedPublicationChecks(tasks, {
+      publishedPrUrl: (id) => `https://github.com/o/r/pull/${id}`,
+      isSchedulerOwned: () => false,
+      isExcluded: (id) => id === 'A',
+    });
+    expect(plan.map((c) => c.task.id)).toEqual(['B']);
+  });
+
   it('counts unticked boxes and ignores ticked ones and prose', () => {
     expect(uncheckedCriteria('## DoD\n- [ ] tests\n- [x] docs\n* [ ] customer confirmed\n- plain bullet')).toBe(2);
     expect(uncheckedCriteria(undefined)).toBe(0);

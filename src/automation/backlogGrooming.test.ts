@@ -68,7 +68,7 @@ describe('backlogGrooming (INT-1609)', () => {
         { issueId: 'id-3', status: 'stale', reason: 'implemented', evidence: ['src/b.ts:2'], closeState: 'Done' },
       ],
     }, 'apply', new Set(['id-1', 'id-2', 'id-3']), noOpenPr);
-    expect(applied).toEqual({ commented: 2, failedComments: 0, updatedDescriptions: 1, moved: 1, movedIssueIds: ['id-3'], skippedUnknown: 0, skippedOpenPr: 0, skippedByCap: 0 });
+    expect(applied).toEqual({ commented: 2, failedComments: 0, updatedDescriptions: 1, moved: 1, movedIssueIds: ['id-3'], skippedUnknown: 0, skippedOpenPr: 0, skippedByCap: 0, skippedProtected: 0 });
     expect(src.updateDescription).toHaveBeenCalledWith('id-2', 'new body');
     expect(src.updateState).toHaveBeenCalledWith('id-3', 'Done');
   });
@@ -248,6 +248,66 @@ describe('backlogGrooming (INT-1609)', () => {
       await applyBacklogGrooming(src, { success: true, decisions: [stale(1)] }, 'apply', ids(1), noOpenPr);
       expect(order).toEqual(['comment', 'state']);
       expect(src.addComment.mock.calls[0][1]).toContain('src/f1.ts:1');
+    });
+  });
+
+  describe('protected issues (AGT-4784)', () => {
+    const stale = (issueId: string) => ({ issueId, status: 'stale' as const, reason: 'implemented', evidence: ['src/x.ts:1'], closeState: 'Done' as const });
+
+    it('grooming apply refuses to move a Backlog or exclusion-labelled issue', async () => {
+      const src = source();
+      const trustedIssues = new Map<string, { state?: string; labels?: readonly string[] }>([
+        ['backlog-1', { state: ' backlog ', labels: [] }],
+        ['global-1', { state: 'Todo', labels: [' Do-Not-Automate '] }],
+        ['project-1', { state: 'Todo', labels: ['HUMAN-ONLY'] }],
+        ['clean-1', { state: 'Todo', labels: ['bug'] }],
+      ]);
+      const ids = ['backlog-1', 'global-1', 'project-1', 'missing-1', 'clean-1'];
+      const applied = await applyBacklogGrooming(src, { success: true, decisions: ids.map(stale) }, 'apply', new Set(ids), {
+        ...noOpenPr,
+        trustedIssues,
+        exclusionLabels: ['do-not-automate', 'human-only'],
+      });
+      expect(applied.skippedProtected).toBe(4);
+      expect(applied.moved).toBe(1);
+      expect(applied.movedIssueIds).toEqual(['clean-1']);
+      expect(src.updateState).toHaveBeenCalledTimes(1);
+      expect(src.updateState).toHaveBeenCalledWith('clean-1', 'Done');
+      for (const id of ['backlog-1', 'global-1', 'project-1', 'missing-1']) {
+        expect(src.updateState).not.toHaveBeenCalledWith(id, expect.anything());
+        expect(src.addComment.mock.calls.some(([issueId, body]) => issueId === id && String(body).includes('no mutation performed'))).toBe(true);
+      }
+    });
+
+    it('refuses a description update on an exclusion-labelled issue but allows one in Backlog', async () => {
+      const src = source();
+      const trustedIssues = new Map([
+        ['ex-1', { state: 'Todo', labels: ['Human-Only'] }],
+        ['bl-1', { state: 'Backlog', labels: [] }],
+      ]);
+      const upd = (issueId: string) => ({ issueId, status: 'needs_update' as const, reason: 'drift', evidence: ['src/y.ts:2'], updatedDescription: 'new' });
+      const applied = await applyBacklogGrooming(src, { success: true, decisions: [upd('ex-1'), upd('bl-1')] }, 'apply',
+        new Set(['ex-1', 'bl-1']), { ...noOpenPr, trustedIssues, exclusionLabels: ['human-only'] });
+      expect(applied.skippedProtected).toBe(1);
+      expect(src.updateDescription).toHaveBeenCalledTimes(1);
+      expect(src.updateDescription).toHaveBeenCalledWith('bl-1', 'new');
+    });
+
+    it('fails closed when exclusion labels are given without trusted issues', async () => {
+      const src = source();
+      const applied = await applyBacklogGrooming(src, { success: true, decisions: [stale('a')] }, 'apply', new Set(['a']),
+        { ...noOpenPr, exclusionLabels: ['human-only'] });
+      expect(applied.skippedProtected).toBe(1);
+      expect(src.updateState).not.toHaveBeenCalled();
+    });
+
+    it('comment mode ignores protection and only records recommendations', async () => {
+      const src = source();
+      const applied = await applyBacklogGrooming(src, { success: true, decisions: [stale('b')] }, 'comment', new Set(['b']),
+        { trustedIssues: new Map([['b', { state: 'Backlog' }]]), exclusionLabels: ['x'] });
+      expect(applied.skippedProtected).toBe(0);
+      expect(src.addComment).toHaveBeenCalledTimes(1);
+      expect(src.updateState).not.toHaveBeenCalled();
     });
   });
 });
