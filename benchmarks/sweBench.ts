@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 // ============================================
-// OpenSwarm - SWE-bench Lite: solve with OpenSwarm, grade with official harness
+// OpenSwarm - SWE-bench (Lite or Verified): solve with OpenSwarm, grade with official harness
 // Created: 2026-06-09
 // Purpose: OpenSwarm worker(runAgenticLoop)가 실제 SWE-bench 버그를 풀고, 채점은 공식
 //          swebench 하니스에 위임. 채점을 손으로 재현하다 함정(테스트 수집/gold/base 상태)에
@@ -15,6 +15,9 @@
 //
 // 실행: npx tsx benchmarks/sweBench.ts <instances.json> [outPreds.json]
 //       (OPENROUTER_API_KEY required — auto-loaded from the repo .env)
+//       SWE_DATASET picks the grading dataset (the Lite or Verified dataset,
+//       allowlisted in benchmarks/sweBenchGrading.ts); unset, Verified is used
+//       only when every instance is in the Verified cohort.
 // ============================================
 
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
@@ -23,6 +26,8 @@ import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { runWorker } from '../src/agents/worker.js';
+import { imageFor } from './sweBenchVerifiedSet.js';
+import { buildGradeCommand, formatGradeCommand, isDirectRun, resolveDataset } from './sweBenchGrading.js';
 import { setDefaultAdapter } from '../src/adapters/index.js';
 import { initLocale } from '../src/locale/index.js';
 import { loadEnvFile } from '../src/core/envFile.js';
@@ -40,10 +45,6 @@ interface SweInstance {
   // grader applies this at eval time. We pre-apply it so local verification
   // runs the REAL FAIL_TO_PASS test (defect #8) — see solveOne.
   test_patch?: string;
-}
-
-function imageFor(id: string): string {
-  return `swebench/sweb.eval.x86_64.${id.replace('__', '_1776_')}:latest`;
 }
 
 /**
@@ -246,17 +247,26 @@ async function solveOne(inst: SweInstance, model: string): Promise<{ pred: Recor
   }
 }
 
-async function main() {
+/**
+ * Solve every instance with the OpenSwarm worker, write the predictions, then
+ * print the official grading command. The dataset is resolved before any
+ * solve so a bad SWE_DATASET fails before a paid run starts. Without an
+ * explicit output path the predictions go to a fresh per-run mkdtemp
+ * directory (CodeQL remediation, PR #406).
+ */
+export async function main(argv: readonly string[] = process.argv, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   loadEnvFile();
   initLocale('en');
   setDefaultAdapter('openrouter');
-  const file = process.argv[2];
-  const outputDir = process.argv[3] ? undefined : await mkdtemp(join(tmpdir(), 'swe-preds-'));
-  const outPreds = process.argv[3] ?? join(outputDir!, 'predictions.json');
-  if (!file) { console.error('usage: sweBench.ts <instances.json> [outPreds.json]'); process.exit(1); }
+  const file = argv[2];
+  if (!file) throw new Error('usage: sweBench.ts <instances.json> [outPreds.json]');
   const instances: SweInstance[] = JSON.parse(await readFile(file, 'utf-8'));
-  const model = process.env.SWE_MODEL ?? 'deepseek/deepseek-v4-flash';
-  console.log(`[swe] ${instances.length} instances, model=${model} (OpenSwarm harness → official grading)`);
+  const instanceIds = instances.map((i) => i.instance_id);
+  const dataset = resolveDataset(instanceIds, { SWE_DATASET: env.SWE_DATASET });
+  const outputDir = argv[3] ? undefined : await mkdtemp(join(tmpdir(), 'swe-preds-'));
+  const outPreds = argv[3] ?? join(outputDir!, 'predictions.json');
+  const model = env.SWE_MODEL ?? 'deepseek/deepseek-v4-flash';
+  console.log(`[swe] ${instances.length} instances, model=${model}, grading dataset=${dataset} (OpenSwarm harness → official grading)`);
 
   const preds = [];
   for (const inst of instances) {
@@ -265,10 +275,11 @@ async function main() {
   }
   await writeFile(outPreds, JSON.stringify(preds, null, 2));
   console.log(`\npredictions → ${outPreds}`);
-  console.log(`\nGrade with official harness:`);
-  console.log(`  /tmp/swebench-env/bin/python -m swebench.harness.run_evaluation \\`);
-  console.log(`    --dataset_name SWE-bench/SWE-bench_Lite --predictions_path ${outPreds} \\`);
-  console.log(`    --run_id openswarm-run --instance_ids ${instances.map((i) => i.instance_id).join(' ')} --cache_level instance`);
+  console.log(`\nGrade with official harness (dataset ${dataset}${env.SWE_DATASET === undefined ? ', inferred from the instance ids; set SWE_DATASET to override' : ', from SWE_DATASET'}):`);
+  const command = buildGradeCommand({ dataset, predsPath: outPreds, runId: 'openswarm-run', instanceIds });
+  for (const line of formatGradeCommand(command)) console.log(line);
 }
 
-main().catch((e) => { console.error('FATAL', e); process.exit(1); });
+if (isDirectRun(import.meta.url, process.argv[1])) {
+  main().catch((e) => { console.error('FATAL', e); process.exit(1); });
+}

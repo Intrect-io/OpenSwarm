@@ -126,6 +126,10 @@ const integrationBoundaryCoverageExcludes = [
   // Model-selection bench entry (AGT-4186): drives live OpenRouter worker runs.
   // Its scoring is in benchmarks/modelSelectScoring.ts, tested in tests/modelSelect.*.test.ts.
   'benchmarks/modelSelect.ts',
+  // SWE-bench L6 solve entry (AGT-3179): drives docker and live OpenRouter worker
+  // runs. Its grading rules are in benchmarks/sweBenchGrading.ts, tested in
+  // tests/sweBench.*.test.ts, which also pin this file's wiring under mocks.
+  'benchmarks/sweBench.ts',
 
   // Ink TUI boundaries — alt-screen entry, network SSE, and effect hooks
   // (real TTY / sockets); the pure parser+reducer carry the tested logic. EPIC INT-1813.
