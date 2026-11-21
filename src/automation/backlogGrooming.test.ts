@@ -41,6 +41,14 @@ describe('backlogGrooming (INT-1609)', () => {
     expect(result.decisions[0].closeState).toBe('Done');
   });
 
+  it('drops a planner close state other than Done or Backlog', () => {
+    const result = parseBacklogGroomingOutput(JSON.stringify({ decisions: [
+      { issueId: 'id-1', status: 'stale', reason: 'obsolete', evidence: ['src/a.ts:1'], closeState: 'Canceled' },
+    ] }), new Set(['id-1']));
+    expect(result.decisions).toHaveLength(1);
+    expect(result.decisions[0].closeState).toBeUndefined();
+  });
+
   it('comment mode records recommendations without mutating state or descriptions', async () => {
     const src = source();
     const applied = await applyBacklogGrooming(src, {
@@ -238,6 +246,17 @@ describe('backlogGrooming (INT-1609)', () => {
       expect(src.updateState).not.toHaveBeenCalled();
       expect(applied.moved).toBe(0);
       expect(applied.failedComments).toBe(1);
+    });
+
+    it('refuses a grooming close state other than Done or Backlog', async () => {
+      const src = source();
+      const canceled = { ...stale(1), closeState: 'Canceled' as unknown as 'Done' };
+      const applied = await applyBacklogGrooming(src, { success: true, decisions: [canceled] }, 'apply', ids(1), noOpenPr);
+      expect(src.updateState).not.toHaveBeenCalledWith('id-1', 'Canceled');
+      expect(src.updateState).not.toHaveBeenCalled();
+      expect(src.addComment).toHaveBeenCalledTimes(1);
+      expect(src.addComment.mock.calls[0][1]).toContain('Canceled');
+      expect(applied.moved).toBe(0);
     });
 
     it('posts the evidence comment before the state change', async () => {

@@ -4,7 +4,33 @@ import { createHash } from 'node:crypto';
 import type { PipelineResult } from '../agents/pairPipeline.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { findOpenPRFileOverlaps } from '../support/worktreeManager.js';
+import { createGhOpenPrLookup, type OpenLinkedPrLookup } from './backlogGrooming.js';
 import type { ITaskSource } from './taskSource.js';
+
+/** Duplicate marks draft grooming may attempt per rolling hour, across all tasks (AGT-4603). */
+export const DRAFT_DUPLICATE_CAP_PER_HOUR = 5;
+const DRAFT_DUPLICATE_WINDOW_MS = 60 * 60 * 1000;
+let draftDuplicateAttempts: number[] = [];
+
+/** Test hook: forget every duplicate mark counted against the hourly cap. */
+export function resetDraftDuplicateBudget(): void {
+  draftDuplicateAttempts = [];
+}
+
+/** Synchronously claims a cap slot (so concurrent callers cannot overshoot); returns its timestamp, or null when the cap is used up. */
+function takeDraftDuplicateSlot(): number | null {
+  const now = Date.now();
+  draftDuplicateAttempts = draftDuplicateAttempts.filter(at => now - at < DRAFT_DUPLICATE_WINDOW_MS);
+  if (draftDuplicateAttempts.length >= DRAFT_DUPLICATE_CAP_PER_HOUR) return null;
+  draftDuplicateAttempts.push(now);
+  return now;
+}
+
+/** Gives back one slot claimed at `at` when markDuplicate was never attempted. */
+function releaseDraftDuplicateSlot(at: number): void {
+  const index = draftDuplicateAttempts.indexOf(at);
+  if (index >= 0) draftDuplicateAttempts.splice(index, 1);
+}
 
 export function projectDraftPeers(task: TaskItem, peers?: TaskItem[]): DraftPeerIssue[] | undefined {
   return peers
@@ -46,6 +72,8 @@ export async function applyDraftGates(options: {
   activeWorkerIssues?: readonly string[];
   /** A project goal is set, so the draft's scope verdict may stop the task. (AGT-4662) */
   goalScopeGate?: boolean;
+  /** Open linked PRs of the task; defaults to the gh-backed lookup. Any URL or a throw keeps the worker. (AGT-4603) */
+  openPrLookup?: OpenLinkedPrLookup;
 }): Promise<PipelineResult | null> {
   const { task, draft, peers, source } = options;
   const duplicateTarget = peers?.find(peer => (peer.issueId || peer.id) === draft.duplicateOfIssueId);
@@ -53,11 +81,17 @@ export async function applyDraftGates(options: {
   if (task.issueId && duplicateTarget && duplicateTarget.createdAt < task.createdAt
     && (draft.duplicateConfidence ?? 0) >= 0.9 && evidence.length >= 2 && source?.markDuplicate) {
     const canonicalId = duplicateTarget.issueId || duplicateTarget.id;
-    if (await source.markDuplicate(task.issueId, canonicalId)) {
-      await source.addComment(task.issueId,
-        `Draft grooming marked this issue as a duplicate of ${duplicateTarget.issueIdentifier ?? canonicalId}.\n\nReason: ${draft.duplicateReason ?? 'Same observable implementation.'}\n\nEvidence:\n${evidence.map(item => `- ${item}`).join('\n')}`,
-      );
-      console.log(`[AutonomousRunner] Draft grooming: ${task.issueIdentifier ?? task.issueId} duplicates ${duplicateTarget.issueIdentifier ?? canonicalId}`);
+    const label = task.issueIdentifier ?? task.issueId;
+    const canonicalLabel = duplicateTarget.issueIdentifier ?? canonicalId;
+    const lookupOpenPrs = options.openPrLookup ?? createGhOpenPrLookup(
+      options.projectPath, task.issueIdentifier ? { [task.issueId]: task.issueIdentifier } : undefined);
+    const marked = await markDraftDuplicate(source, {
+      issueId: task.issueId, identifier: task.issueIdentifier, canonicalId, lookupOpenPrs,
+      label: `${label} -> ${canonicalLabel}`,
+      body: `Draft grooming is marking this issue as a duplicate of ${canonicalLabel}.\n\nReason: ${draft.duplicateReason ?? 'Same observable implementation.'}\n\nEvidence:\n${evidence.map(item => `- ${item}`).join('\n')}`,
+    });
+    if (marked) {
+      console.log(`[AutonomousRunner] Draft grooming: ${label} duplicates ${canonicalLabel}`);
       return supersededResult('duplicate', draft.durationMs);
     }
   }
@@ -109,6 +143,48 @@ export async function applyDraftGates(options: {
     }
   }
   return null;
+}
+
+/**
+ * Safe duplicate path (AGT-4603): refuse while the task has an open linked PR
+ * (or the lookup cannot tell), honour the hourly cap, then post the evidence
+ * comment before the mark. Any refusal returns false so the worker runs.
+ */
+async function markDraftDuplicate(source: ITaskSource, mark: {
+  issueId: string;
+  identifier?: string;
+  canonicalId: string;
+  lookupOpenPrs: OpenLinkedPrLookup;
+  label: string;
+  body: string;
+}): Promise<boolean> {
+  const { issueId, canonicalId, label } = mark;
+  if (!source.markDuplicate) return false;
+  let openPrs: string[];
+  try {
+    openPrs = await mark.lookupOpenPrs({ issueId, identifier: mark.identifier });
+  } catch (error) {
+    console.warn(`[AutonomousRunner] Draft duplicate ${label} not marked: linked-PR lookup failed (${error instanceof Error ? error.message : String(error)})`);
+    return false;
+  }
+  if (openPrs.length > 0) {
+    console.warn(`[AutonomousRunner] Draft duplicate ${label} not marked: open linked PR ${openPrs.join(', ')}`);
+    return false;
+  }
+  const slot = takeDraftDuplicateSlot();
+  if (slot === null) {
+    console.warn(`[AutonomousRunner] Draft duplicate ${label} not marked: ${DRAFT_DUPLICATE_CAP_PER_HOUR} duplicate marks already made this hour`);
+    return false;
+  }
+  const marker = `draft-duplicate:${createHash('sha256').update(issueId + canonicalId).digest('hex').slice(0, 24)}`;
+  try {
+    await source.addComment(issueId, mark.body, marker);
+  } catch (error) {
+    releaseDraftDuplicateSlot(slot);
+    console.warn(`[AutonomousRunner] Draft duplicate ${label} not marked: evidence comment failed (${error instanceof Error ? error.message : String(error)})`);
+    return false;
+  }
+  return source.markDuplicate(issueId, canonicalId);
 }
 
 function supersededResult(kind: string, durationMs: number, failureDetail?: string): PipelineResult {

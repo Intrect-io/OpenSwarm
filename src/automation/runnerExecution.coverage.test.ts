@@ -77,7 +77,7 @@ vi.mock('../support/planner.js', () => ({
   runPlanner: plannerRunPlanner,
   formatPlannerResult: plannerFormatPlannerResult,
 }));
-vi.mock('./unfinishedRunBranch.js', () => ({ keepUnfinishedWorkOnRemote })); vi.mock('./siblingOverlapDefer.js', () => ({ deferForSiblingOverlap: async () => false })); // AGT-4786 gate: own tests
+vi.mock('./unfinishedRunBranch.js', () => ({ keepUnfinishedWorkOnRemote })); vi.mock('./siblingOverlapDefer.js', () => ({ deferForSiblingOverlap: async () => false })); vi.mock('./backlogGrooming.js', async (orig) => ({ ...(await orig<typeof import('./backlogGrooming.js')>()), createGhOpenPrLookup: () => async () => [] })); // AGT-4786 gate: own tests; AGT-4603 no real gh
 vi.mock('../support/worktreeManager.js', () => ({
   createWorktree,
   commitAndCreatePR,
@@ -341,7 +341,7 @@ describe('runnerExecution.ts coverage extension', () => {
 
       expect(result.finalStatus).toBe('superseded');
       expect(markDuplicate).toHaveBeenCalledWith('issue-1', 'issue-older');
-      expect(taskSourceMock.addComment).toHaveBeenCalledWith('issue-1', expect.stringContaining('INT-90'));
+      expect(taskSourceMock.addComment).toHaveBeenCalledWith('issue-1', expect.stringContaining('INT-90'), expect.stringMatching(/^draft-duplicate:[a-f0-9]{24}$/));
       expect(createPipelineFromConfig).not.toHaveBeenCalled();
       expect(runDraftAnalysis).toHaveBeenCalledWith(expect.objectContaining({
         peerIssues: [expect.objectContaining({ issueId: 'issue-older' })],
