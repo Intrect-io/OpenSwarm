@@ -26,8 +26,15 @@
 // - wrong-dispatch rate: runs dispatched in the window (an attempt started in
 //   it) marked "should not have run", over the runs dispatched in it. Not
 //   measured while no run was ever marked or nothing was dispatched;
-// - human minutes (review, answer, intervention time) are not recorded, so
-//   merged changes per human minute stays not measured.
+// - merged changes per human minute: the runs merged in the window (the same
+//   merge record as "Runs merged") over the human minutes recorded at a time
+//   in the window (`openswarm outcome human-minutes`: review, answer and
+//   intervention time), with the minutes by kind. Not measured while no
+//   minutes were ever recorded, none fall in the window, or merges are not
+//   measured. Minutes recorded but nothing merged is a measurement: rate 0
+//   (time was spent and nothing landed), never "not measured". Minutes are
+//   what the operator chose to record, so the rate is an upper bound on
+//   merges per minute actually spent.
 //
 // The window is the previous full UTC day [00:00Z, 00:00Z), the same day the
 // spend ceiling counts against (runLedgerCost.ts). Definitions within it:
@@ -56,6 +63,7 @@ import Database from 'better-sqlite3';
 import { existsSync } from 'node:fs';
 import { Cron } from 'croner';
 import { NO_SPEND_STATUSES, unknownAttemptEstimateUsd } from './runLedgerCost.js';
+import { HUMAN_MINUTES_KINDS, readHumanMinutesInDb, type HumanMinutesKind } from './factoryOutcomes.js';
 
 /** Money that includes cost-less attempts at an estimate, so the unpriced part stays visible. */
 export interface CostFigure {
@@ -71,6 +79,14 @@ export interface MergeCount { measured: true; count: number }
 /** `numerator` of `denominator` runs; `rate` = numerator / denominator. */
 export interface Rate { measured: true; rate: number; numerator: number; denominator: number }
 export interface MedianDuration { measured: true; medianMs: number; issues: number }
+/** `rate` = merged / minutes; `byKind` has every kind (0 when none recorded) and sums to `minutes`. */
+export interface HumanMinuteRate {
+  measured: true;
+  rate: number;
+  merged: number;
+  minutes: number;
+  byKind: Record<HumanMinutesKind, number>;
+}
 
 export interface FactoryDigest {
   from: number;
@@ -95,7 +111,7 @@ export interface FactoryDigest {
   signals: Array<{ kind: string; projectPath: string; count: number }>;
   circuits: Array<{ projectPath: string; reason: string; openUntil: number }>;
   kpis: {
-    mergedPerHumanMinute: NotMeasured;
+    mergedPerHumanMinute: NotMeasured | HumanMinuteRate;
     postMergeDefectRate: NotMeasured | Rate;
     wrongDispatchRate: NotMeasured | Rate;
     cycleTimePerIssue: NotMeasured | MedianDuration;
@@ -112,8 +128,11 @@ export interface NotMeasured {
 const NO_MERGE_RECORD = 'the automation database records no merge yet (no PR state has been recorded by the merge sweep)';
 const NO_MERGE_IN_WINDOW = 'no run merged in the window (GitHub PR state)';
 
+const HUMAN_MINUTES_COMMAND = '`openswarm outcome human-minutes`';
+const NO_HUMAN_MINUTES = `no human review/answer/intervention minutes have been recorded yet (${HUMAN_MINUTES_COMMAND})`;
+
 const NOT_MEASURED = {
-  mergedPerHumanMinute: { measured: false, reason: 'human review/answer/intervention minutes are not recorded anywhere yet' },
+  mergedPerHumanMinute: { measured: false, reason: NO_HUMAN_MINUTES },
   postMergeDefectRate: { measured: false, reason: 'no revert or hotfix has been recorded yet (`openswarm outcome defect`)' },
   wrongDispatchRate: { measured: false, reason: 'no run has been marked "should not have run" yet (`openswarm outcome wrong-dispatch`)' },
   cycleTimePerIssue: { measured: false, reason: `needs the merge time: ${NO_MERGE_RECORD}` },
@@ -243,6 +262,7 @@ export function computeFactoryDigest(
   }
 
   if (hasTable(db, 'automation_runs')) measureOutcomes(db, digest, now);
+  measureHumanMinutes(db, digest);
   if (hasTable(db, 'coordination_trace')) countQuestions(db, digest, now);
   collectPausesAndAnomalies(db, digest, now);
   return digest;
@@ -293,6 +313,32 @@ function measureOutcomes(db: Database.Database, digest: FactoryDigest, now: numb
       ? { measured: false, reason: 'no run was dispatched in the window' }
       : { measured: true, rate: row.numerator / row.denominator, numerator: row.numerator, denominator: row.denominator };
   }
+}
+
+/**
+ * Merged changes per human minute: minutes recorded in the window, then the
+ * window's merge count. Each not-measured reason names the command that
+ * records minutes. Runs after measureOutcomes, which sets the merge count.
+ */
+function measureHumanMinutes(db: Database.Database, digest: FactoryDigest): void {
+  const rows = readHumanMinutesInDb(db, digest.from, digest.to);
+  if (rows === null || (rows.length === 0 && !any(db, 'automation_human_minutes'))) {
+    digest.kpis.mergedPerHumanMinute = { measured: false, reason: NO_HUMAN_MINUTES };
+    return;
+  }
+  if (rows.length === 0) {
+    digest.kpis.mergedPerHumanMinute = { measured: false, reason: `no human minutes were recorded in the window (${HUMAN_MINUTES_COMMAND})` };
+    return;
+  }
+  const merged = digest.runs.merged;
+  if (!merged.measured) {
+    digest.kpis.mergedPerHumanMinute = { measured: false, reason: `merges are not measured: ${merged.reason}; minutes are recorded with ${HUMAN_MINUTES_COMMAND}` };
+    return;
+  }
+  const byKind = Object.fromEntries(HUMAN_MINUTES_KINDS.map((kind) => [kind, 0])) as Record<HumanMinutesKind, number>;
+  for (const row of rows) byKind[row.kind] += row.minutes;
+  const minutes = rows.reduce((sum, row) => sum + row.minutes, 0);
+  digest.kpis.mergedPerHumanMinute = { measured: true, rate: merged.count / minutes, merged: merged.count, minutes, byKind };
 }
 
 /** Active pauses, lifts and signals in the window, and circuits open now. Each table is optional. */
@@ -408,6 +454,11 @@ function windowLabel(from: number, to: number): string {
 
 export const KPI_HEADING = '**KPIs**';
 
+/** Three decimals, or two significant digits for a nonzero rate that would round to 0.000. */
+function ratio(rate: number): string {
+  return rate !== 0 && Math.abs(rate) < 0.0005 ? rate.toPrecision(2) : rate.toFixed(3);
+}
+
 /**
  * The digest as text. Plain lines, one section per question the operator
  * asks. `maxItems` caps each list (the JSON digest keeps every row).
@@ -440,9 +491,12 @@ export function formatFactoryDigest(d: FactoryDigest, options: { maxItems?: numb
   const ct = k.cycleTimePerIssue;
   const dr = k.postMergeDefectRate;
   const wd = k.wrongDispatchRate;
+  const hm = k.mergedPerHumanMinute;
   for (const [name, text] of [
     ['cycle time per issue', ct.measured ? `median ${hours(ct.medianMs)} over ${ct.issues} merged issues (first start to GitHub merge)` : `not measured (${ct.reason})`],
-    ['merged changes per human minute', `not measured (${k.mergedPerHumanMinute.reason})`],
+    ['merged changes per human minute', hm.measured
+      ? `${ratio(hm.rate)} (${hm.merged} runs merged in the window over ${hm.minutes} human minutes recorded in it: ${HUMAN_MINUTES_KINDS.map((kind) => `${kind} ${hm.byKind[kind]}`).join(', ')})`
+      : `not measured (${hm.reason})`],
     ['post-merge defect rate (7 d)', dr.measured ? pct(dr, 'runs merged in the window reverted or hotfixed within 7 days of the merge') : `not measured (${dr.reason})`],
     ['wrong-dispatch rate', wd.measured ? pct(wd, 'runs dispatched in the window marked should-not-have-run') : `not measured (${wd.reason})`],
   ] as const) {
