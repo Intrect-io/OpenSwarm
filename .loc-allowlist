@@ -1,0 +1,9 @@
+# Files allowed to exceed the 1500 code-LOC limit enforced by scripts/loc-check.mjs.
+#
+# Format: <path> <expires YYYY-MM-DD> <reason>
+# An entry is valid through its expiry date. The check fails when an entry has
+# expired while the file still exceeds the limit, and when an entry is stale
+# (the file is back within the limit or gone) - delete the entry then.
+# New entries are for existing offenders only; split new code instead.
+
+src/automation/autonomousRunner.ts 2027-03-31 AGT-4867 split

@@ -1,0 +1,75 @@
+#!/bin/bash
+# Versioned pre-commit hook (installed by `npm install` via core.hooksPath).
+# 1. LOC gate: scripts/loc-check.mjs on the staged source files (fails closed
+#    when the script is missing).
+# 2. oxlint on the staged TypeScript files.
+# 3. Type check (npx tsc --noEmit).
+# 4. Growth rule: a staged .ts file may not newly cross 1000 lines vs HEAD.
+set -e
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+LOC_CHECK="$ROOT/scripts/loc-check.mjs"
+if [ ! -f "$LOC_CHECK" ]; then
+    echo "pre-commit: $LOC_CHECK is missing; refusing to commit without the LOC gate." >&2
+    echo "pre-commit: restore scripts/loc-check.mjs (or bypass deliberately with --no-verify)." >&2
+    exit 1
+fi
+
+# LOC gate on every staged file (loc-check drops paths outside its scope) and
+# reads the staged content, not the working tree.
+echo "Running LOC gate..."
+git diff --cached --name-only --diff-filter=ACM -z | xargs -0 node "$LOC_CHECK" --staged --files || {
+    echo "LOC gate failed. Fix it before committing."
+    exit 1
+}
+
+# Changed TypeScript files
+CHANGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep '\.ts$' || true)
+[ -z "$CHANGED_FILES" ] && exit 0
+
+echo "Pre-commit: Checking $CHANGED_FILES"
+
+# Lint
+echo "Running oxlint..."
+npx oxlint $CHANGED_FILES || {
+    echo "Lint errors found. Fix them before committing."
+    exit 1
+}
+
+# TypeScript compile check
+echo "Running type check..."
+npx tsc --noEmit || {
+    echo "Type errors found. Fix them before committing."
+    exit 1
+}
+
+# Line-count growth rule (HTML template file excluded)
+# Only files THIS commit puts over the limit are rejected. An untracked,
+# gitignored artifact in someone else's checkout (e.g. a node_modules
+# install) must not block the commit, and a file already over the limit on
+# the base must not block work that does not grow it.
+LOC_EXCLUDE="dashboardHtml.ts"
+LOC_MAX=1000
+echo "Checking file sizes..."
+for file in $CHANGED_FILES; do
+    if [ ! -f "$file" ]; then
+        continue
+    fi
+    basename=$(basename "$file")
+    if echo "$LOC_EXCLUDE" | grep -qw "$basename"; then
+        continue
+    fi
+    lines=$(wc -l < "$file")
+    base_lines=$(git show "HEAD:$file" 2>/dev/null | wc -l || true)
+    if [ "$lines" -gt "$LOC_MAX" ]; then
+        if [ "$base_lines" -gt "$LOC_MAX" ] && [ "$lines" -le "$base_lines" ]; then
+            continue
+        fi
+        echo "File $file exceeds $LOC_MAX lines ($lines, base $base_lines)"
+        exit 1
+    fi
+done
+
+echo "Pre-commit checks passed"

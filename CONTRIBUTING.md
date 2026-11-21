@@ -70,7 +70,28 @@ npm test            # vitest
 
 CI (`.github/workflows/ci.yml`) runs **lint → typecheck → build → test** on every PR to
 `main`. Lint, typecheck, and build must pass; keep tests green and add coverage for new
-behavior. Files over 800 lines trigger a CI warning — prefer smaller, focused modules.
+behavior. CI also runs the LOC gate described below — prefer smaller, focused modules.
+
+### LOC gate and git hooks
+
+- **LOC gate.** `node scripts/loc-check.mjs` fails when a tracked source file under
+  `src/`, `web/static/js/` or `scripts/` (`.ts`, `.tsx`, `.js`, `.mjs`; test files
+  `*.test.*` and `fixtures/` excluded) exceeds **1500 code LOC**. Code LOC counts lines
+  that are neither blank nor comment-only; a block comment is recognized only when `/*`
+  starts the line, so a comment opened after code counts as code (the count errs high). CI's `loc-gate` job runs it.
+- **Allowlist.** `.loc-allowlist` names the existing offenders as
+  `<path> <expires YYYY-MM-DD> <reason>`. An entry is valid through its expiry date; the
+  gate fails once it has expired while the file still exceeds the limit, and fails on a
+  stale entry whose file is back under the limit, so delete the entry when you split the
+  file. Do not add entries for new code.
+- **Hooks.** `npm install` runs the `prepare` script, which sets
+  `git config --local core.hooksPath .githooks`. It does nothing outside the top level of
+  a git work tree, when `.githooks` is absent, or when `core.hooksPath` is already set
+  (your own hooks path is never overridden — chain `.githooks/*` from it yourself).
+  `pre-commit` runs the LOC gate on the staged files (and fails closed if
+  `scripts/loc-check.mjs` is missing), then oxlint, `tsc --noEmit` and the 1000-line growth
+  rule on staged `.ts` files. `commit-msg` refuses a message with a `Co-Authored-By:`
+  trailer: commits are attributed to their human author only.
 
 ## Branch & commit conventions
 

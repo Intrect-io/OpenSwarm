@@ -1,0 +1,17 @@
+#!/bin/sh
+# Versioned commit-msg hook (installed by `npm install` via core.hooksPath).
+# Refuses a commit message that carries a Co-Authored-By trailer: commits in
+# this repository are attributed to their human author only (AGT-4866).
+MSG_FILE="$1"
+if [ -z "$MSG_FILE" ] || [ ! -f "$MSG_FILE" ]; then
+    echo "commit-msg: no commit message file given" >&2
+    exit 1
+fi
+# Ignore comment lines git strips anyway (the verbose diff and status hints).
+if grep -v '^#' "$MSG_FILE" | grep -qiE '^[[:space:]]*co-authored-by[[:space:]]*:'; then
+    echo "commit-msg: refused - the message contains a Co-Authored-By trailer:" >&2
+    grep -v '^#' "$MSG_FILE" | grep -iE '^[[:space:]]*co-authored-by[[:space:]]*:' | sed 's/^/  /' >&2
+    echo "commit-msg: remove the trailer; commits are attributed to their human author only." >&2
+    exit 1
+fi
+exit 0

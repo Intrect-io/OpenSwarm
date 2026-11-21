@@ -165,19 +165,19 @@ jobs:
       - run: npm test -- --run src/adapters/processTree.windows.test.ts
 
   loc-gate:
-    name: LOC Warning (800 lines)
+    # Hard limit: a tracked source file over 1500 code LOC (non-blank,
+    # non-comment lines) fails, unless .loc-allowlist names it with an
+    # unexpired date. Stale allowlist entries fail too. See scripts/loc-check.mjs.
+    name: LOC gate (1500 code LOC)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Check file sizes
-        run: |
-          for file in $(find src -name "*.ts" -type f); do
-            lines=$(wc -l < "$file")
-            if [ "$lines" -gt 800 ]; then
-              echo "::warning file=$file::File exceeds 800 lines ($lines)"
-            fi
-          done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Check code LOC
+        run: node scripts/loc-check.mjs
 
   verify-sandbox:
     # Deterministic verification refuses to run without an OS sandbox, and
