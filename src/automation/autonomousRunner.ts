@@ -57,6 +57,8 @@ import * as taskFilter from './runnerTaskFilter.js';
 import type { TaskFilterHost } from './runnerTaskFilter.js';
 import * as candidateAdmission from './runnerCandidateAdmission.js';
 import type { CachedDraftScope, CandidateAdmissionHost } from './runnerCandidateAdmission.js';
+import * as maintenance from './runnerMaintenance.js';
+import { createMaintenanceState, type MaintenanceHost } from './runnerMaintenance.js';
 import { pruneDraftCache } from './draftCache.js';
 import { pruneSessionLogs } from '../support/sessionLog.js';
 import { pruneScratchpads } from '../support/scratchpad.js';
@@ -89,10 +91,7 @@ import { isExecutionLive } from './executionLiveness.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { STUCK_LABEL } from '../linear/index.js';
-import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
-import { scanRepository } from '../registry/entityScanner.js';
-import { readFileSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
@@ -103,11 +102,6 @@ import type { AdapterName } from '../adapters/types.js';
 import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
 import type { ModelRole } from '../adapters/modelCompat.js';
 import { isTimeoutError } from '../adapters/errorClassification.js';
-import {
-  applyBacklogGrooming, DEFAULT_GROOMING_MUTATION_CAP,
-  filterGroomableTasks, runBacklogGroomingPlanner,
-  summarizeGroomingDecision,
-} from './backlogGrooming.js';
 import { resolvePerIssueAttemptsPerDay } from './runLedgerCost.js';
 import {
   DurableRunCoordinator,
@@ -126,8 +120,7 @@ import {
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
-import { exclusionCheck, exclusionLabelsForProject, formatReadinessSummary, projectSkipLabelsHook } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
-import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
+import { exclusionCheck, formatReadinessSummary, projectSkipLabelsHook } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
 import { completeParentIfChildrenDone as completeParentLocally } from '../taskState/store.js'; import { transitionWithReason } from './trackerTransition.js'; import { releaseDependentsInTracker } from './dependentRelease.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
 import {
@@ -364,7 +357,6 @@ export class AutonomousRunner {
   // the first resolve failure so they aren't re-picked every heartbeat (which
   // starved other actionable tasks — they were top-priority but never runnable). (INT-1875)
   private unresolvableIssueIds = new Set<string>();
-  private lastBacklogGroomingAt = 0;
 
   private get taskStateRef(): TaskState {
     return {
@@ -1775,83 +1767,37 @@ export class AutonomousRunner {
     };
   }
 
-  private readonly kgRefreshByPath = new Map<string, Promise<unknown>>();
+  // The maintenance lanes (knowledge-graph refresh, registry scan, skip summary,
+  // backlog grooming, merged-publication sweep) and their state live in
+  // runnerMaintenance.ts (AGT-4867). These delegators keep the runner's names,
+  // which tests call and reassign; the moved code calls back through the host,
+  // so a reassignment is honoured.
+  private readonly maintenanceState = createMaintenanceState();
+  private refreshKnowledgeGraphs(): void { maintenance.refreshKnowledgeGraphs(this.maintenanceHost()); }
+  private refreshCodeRegistries(): void { maintenance.refreshCodeRegistries(this.maintenanceHost()); }
+  private resolveRegistryProjectId(projectPath: string): string { return maintenance.resolveRegistryProjectId(projectPath); }
+  private syslogSkipSummary(unmapped: Map<string, number>, disabled: Map<string, number>): void { maintenance.syslogSkipSummary(this.maintenanceHost(), unmapped, disabled); }
+  private groupTasksForGrooming(tasks: TaskItem[]): Promise<Map<string, TaskItem[]>> { return maintenance.groupTasksForGrooming(this.maintenanceHost(), tasks); }
+  private maybeRunBacklogGrooming(tasks: TaskItem[]): Promise<TaskItem[]> { return maintenance.maybeRunBacklogGrooming(this.maintenanceHost(), tasks); }
+  private reconcileMergedPublications(tasks: TaskItem[], now?: number): Promise<void> { return maintenance.reconcileMergedPublications(this.maintenanceHost(), tasks, now); }
 
-  private refreshKnowledgeGraphs(): void {
-    for (const projectPath of this.config.allowedProjects) {
-      const resolvedPath = normalizeProjectPath(projectPath);
-      // Coalesce concurrent heartbeats: one in-flight refresh per project.
-      if (this.kgRefreshByPath.has(resolvedPath)) continue;
-
-      const flight = refreshGraph(resolvedPath).then(graph => {
-        if (graph) {
-          const slug = toProjectSlug(resolvedPath);
-          broadcastEvent({
-            type: 'knowledge:updated',
-            data: { projectSlug: slug, nodeCount: graph.nodeCount, edgeCount: graph.edgeCount },
-          });
-        }
-        return graph;
-      }).catch((e) => {
-        console.error(`[AutonomousRunner] Knowledge graph refresh failed for ${resolvedPath}:`, e);
-        return null;
-      }).finally(() => {
-        if (this.kgRefreshByPath.get(resolvedPath) === flight) {
-          this.kgRefreshByPath.delete(resolvedPath);
-        }
-      });
-
-      this.kgRefreshByPath.set(resolvedPath, flight);
-    }
-  }
-
-  /**
-   * Keep the code-entity registry fresh for Draft File Map / registryCheck.
-   * Throttled to once per 6h per project so heartbeats stay cheap; a missing
-   * or empty scan still runs immediately (measured: Draft logged "0 entities"
-   * for months while ~/.openswarm/registry.db sat stale since 2026-07-05).
-   */
-  private readonly registryScanAt = new Map<string, number>();
-  private static readonly REGISTRY_SCAN_INTERVAL_MS = 6 * 60 * 60 * 1000;
-
-  private refreshCodeRegistries(): void {
-    for (const projectPath of this.config.allowedProjects) {
-      const resolvedPath = normalizeProjectPath(projectPath);
-      const last = this.registryScanAt.get(resolvedPath) ?? 0;
-      if (Date.now() - last < AutonomousRunner.REGISTRY_SCAN_INTERVAL_MS) continue;
-      if (!existsSync(join(resolvedPath, '.git'))) continue;
-
-      const projectId = this.resolveRegistryProjectId(resolvedPath);
-      this.registryScanAt.set(resolvedPath, Date.now());
-      void scanRepository(resolvedPath, projectId, { timeoutMs: 180_000 })
-        .then((result) => {
-          if (result.incomplete) {
-            this.syslog(
-              `Registry scan ${projectId} was INCOMPLETE after ${result.durationMs}ms: `
-              + result.incompleteReasons.slice(0, 5).join('; '),
-            );
-          }
-          this.syslog(
-            `Registry scan ${projectId}: ${result.extracted} entities `
-            + `(+${result.registered}/~${result.updated}) in ${result.durationMs}ms`,
-          );
-        })
-        .catch((e) => {
-          console.error(`[AutonomousRunner] Registry scan failed for ${resolvedPath}:`, e);
-          this.registryScanAt.delete(resolvedPath);
-        });
-    }
-  }
-
-  private resolveRegistryProjectId(projectPath: string): string {
-    const normalized = projectPath.replace(/\/+$/, '');
-    const wt = normalized.match(/^(.*)\/worktree\/[^/]+$/);
-    const repoRoot = wt ? wt[1] : normalized;
-    try {
-      const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf-8')) as { name?: unknown };
-      if (typeof pkg.name === 'string' && pkg.name) return pkg.name.replace(/^@[^/]+\//, '');
-    } catch { /* basename fallback */ }
-    return repoRoot.split('/').pop() ?? repoRoot;
+  private maintenanceHostCache: MaintenanceHost | undefined;
+  /** Built once; every member reads the runner at call time (see MaintenanceHost). */
+  private maintenanceHost(): MaintenanceHost {
+    if (this.maintenanceHostCache) return this.maintenanceHostCache;
+    const runner = () => this;
+    this.maintenanceHostCache = {
+      get maintenance() { return runner().maintenanceState; },
+      get config() { return runner().config; },
+      get scheduler() { return runner().scheduler; },
+      get durableRuns() { return runner().durableRuns; },
+      syslog: (line) => this.syslog(line),
+      resolveProjectPath: (task) => this.resolveProjectPath(task),
+      resolveRegistryProjectId: (projectPath) => this.resolveRegistryProjectId(projectPath),
+      groupTasksForGrooming: (tasks) => this.groupTasksForGrooming(tasks),
+      completeParentIfChildrenMerged: (childIssueId, source) => this.completeParentIfChildrenMerged(childIssueId, source),
+    };
+    return this.maintenanceHostCache;
   }
 
   /** Send system message to dashboard LIVE LOG */
@@ -1861,12 +1807,6 @@ export class AutonomousRunner {
     broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'heartbeat', line: safeLine } });
   }
 
-  private lastSkipSummary = '';
-
-  /**
-   * Log unmapped/disabled project skips as one aggregate line per category,
-   * and stay silent while the summary is identical to the previous heartbeat.
-   */
   /**
    * The retrospective lane (AGT-4181): the runner reads its own ledger and
    * files one evidence-rich issue on the largest failure bucket, so the
@@ -1886,187 +1826,6 @@ export class AutonomousRunner {
     }
   }
 
-  private syslogSkipSummary(unmapped: Map<string, number>, disabled: Map<string, number>): void {
-    const fmt = (m: Map<string, number>) => [...m.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .map(([name, n]) => `${name} (${n})`)
-      .join(', ');
-    const total = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0);
-    const lines: string[] = [];
-    if (unmapped.size > 0) {
-      lines.push(`  ⚠ Skipped ${total(unmapped)} issue(s) in ${unmapped.size} unmapped project(s): ${fmt(unmapped)} — run \`openswarm add\` to map`);
-    }
-    if (disabled.size > 0) {
-      lines.push(`  ⚠ Skipped ${total(disabled)} issue(s) in ${disabled.size} disabled project(s): ${fmt(disabled)}`);
-    }
-    const summary = lines.join('\n');
-    if (summary === this.lastSkipSummary) return;
-    this.lastSkipSummary = summary;
-    for (const line of lines) this.syslog(line);
-  }
-
-  private async groupTasksForGrooming(tasks: TaskItem[]): Promise<Map<string, TaskItem[]>> {
-    const byProjectId = new Map<string, string>();
-    for (const repoPath of this.config.allowedProjects) {
-      try {
-        const resolvedPath = normalizeProjectPath(repoPath);
-        const meta = await loadRepoMetadata(resolvedPath);
-        if (meta?.linear?.projectId) byProjectId.set(meta.linear.projectId, resolvedPath);
-      } catch {
-        // Grooming is advisory; unreadable metadata should not block normal work.
-      }
-    }
-
-    const groups = new Map<string, TaskItem[]>();
-    for (const task of tasks) {
-      const projectPath = task.projectPath
-        ?? (task.linearProject?.id ? byProjectId.get(task.linearProject.id) : undefined)
-        ?? undefined;
-      if (!projectPath) continue;
-      const list = groups.get(projectPath) ?? [];
-      list.push(task);
-      groups.set(projectPath, list);
-    }
-    return groups;
-  }
-
-  private async maybeRunBacklogGrooming(tasks: TaskItem[]): Promise<TaskItem[]> {
-    const cfg = this.config.backlogGrooming;
-    if (!cfg?.enabled) return tasks;
-
-    const cadenceMs = Math.max(1, cfg.cadenceHours ?? 24) * 60 * 60 * 1000;
-    const now = Date.now();
-    if (this.lastBacklogGroomingAt && now - this.lastBacklogGroomingAt < cadenceMs) return tasks;
-
-    const source = getTaskSource();
-    if (!source) {
-      this.syslog('⚠ Backlog grooming skipped: no task source');
-      return tasks;
-    }
-
-    const groomable = filterGroomableTasks(tasks);
-    if (groomable.length === 0) return tasks;
-
-    const mode = cfg.mode ?? 'comment';
-    const moved = new Set<string>();
-    const groups = await this.groupTasksForGrooming(groomable);
-    if (groups.size === 0) {
-      this.syslog('⚠ Backlog grooming skipped: no mapped project paths');
-      return tasks;
-    }
-
-    let successfulPlannerRuns = 0; const mutationBudget = { remaining: DEFAULT_GROOMING_MUTATION_CAP }; // AGT-4603: one cap per grooming run
-    for (const [projectPath, groupTasks] of groups) {
-      this.syslog(`⟳ Backlog grooming: ${groupTasks.length} issue(s) in ${projectPath.split('/').pop()}`);
-      const result = await runBacklogGroomingPlanner({
-        tasks: groupTasks,
-        projectPath,
-        projectName: groupTasks[0]?.linearProject?.name,
-        model: cfg.plannerModel ?? this.config.plannerModel,
-        timeoutMs: cfg.plannerTimeoutMs ?? this.config.plannerTimeoutMs,
-        maxIssues: cfg.maxIssues,
-        onLog: (line) => broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'groom', line } }),
-      });
-      if (!result.success) {
-        this.syslog(`⚠ Backlog grooming failed: ${result.error ?? 'unknown error'}`);
-        continue;
-      }
-      successfulPlannerRuns++;
-      const validIssueIds = new Set(groupTasks.map(task => task.issueId || task.id));
-      const applied = await applyBacklogGrooming(source, result, mode, validIssueIds, { mutationBudget, trustedIssues: new Map(groupTasks.map(t => [t.issueId || t.id, { state: t.linearState, labels: t.labels }])), exclusionLabels: exclusionLabelsForProject((this.config.skip ?? DEFAULT_AGENT_SKIP).labels, this.config.projectAgents, projectPath) }); // AGT-4784
-      for (const issueId of applied.movedIssueIds) moved.add(issueId);
-      this.syslog(`✓ Backlog grooming: ${result.decisions.length} decision(s), ${applied.commented} comment(s), ${applied.failedComments} comment failure(s), ${applied.updatedDescriptions} description update(s), ${applied.moved} moved, ${applied.skippedUnknown} unknown skipped, ${applied.skippedOpenPr} open-PR skipped, ${applied.skippedByCap} over the cap, ${applied.skippedProtected} protected`);
-      for (const decision of result.decisions.slice(0, 5)) {
-        this.syslog(`  ${summarizeGroomingDecision(decision)}`);
-      }
-    }
-
-    if (successfulPlannerRuns > 0) this.lastBacklogGroomingAt = now;
-    if (moved.size === 0) return tasks;
-    return tasks.filter(task => !moved.has(task.issueId || task.id));
-  }
-
-  /**
-   * Keep Linear's In Progress column honest: it represents a scheduler-owned
-   * task or a live durable lease, never an abandoned claim. The bulk heartbeat
-   * fetch already carries updatedAt, so the sweep adds no read-side API calls.
-   */
-  /** Last merge sweep, so a 5-minute heartbeat does not pay a `gh` call per In Review issue every tick. */
-  private lastMergedPublicationSweepAt = 0;
-  private static readonly MERGED_PUBLICATION_SWEEP_INTERVAL_MS = 10 * 60_000;
-
-  /**
-   * Done means merged (AGT-4409). A publication leaves the issue In Review;
-   * this moves it on once GitHub says the PR merged (→ Done, unless the
-   * description still has unticked criteria) or closed unmerged (→ Backlog).
-   * Only issues whose PR this daemon published, only from In Review, re-read
-   * right before the write so a person's later move is never overwritten.
-   */
-  private async reconcileMergedPublications(tasks: TaskItem[], now = Date.now()): Promise<void> {
-    const source = getTaskSource(); if (source?.kind !== 'linear') return;
-    if (now - this.lastMergedPublicationSweepAt < AutonomousRunner.MERGED_PUBLICATION_SWEEP_INTERVAL_MS) return;
-    this.lastMergedPublicationSweepAt = now;
-
-    const candidates = planMergedPublicationChecks(tasks, {
-      isExcluded: await exclusionCheck(tasks, this.config.skip ?? DEFAULT_AGENT_SKIP, this.config.projectAgents, (t: TaskItem) => this.resolveProjectPath(t)), // AGT-4784
-      publishedPrUrl: (issueId) => this.durableRuns.getRun(issueId)?.prUrl ?? undefined,
-      isSchedulerOwned: (issueId) => this.scheduler.isTaskQueued(issueId) || this.scheduler.isTaskRunning(issueId),
-    });
-    if (candidates.length === 0) return;
-
-    const { parsePublishedPullRequest } = await import('./publishedPullRequest.js');
-    const { getPRLifecycleOrThrow } = await import('../github/github.js');
-    let moved = 0;
-    for (const { task, prUrl } of candidates) {
-      const issueId = task.issueId || task.id;
-      const label = task.issueIdentifier ?? issueId;
-      const pr = parsePublishedPullRequest(prUrl);
-      if (!pr) continue;
-      let lifecycle;
-      try {
-        lifecycle = await getPRLifecycleOrThrow(pr.repo, pr.number);
-      } catch (error) {
-        console.warn(`[AutonomousRunner] Could not read ${prUrl} for ${label}:`, error instanceof Error ? error.message : error);
-        continue;
-      }
-      this.durableRuns.recordPullRequestState(issueId, prUrl, lifecycle); // AGT-4810: the digest counts merges from this record, never from tracker Done
-      const decision = decideMergedPublication(lifecycle, prUrl, task.description); if (decision.action === 'none') continue;
-
-      const refreshed = await source.lookupIssueState(label).catch(() => null);
-      if (!refreshed || !refreshed.ok || !refreshed.issue || refreshed.issue.state.toLowerCase() !== 'in review') {
-        console.warn(`[AutonomousRunner] Skipping merge reconciliation for ${label}: tracker state changed since the heartbeat`);
-        continue;
-      }
-
-      if (decision.action === 'await-criteria') {
-        const comments = source.getExecutionComments ? await source.getExecutionComments(issueId).catch(() => []) : [];
-        const marker = `<!-- openswarm-effect:${decision.marker} -->`;
-        if (comments.some((c) => c.body.includes(marker))) continue;
-        await source.addComment(issueId, `${decision.comment}\n\n${marker}`, decision.marker).catch((error) => {
-          console.warn(`[AutonomousRunner] Could not note open criteria on ${label}:`, error);
-        });
-        this.syslog(`⏸ ${label}: PR merged, waiting on unticked completion criteria`);
-        continue;
-      }
-
-      const targetState = decision.action === 'done' ? 'Done' : 'Backlog';
-      const accepted = await transitionWithReason(source, issueId, targetState, decision.comment).catch((error) => {
-        console.warn(`[AutonomousRunner] Failed to move ${label} → ${targetState}:`, error);
-        return false;
-      });
-      if (!accepted) continue;
-      task.linearState = targetState;
-      updateTaskLinearState(issueId, targetState);
-      moved++;
-      this.syslog(`${targetState === 'Done' ? '✓' : '↩'} ${label}: PR ${lifecycle.state.toLowerCase()} → ${targetState}`);
-
-      // A parent closes when its last child has MERGED, checked against the
-      // tracker — the local ledger marks children done at publication.
-      if (targetState === 'Done') await this.completeParentIfChildrenMerged(issueId, source);
-    }
-    if (moved > 0) this.syslog(`✓ Reconciled ${moved} merged/closed publication(s)`);
-  }
-
   private async completeParentIfChildrenMerged(childIssueId: string, source: NonNullable<ReturnType<typeof getTaskSource>>): Promise<void> {
     const parentState = getTaskState(childIssueId)?.parentIssueId
       ? getTaskState(getTaskState(childIssueId)!.parentIssueId!)
@@ -2084,6 +1843,11 @@ export class AutonomousRunner {
     this.syslog(`✓ ${parent.issueIdentifier ?? parent.issueId}: all children merged → Done`);
   }
 
+  /**
+   * Keep Linear's In Progress column honest: it represents a scheduler-owned
+   * task or a live durable lease, never an abandoned claim. The bulk heartbeat
+   * fetch already carries updatedAt, so the sweep adds no read-side API calls.
+   */
   private async reconcileStalledInProgress(tasks: TaskItem[], now = Date.now()): Promise<TaskItem[]> {
     const source = getTaskSource(); if (source?.kind !== 'linear') return tasks;
 
