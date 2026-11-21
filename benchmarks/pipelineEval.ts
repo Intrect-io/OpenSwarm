@@ -36,8 +36,9 @@ import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
-  CASES, FIXTURE, FIXTURE_SOURCE, type EvalCase, type Grade, type GroundTruth, type RunOutcome,
-  classifyChanges, countWorkflowRuns, dispatchGuardScript, findEvalLeaks, gradeRun,
+  CASES, FIXTURE, FIXTURE_SOURCE, type EvalCase, type EvalRecord, type GroundTruth, type RunOutcome, type UsageRow,
+  classifyChanges, countWorkflowRuns, dispatchGuardScript, evalPublication, findEvalLeaks, gradeRun,
+  providerEvidence, summariseResults, summariseUsage,
 } from './pipelineEvalGrading.js';
 
 // The cases and grading rules live in pipelineEvalGrading.ts (pure, unit-tested).
@@ -331,11 +332,6 @@ async function parent(opts: Options): Promise<void> {
 // Child: run cases inside the isolated HOME
 // ---------------------------------------------------------------------------
 
-interface UsageRow {
-  adapter: string; model: string; servedModel?: string; taskId?: string; stage?: string;
-  promptTokens: number; completionTokens: number; costUsd: number | null; durationMs?: number;
-}
-
 async function readUsageRows(home: string, taskId: string): Promise<UsageRow[]> {
   const dir = join(home, '.openswarm', 'usage');
   if (!existsSync(dir)) return [];
@@ -349,22 +345,6 @@ async function readUsageRows(home: string, taskId: string): Promise<UsageRow[]> 
     }
   }
   return rows;
-}
-
-function summariseUsage(rows: UsageRow[]) {
-  const byStage: Record<string, { calls: number; adapters: string[]; models: string[]; servedModels: string[]; promptTokens: number; completionTokens: number; costUsd: number | null }> = {};
-  for (const row of rows) {
-    const key = row.stage ?? 'unknown';
-    const slot = byStage[key] ??= { calls: 0, adapters: [], models: [], servedModels: [], promptTokens: 0, completionTokens: 0, costUsd: 0 };
-    slot.calls += 1;
-    if (!slot.adapters.includes(row.adapter)) slot.adapters.push(row.adapter);
-    if (!slot.models.includes(row.model)) slot.models.push(row.model);
-    if (row.servedModel && !slot.servedModels.includes(row.servedModel)) slot.servedModels.push(row.servedModel);
-    slot.promptTokens += row.promptTokens;
-    slot.completionTokens += row.completionTokens;
-    slot.costUsd = row.costUsd === null || slot.costUsd === null ? null : slot.costUsd + row.costUsd;
-  }
-  return byStage;
 }
 
 async function groundTruth(worktree: string, baseSha: string, evalCase: EvalCase): Promise<GroundTruth & { testOutput: string }> {
@@ -486,7 +466,7 @@ async function child(opts: Options): Promise<void> {
   initLocale('en');
 
   const evidenceRoot = join(evalRoot, 'evidence');
-  const results: unknown[] = [];
+  const results: EvalRecord[] = [];
   for (const caseId of opts.cases) {
     const evalCase = CASES.find((c) => c.id === caseId)!;
     for (let n = 1; n <= opts.repeat; n += 1) {
@@ -494,7 +474,9 @@ async function child(opts: Options): Promise<void> {
       // agents through the task id, worktree path or branch.
       const tag = createHash('sha256').update(`${opts.runId}\0${caseId}\0${n}`).digest('hex').slice(0, 8);
       const label = `TK-${tag}`;
-      const branch = `agt-4534/${opts.runId}-${tag}`;
+      // Branch, PR and comments carry the run id and the label only (evalPublication).
+      const publication = evalPublication(opts.runId, label);
+      const branch = publication.branch;
       console.log(`\n[eval] ${caseId}#${n} as ${label}  branch ${branch}`);
       // One case failing (base8: another session deleted the run's worktree)
       // must not take the finished cases' results with it.
@@ -558,12 +540,13 @@ async function child(opts: Options): Promise<void> {
         graderAccess,
       };
       const usage = summariseUsage(await readUsageRows(home, label));
+      const provider = providerEvidence(usage, { adapter: opts.adapter, model: opts.model });
 
       let pr: PrReadback | undefined;
       if (opts.publish && outcome.finalStatus === 'approved') {
         try {
-          const published = await commitAndCreatePRWithHead(info, `eval(AGT-4534): ${evalCase.title} [${opts.runId}/${caseId}]`, label,
-            `Evaluation run ${opts.runId}, case ${caseId}. Automated evaluation PR — not for merge.`, { draft: true, fileScope: [FIXTURE] });
+          const published = await commitAndCreatePRWithHead(info, publication.title, label,
+            publication.body, { draft: true, fileScope: [FIXTURE] });
           const readback = await readBackPr(info.worktreePath, published.prUrl, published.headSha, opts.checksWaitMin);
           pr = { ...readback, closedAfterReadback: false };
           // Closing is cleanup, recorded apart from the readback: in base5 a
@@ -572,7 +555,7 @@ async function child(opts: Options): Promise<void> {
           // which the run's worktree still has checked out.
           if (!opts.keepPr) {
             try {
-              await exec('gh', ['pr', 'close', published.prUrl, '--comment', `Evaluation readback recorded (run ${opts.runId}). Closing: evaluation PR, not for merge.`], { cwd: repo });
+              await exec('gh', ['pr', 'close', published.prUrl, '--comment', publication.closeComment], { cwd: repo });
               pr.closedAfterReadback = true;
               await exec('git', ['push', 'origin', '--delete', branch], { cwd: info.worktreePath });
             } catch (error) {
@@ -587,12 +570,16 @@ async function child(opts: Options): Promise<void> {
       const grade = gradeRun(evalCase, truth, outcome, { requested: opts.publish, pr });
       const phantom = evalCase.forbiddenClaims?.find((c) => c.startsWith('https://github.com/'));
 
-      const record = {
+      const record: EvalRecord & Record<string, unknown> = {
         runId: opts.runId, case: caseId, attempt: n, label, branch, baseSha,
         model: opts.model, adapter: opts.adapter, maxIterations: opts.maxIterations,
         latencyMs, pipelineError,
         finalStatus: outcome.finalStatus, iterations: result?.iterations,
-        stages: result?.stages.map((s) => ({ stage: s.stage, success: s.success, durationMs: s.duration })),
+        stages: result?.stages.map((s) => ({
+          stage: s.stage, success: s.success, durationMs: s.duration,
+          ...(s.stage === 'reviewer' ? { decision: (s.result as { decision?: string }).decision } : {}),
+        })),
+        operatorPark: result?.operatorPark?.code,
         worker: worker && { success: worker.success, filesChanged: worker.filesChanged, commands: worker.commands, summary: worker.summary?.slice(0, 1500), haltReason: worker.haltReason, noChangesReason: worker.noChangesReason },
         reviewer: result?.reviewResult && { decision: result.reviewResult.decision, feedback: result.reviewResult.feedback?.slice(0, 1500) },
         failureDetail: result?.failureDetail,
@@ -600,13 +587,14 @@ async function child(opts: Options): Promise<void> {
         grade,
         graderAccess,
         usage,
+        providerEvidence: provider,
         phantom: phantom ? await phantomExists(phantom).then((found) => ({ url: phantom, existsOnGitHub: found.exists, error: found.error })) : undefined,
         pr,
         sessionLogDir: join(evidenceRoot, label, 'sessions'),
         worktree: info.worktreePath,
       };
       results.push(record);
-      console.log(`[eval] ${caseId}#${n} (${label}): status=${record.finalStatus} truthPass=${grade.truthPass} correct=${grade.correct} inconclusive=${grade.inconclusive} falseAcceptance=${grade.falseAcceptance} falseCompletion=${grade.falseCompletion} scopeCreep=${grade.scopeCreep} workflowRuns=${truth.workflowRuns} graderAccess=${graderAccess.join(',') || 'none'} ${Math.round(latencyMs / 1000)}s`);
+      console.log(`[eval] ${caseId}#${n} (${label}): status=${outcome.finalStatus} truthPass=${grade.truthPass} correct=${grade.correct} inconclusive=${grade.inconclusive} falseAcceptance=${grade.falseAcceptance} falseCompletion=${grade.falseCompletion} scopeCreep=${grade.scopeCreep} workflowRuns=${truth.workflowRuns} providerMismatches=${provider.mismatches.length} graderAccess=${graderAccess.join(',') || 'none'} ${Math.round(latencyMs / 1000)}s`);
       } catch (error) {
         const harnessError = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
         results.push({ runId: opts.runId, case: caseId, attempt: n, label, branch, harnessError, grade: null });
@@ -630,22 +618,7 @@ async function child(opts: Options): Promise<void> {
   async function writeResults(final: boolean): Promise<void> {
     await mkdir(RESULTS_DIR, { recursive: true });
     const out = join(RESULTS_DIR, `pipelineEval-${opts.runId}.json`);
-    const graded = results as Array<{ grade: Grade | null }>;
-    const summary = {
-      runs: graded.length,
-      complete: final,
-      harnessErrors: graded.filter((r) => !r.grade).length,
-      correct: graded.filter((r) => r.grade?.correct).length,
-      inconclusive: graded.filter((r) => r.grade?.inconclusive).length,
-      prVerified: graded.filter((r) => r.grade?.prVerified === true).length,
-      prUnverified: graded.filter((r) => r.grade?.prVerified === false).length,
-      falseAcceptance: graded.filter((r) => r.grade?.falseAcceptance).length,
-      falseCompletion: graded.filter((r) => r.grade?.falseCompletion).length,
-      fabricationAccepted: graded.filter((r) => r.grade?.fabricationAccepted).length,
-      scopeCreep: graded.filter((r) => r.grade?.scopeCreep).length,
-      cleanPark: graded.filter((r) => r.grade?.cleanPark).length,
-      graderAccess: graded.filter((r) => r.grade?.graderAccess).length,
-    };
+    const summary = { ...summariseResults(results), complete: final };
     const body = JSON.stringify({ runId: opts.runId, evalRoot, summary, results }, null, 2);
     await writeFile(out, body);
     if (final) {
