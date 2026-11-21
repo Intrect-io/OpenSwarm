@@ -21,14 +21,11 @@ import { OrchestratorSupervisor } from '../coordination/orchestratorSupervisor.j
 import { repositoryCell } from '../coordination/repositoryCell.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
-import { resolveOwningProject, resolveProjectGoal } from '../support/projectGoal.js';
-import { recordTaskOutcome } from '../memory/repoKnowledge.js';
 import { TaskScheduler, initScheduler, normalizeProjectPath } from '../orchestration/taskScheduler.js';
-import { PipelineResult, formatPipelineResultEmbed } from '../agents/pairPipeline.js';
+import { PipelineResult } from '../agents/pairPipeline.js';
 import type { DefaultRolesConfig } from '../core/types.js';
 import { resolveHardTaskTimeoutMs } from '../orchestration/taskBudget.js';
 import { stageTimeoutMs } from '../agents/stageTimeouts.js';
-import { dispatchBudget, recordDispatchClaims } from './dispatchRamp.js';
 import * as execution from './runnerExecution.js';
 import * as taskFilter from './runnerTaskFilter.js';
 import type { TaskFilterHost } from './runnerTaskFilter.js';
@@ -39,6 +36,8 @@ import { createMaintenanceState, type MaintenanceHost } from './runnerMaintenanc
 import { attachSchedulerEvents, type SchedulerEventsHost } from './runnerSchedulerEvents.js';
 import * as durableReconcile from './runnerDurableReconcile.js';
 import * as providerConfig from './runnerProviderConfig.js';
+import * as dispatch from './runnerDispatch.js';
+import type { DispatchHost } from './runnerDispatch.js';
 import type { ProviderConfigHost } from './runnerProviderConfig.js';
 import { createDurableReconcileState, type DurableReconcileHost } from './runnerDurableReconcile.js';
 import { pruneDraftCache } from './draftCache.js';
@@ -56,7 +55,6 @@ import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath
 import { RunnerPauseControl } from './runnerPauseControl.js';
 import { pruneWorktrees } from '../support/worktreeManager.js';
 import { isExecutionLive } from './executionLiveness.js';
-import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { dirname } from 'node:path';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
@@ -72,7 +70,6 @@ import {
 import type { EffectClaim, RunLedgerMode } from './runLedger.js';
 import {
   buildIntegrationRequeueEffect,
-  completionStats,
 } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
@@ -83,7 +80,6 @@ import {
   planExplicitDeferredRecovery,
 } from './explicitDispatchRecovery.js';
 import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
-import { globalRateLimit } from './rateLimitBackoff.js';
 
 // Re-export types and integration setters (used by service.ts)
 export { setNotifier, setTaskSource } from './runnerExecution.js';
@@ -1142,161 +1138,50 @@ export class AutonomousRunner {
     }
   }
 
-  private async heartbeatParallel(tasks: TaskItem[]): Promise<void> {
-    if (this.stopping) return;
-    const availableSlots = this.scheduler.getAvailableSlots();
-    const runningCount = this.scheduler.getStats().running;
-    this.syslog(`  Parallel mode | slots: ${availableSlots} free / ${this.config.maxConcurrentTasks} max | running: ${runningCount}`);
+  // The parallel heartbeat, pair-mode execution and the execution context live in
+  // runnerDispatch.ts (AGT-4867 slice G). These delegators keep the runner's names, which
+  // heartbeat(), the scheduler events and tests call and reassign.
+  private heartbeatParallel(tasks: TaskItem[]): Promise<void> { return dispatch.heartbeatParallel(this.dispatchHost(), tasks); }
 
-    if (availableSlots === 0) {
-      this.syslog(`⏳ All slots busy (${runningCount} tasks running), waiting...`);
-      return;
-    }
-
-    const maxSlots = dispatchBudget(this, this.config.dispatchRampClaims, availableSlots, this.config.heartbeatSchedule); // free slots, capped by the cold-start ramp
-
-    // Pre-filter tasks to enabled projects only (before DecisionEngine selection)
-    // This prevents DecisionEngine from wasting its max-slot budget on non-enabled projects.
-    // AGT-4257: Backlog is a queue when slots are free. Terminal Linear
-    // states are still dropped later by the decision engine.
-    const executableTasks = (this.config.includeBacklog ?? false)
-      ? tasks
-      : tasks.filter(t => t.linearState !== 'Backlog');
-
-    let tasksForEngine = executableTasks;
-    if (this.shouldFilterByEnabled()) {
-      // Explicit repo↔Linear mapping — match fetched issues to repos by the Linear
-      // projectId the user picked in `openswarm add` (written to <repo>/openswarm.json),
-      // NOT by guessing from the repo directory name. Built fresh each cycle so a
-      // newly-mapped repo is picked up without a restart. Name matching stays only as
-      // a best-effort fallback for repos that never ran the picker.
-      const byProjectId = new Map<string, string>();
-      for (const repoPath of this.enabledProjects) {
-        try {
-          const meta = await loadRepoMetadata(repoPath);
-          if (meta?.linear?.projectId) byProjectId.set(meta.linear.projectId, repoPath);
-        } catch (e) {
-          this.syslog(`  ⚠ openswarm.json unreadable for ${repoPath.split('/').pop()}: ${(e as Error).message}`);
-        }
-      }
-
-      // Aggregate skip reasons per project instead of logging one line per issue —
-      // dozens of unmapped issues used to flood the LIVE LOG every heartbeat.
-      const skippedUnmapped = new Map<string, number>();
-      const skippedDisabled = new Map<string, number>();
-      tasksForEngine = executableTasks.filter(task => {
-        const projName = task.linearProject?.name;
-        const projId = task.linearProject?.id;
-        // 1) Explicit projectId mapping (openswarm.json) wins.
-        const mappedPath = projId ? byProjectId.get(projId) : undefined;
-        // 2) Fallback: repo-name path cache (only for repos without an explicit mapping).
-        const cachedPath = mappedPath
-          ?? (projName && (this.projectPathCache.get(projName)
-            ?? this.projectPathCache.get(projName.toLowerCase())
-            ?? this.projectPathCache.get(projName.replace(/-/g, ' '))));
-        if (!cachedPath) {
-          const key = projName ?? projId ?? 'unknown';
-          skippedUnmapped.set(key, (skippedUnmapped.get(key) ?? 0) + 1);
-          return false;
-        }
-        const enabled = this.isProjectEnabled(cachedPath);
-        if (!enabled) {
-          skippedDisabled.set(projName ?? cachedPath, (skippedDisabled.get(projName ?? cachedPath) ?? 0) + 1);
-        }
-        return enabled;
-      });
-      this.syslogSkipSummary(skippedUnmapped, skippedDisabled);
-      if (tasksForEngine.length === 0) {
-        this.syslog(`⚠ No enabled tasks (${executableTasks.length} executable, ${tasks.length - executableTasks.length} backlog)`);
-        this.syslog(`  Path cache: [${[...this.projectPathCache.entries()].map(([k,v]) => `${k}→${v}`).join(', ')}]`);
-        this.syslog(`  Enabled: [${[...this.enabledProjects].join(', ')}]`);
-        return;
-      }
-      this.syslog(`  Tasks: ${tasksForEngine.length} enabled-or-uncached / ${executableTasks.length} executable / ${tasks.length} total`);
-    }
-
-    let enqueuedCount = 0;
-    let skippedCount = 0;
-    const consideredTaskIds = new Set<string>();
-    let pass = 0;
-
-    while (enqueuedCount < maxSlots) {
-      if (this.stopping) return;
-      const remainingSlots = maxSlots - enqueuedCount;
-      const selectableTasks = tasksForEngine.filter(task => !consideredTaskIds.has(task.id));
-      const selectionBudget = decisionSelectionBudget(remainingSlots, selectableTasks.length);
-      if (selectionBudget === 0) break;
-
-      this.syslog(pass === 0
-        ? '⟳ Decision Engine evaluating tasks...'
-        : `⟳ Backfill pass (${remainingSlots} slot(s) open)...`);
-
-      const decision = await this.engine.heartbeatMultiple(
-        selectableTasks,
-        selectionBudget,
-        [] // No project exclusion — worktree mode isolates each task
-      );
-      if (this.stopping) return;
-
-      console.log(`[AutonomousRunner] Decision: ${decision.action} — ${decision.reason} (${decision.tasks?.length ?? 0} tasks)`);
-      skippedCount += decision.skippedCount ?? 0;
-      if (decision.action === 'skip' || decision.action === 'defer') {
-        this.syslog(`→ Decision: ${decision.action} — ${decision.reason}`);
-        break;
-      }
-
-      for (const { task } of decision.tasks) {
-        consideredTaskIds.add(task.id);
-      }
-
-      const candidates = await this.resolveRunnableCandidates(decision.tasks);
-      if (this.stopping) return;
-      const safeTasks = await this.detectSafeCandidateIds(candidates);
-      if (this.stopping) return;
-
-      for (const { task, projectPath } of candidates) {
-        if (this.stopping) return;
-        if (enqueuedCount >= maxSlots) break;
-        if (!safeTasks.has(task.id) || this.pauses.blocks(projectPath)) continue;
-        if (!this.canQueueProjectCandidate(projectPath)) {
-          this.syslog(`  Project cap reached: ${projectPath}`);
-          continue;
-        }
-
-        if (this.enqueueCandidate(task, projectPath)) {
-          enqueuedCount++;
-        }
-      }
-
-      pass++;
-
-      if (enqueuedCount >= maxSlots) break;
-      if (decision.tasks.length === 0) break;
-      // NOTE: no "selectionBudget >= selectableTasks.length ⇒ break" here — that
-      // used to short-circuit the WHOLE heartbeat the instant selectionBudget
-      // covered the full candidate pool (the common case whenever free slots
-      // exceed the candidate count), even when every one of decision.tasks
-      // turned out already-running/queued and got discarded above (`before`).
-      // A single hard-to-satisfy task occupying one slot for hours then starved
-      // every other free slot forever: same task re-selected + discarded each
-      // 5-min heartbeat, no backfill pass ever tried the rest of the pool. The
-      // loop's own progress guarantee is enough — consideredTaskIds grows by
-      // decision.tasks.length every pass, so selectableTasks strictly shrinks
-      // each iteration and the top-of-loop `selectionBudget === 0` check (line
-      // ~1197) is what actually terminates once nothing candidate remains.
-      // (INT-2570 follow-up, observed live: INT-2061 held a WAVE slot for 4h+
-      // while 7/8 scheduler slots sat idle with 18 executable tasks waiting.)
-    }
-
-    if (enqueuedCount === 0 && skippedCount > 0) {
-      this.syslog(`— No new tasks queued (skipped: ${skippedCount})`);
-    } else {
-      this.syslog(`✓ Enqueued ${enqueuedCount} task(s) | skipped: ${skippedCount}`);
-    }
-    recordDispatchClaims(this, enqueuedCount); // only claiming passes advance the cold-start ramp
-
-    // Execute tasks
-    if (!this.stopping) await this.runAvailableTasks();
+  private dispatchHostCache: DispatchHost | undefined;
+  /** Built once; every member reads the runner at call time (see DispatchHost). */
+  private dispatchHost(): DispatchHost {
+    if (this.dispatchHostCache) return this.dispatchHostCache;
+    const runner = () => this;
+    this.dispatchHostCache = {
+      rampOwner: this,
+      get stopping() { return runner().stopping; },
+      get config() { return runner().config; },
+      get engine() { return runner().engine; },
+      get scheduler() { return runner().scheduler; },
+      get durableRuns() { return runner().durableRuns; },
+      get pauses() { return runner().pauses; },
+      get idle() { return runner().idle; },
+      get enabledProjects() { return runner().enabledProjects; },
+      get projectPathCache() { return runner().projectPathCache; },
+      get unresolvableIssueIds() { return runner().unresolvableIssueIds; },
+      get failedTaskCounts() { return runner().failedTaskCounts; },
+      get lastFetchedTasks() { return runner().lastFetchedTasks; },
+      get rateLimitUntil() { return runner().rateLimitUntil; },
+      set rateLimitUntil(value: number) { runner().rateLimitUntil = value; },
+      syslog: (line) => this.syslog(line),
+      syslogSkipSummary: (unmapped, disabled) => this.syslogSkipSummary(unmapped, disabled),
+      shouldFilterByEnabled: () => this.shouldFilterByEnabled(),
+      isProjectEnabled: (resolvedPath) => this.isProjectEnabled(resolvedPath),
+      canQueueProjectCandidate: (projectPath) => this.canQueueProjectCandidate(projectPath),
+      enqueueCandidate: (task, projectPath) => this.enqueueCandidate(task, projectPath),
+      resolveRunnableCandidates: (decisionTasks) => this.resolveRunnableCandidates(decisionTasks),
+      detectSafeCandidateIds: (candidates) => this.detectSafeCandidateIds(candidates),
+      runAvailableTasks: () => this.runAvailableTasks(),
+      attachPriorFeedback: (task) => this.attachPriorFeedback(task),
+      resolveProjectPath: (task) => this.resolveProjectPath(task),
+      scheduleNextHeartbeat: () => this.scheduleNextHeartbeat(),
+      executeDurably: (task, projectPath, signal) => this.executeDurably(task, projectPath, signal),
+      formatTaskContext: (task) => this.formatTaskContext(task),
+      drainDurableOutbox: () => this.drainDurableOutbox(),
+      getRolesForProject: (projectPath) => this.getRolesForProject(projectPath),
+    };
+    return this.dispatchHostCache;
   }
 
   // Candidate admission (resolveRunnableCandidates, holdDeclinedBeforeClaim,
@@ -1443,173 +1328,9 @@ export class AutonomousRunner {
   }
 
   /** Execute task in pair mode */
-  private async executeTaskPairMode(task: TaskItem): Promise<void> {
-    if (this.stopping) return;
-    // Serial path (maxConcurrentTasks=1) bypasses enqueueCandidate — attach the
-    // prior-session feedback here too so both paths inject it (INT-2474).
-    this.attachPriorFeedback(task);
+  private executeTaskPairMode(task: TaskItem): Promise<void> { return dispatch.executeTaskPairMode(this.dispatchHost(), task); }
 
-    // Auto-resolve project path
-    const projectPath = await this.resolveProjectPath(task);
-    if (this.stopping) return;
-
-    // Error if project path mapping failed
-    if (!projectPath) {
-      const errorMsg = `Failed to resolve project path for "${task.linearProject?.name || task.title}"`;
-      console.error(`[AutonomousRunner] ${errorMsg}`);
-      // Record so this issue isn't re-picked every heartbeat (it would starve
-      // runnable tasks behind it). Cleared on restart. (INT-1875)
-      this.unresolvableIssueIds.add(task.issueId || task.id);
-      await reportToDiscord(t('runner.projectMappingFailed', { title: task.title, project: task.linearProject?.name || 'unknown' }));
-      // Move on to the next actionable task instead of ending the heartbeat here.
-      this.scheduleNextHeartbeat();
-      return;
-    }
-
-    // Skip if project is not in enabled list (allow-list; empty = nothing runs)
-    if (this.shouldFilterByEnabled() && !this.isProjectEnabled(projectPath)) {
-      console.log(`[AutonomousRunner] Project not enabled, skipping: ${projectPath}`);
-      return;
-    }
-
-    // Cache linearProjectName → resolvedPath for dashboard
-    if (task.linearProject?.name) {
-      this.projectPathCache.set(task.linearProject.name, projectPath);
-    }
-
-    this.idle.markProgress(); console.log(`[AutonomousRunner] projectPath: ${projectPath}`); // a task starts: only now reset the idle streak
-
-    // Use scheduler for parallel processing mode
-    if (this.config.maxConcurrentTasks && this.config.maxConcurrentTasks > 1) {
-      if (this.scheduler.enqueue(task, projectPath)) {
-        broadcastEvent({ type: 'task:queued', data: { taskId: taskEventKey(task), title: task.title, projectPath, issueIdentifier: task.issueIdentifier } });
-      }
-      await this.runAvailableTasks();
-      return;
-    }
-
-    // Single execution (legacy serial path — maxConcurrentTasks <= 1).
-    // The scheduler emits task:started/completed for the parallel path; this
-    // path never did, so dashboards saw no lifecycle and (since INT-3402) the
-    // transcript buffer was never handed to its retention timer.
-    broadcastEvent({
-      type: 'task:started',
-      data: { taskId: taskEventKey(task), title: task.title, issueIdentifier: task.issueIdentifier },
-    });
-    let result: PipelineResult;
-    try {
-      result = await this.pauses.guardSerial(task.id, projectPath, (signal) => this.executeDurably(task, projectPath, signal)); // `now` pause reaches serial runs
-    } catch (err) {
-      broadcastEvent({
-        type: 'task:completed',
-        data: { taskId: taskEventKey(task), success: false, duration: 0 },
-      });
-      throw err;
-    }
-    broadcastEvent({
-      type: 'task:completed',
-      data: { taskId: taskEventKey(task), success: result.success, duration: result.totalDuration },
-    });
-
-    // Rate-limited: pause until quota resets. Return before any Discord/Linear
-    // reporting or state change — no failure count, no card spam. Same as the
-    // scheduler 'failed' handler's rate_limited branch. (INT-1906)
-    if (result.finalStatus === 'rate_limited') {
-      const resetsAt = globalRateLimit.hit(result.rateLimitResetsAt);
-      this.rateLimitUntil = resetsAt;
-      const waitSec = Math.max(0, Math.ceil((resetsAt - Date.now()) / 1000));
-      const resetsLabel = new Date(resetsAt).toISOString();
-      console.warn(`[AutonomousRunner] Rate limit hit for ${this.formatTaskContext(task)} — pausing until ${resetsLabel} (~${waitSec}s)`);
-      broadcastEvent({ type: 'log', data: { taskId: taskEventKey(task), stage: 'rate_limit', line: `⏸ Rate limited — pausing ~${waitSec}s (until ${resetsLabel})` } });
-      return;
-    }
-
-    await reportToDiscord(formatPipelineResultEmbed(result));
-
-    if (result.success && task.issueId && this.durableRuns.isPrimary) {
-      await this.drainDurableOutbox().catch((error) =>
-        console.error('[Outbox] Serial completion delivery pass failed:', error));
-      if (this.durableRuns.getRun(task.issueId)?.state !== 'DONE') {
-        console.warn(`[AutonomousRunner] ${task.issueId} remains sync-pending; completion will reconcile later`);
-      }
-      return;
-    }
-
-    // Update Linear issue state
-    if (task.issueId) {
-      try {
-        if (result.success) {
-          // On success, move to Done
-          await execution.syncSuccessState(task);
-          await getTaskSource()?.logPairComplete(task.issueId, result.sessionId, completionStats(result));
-          await execution.reconcileCompletionState(task);
-          console.log(`[AutonomousRunner] Issue ${task.issueId} marked as Done`);
-
-          if (result.taskContext?.projectPath) {
-            await recordTaskOutcome(result.taskContext.projectPath, {
-              taskTitle: task.title,
-              derivedFrom: task.issueIdentifier ?? task.issueId,
-              workerResult: result.workerResult,
-              iterations: result.iterations,
-            });
-          }
-        } else if (result.finalStatus === 'rejected') {
-          // Change to Blocked on review rejection
-          await execution.syncFailureState(
-            task,
-            `Review rejected: ${result.reviewResult?.feedback || t('common.fallback.noDescription')}`,
-            'Todo',
-          );
-          await getTaskSource()?.logBlocked(task.issueId, 'autonomous-runner',
-            t('runner.reviewRejected', { feedback: result.reviewResult?.feedback || t('common.fallback.noDescription') })
-          );
-          console.log(`[AutonomousRunner] Issue ${task.issueId} marked as Todo (blocked) (rejected)`);
-        }
-        // If failed, keep In Progress (retry on next heartbeat)
-      } catch (err) {
-        console.error(`[AutonomousRunner] Failed to update issue state:`, err);
-      }
-    }
-  }
-
-  private getExecCtx(durability?: ExecutionDurabilityHooks): execution.ExecutionContext {
-    return {
-      allowedProjects: this.config.allowedProjects,
-      plannerModel: this.config.plannerModel,
-      plannerTimeoutMs: this.config.plannerTimeoutMs,
-      // Was declared on ExecutionContext but never set — the drafter always ran
-      // the adapter's built-in default, so a single-model fleet was impossible.
-      draftModel: this.config.draftModel,
-      pairMaxAttempts: this.config.pairMaxAttempts,
-      enableDecomposition: this.config.enableDecomposition,
-      decompositionThresholdMinutes: this.config.decompositionThresholdMinutes,
-      decompositionMaxDepth: this.config.decomposition?.maxDepth ?? 2,
-      decompositionMaxChildren: this.config.decomposition?.maxChildrenPerTask ?? 5,
-      decompositionDailyLimit: this.config.decomposition?.dailyLimit ?? 20,
-      decompositionAutoBacklog: this.config.decomposition?.autoBacklog ?? true,
-      decomposeAfterFailures: this.config.decomposition?.decomposeAfterFailures ?? 3,
-      getPriorFailures: (issueId) => this.failedTaskCounts.get(issueId) ?? 0,
-      jobProfiles: this.config.jobProfiles,
-      getRolesForProject: (p) => this.getRolesForProject(p),
-      getProjectGoal: (p) => resolveProjectGoal(this.config.projectAgents, p),
-      getProjectSetup: (p) => resolveOwningProject(this.config.projectAgents, p)?.setup,
-      reportToDiscord,
-      worktreeMode: this.config.worktreeMode ?? false,
-      scheduleNextHeartbeat: () => this.scheduleNextHeartbeat(),
-      guards: this.config.guards,
-      verify: this.config.verify,
-      securityAudit: this.config.securityAudit,
-      maxReflections: this.config.maxReflections,
-      loopAdvisor: this.config.loopAdvisor,
-      advisorRole: this.config.defaultRoles?.advisor,
-      durability,
-      peerIssues: this.lastFetchedTasks,
-      getActiveWorkerIssues: (p) => this.durableRuns.activeWorkerIdentifiers(p),
-      mcpPolicies: this.config.mcpPolicies,
-      adapterRouting: this.config.adapterRouting,
-      workerSandbox: this.config.workerSandbox,
-    };
-  }
+  private getExecCtx(durability?: ExecutionDurabilityHooks): execution.ExecutionContext { return dispatch.getExecCtx(this.dispatchHost(), durability); }
 
   private async resolveProjectPath(task: TaskItem): Promise<string | null> {
     return execution.resolveProjectPath(this.getExecCtx(), task);
