@@ -21,7 +21,12 @@ vi.mock('./tester.js', async () => {
   const actual = await vi.importActual<typeof import('./tester.js')>('./tester.js');
   return { ...actual, runTester: vi.fn() };
 });
-vi.mock('../knowledge/index.js', () => ({ hasRepoSnapshot, scanAndCache, analyzeIssue, recallRepoKnowledge }));
+vi.mock('../knowledge/index.js', () => ({ hasRepoSnapshot, scanAndCache, analyzeIssue }));
+// recallRepoKnowledge lives in memory/repoKnowledge, not knowledge/index. Left unmocked it opens
+// the LanceDB store and loads the embedding model, which on a cold cache (CI) downloads it.
+vi.mock('../memory/repoKnowledge.js', () => ({ recallRepoKnowledge }));
+// The sibling scan runs `git status` in every worktree of the checkout; nothing here asserts on it.
+vi.mock('./siblingWork.js', () => ({ collectSiblingWork: vi.fn(async () => []) }));
 vi.mock('../core/eventHub.js', () => ({ broadcastEvent }));
 vi.mock('../adapters/index.js', async () => {
   const actual = await vi.importActual<typeof import('../adapters/index.js')>('../adapters/index.js');
