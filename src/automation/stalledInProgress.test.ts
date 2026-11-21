@@ -60,4 +60,9 @@ describe('planStalledInProgress', () => {
     expect(plan({}, [task({ linearState: 'Todo' })])).toEqual([]);
     expect(plan({ staleAfterMs: 0 })).toEqual([]);
   });
+
+  it('the stalled sweep skips an exclusion-labelled issue', () => {
+    expect(plan({ isExcluded: (id) => id === 'uuid-1' })).toEqual([]);
+    expect(plan({ isExcluded: () => false })).toHaveLength(1);
+  });
 });

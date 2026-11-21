@@ -131,6 +131,8 @@ export function verdictFromDraft(
 type ProjectSkipLike = { projectPath: string; linearProjectId?: string; skipLabels?: string[] };
 type OwnedTask = ReadinessTask & { projectPath?: string; linearProject?: { id: string } };
 
+const normLabel = (label: string) => label.trim().toLowerCase();
+
 /**
  * The per-project exclusion labels hook (`projectAgents[].skipLabels`), or undefined when no project
  * sets any. A fetched Linear task carries no `projectPath`, so the owning project is found by its
@@ -141,12 +143,11 @@ export function projectSkipLabelsHook<T extends OwnedTask>(
   resolveProjectPath?: (task: T) => Promise<string | null | undefined>,
 ): ((task: ReadinessTask) => Promise<readonly string[]>) | undefined {
   if (!projectAgents?.some((agent) => agent.skipLabels?.length)) return undefined;
-  const norm = (label: string) => label.trim().toLowerCase();
-  const listed = new Set(projectAgents.flatMap((agent) => agent.skipLabels ?? []).map(norm));
+  const listed = new Set(projectAgents.flatMap((agent) => agent.skipLabels ?? []).map(normLabel));
   return async (readinessTask) => {
     const task = readinessTask as T;
     // Owning a task can read openswarm.json per project: only look when one of its labels is listed somewhere.
-    if (!(task.labels ?? []).some((label) => listed.has(norm(label)))) return [];
+    if (!(task.labels ?? []).some((label) => listed.has(normLabel(label)))) return [];
     const byLinearId = task.linearProject?.id
       ? projectAgents.find((agent) => agent.linearProjectId === task.linearProject?.id)
       : undefined;
@@ -166,4 +167,59 @@ export async function resolveProjectExclusionLabels<T extends ReadinessTask>(
   const byTask = new Map<ReadinessTask, readonly string[]>();
   for (const task of tasks) byTask.set(task, await hook(task));
   return { ...options, exclusionLabelsFor: (task) => [...(options.exclusionLabelsFor?.(task) ?? []), ...(byTask.get(task) ?? [])] };
+}
+
+
+/**
+ * Issue ids (`issueId || id`) of the tasks carrying a global exclusion label or their owning
+ * project's, for the sweeps that move issues after the claim (stalled In Progress, merged
+ * publications). A project lookup that throws counts as excluded: fail closed (AGT-4784).
+ */
+export async function exclusionLabelledIds<T extends ReadinessTask & { issueId?: string }>(
+  tasks: readonly T[],
+  exclusionLabels: readonly string[] | undefined,
+  projectExclusionLabels?: (task: ReadinessTask) => Promise<readonly string[]>,
+): Promise<ReadonlySet<string>> {
+  const global = new Set((exclusionLabels ?? []).map(normLabel).filter(Boolean));
+  const excluded = new Set<string>();
+  for (const task of tasks) {
+    const issueId = task.issueId || task.id;
+    const labels = (task.labels ?? []).map(normLabel).filter(Boolean);
+    if (!issueId || labels.length === 0) continue;
+    if (labels.some((label) => global.has(label))) {
+      excluded.add(issueId);
+      continue;
+    }
+    if (!projectExclusionLabels) continue;
+    let projectLabels: Set<string>;
+    try {
+      projectLabels = new Set((await projectExclusionLabels(task)).map(normLabel).filter(Boolean));
+    } catch {
+      excluded.add(issueId);
+      continue;
+    }
+    if (labels.some((label) => projectLabels.has(label))) excluded.add(issueId);
+  }
+  return excluded;
+}
+
+/** Global exclusion labels plus the skipLabels of the project owning `projectPath`, for grooming. */
+export function exclusionLabelsForProject(
+  globalLabels: readonly string[] | undefined,
+  projectAgents: ReadonlyArray<ProjectSkipLike> | undefined,
+  projectPath: string | undefined,
+): string[] {
+  const owner = projectPath ? resolveOwningProject(projectAgents, projectPath) : undefined;
+  return [...(globalLabels ?? []), ...(owner?.skipLabels ?? [])];
+}
+
+/** The sweeps' exclusion check in one call: global skip labels plus each task's project skipLabels (AGT-4784). */
+export async function exclusionCheck<T extends ReadinessTask & { issueId?: string }>(
+  tasks: readonly T[],
+  skip: { labels?: readonly string[] } | undefined,
+  projectAgents: ReadonlyArray<ProjectSkipLike> | undefined,
+  resolveProjectPath?: (task: T) => Promise<string | null | undefined>,
+): Promise<(issueId: string) => boolean> {
+  const excluded = await exclusionLabelledIds(tasks, skip?.labels, projectSkipLabelsHook(projectAgents, resolveProjectPath));
+  return (issueId) => excluded.has(issueId);
 }

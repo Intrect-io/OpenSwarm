@@ -255,4 +255,34 @@ describe('integration requeue effect (AGT-4078)', () => {
     } as EffectClaim, source)).rejects.toThrow('tracker moved to In Progress');
     expect(updateState).not.toHaveBeenCalled();
   });
+
+  it('integration requeue refuses to lift an issue a person parked in Backlog back to Todo', async () => {
+    const cases = [
+      { state: 'Backlog', stateType: 'backlog' },
+      { state: ' backlog ', stateType: 'unstarted' },
+      { state: 'Parked by ops', stateType: 'backlog' },
+    ];
+    for (const [index, issue] of cases.entries()) {
+      const marker = `integration-conflict:owner/repo#11@b${index}`;
+      const input = buildIntegrationRequeueEffect('issue-11', marker, 'conflict evidence');
+      const updateState = vi.fn(async () => true);
+      const updateIssueState = vi.fn(async () => true);
+      const source = {
+        updateState,
+        updateIssueState,
+        addComment: vi.fn(async () => undefined),
+        getExecutionComments: vi.fn(async () => []),
+        lookupIssueState: vi.fn(async () => ({ ok: true as const, issue })),
+      } as unknown as ITaskSource;
+
+      await expect(deliverTrackerEffect({
+        id: 4 + index, issueId: 'issue-11', attemptNo: 1, kind: input.kind, dedupeKey: input.dedupeKey,
+        payload: input.payload, status: 'in_flight', attempts: 1, availableAt: 0,
+        ownerInstanceId: 'daemon', deliveryToken: 'token', leaseEpoch: 1, leaseExpiresAt: 10_000,
+        createdAt: 0, updatedAt: 0,
+      } as EffectClaim, source)).rejects.toThrow(`tracker moved to ${issue.state}`);
+      expect(updateState).not.toHaveBeenCalled();
+      expect(updateIssueState).not.toHaveBeenCalled();
+    }
+  });
 });

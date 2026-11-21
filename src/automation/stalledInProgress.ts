@@ -14,6 +14,8 @@ export interface StalledInProgressContext {
   isSchedulerOwned: (issueId: string) => boolean;
   hasLiveLease: (issueId: string) => boolean;
   hasPublishedArtifact: (issueId: string) => boolean;
+  /** Carries an exclusion label (global or the project's): never move it (AGT-4784). */
+  isExcluded?: (issueId: string) => boolean;
 }
 
 /**
@@ -38,6 +40,7 @@ export function planStalledInProgress(
     if (!Number.isFinite(updatedAt) || updatedAt! > context.now) return [];
     if (context.now - updatedAt! < context.staleAfterMs) return [];
     if (!context.hasOpenSwarmClaim(issueId)) return [];
+    if (context.isExcluded?.(issueId)) return [];
     if (context.isSchedulerOwned(issueId) || context.hasLiveLease(issueId)) return [];
     return [{
       task,

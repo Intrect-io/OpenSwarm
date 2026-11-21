@@ -45,7 +45,7 @@ const markTaskBlocked = vi.fn();
 const markTaskBacklog = vi.fn();
 const markTaskDecomposed = vi.fn();
 const markTaskDone = vi.fn();
-const releaseDependentTasks = vi.fn();
+const releaseDependentTasks = vi.fn(); const getTaskState = vi.fn();
 const upsertTaskState = vi.fn();
 
 const getDecompositionDepth = vi.fn();
@@ -111,7 +111,7 @@ vi.mock('../taskState/store.js', () => ({
   markTaskBacklog,
   markTaskDecomposed,
   markTaskDone,
-  releaseDependentTasks,
+  releaseDependentTasks, getTaskState,
   upsertTaskState,
 }));
 
@@ -1449,7 +1449,7 @@ describe('reconcileCompletionState', () => {
     buildTaskStateSyncComment.mockReturnValue('sync comment');
     releaseDependentTasks.mockReturnValue([]);
     completeParentIfChildrenDone.mockReturnValue(null);
-    taskSourceMock = makeTaskSource();
+    getTaskState.mockImplementation((id: string) => (id === 'goal-1' ? { childIssueIds: ['child-1', 'child-2'] } : undefined)); taskSourceMock = makeTaskSource({ lookupIssueState: vi.fn(async () => ({ ok: true as const, issue: { state: 'Backlog', stateType: 'backlog' } })) });
     setTaskSource(taskSourceMock);
   });
 
@@ -1465,7 +1465,7 @@ describe('reconcileCompletionState', () => {
   });
 
   it('releases dependent tasks back to Todo', async () => {
-    releaseDependentTasks.mockReturnValueOnce([{ issueId: 'child-1' }, { issueId: 'child-2' }]);
+    releaseDependentTasks.mockReturnValueOnce([{ issueId: 'child-1', parentIssueId: 'goal-1' }, { issueId: 'child-2', parentIssueId: 'goal-1' }]);
 
     await reconcileCompletionState(task());
 
@@ -1475,7 +1475,7 @@ describe('reconcileCompletionState', () => {
   });
 
   it('tolerates a release failure for one child without stopping the others', async () => {
-    releaseDependentTasks.mockReturnValueOnce([{ issueId: 'child-1' }, { issueId: 'child-2' }]);
+    releaseDependentTasks.mockReturnValueOnce([{ issueId: 'child-1', parentIssueId: 'goal-1' }, { issueId: 'child-2', parentIssueId: 'goal-1' }]);
     (taskSourceMock.updateState as ReturnType<typeof vi.fn>)
       .mockRejectedValueOnce(new Error('linear down'))
       .mockResolvedValueOnce(true);

@@ -1,0 +1,323 @@
+{
+ "note": "Synthetic stand-in for the operator-only real-data replay of the 2026-10-20 AX dispatch incident (AGT-4784). Identifiers follow the incident; titles are neutral and no real issue text or people are included. A draft with no scope field is the actionable verdict (scope is only emitted to decline). AX-9001..9003 are clean controls that did not exist in the incident.",
+ "projectAgents": [
+  {
+   "projectPath": "/repos/ax",
+   "linearProjectId": "proj-ax",
+   "skipLabels": [
+    "추가 유지보수"
+   ]
+  }
+ ],
+ "tasks": [
+  {
+   "id": "ax-2005",
+   "issueId": "uuid-ax-2005",
+   "issueIdentifier": "AX-2005",
+   "title": "Maintenance item 1",
+   "linearState": "Backlog",
+   "labels": [
+    "추가 유지보수"
+   ],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   }
+  },
+  {
+   "id": "ax-2006",
+   "issueId": "uuid-ax-2006",
+   "issueIdentifier": "AX-2006",
+   "title": "Maintenance item 2",
+   "linearState": "Backlog",
+   "labels": [
+    "추가 유지보수"
+   ],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   }
+  },
+  {
+   "id": "ax-2007",
+   "issueId": "uuid-ax-2007",
+   "issueIdentifier": "AX-2007",
+   "title": "Maintenance item 3",
+   "linearState": "Backlog",
+   "labels": [
+    "추가 유지보수"
+   ],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   }
+  },
+  {
+   "id": "ax-2017",
+   "issueId": "uuid-ax-2017",
+   "issueIdentifier": "AX-2017",
+   "title": "Maintenance item 4",
+   "linearState": "Backlog",
+   "labels": [
+    "추가 유지보수"
+   ],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   }
+  },
+  {
+   "id": "ax-2103",
+   "issueId": "uuid-ax-2103",
+   "issueIdentifier": "AX-2103",
+   "title": "Maintenance item 5",
+   "linearState": "Backlog",
+   "labels": [
+    "추가 유지보수"
+   ],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   }
+  },
+  {
+   "id": "ax-2104",
+   "issueId": "uuid-ax-2104",
+   "issueIdentifier": "AX-2104",
+   "title": "Maintenance item 6",
+   "linearState": "Backlog",
+   "labels": [
+    "추가 유지보수"
+   ],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   }
+  },
+  {
+   "id": "ax-2107",
+   "issueId": "uuid-ax-2107",
+   "issueIdentifier": "AX-2107",
+   "title": "Maintenance item 7",
+   "linearState": "Backlog",
+   "labels": [
+    "추가 유지보수"
+   ],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   }
+  },
+  {
+   "id": "ax-2109",
+   "issueId": "uuid-ax-2109",
+   "issueIdentifier": "AX-2109",
+   "title": "Maintenance item 8",
+   "linearState": "Backlog",
+   "labels": [
+    "추가 유지보수"
+   ],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   }
+  },
+  {
+   "id": "ax-2153",
+   "issueId": "uuid-ax-2153",
+   "issueIdentifier": "AX-2153",
+   "title": "Maintenance item 9",
+   "linearState": "Backlog",
+   "labels": [
+    "추가 유지보수"
+   ],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   }
+  },
+  {
+   "id": "ax-2148",
+   "issueId": "uuid-ax-2148",
+   "issueIdentifier": "AX-2148",
+   "title": "Decision item 1",
+   "linearState": "Todo",
+   "labels": [],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   },
+   "preAdmissionDraft": {
+    "scope": {
+     "applicable": false,
+     "kind": "decision_pending",
+     "confidence": 0.95,
+     "reason": "the issue says a person has to choose first",
+     "evidence": [
+      "the title asks which option to pick",
+      "no code deliverable is named before the choice"
+     ]
+    }
+   }
+  },
+  {
+   "id": "ax-2145",
+   "issueId": "uuid-ax-2145",
+   "issueIdentifier": "AX-2145",
+   "title": "Decision item 2",
+   "linearState": "Todo",
+   "labels": [],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   },
+   "preAdmissionDraft": {
+    "scope": {
+     "applicable": false,
+     "kind": "decision_pending",
+     "confidence": 0.95,
+     "reason": "the issue says a person has to choose first",
+     "evidence": [
+      "the title asks which option to pick",
+      "no code deliverable is named before the choice"
+     ]
+    }
+   }
+  },
+  {
+   "id": "ax-2034",
+   "issueId": "uuid-ax-2034",
+   "issueIdentifier": "AX-2034",
+   "title": "Decision item 3",
+   "linearState": "Todo",
+   "labels": [],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   },
+   "preAdmissionDraft": {
+    "scope": {
+     "applicable": false,
+     "kind": "decision_pending",
+     "confidence": 0.95,
+     "reason": "the issue says a person has to choose first",
+     "evidence": [
+      "the title asks which option to pick",
+      "no code deliverable is named before the choice"
+     ]
+    }
+   }
+  },
+  {
+   "id": "ax-2147",
+   "issueId": "uuid-ax-2147",
+   "issueIdentifier": "AX-2147",
+   "title": "Decision item 4",
+   "linearState": "Todo",
+   "labels": [],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   },
+   "preAdmissionDraft": {
+    "scope": {
+     "applicable": false,
+     "kind": "decision_pending",
+     "confidence": 0.95,
+     "reason": "the issue says a person has to choose first",
+     "evidence": [
+      "the title asks which option to pick",
+      "no code deliverable is named before the choice"
+     ]
+    }
+   }
+  },
+  {
+   "id": "ax-2144",
+   "issueId": "uuid-ax-2144",
+   "issueIdentifier": "AX-2144",
+   "title": "Operations item 1",
+   "linearState": "Todo",
+   "labels": [],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   },
+   "preAdmissionDraft": {
+    "scope": {
+     "applicable": false,
+     "kind": "human_action_only",
+     "confidence": 0.95,
+     "reason": "only a person can complete it",
+     "evidence": [
+      "the body asks for a hand-run production step",
+      "no code or doc change completes it"
+     ]
+    }
+   }
+  },
+  {
+   "id": "ax-2154",
+   "issueId": "uuid-ax-2154",
+   "issueIdentifier": "AX-2154",
+   "title": "Operations item 2",
+   "linearState": "Todo",
+   "labels": [],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   },
+   "preAdmissionDraft": {
+    "scope": {
+     "applicable": false,
+     "kind": "human_action_only",
+     "confidence": 0.95,
+     "reason": "only a person can complete it",
+     "evidence": [
+      "the body asks for a hand-run production step",
+      "no code or doc change completes it"
+     ]
+    }
+   }
+  },
+  {
+   "id": "ax-9001",
+   "issueId": "uuid-ax-9001",
+   "issueIdentifier": "AX-9001",
+   "title": "Control item 1",
+   "linearState": "Todo",
+   "labels": [],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   },
+   "preAdmissionDraft": {}
+  },
+  {
+   "id": "ax-9002",
+   "issueId": "uuid-ax-9002",
+   "issueIdentifier": "AX-9002",
+   "title": "Control item 2",
+   "linearState": "Todo",
+   "labels": [],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   },
+   "preAdmissionDraft": {}
+  },
+  {
+   "id": "ax-9003",
+   "issueId": "uuid-ax-9003",
+   "issueIdentifier": "AX-9003",
+   "title": "Control item 3",
+   "linearState": "Todo",
+   "labels": [],
+   "linearProject": {
+    "id": "proj-ax",
+    "name": "AX"
+   },
+   "preAdmissionDraft": {}
+  }
+ ]
+}

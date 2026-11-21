@@ -179,8 +179,11 @@ export async function deliverTrackerEffect(effect: EffectClaim, source: ITaskSou
     if (!lookup.issue) throw new Error(`Tracker issue disappeared during Todo reconciliation: ${payload.issueId}`);
     const normalizedState = lookup.issue.state.trim().toLowerCase().replaceAll('_', ' ');
     if (normalizedState === 'todo') return;
+    // Backlog is a person's parking decision (AGT-4784): never lift it to Todo.
     if (lookup.issue.stateType === 'started'
       || lookup.issue.stateType === 'canceled'
+      || lookup.issue.stateType === 'backlog'
+      || normalizedState === 'backlog'
       || normalizedState === 'in progress'
       || normalizedState === 'in review'
       || normalizedState === 'cancelled'

@@ -63,6 +63,8 @@ export interface ApplyBacklogGroomingResult {
   skippedOpenPr: number;
   /** Mutating decisions left unapplied because the per-run mutation cap was reached. */
   skippedByCap: number;
+  /** Mutations refused because the issue is in Backlog, exclusion-labelled, or untrusted (AGT-4784). */
+  skippedProtected: number;
 }
 
 /** Default number of tracker mutations (state moves + description rewrites) one apply call may make (AGT-4603). */
@@ -85,6 +87,10 @@ export interface ApplyBacklogGroomingOptions {
    * precedence over maxMutations.
    */
   mutationBudget?: { remaining: number };
+  /** issueId -> live state/labels from the fetched tasks (never planner output). Missing id = refuse. */
+  trustedIssues?: ReadonlyMap<string, { state?: string; labels?: readonly string[] }>;
+  /** Global skip labels plus the group's per-project skip labels; compared trimmed, case-insensitive. */
+  exclusionLabels?: readonly string[];
   onLog?: (line: string) => void;
 }
 
@@ -289,6 +295,7 @@ export async function applyBacklogGrooming(
     skippedUnknown: 0,
     skippedOpenPr: 0,
     skippedByCap: 0,
+    skippedProtected: 0,
   };
   if (!result.success) return applied;
   const log = options.onLog ?? ((line: string) => console.warn(`[BacklogGrooming] ${line}`));
@@ -329,6 +336,15 @@ export async function applyBacklogGrooming(
     const isStateMove = decision.status === 'stale';
     if (!isDescriptionUpdate && !isStateMove) {
       await comment(decision.issueId, formatGroomingComment(decision, 'no mutation performed.'));
+      continue;
+    }
+
+    // AGT-4784: never move a Backlog issue, never mutate an exclusion-labelled or untrusted one.
+    const refusal = protectedReason(decision.issueId, isStateMove, options);
+    if (refusal) {
+      applied.skippedProtected++;
+      log(`${label(decision)}: mutation refused, ${refusal}`);
+      await comment(decision.issueId, formatGroomingComment(decision, `no mutation performed (${refusal}).`));
       continue;
     }
 
@@ -400,6 +416,24 @@ export async function applyBacklogGrooming(
     log(`mutation cap reached; ${applied.skippedByCap} mutating decision(s) left for a later run`);
   }
   return applied;
+}
+
+const normLabel = (value: string) => value.trim().toLowerCase();
+
+/** Why a mutation on this issue is refused, or undefined when it is allowed. */
+function protectedReason(issueId: string, isStateMove: boolean, options: ApplyBacklogGroomingOptions): string | undefined {
+  const { trustedIssues, exclusionLabels } = options;
+  if (!trustedIssues && !exclusionLabels?.length) return undefined;
+  const trusted = trustedIssues?.get(issueId);
+  if (trustedIssues && !trusted) return 'issue missing from the trusted task list';
+  if (isStateMove && trustedIssues && trusted?.state === undefined) return 'trusted state unknown';
+  if (isStateMove && trusted?.state !== undefined && normLabel(trusted.state) === 'backlog') return 'issue is in Backlog';
+  const excluded = new Set((exclusionLabels ?? []).map(normLabel).filter(Boolean));
+  const hit = (trusted?.labels ?? []).find(l => excluded.has(normLabel(l)));
+  if (hit) return `issue carries exclusion label "${hit}"`;
+  // Without trusted labels an exclusion list cannot be checked: fail closed.
+  if (excluded.size > 0 && !trustedIssues) return 'exclusion labels given without trusted issue labels';
+  return undefined;
 }
 
 export function filterGroomableTasks(tasks: TaskItem[]): TaskItem[] {

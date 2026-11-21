@@ -22,6 +22,8 @@ export interface MergedPublicationContext {
   publishedPrUrl: (issueId: string) => string | undefined;
   /** Still queued or running here — its state is in motion, leave it. */
   isSchedulerOwned: (issueId: string) => boolean;
+  /** Carries an exclusion label (global or the project's): never move it (AGT-4784). */
+  isExcluded?: (issueId: string) => boolean;
   /** Bound the gh calls per sweep. */
   limit?: number;
 }
@@ -38,6 +40,7 @@ export function planMergedPublicationChecks(
     if (task.linearState !== 'In Review') continue;
     const issueId = task.issueId || task.id;
     if (context.isSchedulerOwned(issueId)) continue;
+    if (context.isExcluded?.(issueId)) continue;
     const prUrl = context.publishedPrUrl(issueId);
     if (!prUrl) continue;
     candidates.push({ task, prUrl });

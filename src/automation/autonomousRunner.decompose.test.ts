@@ -63,7 +63,7 @@ describe('AutonomousRunner decomposed parent completion (AGT-4817)', () => {
     const calls: string[] = [];
     const source = {
       kind: 'linear',
-      lookupIssueState: vi.fn(async () => ({ ok: true, issue: { state: 'Done', stateType: 'completed' } })),
+      lookupIssueState: vi.fn(async (id: string) => ({ ok: true, issue: id === 'WAITER' ? { state: 'Backlog', stateType: 'backlog' } : { state: 'Done', stateType: 'completed' } })),
       addComment: vi.fn(async (issueId: string, body: string) => { calls.push(`comment:${issueId}:${body.split('\n')[0]}`); }),
       updateState: vi.fn(async (issueId: string, state: string) => { calls.push(`state:${issueId}:${state}`); return true; }),
     } as unknown as ITaskSource;
