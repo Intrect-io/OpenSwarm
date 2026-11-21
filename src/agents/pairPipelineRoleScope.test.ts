@@ -49,6 +49,19 @@ vi.mock('../adapters/index.js', async () => {
   return { ...actual, getAdapter: () => ({ getDefaultModel }) };
 });
 
+// Worker-context collection is not the subject here. Unmocked, recallRepoKnowledge opens the
+// LanceDB store and loads the embedding model (a download on a cold CI cache), and the sibling
+// scan runs `git status` in every worktree of the checkout. Mocked the way pairPipeline.test.ts does.
+vi.mock('../knowledge/index.js', () => ({
+  hasRepoSnapshot: () => true,
+  scanAndCache: vi.fn(),
+  analyzeIssue: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../memory/repoKnowledge.js', () => ({
+  recallRepoKnowledge: vi.fn().mockResolvedValue([]),
+}));
+vi.mock('./siblingWork.js', () => ({ collectSiblingWork: vi.fn(async () => []) }));
+
 const boardEvents = vi.hoisted(() => ({ list: [] as Array<Record<string, unknown>> }));
 vi.mock('../coordination/runCoordination.js', () => ({
   publishCoordination: vi.fn(async (event: Record<string, unknown>) => { boardEvents.list.push(event); }),
