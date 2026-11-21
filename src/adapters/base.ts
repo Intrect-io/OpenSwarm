@@ -26,6 +26,7 @@ import {
 import { raceWithAbort } from './abortRace.js';
 import { isHumanSurfaceReadOnlyEnabled } from '../mcp/humanSurfacePolicy.js';
 import { assertAdapterCanRunUnderHumanSurfaceBoundary } from './humanSurfaceBoundary.js';
+import { EMPTY_GH_CONFIG_DIR_PREFIX, withoutPublicationCredentials } from './delegatedPublicationEnv.js';
 import { applyReasoningEffortOverride } from '../support/reasoningEffortOverride.js';
 import { createSessionRecorder, type SessionRecorder } from '../support/sessionLog.js';
 import { createCliNetworkScanner } from '../support/sandboxNetworkSignal.js';
@@ -106,6 +107,8 @@ export async function spawnCli(
   // a role's `tools.allow`/`tools.deny`, and for `protectedFiles` /
   // `forbidPublication`: this path cannot honor any of them (the CLI owns its
   // tools), and a silently inert fence is worse than none. (AGT-4444)
+  // forbidPublication is only partly honored: gh credentials are withheld from
+  // the child env (AGT-4414), but the CLI can still run any command.
   if (
     options.mcpTools?.length
     || options.coordinationContext
@@ -123,6 +126,10 @@ export async function spawnCli(
     ].filter(Boolean).join(' and ');
     console.warn(
       `[Adapter] '${adapter.name}' delegates to its own CLI tool loop; ${dropped} will not be available to this run. `
+      + (options.forbidPublication
+        ? `The CLI cannot refuse a publication command; gh tokens are stripped and GH_CONFIG_DIR points at an empty dir, `
+          + `but the CLI can still reach other credentials (ssh, git helpers, an explicit GH_CONFIG_DIR). `
+        : '')
       + `Use an adapter that runs OpenSwarm's loop (codex-responses, cc-router, gpt, openrouter, atlascloud, lmstudio, local) if they are required.`,
     );
   }
@@ -193,7 +200,18 @@ export async function spawnCli(
       throw reason instanceof Error ? reason : new Error(`${adapter.name} aborted`);
     }
     const { command, args, stdinFile } = commandSpec;
-    cleanupPaths = commandSpec.cleanupPaths ?? [];
+    cleanupPaths = [...(commandSpec.cleanupPaths ?? [])];
+    // Defence in depth for the publication fence (AGT-4414): the CLI still owns
+    // its tools, but gh inside it gets no token and an empty config dir.
+    let emptyGhConfigDir: string | undefined;
+    if (options.forbidPublication) {
+      emptyGhConfigDir = await fs.mkdtemp(join(tmpdir(), EMPTY_GH_CONFIG_DIR_PREFIX));
+      cleanupPaths.push(emptyGhConfigDir);
+    }
+    const overlaidEnv = applyEnvOverlay(buildWorkerEnv(runOptions.baseEnv ?? process.env), commandSpec.env);
+    const childEnv = emptyGhConfigDir
+      ? withoutPublicationCredentials(overlaidEnv, emptyGhConfigDir)
+      : overlaidEnv;
 
     const stdin = stdinFile ? await fs.readFile(stdinFile) : undefined;
     if (lifecycleController.signal.aborted) {
@@ -205,7 +223,7 @@ export async function spawnCli(
         command,
         args,
         {
-          ...applyEnvOverlay(buildWorkerEnv(runOptions.baseEnv ?? process.env), commandSpec.env),
+          ...childEnv,
           [CLI_PROCESS_MARKER_ENV]: (processMarker = `osw-cli-${randomUUID()}`),
         },
       );
