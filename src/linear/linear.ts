@@ -25,6 +25,7 @@ import { resolve } from 'node:path';
 import { atomicWriteFile } from '../support/atomicFile.js';
 import { withFileLock } from '../support/fileLock.js';
 import { safeConsole as console } from '../support/safeLog.js';
+import { IssueDeltaCursor } from './issueDeltaCursor.js';
 
 /**
  * Extract project info from an issue
@@ -164,7 +165,7 @@ export async function fetchIssuesForStates(
   const filter = {
     ...extraFilter,
     ...(ids.length ? { team: teamPart } : {}),
-    state: { name: { in: stateNames } },
+    ...(stateNames.length > 0 ? { state: { name: { in: stateNames } } } : {}), // [] = any state: the delta cursor's query (AGT-4607)
   };
 
   return fetchRawIssues(linear, filter);
@@ -260,7 +261,7 @@ interface CachedIssues {
 
 const inProgressCache = new Map<string, CachedIssues>();
 const backlogCache = new Map<string, CachedIssues>();
-const myIssuesCache = new Map<string, CachedIssues>();
+const myIssuesCache = new Map<string, CachedIssues>(); const activeIssueCursor = new IssueDeltaCursor<RawIssueNode>({ log: (line) => console.log(line) }); // updatedAt delta (AGT-4607); not reset by clearLinearCache — mutations bump updatedAt
 const CACHE_TTL_MS = 300000; // 5 minute cache (was 1min, reduced API calls)
 const MAX_AGENT_CACHE_ENTRIES = 50;
 
@@ -326,7 +327,7 @@ export function initLinear(credential: string, team: string, isOAuth = false): v
   currentToken = credential;
   teamId = team;
   teamIds = team.split(',').map(id => id.trim()).filter(Boolean);
-  setLinearClient(client);
+  setLinearClient(client); activeIssueCursor.reset();
   console.log(`${status.info('[Linear]')} ${c.dim('client initialized')} ${c.yellow(isOAuth ? 'OAuth' : 'apiKey')}`);
 }
 
@@ -704,14 +705,13 @@ export async function getMyIssues(
 
     const extraFilter: Record<string, unknown> = {};
     if (agentLabel) extraFilter.labels = { name: { eq: agentLabel } }; if (milestone) extraFilter.projectMilestone = { name: { eq: milestone } };
+    const fetchGroup = (states: string[]) => fetchIssuesForStates(linear, states, extraFilter);
+    const fetchChanged = (since: string) => fetchIssuesForStates(linear, [], { ...extraFilter, updatedAt: { gt: since } }); // delta cursor (AGT-4607)
 
     if (slim) {
       // Separate queries per state → tag each issue without resolver calls.
-      const [todoIssues, inProgressIssues, backlogIssues] = await Promise.all([
-        fetchIssuesForStates(linear, ['Todo'], extraFilter),
-        fetchIssuesForStates(linear, ['In Progress', 'In Review'], extraFilter),
-        fetchIssuesForStates(linear, ['Backlog'], extraFilter),
-      ]);
+      const [todoIssues, inProgressIssues, backlogIssues] = await activeIssueCursor.fetchGroups(cacheKey,
+        [['Todo'], ['In Progress', 'In Review'], ['Backlog']], fetchGroup, fetchChanged);
 
       const withState = [
         ...todoIssues.nodes.map(i => ({ issue: i, state: 'Todo' })),
@@ -744,10 +744,8 @@ export async function getMyIssues(
     }
 
     // Full mode: fetch executable + backlog, then resolve per-issue
-    const [executableIssues, backlogIssues] = await Promise.all([
-      fetchIssuesForStates(linear, ['Todo', 'In Progress', 'In Review'], extraFilter),
-      fetchIssuesForStates(linear, ['Backlog'], extraFilter),
-    ]);
+    const [executableIssues, backlogIssues] = await activeIssueCursor.fetchGroups(cacheKey,
+      [['Todo', 'In Progress', 'In Review'], ['Backlog']], fetchGroup, fetchChanged);
 
     {
       // project/state/labels are embedded in each node (nested GraphQL) — no
