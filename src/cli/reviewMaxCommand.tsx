@@ -14,20 +14,11 @@ import { execFileSync } from 'node:child_process';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname, basename } from 'node:path';
 import {
-  listSourceFiles,
-  planAuditAreas,
-  runMaxReview,
-  aggregateAuditResults,
-  formatAuditSummary,
-  formatAuditReport,
-  oneLineError,
-  mergeFallback,
-  mergeSecurityAuditFindings,
-  mergeQualityHarnessResult,
-  type AuditArea,
-  type AuditRun,
-  type AuditSummary,
+  listSourceFiles, planAuditAreas, runMaxReview, aggregateAuditResults, formatAuditSummary, formatAuditReport,
+  oneLineError, mergeFallback, mergeSecurityAuditFindings, mergeQualityHarnessResult,
+  type AuditArea, type AuditRun, type AuditSummary,
 } from './reviewAudit.js';
+import { beginReviewQueueTimeCapture, formatQueueTimeLine } from './reviewQueueTime.js';
 import type { AdvisorRole } from './advisorRole.js';
 import {
   runFixVerifyLoop,
@@ -597,45 +588,17 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
   let fixVerified: boolean | undefined;
   let fixVerificationStatus: FixVerificationStatus | undefined;
   let fixResult: Pick<FixVerifyResult, 'resolved' | 'verified' | 'verificationStatus'> | undefined;
+  // Process-wide in-process undici queue time over the first reviewer fan-out
+  // and its fallback only; frozen by end() before dedupe/--fix/harness traffic. (AGT-4313)
+  const queueCapture = beginReviewQueueTimeCapture();
   try {
-    run = await runMaxReview(
-      areas,
-      workCwd,
-      {
-        concurrency,
-        adapter: opts.adapter as AdapterName | undefined,
-        maxTurns: opts.maxTurns,
-        timeoutMs: opts.timeoutMs,
-        priorReviewContextByArea,
-        advisor,
-      },
-      {
-        onProgress: (e) => {
-          // The board is a live, self-erasing frame: anything printed only there
-          // is gone by the time the run ends. Batch notices go straight to stderr
-          // so the give-up decision survives in the scrollback. (AGT-3990)
-          if (e.type === 'notice') console.warn(`\n${status.warn(e.line)}`);
-          else events.emit('progress', e);
-        },
-      },
-    );
-  } finally {
-    board.unmount();
-  }
-
-  // Auto-fallback: a codex usage-limit aborted the run early → retry the failed/
-  // skipped areas on the fallback adapter (default claude → Claude subscription). (INT-2192)
-  if (run.rateLimit) {
-    const fallback = resolveFallbackAdapter(opts);
-    if (fallback) {
-      const pending = areas.filter((_, i) => run.results[i]?.error);
-      console.warn(`\n${status.warn(`Codex usage limit hit — falling back to "${fallback}" for ${pending.length} remaining area(s)...`)}`);
-      const fbRun = await runMaxReview(
-        pending,
+    try {
+      run = await runMaxReview(
+        areas,
         workCwd,
         {
           concurrency,
-          adapter: fallback,
+          adapter: opts.adapter as AdapterName | undefined,
           maxTurns: opts.maxTurns,
           timeoutMs: opts.timeoutMs,
           priorReviewContextByArea,
@@ -643,15 +606,48 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
         },
         {
           onProgress: (e) => {
-            if (e.type === 'done') console.error(`  [${fallback}] ${e.label}: ${e.decision}`);
-            else if (e.type === 'error') console.error(`  [${fallback}] ${e.label}: ${e.error}`);
-            else if (e.type === 'notice') console.error(`  [${fallback}] ${e.line}`);
+            // The board is a live, self-erasing frame: anything printed only there
+            // is gone by the time the run ends. Batch notices go straight to stderr
+            // so the give-up decision survives in the scrollback. (AGT-3990)
+            if (e.type === 'notice') console.warn(`\n${status.warn(e.line)}`);
+            else events.emit('progress', e);
           },
         },
       );
-      run = mergeFallback(run, fbRun);
+    } finally {
+      board.unmount();
     }
-  }
+
+    // Auto-fallback: a codex usage-limit aborted the run early → retry the failed/
+    // skipped areas on the fallback adapter (default claude → Claude subscription). (INT-2192)
+    if (run.rateLimit) {
+      const fallback = resolveFallbackAdapter(opts);
+      if (fallback) {
+        const pending = areas.filter((_, i) => run.results[i]?.error);
+        console.warn(`\n${status.warn(`Codex usage limit hit — falling back to "${fallback}" for ${pending.length} remaining area(s)...`)}`);
+        const fbRun = await runMaxReview(
+          pending,
+          workCwd,
+          {
+            concurrency,
+            adapter: fallback,
+            maxTurns: opts.maxTurns,
+            timeoutMs: opts.timeoutMs,
+            priorReviewContextByArea,
+            advisor,
+          },
+          {
+            onProgress: (e) => {
+              if (e.type === 'done') console.error(`  [${fallback}] ${e.label}: ${e.decision}`);
+              else if (e.type === 'error') console.error(`  [${fallback}] ${e.label}: ${e.error}`);
+              else if (e.type === 'notice') console.error(`  [${fallback}] ${e.line}`);
+            },
+          },
+        );
+        run = mergeFallback(run, fbRun);
+      }
+    }
+  } finally { queueCapture.end(); }
 
   // Every failure carries a reason; the live board only ever showed a counter,
   // and it erases itself when the run ends. Print the reasons after the fallback
@@ -695,7 +691,7 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
     run = mergeSecurityAuditFindings(run, await refreshSecurityAudit());
   }
 
-  console.log(formatAuditSummary(run.summary));
+  console.log(`${formatAuditSummary(run.summary)}\n${formatQueueTimeLine(queueCapture.snapshot())}`);
 
   // If a usage-limit is still unresolved (fallback also exhausted, or no fallback),
   // surface the reset time. (INT-2192)
@@ -865,7 +861,7 @@ export async function runReviewMaxCommand(rawOpts: ReviewMaxOptions = {}): Promi
   // (3.6) Persist a markdown report so the result isn't lost to the scrollback.
   //       Built here (after --fix) so it reflects the verified post-fix verdicts —
   //       and so the Linear master issue below embeds the same final state. (INT-2022 / INT-2443)
-  const report = formatAuditReport(run.summary, basename(cwd) || cwd, ts);
+  const report = formatAuditReport(run.summary, basename(cwd) || cwd, ts, queueCapture.snapshot());
   const outPath = opts.out ?? join(cwd, '.openswarm', 'audit', `audit-${ts}.md`);
   try {
     await mkdir(dirname(outPath), { recursive: true });

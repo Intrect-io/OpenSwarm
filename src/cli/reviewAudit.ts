@@ -22,6 +22,7 @@ import { c, status } from '../support/colors.js';
 import { sanitizeTerminalText } from '../tui/sanitize.js';
 import type { SecurityFinding } from '../verify/securityAudit.js';
 import type { QualityHarnessResult } from '../verify/qualityHarness.js';
+import { formatQueueTimeLine, type QueueTimeSnapshot } from './reviewQueueTime.js';
 
 /** Synthetic area label carrying deterministic CodeQL findings into a review run. */
 export const SECURITY_AUDIT_AREA = '.openswarm/codeql-security';
@@ -358,7 +359,7 @@ export function oneLineError(error: string | undefined, max = 300): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-export function formatAuditReport(summary: AuditSummary, repoName: string, timestamp: string): string {
+export function formatAuditReport(summary: AuditSummary, repoName: string, timestamp: string, queueTime?: QueueTimeSnapshot): string {
   const mark = (d: AuditAreaSummary['decision']) =>
     d === 'approve' ? '✓' : d === 'revise' ? '✎' : d === 'reject' ? '✗' : '⚠';
   const approved = summary.areas.filter((a) => a.decision === 'approve').length;
@@ -407,6 +408,11 @@ export function formatAuditReport(summary: AuditSummary, repoName: string, times
   if (summary.issues.length) {
     lines.push(`## Issues (${summary.issues.length})`);
     summary.issues.forEach((i) => lines.push(`- ${i}`));
+  }
+
+  if (queueTime) {
+    if (lines[lines.length - 1] !== '') lines.push('');
+    lines.push('## Transport', formatQueueTimeLine(queueTime));
   }
 
   return lines.join('\n');

@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +8,30 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ReviewResult } from '../agents/agentPair.js';
 import { aggregateAuditResults, type AuditRun, type AuditSummary } from './reviewAudit.js';
 import { runFixVerifyLoop } from './reviewFixPass.js';
+import { adapterFetch, isQueueTimeCollectorRunning, resetAdapterDispatcherForTests } from '../adapters/httpDispatcher.js';
+import { RateLimitError } from '../adapters/rateLimitError.js';
+
+// Partial mocks: delegate to the real implementation unless a test installs an
+// override, so the existing fix-loop tests keep using the real runMaxReview.
+type RunMaxReviewFn = typeof import('./reviewAudit.js').runMaxReview;
+const runMaxReviewOverride: { fn?: RunMaxReviewFn } = {};
+vi.mock('./reviewAudit.js', async () => {
+  const actual = await vi.importActual<typeof import('./reviewAudit.js')>('./reviewAudit.js');
+  return {
+    ...actual,
+    runMaxReview: (...args: Parameters<RunMaxReviewFn>) => (runMaxReviewOverride.fn ?? actual.runMaxReview)(...args),
+  };
+});
+type RunQualityHarnessFn = typeof import('../verify/qualityHarness.js').runQualityHarness;
+const runQualityHarnessOverride: { fn?: RunQualityHarnessFn } = {};
+vi.mock('../verify/qualityHarness.js', async () => {
+  const actual = await vi.importActual<typeof import('../verify/qualityHarness.js')>('../verify/qualityHarness.js');
+  return {
+    ...actual,
+    runQualityHarness: (...args: Parameters<RunQualityHarnessFn>) =>
+      (runQualityHarnessOverride.fn ?? actual.runQualityHarness)(...args),
+  };
+});
 
 const ensureTaskSourceMock = vi.fn();
 const ensureProjectMappingMock = vi.fn();
@@ -492,5 +518,110 @@ describe('shipAuditWorktree (INT-2905)', () => {
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
+  });
+});
+
+describe('review --max request queue time (AGT-4313)', () => {
+  // The figure is the process-wide in-process undici queue time during the
+  // first reviewer fan-out (and its usage-limit fallback) only. undici 6.x
+  // publishes sendHeaders for HTTP/1.1 requests, which is what adapterFetch sends.
+  async function withQueueFixture(
+    body: (ctx: { hit: (path: string) => Promise<void>; repo: string; out: string[] }) => Promise<void>,
+  ): Promise<void> {
+    const server: Server = createServer((_req, res) => res.end('ok'));
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const hit = async (path: string) => { await (await adapterFetch(`${base}${path}`)).text(); };
+    const repo = await mkdtemp(join(tmpdir(), 'openswarm-review-max-queue-'));
+    const out: string[] = [];
+    const spies = [
+      vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { out.push(a.map(String).join(' ')); }),
+      vi.spyOn(console, 'warn').mockImplementation(() => undefined),
+      vi.spyOn(console, 'error').mockImplementation(() => undefined),
+    ];
+    resetAdapterDispatcherForTests();
+    try {
+      await mkdir(join(repo, 'src'), { recursive: true });
+      await writeFile(join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
+      execFileSync('git', ['init', '-q', repo]);
+      execFileSync('git', ['-C', repo, 'add', '-A']);
+      await body({ hit, repo, out });
+    } finally {
+      runMaxReviewOverride.fn = undefined;
+      runQualityHarnessOverride.fn = undefined;
+      spies.forEach((spy) => spy.mockRestore());
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(repo, { recursive: true, force: true });
+    }
+  }
+  const approveAll: (areas: Parameters<RunMaxReviewFn>[0]) => AuditRun = (areas) => {
+    const results = areas.map((area) => ({ area, review: { decision: 'approve' as const, feedback: 'ok' } }));
+    return { results, summary: aggregateAuditResults(results) };
+  };
+  const queueLine = (out: string[]) => out.find((l) => l.includes('Request queue time (undici create->sendHeaders): p50 '));
+  const overN = (n: number) => new RegExp(`p50 [\\d.]+ ms, p90 [\\d.]+ ms over ${n} request\\(s\\)`);
+
+  it('prints request queue p50 and p90 after the review --max fan-out', async () => {
+    await withQueueFixture(async ({ hit, repo, out }) => {
+      const FAN_OUT_REQUESTS = 3;
+      let harnessRequests = 0;
+      runMaxReviewOverride.fn = async (areas) => {
+        for (let i = 0; i < FAN_OUT_REQUESTS; i++) await hit(`/review/${i}`);
+        return approveAll(areas);
+      };
+      runQualityHarnessOverride.fn = async () => {
+        for (let i = 0; i < 2; i++) { await hit(`/harness/${i}`); harnessRequests++; }
+        return { status: 'passed', filesListed: 1, filesScanned: 1, findings: [], commands: [] };
+      };
+      const reportPath = join(repo, 'audit.md');
+      await runReviewMaxCommand({
+        path: repo, yes: true, noLinear: true, learn: false, securityAudit: false, out: reportPath, adapter: undefined,
+      });
+
+      expect(harnessRequests).toBe(2);
+      const line = queueLine(out);
+      expect(line).toMatch(overN(FAN_OUT_REQUESTS));
+      expect(isQueueTimeCollectorRunning()).toBe(false);
+      expect(await readFile(reportPath, 'utf8')).toContain(`## Transport\n${line?.split('\n').pop()}`);
+    });
+  });
+
+  it('counts the usage-limit fallback fan-out requests in the queue time', async () => {
+    await withQueueFixture(async ({ hit, repo, out }) => {
+      const PRIMARY = 2;
+      const FALLBACK = 3;
+      const adapters: Array<string | undefined> = [];
+      runMaxReviewOverride.fn = async (areas, _cwd, options) => {
+        adapters.push(options?.adapter);
+        if (adapters.length === 1) {
+          for (let i = 0; i < PRIMARY; i++) await hit(`/primary/${i}`);
+          const results = areas.map((area) => ({ area, error: 'skipped: codex usage limit already hit this run' }));
+          return { results, summary: aggregateAuditResults(results), rateLimit: new RateLimitError() };
+        }
+        for (let i = 0; i < FALLBACK; i++) await hit(`/fallback/${i}`);
+        return approveAll(areas);
+      };
+      runQualityHarnessOverride.fn = async () => ({ status: 'passed', filesListed: 1, filesScanned: 1, findings: [], commands: [] });
+      await runReviewMaxCommand({
+        path: repo, yes: true, noLinear: true, learn: false, securityAudit: false, out: join(repo, 'audit.md'), adapter: undefined, fallbackAdapter: 'claude',
+      });
+
+      expect(adapters).toEqual([undefined, 'claude']);
+      expect(queueLine(out)).toMatch(overN(PRIMARY + FALLBACK));
+      expect(isQueueTimeCollectorRunning()).toBe(false);
+    });
+  });
+
+  it('stops the queue-time collector when the review --max fan-out throws', async () => {
+    await withQueueFixture(async ({ hit, repo }) => {
+      runMaxReviewOverride.fn = async () => {
+        await hit('/boom');
+        throw new Error('fan-out exploded');
+      };
+      await expect(runReviewMaxCommand({
+        path: repo, yes: true, noLinear: true, learn: false, securityAudit: false, out: join(repo, 'audit.md'), adapter: undefined,
+      })).rejects.toThrow('fan-out exploded');
+      expect(isQueueTimeCollectorRunning()).toBe(false);
+    });
   });
 });
