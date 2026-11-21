@@ -2839,7 +2839,7 @@ export class AutonomousRunner {
 
         // 4. Handle decision
         if (decision.action === 'execute' && decision.task) {
-          this.idle.markProgress(); await this.executeTaskPairMode(decision.task);
+          await this.executeTaskPairMode(decision.task);
         } else if (decision.action === 'defer' && decision.task) {
           this.state.pendingApproval = decision.task;
           await this.requestApproval(decision);
@@ -3401,7 +3401,7 @@ export class AutonomousRunner {
       this.projectPathCache.set(task.linearProject.name, projectPath);
     }
 
-    console.log(`[AutonomousRunner] projectPath: ${projectPath}`);
+    this.idle.markProgress(); console.log(`[AutonomousRunner] projectPath: ${projectPath}`); // a task starts: only now reset the idle streak
 
     // Use scheduler for parallel processing mode
     if (this.config.maxConcurrentTasks && this.config.maxConcurrentTasks > 1) {

@@ -19,7 +19,10 @@
 //     the pointer, so it is never probed again;
 //   - transient (network, timeout, anything unrecognised): logged once with
 //     its cause, then backed off per run — 5 min doubling to 6 h — in a table
-//     of the automation database, so a restart does not reset it.
+//     of the automation database, so a restart does not reset it. After
+//     MAX_TRANSIENT_FAILURES in a row the row parks NEEDS_HUMAN with the last
+//     cause and the count instead of being probed every 6 h forever; a
+//     success in between clears the count.
 // Probes run concurrently (CONCURRENCY at a time) and a row inside its backoff
 // is skipped without a probe or a log line.
 
@@ -37,6 +40,8 @@ const CONCURRENCY = 4;
 const BACKOFF_BASE_MS = 5 * 60_000;
 const BACKOFF_MAX_MS = 6 * 60 * 60_000;
 const PROBE_TIMEOUT_MS = 30_000;
+/** Consecutive transient failures before parking: about a day (~23 h) of backoff after the first failure. */
+export const MAX_TRANSIENT_FAILURES = 10;
 
 export type OriginLookupFailureKind = 'permanent' | 'transient';
 
@@ -227,6 +232,17 @@ export async function reconcileMissingWorktrees(deps: MissingWorktreeReconcileDe
         return null;
       }
       const failures = (backoff?.failures ?? 0) + 1;
+      if (failures >= MAX_TRANSIENT_FAILURES) {
+        // Fail closed: park the run (clearing its pointer), no further probe; an
+        // operator releases it. A lost ledger race keeps counting and retries the park.
+        const reason = `Origin branch lookup for the missing worktree failed ${failures} times in a row; last cause: ${cause}. `
+          + 'Check the network and the repository remote, then release the run.';
+        if (durableRuns.reconcileMissingWorktree(run, 'needs_human', reason, false)) {
+          store.clear(run.issueId);
+          log.warn(`[Reconciler] ${label}: parked for a person — origin lookup failed ${failures} times (${cause})`);
+          return null;
+        }
+      }
       const delay = originLookupBackoffMs(failures);
       store.set(run.issueId, { failures, nextAt: now() + delay, cause });
       if (failures === 1) {
