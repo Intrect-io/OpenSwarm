@@ -64,8 +64,19 @@ services:
       # ChatGPT-OAuth (codex-responses adapter) state from a host login:
       # - ~/.codex:/home/openswarm/.codex
 
+    # Healthcheck reads /api/health's `progress` block (AGT-4607), not just
+    # liveness. Decision: an idle daemon with nothing selectable is healthy, so
+    # progress age alone never fails the check. It fails when the daemon stopped
+    # serving, or when the autonomous heartbeat cron is active (progress.active:
+    # not explicit-dispatch mode, not stopped) and BOTH progress.lastProgressAgeMs
+    # and progress.lastHeartbeatAgeMs exceed 6h: no task selected/claimed/completed
+    # AND no heartbeat ran, i.e. the loop is wedged. The idle backoff stretches the
+    # heartbeat to at most 1h, and paused / time-window heartbeats still run, so a
+    # healthy idle daemon always stays under the threshold. Ages are measured from
+    # boot until the first heartbeat / lastProgressAt. No `$` here: compose would
+    # interpolate it.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:3847/api/health"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3847/api/health').then(r=>{if(!r.ok)process.exit(1);return r.json()}).then(h=>{const p=h.progress,L=6*3600*1000;process.exit(p&&p.active&&p.lastProgressAgeMs>L&&p.lastHeartbeatAgeMs>L?1:0)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3

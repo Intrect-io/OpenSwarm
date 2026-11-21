@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { getHeapStatistics } from 'node:v8';
 import { credentialProbeSnapshot } from '../core/credentialProbes.js';
 import { globalRateLimit, type RateLimitDegradation } from '../automation/rateLimitBackoff.js';
+import { progressHealthSnapshot, type ProgressHealth } from '../automation/idleBackoff.js';
 
 export interface HealthPayload {
   status: 'ok';
@@ -55,6 +56,14 @@ export interface HealthPayload {
    * 'ok' — the process is alive and serving; this says it is not doing work.
    */
   degraded?: RateLimitDegradation;
+  /**
+   * Heartbeat progress clock (AGT-4607): `lastProgressAt` / `lastProgressAgeMs`
+   * (a task enqueued, claimed or completed), the last heartbeat's age and the
+   * idle-backoff streak. Present only once a runner registered its heartbeat
+   * cron, so the vega shell contract above is unchanged without one.
+   * docker-compose.yml's healthcheck reads it.
+   */
+  progress?: ProgressHealth;
 }
 
 const MB = 1024 * 1024;
@@ -86,6 +95,7 @@ export function buildHealthPayload(
     memory?: { heapUsedBytes: number; heapLimitBytes: number; rssBytes: number };
     credentials?: HealthPayload['credentials'];
     degraded?: RateLimitDegradation | null;
+    progress?: ProgressHealth | null;
   } = {},
 ): HealthPayload {
   const env = deps.env ?? process.env;
@@ -109,7 +119,13 @@ export function buildHealthPayload(
     ...memoryFields(deps.memory),
     ...credentialField(deps.credentials),
     ...degradedField(deps.degraded),
+    ...progressField(deps.progress),
   };
+}
+
+function progressField(provided: ProgressHealth | null | undefined): Pick<HealthPayload, 'progress'> {
+  const progress = provided === undefined ? progressHealthSnapshot() : provided;
+  return progress ? { progress } : {};
 }
 
 function degradedField(provided: RateLimitDegradation | null | undefined): Pick<HealthPayload, 'degraded'> {

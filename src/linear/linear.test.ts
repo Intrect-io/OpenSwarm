@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, drainLinearConnectionPages, effectCommentId, fetchIssuesForStates, getInProgressIssues, getNextBacklogIssue, initLinear, logBlocked, logWorkComplete, logWorkStart, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_MAX_CANDIDATES, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers, populateBlockedBy, type LinearIssueInfo, type RawIssueNode } from './linear.js';
+import { addComment, clearLinearCache, createSubIssue, drainLinearConnection, drainLinearConnectionPages, effectCommentId, fetchIssuesForStates, getInProgressIssues, getMyIssues, getNextBacklogIssue, initLinear, logBlocked, logWorkComplete, logWorkStart, LINEAR_ACTIVE_ENRICH_CAP, LINEAR_ACTIVE_MAX_PAGES, LINEAR_ACTIVE_PAGE_SIZE, LINEAR_BACKLOG_MAX_CANDIDATES, LINEAR_BACKLOG_PAGE_SIZE, LINEAR_RELATED_PAGE_SIZE, parseBlockerIdentifiers, populateBlockedBy, type LinearIssueInfo, type RawIssueNode } from './linear.js';
 import { LinearClient } from '@linear/sdk';
 
 // createSubIssue reads the module-level client singleton (getClient()), set only
@@ -668,5 +668,72 @@ describe('state-change comment ordering', () => {
     initLinear('fake-key', 'team-1');
     await (action as (...values: string[]) => Promise<void>)(...(args as string[]));
     expect(events).toEqual(['comment', 'state']);
+  });
+});
+
+// AGT-4607: an idle daemon re-fetched every active issue on every heartbeat.
+describe('getMyIssues updatedAt delta cursor', () => {
+  type Filter = { state?: { name: { in: string[] } }; updatedAt?: { gt: string }; team?: unknown };
+  function installRawClient(respond: (filter: Filter) => RawIssueNode[]) {
+    const filters: Filter[] = [];
+    const fakeClient = {
+      client: {
+        rawRequest: vi.fn(async (_query: string, vars?: Record<string, unknown>) => {
+          const filter = vars?.filter as Filter;
+          filters.push(filter);
+          return { data: { issues: { nodes: respond(filter), pageInfo: { hasNextPage: false, endCursor: 'c' } } } };
+        }),
+      },
+    };
+    vi.mocked(LinearClient).mockImplementation(function (this: unknown) { return fakeClient as never; } as never);
+    initLinear('fake-key', 'team-1'); // also resets every cursor
+    clearLinearCache();
+    return filters;
+  }
+  const issue = (id: string, state: string, title = id): RawIssueNode => ({ id, identifier: id.toUpperCase(), title, priority: 2, state: { name: state } });
+
+  it('fetches only issues updated since the cursor', async () => {
+    const full: Record<string, RawIssueNode[]> = {
+      Todo: [issue('a-1', 'Todo'), issue('a-2', 'Todo')],
+      'In Progress,In Review': [issue('a-3', 'In Progress')],
+      Backlog: [issue('a-4', 'Backlog')],
+    };
+    let delta: RawIssueNode[] = [];
+    let failDelta = false;
+    const filters = installRawClient((filter) => {
+      if (filter.updatedAt) {
+        if (failDelta) throw new Error('Linear 503');
+        return delta;
+      }
+      return full[filter.state!.name.in.join(',')] ?? [];
+    });
+
+    const before = Date.now();
+    const first = await getMyIssues({ slim: true });
+    expect(first.map((i) => i.id).sort()).toEqual(['a-1', 'a-2', 'a-3', 'a-4']);
+    expect(filters).toHaveLength(3); // one full query per state group
+    expect(filters.every((f) => f.state && !f.updatedAt)).toBe(true);
+
+    // Next cycle (TTL cache cleared by a mutation): one delta request, no state
+    // filter, cursor at or before the previous fetch start.
+    delta = [issue('a-2', 'Done'), issue('a-1', 'Todo', 'retitled'), issue('a-5', 'In Review')];
+    clearLinearCache();
+    const second = await getMyIssues({ slim: true });
+    expect(filters).toHaveLength(4);
+    const deltaFilter = filters[3];
+    expect(deltaFilter.state).toBeUndefined();
+    expect(deltaFilter.team).toEqual({ id: { eq: 'team-1' } });
+    expect(Date.parse(deltaFilter.updatedAt!.gt)).toBeLessThanOrEqual(before);
+    expect(second.map((i) => i.id).sort()).toEqual(['a-1', 'a-3', 'a-4', 'a-5']); // a-2 left the active states
+    expect(second.find((i) => i.id === 'a-1')?.title).toBe('retitled');
+    expect(second.find((i) => i.id === 'a-5')?.state).toBe('In Review');
+    expect(second.find((i) => i.id === 'a-4')?.state).toBe('Backlog');
+
+    // A failed delta falls back to a full fetch in the same cycle.
+    failDelta = true;
+    clearLinearCache();
+    const third = await getMyIssues({ slim: true });
+    expect(filters).toHaveLength(4 + 1 + 3);
+    expect(third.map((i) => i.id).sort()).toEqual(['a-1', 'a-2', 'a-3', 'a-4']);
   });
 });

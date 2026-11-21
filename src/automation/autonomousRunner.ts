@@ -1,6 +1,7 @@
 // OpenSwarm - Autonomous Runner
 // Heartbeat → Decision → Execution → Report
 import { Cron } from 'croner';
+import { createHeartbeatCron, IdleBackoff } from './idleBackoff.js';
 import {
   loadTaskState,
   saveTaskState,
@@ -289,7 +290,7 @@ export class AutonomousRunner {
   private unknownScopeDebt = new Set<string>();
   /** Sufficient drafted scopes survive heartbeat refetches and feed the pipeline. */
   private preAdmissionScopeCache = new Map<string, CachedDraftScope>();
-  private cronJob: Cron | null = null;
+  private cronJob: Cron | null = null; private readonly idle = new IdleBackoff({ log: (line) => this.syslog(line) }); // AGT-4607
   private periodicReviewJobs: Cron[] = [];
   private orchestratorSupervisor: OrchestratorSupervisor | null = null;
   private startupHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
@@ -618,7 +619,7 @@ export class AutonomousRunner {
     });
 
     // Set up scheduler event handling
-    this.setupSchedulerEvents();
+    this.setupSchedulerEvents(); this.idle.attach(this.scheduler);
   }
 
   private setupSchedulerEvents(): void {
@@ -2119,9 +2120,7 @@ export class AutonomousRunner {
     const heartbeatEnabled = this.config.autonomousHeartbeat !== false;
     if (heartbeatEnabled) {
       // Set up cron job
-      this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
-        await this.heartbeat();
-      });
+      this.cronJob = createHeartbeatCron(this.config.heartbeatSchedule, this.idle, () => this.heartbeat()); // ticks gated by idle backoff (AGT-4607)
     } else {
       // Explicit-dispatch mode has no heartbeat to run the artifact
       // reconciliation that unparks NEEDS_RECONCILE runs — without this,
@@ -2220,9 +2219,7 @@ export class AutonomousRunner {
   enableHeartbeat(): boolean {
     if (this.stopping || this.cronJob) return false;
     this.config.autonomousHeartbeat = true;
-    this.cronJob = new Cron(this.config.heartbeatSchedule, async () => {
-      await this.heartbeat();
-    });
+    this.cronJob = createHeartbeatCron(this.config.heartbeatSchedule, this.idle, () => this.heartbeat());
     console.log(`[AutonomousRunner] Heartbeat enabled at runtime (schedule: ${this.config.heartbeatSchedule})`);
     return true;
   }
@@ -2712,7 +2709,7 @@ export class AutonomousRunner {
     this.heartbeatCompletion = completion;
 
     console.log('[AutonomousRunner] Heartbeat triggered');
-    this.state.lastHeartbeat = Date.now();
+    this.state.lastHeartbeat = Date.now(); this.idle.beginHeartbeat();
     broadcastEvent({ type: 'stats', data: this.buildStats() });
     broadcastEvent({ type: 'heartbeat' });
     this.syslog('▶ Heartbeat started');
@@ -2827,7 +2824,7 @@ export class AutonomousRunner {
         await reportToDiscord(`⚠️ Linear fetch failed: ${fetchResult.error}`);
         return;
       }
-      let tasks = await this.reconcileStalledInProgress(fetchResult.tasks);
+      this.idle.beginSelection(); let tasks = await this.reconcileStalledInProgress(fetchResult.tasks); // from here an empty result counts (AGT-4607)
       await this.reconcileMergedPublications(tasks).catch((error) => {
         console.warn('[AutonomousRunner] Merge reconciliation failed:', error);
       });
@@ -2930,7 +2927,7 @@ export class AutonomousRunner {
 
         // 4. Handle decision
         if (decision.action === 'execute' && decision.task) {
-          await this.executeTaskPairMode(decision.task);
+          this.idle.markProgress(); await this.executeTaskPairMode(decision.task);
         } else if (decision.action === 'defer' && decision.task) {
           this.state.pendingApproval = decision.task;
           await this.requestApproval(decision);
@@ -2950,7 +2947,7 @@ export class AutonomousRunner {
         await reportToDiscord(t('runner.consecutiveErrors', { count: this.state.consecutiveErrors, error: msg }));
       }
     } finally {
-      this._heartbeatRunning = false;
+      this._heartbeatRunning = false; this.idle.endHeartbeat(() => this.scheduler.getStats());
       if (this.heartbeatCompletion === completion) this.heartbeatCompletion = null;
       settleHeartbeat();
     }
@@ -3671,7 +3668,7 @@ export class AutonomousRunner {
   }
 
   async runNow(): Promise<void> {
-    await this.heartbeat();
+    this.idle.reset('runNow'); await this.heartbeat();
   }
 
   getState(): RunnerState {
