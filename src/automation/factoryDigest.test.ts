@@ -13,7 +13,7 @@ import {
 } from './factoryDigest.js';
 import { FACTORY_DIGEST_MEMO_MS, handleFactoryDigest } from '../support/webFactoryDigest.js';
 import { recordPullRequestStateInDb } from './factoryOutcomes.js';
-import { runDefectCommand, runWrongDispatchCommand } from '../cli/outcomeCommand.js';
+import { runDefectCommand, runHumanMinutesCommand, runWrongDispatchCommand } from '../cli/outcomeCommand.js';
 import type { ServerResponse } from 'node:http';
 
 const cron = vi.hoisted(() => ({ calls: [] as Array<{ pattern: string; options: { timezone?: string }; fn: () => Promise<void>; stop: ReturnType<typeof vi.fn> }> }));
@@ -297,9 +297,122 @@ describe('recorded outcomes', () => {
     const d = readFactoryDigest(dbPath, T + D);
     expect(d.kpis.wrongDispatchRate).toEqual({ measured: true, rate: 0.25, numerator: 1, denominator: 4 });
     expect(formatFactoryDigest(d)).toContain('wrong-dispatch rate: 25.0% (1 of 4 runs dispatched in the window marked should-not-have-run)');
-    // Merged per human minute stays unmeasured: human minutes are not recorded.
+    // Merged per human minute stays unmeasured: no human minutes are recorded.
     expect(d.kpis.mergedPerHumanMinute.measured).toBe(false);
     expect(readFactoryDigest(dbPath, T + 30 * D).kpis.wrongDispatchRate).toEqual({ measured: false, reason: 'no run was dispatched in the window' });
+  });
+});
+
+// AGT-4810: merged changes per human minute, from minutes recorded through
+// `openswarm outcome human-minutes` and the same merge record as "Runs merged".
+describe('merged per human minute', () => {
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const COMMAND = 'openswarm outcome human-minutes';
+
+  function withMerges(dbPath: string): string {
+    const db = new Database(dbPath);
+    for (const [issueId, prUrl, state, mergedAt] of [
+      ['r2', 'pr/2', 'MERGED', T],          // exactly at the window start: in
+      ['r3', 'pr/3', 'MERGED', T + 4 * H],  // in
+      ['r4', 'pr/4', 'MERGED', T + 10 * H], // in
+      ['r6', 'pr/6', 'MERGED', T - 2 * H],  // before the window
+      ['r5', 'pr/5', 'MERGED', T + D],      // exactly at the window end: out
+      ['r1', 'pr/1', 'CLOSED', undefined],  // closed unmerged
+    ] as const) {
+      expect(recordPullRequestStateInDb(db, issueId, prUrl, { state, mergedAt: mergedAt === undefined ? undefined : iso(mergedAt) }, T + 2 * D)).toBe(true);
+    }
+    db.close();
+    return dbPath;
+  }
+
+  function record(dbPath: string, minutes: string, kind: string, at: number): void {
+    expect(runHumanMinutesCommand(minutes, { kind, at: iso(at) }, { dbPath, now: T + 3 * D, actor: 'test', out: () => {} })).toBe(0);
+  }
+
+  it('computes merged per human minute from recorded minutes', () => {
+    const dbPath = withMerges(fixtureDb());
+    record(dbPath, '30', 'review', T);                 // exactly at the window start: in
+    record(dbPath, '12', 'answer', T + 5 * H);         // in
+    record(dbPath, '15', 'review', T + 23 * H + 59 * M); // in
+    record(dbPath, '3', 'intervention', T + D - 1);    // last millisecond of the window: in
+    record(dbPath, '40', 'answer', T + D);             // exactly at the window end: out (next day)
+    record(dbPath, '50', 'intervention', T - M);       // the day before: out
+
+    const d = readFactoryDigest(dbPath, T + D);
+    expect(d.runs.merged).toEqual({ measured: true, count: 3 });
+    // 3 merged (r2, r3, r4) over 30 + 12 + 15 + 3 = 60 minutes.
+    expect(d.kpis.mergedPerHumanMinute).toEqual({ measured: true, rate: 0.05, merged: 3, minutes: 60, byKind: { review: 45, answer: 12, intervention: 3 } });
+    expect(formatFactoryDigest(d)).toContain(
+      '  merged changes per human minute: 0.050 (3 runs merged in the window over 60 human minutes recorded in it: review 45, answer 12, intervention 3)',
+    );
+
+    // The next day: r5 merged at its start, 40 answer minutes: 1 over 40.
+    const next = readFactoryDigest(dbPath, T + 2 * D);
+    expect(next.kpis.mergedPerHumanMinute).toEqual({ measured: true, rate: 0.025, merged: 1, minutes: 40, byKind: { review: 0, answer: 40, intervention: 0 } });
+
+    // The day before: 50 intervention minutes and r6's merge (T - 2h): 1 over 50.
+    const readDayBefore = () => {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        return computeFactoryDigest(db, { from: T - D, to: T });
+      } finally {
+        db.close();
+      }
+    };
+    const before = readDayBefore();
+    // Minutes spent and nothing merged: a real measurement of 0, not "not measured".
+    const write = new Database(dbPath);
+    write.prepare("DELETE FROM automation_pr_states WHERE issue_id = 'r6'").run();
+    write.close();
+    const idle = readDayBefore();
+    expect(before.kpis.mergedPerHumanMinute).toEqual({ measured: true, rate: 0.02, merged: 1, minutes: 50, byKind: { review: 0, answer: 0, intervention: 50 } });
+    expect(idle.runs.merged).toEqual({ measured: true, count: 0 });
+    expect(idle.kpis.mergedPerHumanMinute).toEqual({ measured: true, rate: 0, merged: 0, minutes: 50, byKind: { review: 0, answer: 0, intervention: 50 } });
+    expect(formatFactoryDigest(idle)).toContain(
+      '  merged changes per human minute: 0.000 (0 runs merged in the window over 50 human minutes recorded in it: review 0, answer 0, intervention 50)',
+    );
+    // A small nonzero rate is not printed as 0.000.
+    const small = { ...idle, kpis: { ...idle.kpis, mergedPerHumanMinute: { measured: true as const, rate: 1 / 2400, merged: 1, minutes: 2400, byKind: { review: 2400, answer: 0, intervention: 0 } } } };
+    expect(formatFactoryDigest(small)).toContain('merged changes per human minute: 0.00042 (1 runs merged');
+  });
+
+  it('reports merged per human minute as not measured when no minutes are recorded', () => {
+    const expectNotMeasured = (d: FactoryDigest, reason: RegExp) => {
+      const k = d.kpis.mergedPerHumanMinute;
+      expect(k.measured).toBe(false);
+      if (k.measured) return;
+      expect(k.reason).toMatch(reason);
+      expect(k.reason).toContain(COMMAND);
+      expect(formatFactoryDigest(d)).toContain(`merged changes per human minute: not measured (${k.reason})`);
+    };
+
+    // Table absent (a database from before the table existed), merges measured.
+    const absent = withMerges(fixtureDb());
+    const drop = new Database(absent);
+    drop.exec('DROP TABLE automation_human_minutes');
+    drop.close();
+    const absentDigest = readFactoryDigest(absent, T + D);
+    expect(absentDigest.runs.merged).toEqual({ measured: true, count: 3 });
+    expectNotMeasured(absentDigest, /no human review\/answer\/intervention minutes have been recorded yet/);
+
+    // Table present and empty.
+    expectNotMeasured(readFactoryDigest(withMerges(fixtureDb()), T + D), /have been recorded yet/);
+
+    // Rows only outside the window (at its end, and before its start).
+    const outside = withMerges(fixtureDb());
+    record(outside, '45', 'answer', T + D);
+    record(outside, '60', 'review', T - 1);
+    expectNotMeasured(readFactoryDigest(outside, T + D), /no human minutes were recorded in the window/);
+
+    // Minutes in the window, but merges are not measured (no PR state ever recorded).
+    const unmerged = fixtureDb();
+    record(unmerged, '20', 'review', T + H);
+    const d = readFactoryDigest(unmerged, T + D);
+    expect(d.runs.merged.measured).toBe(false);
+    expectNotMeasured(d, /^merges are not measured: the automation database records no merge yet/);
+
+    // No database at all.
+    expectNotMeasured(readFactoryDigest(join(tmpdir(), 'openswarm-digest-missing', 'none.db'), T), /have been recorded yet/);
   });
 });
 

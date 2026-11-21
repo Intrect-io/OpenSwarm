@@ -9,7 +9,11 @@
 // - post-merge defects: a revert or a hotfix linked to the run whose merge it
 //   repairs, recorded by the operator (`openswarm outcome defect`);
 // - wrong dispatches: a run the operator marks "should not have run"
-//   (`openswarm outcome wrong-dispatch`).
+//   (`openswarm outcome wrong-dispatch`);
+// - human minutes: time the operator spent reviewing, answering a question or
+//   intervening, recorded as whole minutes (`openswarm outcome human-minutes`).
+//   The digest divides the runs merged in its window by the minutes recorded
+//   in it.
 //
 // The tables are additive (CREATE IF NOT EXISTS), created by the schema
 // migration and again by every writer, so a CLI against an older database
@@ -46,6 +50,18 @@ export const OUTCOME_TABLE_DDL = `
     actor TEXT NOT NULL,
     marked_at INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS automation_human_minutes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK (kind IN ('review', 'answer', 'intervention')),
+    minutes INTEGER NOT NULL CHECK (typeof(minutes) = 'integer' AND minutes BETWEEN 1 AND 1440),
+    at INTEGER NOT NULL,
+    issue_id TEXT,
+    note TEXT,
+    actor TEXT NOT NULL,
+    recorded_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_automation_human_minutes_at
+    ON automation_human_minutes(at);
 `;
 
 export type DefectKind = 'revert' | 'hotfix';
@@ -128,6 +144,62 @@ export function markWrongDispatchInDb(
     ON CONFLICT(issue_id) DO UPDATE SET reason = excluded.reason, actor = excluded.actor, marked_at = excluded.marked_at
   `).run(issueId, input.reason, input.actor, now);
   return { issueId };
+}
+
+export type HumanMinutesKind = 'review' | 'answer' | 'intervention';
+export const HUMAN_MINUTES_KINDS: readonly HumanMinutesKind[] = ['review', 'answer', 'intervention'];
+/** One record covers at most a day; a longer stretch is several records. */
+export const MAX_HUMAN_MINUTES = 1440;
+
+export interface HumanMinutesRecord {
+  id: number;
+  kind: HumanMinutesKind;
+  minutes: number;
+  at: number;
+  issueId: string | null;
+  note: string | null;
+  actor: string;
+  recordedAt: number;
+}
+
+/**
+ * Record human minutes. Validates again whatever the caller checked (fail
+ * closed): a whole number of minutes in 1..1440, a known kind, a finite time
+ * and a non-empty actor. The table's CHECKs reject the same values, so a
+ * caller that skips this cannot store them either.
+ */
+export function recordHumanMinutesInDb(
+  db: Database.Database,
+  input: { kind: HumanMinutesKind; minutes: number; at: number; issue?: string; note?: string; actor: string },
+  now = Date.now(),
+): HumanMinutesRecord {
+  if (!HUMAN_MINUTES_KINDS.includes(input.kind)) throw new Error(`human-minutes kind must be one of ${HUMAN_MINUTES_KINDS.join(', ')}`);
+  if (!Number.isInteger(input.minutes) || input.minutes < 1 || input.minutes > MAX_HUMAN_MINUTES) {
+    throw new Error(`minutes must be a whole number from 1 to ${MAX_HUMAN_MINUTES}`);
+  }
+  if (!Number.isFinite(input.at)) throw new Error('human-minutes time is invalid');
+  if (!input.actor.trim()) throw new Error('an actor is required');
+  const at = Math.trunc(input.at);
+  const issueId = input.issue?.trim() || null;
+  const note = input.note?.trim() || null;
+  db.exec(OUTCOME_TABLE_DDL);
+  const { lastInsertRowid } = db.prepare(
+    'INSERT INTO automation_human_minutes(kind, minutes, at, issue_id, note, actor, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  ).run(input.kind, input.minutes, at, issueId, note, input.actor, now);
+  return { id: Number(lastInsertRowid), kind: input.kind, minutes: input.minutes, at, issueId, note, actor: input.actor, recordedAt: now };
+}
+
+/**
+ * Human minutes recorded at a time in [from, to), oldest first. Never creates
+ * the table (the digest reads the database read-only): `null` when it does not
+ * exist, so a caller can tell "never recorded" from "none in the window".
+ */
+export function readHumanMinutesInDb(db: Database.Database, from: number, to: number): HumanMinutesRecord[] | null {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'automation_human_minutes'").get()) return null;
+  return db.prepare(`
+    SELECT id, kind, minutes, at, issue_id AS issueId, note, actor, recorded_at AS recordedAt
+    FROM automation_human_minutes WHERE at >= ? AND at < ? ORDER BY at, id
+  `).all(from, to) as HumanMinutesRecord[];
 }
 
 /** Open the existing automation database for one CLI write (the daemon may hold it too). */
