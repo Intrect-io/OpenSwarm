@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readlinkSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { buildLockPayload, getTaskState, resetTaskStateStoreForTests } from './store.js';
+import { buildLockPayload, getTaskState, resetTaskStateStoreForTests, upsertTaskState } from './store.js';
+
+/** Open descriptors of this process that point at `target` (Linux only; null elsewhere). */
+function openHandlesTo(target: string): number | null {
+  if (process.platform !== 'linux') return null;
+  return readdirSync('/proc/self/fd').filter((fd) => {
+    try { return readlinkSync(`/proc/self/fd/${fd}`) === target; } catch { return false; }
+  }).length;
+}
 
 describe('task state lock compatibility', () => {
   let stateDir: string;
@@ -77,4 +85,27 @@ describe('task state lock compatibility', () => {
     resetTaskStateStoreForTests();
     expect(getTaskState('MIXED-CLIENT')?.title).toBe('MIXED-CLIENT');
   });
+  it('reports mutex contention as a task state lock timeout and closes the mutex handle', () => {
+    const mutexPath = `${stateFile}.mutex.db`;
+    const holder = new Database(mutexPath);
+    holder.exec('CREATE TABLE IF NOT EXISTS task_state_mutex (id INTEGER PRIMARY KEY CHECK (id = 1)); INSERT OR IGNORE INTO task_state_mutex (id) VALUES (1); BEGIN IMMEDIATE');
+    try {
+      const started = Date.now();
+      // A raw SQLITE_BUSY would escape here before the fix; callers match on this message.
+      expect(() => upsertTaskState('CONTENDED', { title: 'CONTENDED' })).toThrow(`Timed out waiting for task state lock: ${mutexPath}`);
+      expect(Date.now() - started).toBeLessThan(15_000);
+    } finally {
+      holder.exec('ROLLBACK');
+      holder.close();
+    }
+    // SQLite defers closing a connection's fd while another connection in this
+    // process holds a lock on the same file, so count only once the holder is
+    // gone: a closed writer leaves nothing, a leaked one keeps its fd.
+    const leftOpen = openHandlesTo(mutexPath);
+    if (leftOpen !== null) expect(leftOpen).toBe(0);
+    // Nothing was left locked: the same writer now succeeds.
+    upsertTaskState('CONTENDED', { title: 'CONTENDED' });
+    resetTaskStateStoreForTests();
+    expect(getTaskState('CONTENDED')?.title).toBe('CONTENDED');
+  }, 20_000);
 });

@@ -18,7 +18,7 @@ import {
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import Database from 'better-sqlite3';
+import Database from 'better-sqlite3'; import { isRetryableBusyError } from '../support/sqliteWal.js';
 import { z } from 'zod';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from '../support/processLiveness.js';
@@ -226,9 +226,10 @@ function withStoreLock<T>(operation: () => T): T {
   const directory = dirname(path);
   const lockPath = `${path}.lock`;
   mkdirSync(directory, { recursive: true });
-  // Transition mutex: SQLite first, then the legacy dot-lock for old CLI releases.
-  const mutexDb = new Database(`${path}.mutex.db`, { timeout: LOCK_TIMEOUT_MS }); mutexDb.exec('PRAGMA journal_mode = DELETE; CREATE TABLE IF NOT EXISTS task_state_mutex (id INTEGER PRIMARY KEY CHECK (id = 1)); INSERT OR IGNORE INTO task_state_mutex (id) VALUES (1); BEGIN IMMEDIATE');
-  const deadline = Date.now() + LOCK_TIMEOUT_MS; let lockFd: number | undefined; const lockToken = randomUUID();
+  // Transition mutex: SQLite first, then the legacy dot-lock for old CLI releases. One deadline bounds both waits.
+  const deadline = Date.now() + LOCK_TIMEOUT_MS; let lockFd: number | undefined; const lockToken = randomUUID(); let mutexDb: Database.Database | undefined;
+  try { mutexDb = new Database(`${path}.mutex.db`, { timeout: LOCK_TIMEOUT_MS }); mutexDb.exec('PRAGMA journal_mode = DELETE; CREATE TABLE IF NOT EXISTS task_state_mutex (id INTEGER PRIMARY KEY CHECK (id = 1)); INSERT OR IGNORE INTO task_state_mutex (id) VALUES (1); BEGIN IMMEDIATE'); } catch (error) {
+    mutexDb?.close(); throw isRetryableBusyError(error) ? new Error(`Timed out waiting for task state lock: ${path}.mutex.db`) : error; } // never leak the handle
 
   try {
     while (lockFd === undefined) {
@@ -296,13 +297,12 @@ function withStoreLock<T>(operation: () => T): T {
         // double-execute anything, and the next Linear sync re-derives it.
         const expiredLock = lockAgeMs > LOCK_ABANDON_MS;
         if (staleMalformedLock || abandonedLock || priorGenerationLock || expiredLock) {
-          // Reclaim only the lock that was actually judged. Between the
-          // judgement above and this unlink the holder can release and a third
-          // process can take a fresh lock; deleting THAT one would put two
-          // writers in the store. Re-reading identity here narrows the window
-          // to a pair of syscalls — it does not close it, because POSIX has no
-          // compare-and-unlink for a regular file. Closing it needs a
-          // kernel-owned mutex (AGT-4024).
+          // Reclaim only the lock that was actually judged. Every current
+          // writer already holds the SQLite mutex above, so no current writer
+          // can take a fresh dot-lock between the judgement and this unlink;
+          // the window stays open only against an old CLI release that takes
+          // the dot-lock alone, and re-reading identity narrows it to a pair of
+          // syscalls (POSIX has no compare-and-unlink). (AGT-4024)
           const currentMtimeMs = statSync(lockPath).mtimeMs;
           const currentOwner = readStoreLockOwner(lockPath);
           const sameLock = currentMtimeMs === judgedMtimeMs
@@ -343,7 +343,7 @@ function withStoreLock<T>(operation: () => T): T {
         console.warn(`[TaskState] Failed to remove lock ${lockPath}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    try { mutexDb.exec('ROLLBACK'); } finally { mutexDb.close(); }
+    try { mutexDb?.exec('ROLLBACK'); } finally { mutexDb?.close(); }
   }
 }
 
