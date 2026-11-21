@@ -23,7 +23,8 @@
 //   npx tsx benchmarks/diagnosticsAb.ts                          # atlas-cloud pinned, z-ai/glm-4.7, 2 seeds
 //   npx tsx benchmarks/diagnosticsAb.ts --provider any --model openai/gpt-5-mini
 //   npx tsx benchmarks/diagnosticsAb.ts --task rename-function --nudge off
-//   (OPENROUTER_API_KEY from .env; default provider pin = atlas-cloud sponsorship credits)
+//   (OPENROUTER_API_KEY from .env; default provider pin = atlas-cloud, which draws on a sponsor balance that can
+//    run dry: a 402 means the pool is empty, and `--provider any` bills the real account)
 // ============================================
 
 import { execFile } from 'node:child_process';
@@ -250,7 +251,7 @@ async function main(): Promise<void> {
     const i = args.indexOf(`--${name}`);
     return i >= 0 ? args[i + 1] : undefined;
   };
-  // Default provider pin: Atlas Cloud (sponsorship credits) — `--provider any`
+  // Default provider pin: Atlas Cloud (a sponsor balance that can run out; a 402 means it is dry) — `--provider any`
   // unpins, `--provider <slug>` pins elsewhere. The default model must be one
   // Atlas Cloud actually serves (glm-4.7, deepseek-v4-pro, kimi-k2.5, glm-5 as
   // of 2026-07-29); a pinned run with an unserved model fails with no provider.

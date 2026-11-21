@@ -27,6 +27,36 @@ routing each level to the most **cost-efficient model** based on data.
   instances; the official `swebench.harness.run_evaluation` grades them via
   FAIL_TO_PASS + PASS_TO_PASS.
 
+## Credits
+
+The benchmarks never assume free credits.
+
+- Runs pinned with `OPENROUTER_PROVIDER_ONLY=atlas-cloud` (and `diagnosticsAb.ts`
+  by default) draw on an Atlas Cloud sponsor balance, and that balance can run out.
+- A **402** ("insufficient balance" / "insufficient credits") means the sponsor
+  pool is dry. It is not a model failure. A 401 "User not found" means the
+  OpenRouter key was rejected.
+- `benchmarks/modelSelect.ts` treats 401, 402, quota errors and the worker's
+  `[Worker] quota|infra on … fallback to …` line as infrastructure failures. It
+  leaves them out of every pass rate, stops the sweep, prints the reason and
+  produces no ranking. `results/latest.json` keeps the last valid run.
+- It also treats the adapter's `[OpenRouter] … failed; escalating to …` line as
+  an infrastructure failure: a failed `deepseek/deepseek-v4-flash` run is re-run
+  on the GLM fallback, so that result does not belong to the model under test.
+- **Dropping the pin bills the real OpenRouter account.** Unset
+  `OPENROUTER_PROVIDER_ONLY` (modelSelect, reviewerModelSelect,
+  providerConcurrency) or pass `--provider any` to `diagnosticsAb.ts` only when
+  spending real-account credit is intended.
+
+## Escalation finding (`--primary`)
+
+`npx tsx benchmarks/modelSelect.ts --model <primary> --model <candidate>… --primary <primary> --task <id>…`
+adds an ESCALATION FINDING section. `--primary` must be one of the `--model`
+values. A candidate that scores below the primary on the same tasks is
+reported as "weaker than primary - not a second opinion". Eligible candidates
+are ranked by pass rate, then $/pass. If the primary passes 100%, the report
+says the task set does not discriminate and recommends no escalate change.
+
 ## Recommended models per level (measured)
 
 Derived from benchmark data (`benchmarks/results/`). Score = pass_rate → $/pass → tool calls.
