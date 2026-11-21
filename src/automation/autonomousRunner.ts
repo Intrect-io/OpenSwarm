@@ -38,37 +38,33 @@ import * as maintenance from './runnerMaintenance.js';
 import { createMaintenanceState, type MaintenanceHost } from './runnerMaintenance.js';
 import { attachSchedulerEvents, type SchedulerEventsHost } from './runnerSchedulerEvents.js';
 import * as durableReconcile from './runnerDurableReconcile.js';
+import * as providerConfig from './runnerProviderConfig.js';
+import type { ProviderConfigHost } from './runnerProviderConfig.js';
 import { createDurableReconcileState, type DurableReconcileHost } from './runnerDurableReconcile.js';
 import { pruneDraftCache } from './draftCache.js';
 import { pruneSessionLogs } from '../support/sessionLog.js';
 import { pruneScratchpads } from '../support/scratchpad.js';
 import { pruneSnapshots } from '../support/worktreeSnapshot.js';
 import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecution.js';
-import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
 import { HostDiskGate, dispatchWritePaths } from '../support/hostHealth.js';
 import { reclaimWorktreesUnderDiskPressure } from './diskPressureReclaim.js';
 import { decideExplicitReadmission } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
-import { writeProviderOverride } from '../core/providerOverride.js';
-import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState } from '../taskState/store.js';
+import { getTaskState, reconcileDependencyBlockers } from '../taskState/store.js';
 import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
 import { RunnerPauseControl } from './runnerPauseControl.js';
-import { providerSwitchViolation } from '../adapters/unattendedPolicy.js'; import { providerSwitchFamilyViolation } from '../adapters/reviewerIndependence.js';
 import { pruneWorktrees } from '../support/worktreeManager.js';
 import { isExecutionLive } from './executionLiveness.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
 import { dirname } from 'node:path';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
-import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 export { pickPipelineFailureDetail } from './runnerState.js';
 export { parkRunForHuman } from './runnerParking.js';
 import type { AdapterName } from '../adapters/types.js';
 
-import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
-import type { ModelRole } from '../adapters/modelCompat.js';
 import {
   DurableRunCoordinator,
   type ExecutionDurabilityHooks,
@@ -79,16 +75,13 @@ import {
   completionStats,
 } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
-import { planStalledInProgress } from './stalledInProgress.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
-import { exclusionCheck, formatReadinessSummary, projectSkipLabelsHook } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
-import { completeParentIfChildrenDone as completeParentLocally } from '../taskState/store.js'; import { transitionWithReason } from './trackerTransition.js'; import { releaseDependentsInTracker } from './dependentRelease.js';
-import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
+import { formatReadinessSummary, projectSkipLabelsHook } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
+import { releaseDependentsInTracker } from './dependentRelease.js';
 import {
   isExplicitAdmissionRetry,
   planExplicitDeferredRecovery,
 } from './explicitDispatchRecovery.js';
-import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
 import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
 import { globalRateLimit } from './rateLimitBackoff.js';
 
@@ -850,10 +843,10 @@ export class AutonomousRunner {
   }
 
   // The maintenance lanes (knowledge-graph refresh, registry scan, skip summary,
-  // backlog grooming, merged-publication sweep) and their state live in
-  // runnerMaintenance.ts (AGT-4867). These delegators keep the runner's names,
-  // which tests call and reassign; the moved code calls back through the host,
-  // so a reassignment is honoured.
+  // backlog grooming, merged-publication sweep, ledger retrospective, decomposed-parent
+  // completion, stalled In Progress sweep) and their state live in runnerMaintenance.ts
+  // (AGT-4867). These delegators keep the runner's names, which tests call and reassign;
+  // the moved code calls back through the host, so a reassignment is honoured.
   private readonly maintenanceState = createMaintenanceState();
   private refreshKnowledgeGraphs(): void { maintenance.refreshKnowledgeGraphs(this.maintenanceHost()); }
   private refreshCodeRegistries(): void { maintenance.refreshCodeRegistries(this.maintenanceHost()); }
@@ -862,6 +855,9 @@ export class AutonomousRunner {
   private groupTasksForGrooming(tasks: TaskItem[]): Promise<Map<string, TaskItem[]>> { return maintenance.groupTasksForGrooming(this.maintenanceHost(), tasks); }
   private maybeRunBacklogGrooming(tasks: TaskItem[]): Promise<TaskItem[]> { return maintenance.maybeRunBacklogGrooming(this.maintenanceHost(), tasks); }
   private reconcileMergedPublications(tasks: TaskItem[], now?: number): Promise<void> { return maintenance.reconcileMergedPublications(this.maintenanceHost(), tasks, now); }
+  private maybeRunLedgerRetrospective(): Promise<void> { return maintenance.maybeRunLedgerRetrospective(this.maintenanceHost()); }
+  private completeParentIfChildrenMerged(childIssueId: string, source: NonNullable<ReturnType<typeof getTaskSource>>): Promise<void> { return maintenance.completeParentIfChildrenMerged(this.maintenanceHost(), childIssueId, source); }
+  private reconcileStalledInProgress(tasks: TaskItem[], now?: number): Promise<TaskItem[]> { return maintenance.reconcileStalledInProgress(this.maintenanceHost(), tasks, now); }
 
   private maintenanceHostCache: MaintenanceHost | undefined;
   /** Built once; every member reads the runner at call time (see MaintenanceHost). */
@@ -873,6 +869,7 @@ export class AutonomousRunner {
       get config() { return runner().config; },
       get scheduler() { return runner().scheduler; },
       get durableRuns() { return runner().durableRuns; },
+      get stopping() { return runner().stopping; },
       syslog: (line) => this.syslog(line),
       resolveProjectPath: (task) => this.resolveProjectPath(task),
       resolveRegistryProjectId: (projectPath) => this.resolveRegistryProjectId(projectPath),
@@ -887,112 +884,6 @@ export class AutonomousRunner {
     const safeLine = line.replace(/[\r\n]/g, '');
     console.log(`[HB] ${safeLine}`);
     broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'heartbeat', line: safeLine } });
-  }
-
-  /**
-   * The retrospective lane (AGT-4181): the runner reads its own ledger and
-   * files one evidence-rich issue on the largest failure bucket, so the
-   * systemic fixes an operator would derive from the same queries happen
-   * without one. Isolated — a lane failure must not fail the heartbeat.
-   */
-  private async maybeRunLedgerRetrospective(): Promise<void> {
-    if (!this.config.retrospectiveProjectId || !this.durableRuns.isPrimary || this.stopping) return;
-    try {
-      const source = getTaskSource();
-      if (source) {
-        const outcome = await runLedgerRetrospective({ taskSource: source, projectId: this.config.retrospectiveProjectId });
-        if (outcome.filed) this.syslog(`🔁 Retrospective filed ${outcome.identifier}: ${outcome.reason}`);
-      }
-    } catch (error) {
-      console.warn('[AutonomousRunner] Ledger retrospective failed:', error instanceof Error ? error.message : error);
-    }
-  }
-
-  private async completeParentIfChildrenMerged(childIssueId: string, source: NonNullable<ReturnType<typeof getTaskSource>>): Promise<void> {
-    const parentState = getTaskState(childIssueId)?.parentIssueId
-      ? getTaskState(getTaskState(childIssueId)!.parentIssueId!)
-      : undefined;
-    if (!parentState || parentState.childIssueIds.length === 0) return;
-    for (const childId of parentState.childIssueIds) {
-      const lookup = await source.lookupIssueState(childId).catch(() => null);
-      if (!lookup || !lookup.ok || !lookup.issue || lookup.issue.state.toLowerCase() !== 'done') return;
-    }
-    const parent = completeParentLocally(childIssueId);
-    if (!parent) return;
-    const accepted = await transitionWithReason(source, parent.issueId, 'Done', `All ${parent.childIssueIds.length} child tasks merged, so this parent closes as Done.`).catch(() => false);
-    if (!accepted) return;
-    await releaseDependentsInTracker(source, parent.issueId); // AGT-4817: tasks waiting on the parent go to Todo in the tracker too
-    this.syslog(`✓ ${parent.issueIdentifier ?? parent.issueId}: all children merged → Done`);
-  }
-
-  /**
-   * Keep Linear's In Progress column honest: it represents a scheduler-owned
-   * task or a live durable lease, never an abandoned claim. The bulk heartbeat
-   * fetch already carries updatedAt, so the sweep adds no read-side API calls.
-   */
-  private async reconcileStalledInProgress(tasks: TaskItem[], now = Date.now()): Promise<TaskItem[]> {
-    const source = getTaskSource(); if (source?.kind !== 'linear') return tasks;
-
-    const staleAfterMs = (this.config.stalledInProgressHours ?? 6) * 60 * 60_000;
-    const candidates = planStalledInProgress(tasks, {
-      isExcluded: await exclusionCheck(tasks, this.config.skip ?? DEFAULT_AGENT_SKIP, this.config.projectAgents, (t: TaskItem) => this.resolveProjectPath(t)), // AGT-4784
-      now,
-      staleAfterMs,
-      hasOpenSwarmClaim: (issueId) =>
-        this.durableRuns.getRun(issueId) != null
-        && getTaskState(issueId)?.execution.status === 'in_progress',
-      isSchedulerOwned: (issueId) => this.scheduler.isTaskQueued(issueId) || this.scheduler.isTaskRunning(issueId),
-      hasLiveLease: (issueId) => {
-        const run = this.durableRuns.getRun(issueId);
-        return Boolean(
-          run
-          && ACTIVE_LEASE_STATES.includes(run.state)
-          && run.leaseExpiresAt != null
-          && run.leaseExpiresAt > now,
-        );
-      },
-      hasPublishedArtifact: (issueId) => Boolean(this.durableRuns.getRun(issueId)?.prUrl),
-    });
-
-    let moved = 0;
-    for (const { task, targetState } of candidates) {
-      const issueId = task.issueId || task.id;
-      // Re-read immediately before the write. The heartbeat snapshot may be
-      // minutes old; a person or another daemon could have reclaimed or edited
-      // the issue since then. Linear has no conditional issue-update mutation,
-      // so an exact state+updatedAt match is the strongest available optimistic
-      // guard and missing evidence must fail closed.
-      const refreshed = await source.lookupIssueState(task.issueIdentifier ?? issueId).catch((error) => ({
-        ok: false as const,
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      if (
-        !refreshed.ok
-        || !refreshed.issue
-        || refreshed.issue.state.toLowerCase() !== 'in progress'
-        || !Number.isFinite(refreshed.issue.updatedAt)
-        || refreshed.issue.updatedAt !== task.trackerUpdatedAt
-      ) {
-        console.warn(
-          `[AutonomousRunner] Skipping stale-state repair for ${task.issueIdentifier ?? issueId}: tracker ownership changed or could not be revalidated`,
-        );
-        continue;
-      }
-      const reason = `No OpenSwarm run, lease or pull request has owned this issue for ${this.config.stalledInProgressHours ?? 6}h, so it returns to ${targetState}.`;
-      const accepted = await transitionWithReason(source, issueId, targetState, reason).catch((error) => {
-        console.warn(`[AutonomousRunner] Failed to retire stalled ${task.issueIdentifier ?? issueId}:`, error);
-        return false;
-      });
-      if (!accepted) {
-        console.warn(`[AutonomousRunner] Tracker refused stale-state repair for ${task.issueIdentifier ?? issueId}`);
-        continue;
-      }
-      task.linearState = targetState; updateTaskLinearState(issueId, targetState);
-      moved++;
-      this.syslog(`↩ ${task.issueIdentifier ?? issueId}: stale In Progress → ${targetState}`);
-    }
-    if (moved > 0) this.syslog(`✓ Retired ${moved} stalled In Progress issue(s)`);
-    return tasks;
   }
 
   async heartbeat(): Promise<void> {
@@ -1819,91 +1710,48 @@ export class AutonomousRunner {
     };
   }
 
-  private startPeriodicReviews(): void {
-    for (const job of this.periodicReviewJobs) job.stop();
-    this.periodicReviewJobs = [];
-    for (const review of this.config.periodicReviews ?? []) {
-      const cron = new Cron(review.schedule, () => {
-        void this.runPeriodicReviewAcrossProjects(review).catch((error) =>
-          console.error(`[PeriodicReview] ${review.profile} failed:`, error));
-      });
-      this.periodicReviewJobs.push(cron);
-    }
-  }
+  // Periodic reviews, the orchestrator start, the adapter summary, provider model remapping
+  // and the live provider switch live in runnerProviderConfig.ts (AGT-4867 slice F). The
+  // public methods keep their signatures (the dashboard and service call them); the private
+  // delegators keep the runner's names, which the constructor, start() and tests call. The
+  // host is built lazily and is safe from the constructor: building it reads nothing.
+  private startPeriodicReviews(): void { providerConfig.startPeriodicReviews(this.providerConfigHost()); }
+  private runPeriodicReviewAcrossProjects(review: providerConfig.PeriodicReviewConfig): Promise<void> { return providerConfig.runPeriodicReviewAcrossProjects(this.providerConfigHost(), review); }
+  private startOrchestrator(): void { providerConfig.startOrchestrator(this.providerConfigHost()); }
+  getAdapterSummary() { return providerConfig.getAdapterSummary(this.providerConfigHost()); }
+  private applyProviderConfig(adapter: AdapterName, overrideRoleAdapters = true): void { providerConfig.applyProviderConfig(this.providerConfigHost(), adapter, overrideRoleAdapters); }
 
-  private async runPeriodicReviewAcrossProjects(review: NonNullable<AutonomousConfig['periodicReviews']>[number]): Promise<void> {
-    const { runPeriodicReview } = await import('../coordination/periodicReview.js');
-    const projects = this.getBackgroundServiceProjects();
-    for (const repository of projects) {
-      await runPeriodicReview({
-        repository,
-        taskId: `periodic:${review.profile}`,
-        profile: review.profile,
-        adapter: review.adapter,
-      });
-    }
-  }
+  /**
+   * Why this runner may not be switched to `adapter`, or null. A delegated CLI owns its tool loop,
+   * so the fences the daemon refused to start without (AGT-4444) would not reach it; the operator's
+   * `allowDelegatedAdapters` is the only way past. Callers that take the adapter from outside the
+   * process (the dashboard toggle, `openswarm provider`) ask this before `switchProvider`.
+   */
+  providerSwitchViolation(adapter: AdapterName): string | null { return providerConfig.providerSwitchViolation(this.providerConfigHost(), adapter); }
+  switchProvider(adapter: AdapterName): void { providerConfig.switchProvider(this.providerConfigHost(), adapter); }
 
-  private startOrchestrator(): void {
-    const config = resolveOrchestratorConfig(this.config);
-    if (!config?.enabled) return;
-
-    const trackerSource = getTaskSource();
-    const getCachedIssue = (issueIdOrIdentifier: string) => {
-      const requested = issueIdOrIdentifier.toLowerCase();
-      const task = this.lastFetchedTasks.find((candidate) =>
-        candidate.issueId?.toLowerCase() === requested
-        || candidate.issueIdentifier?.toLowerCase() === requested
-        || candidate.id.toLowerCase() === requested);
-      const issueId = task?.issueId ?? task?.id;
-      if (!task || !issueId) return undefined;
-      return {
-        issueId,
-        identifier: task.issueIdentifier ?? issueId,
-        title: task.title,
-        state: task.linearState,
-        priority: task.priority,
-        blockedBy: task.blockedBy,
-      };
+  private providerConfigHostCache: ProviderConfigHost | undefined;
+  /** Built once (first from the constructor); every member reads the runner at call time (see ProviderConfigHost). */
+  private providerConfigHost(): ProviderConfigHost {
+    if (this.providerConfigHostCache) return this.providerConfigHostCache;
+    const runner = () => this;
+    this.providerConfigHostCache = {
+      get config() { return runner().config; },
+      get durableRuns() { return runner().durableRuns; },
+      get defaultModelCache() { return runner().defaultModelCache; },
+      get lastFetchedTasks() { return runner().lastFetchedTasks; },
+      get periodicReviewJobs() { return runner().periodicReviewJobs; },
+      set periodicReviewJobs(value: Cron[]) { runner().periodicReviewJobs = value; },
+      get orchestratorSupervisor() { return runner().orchestratorSupervisor; },
+      set orchestratorSupervisor(value: OrchestratorSupervisor | null) { runner().orchestratorSupervisor = value; },
+      get rateLimitUntil() { return runner().rateLimitUntil; },
+      set rateLimitUntil(value: number) { runner().rateLimitUntil = value; },
+      getBackgroundServiceProjects: () => this.getBackgroundServiceProjects(),
+      scheduleNextHeartbeat: () => this.scheduleNextHeartbeat(),
+      applyProviderConfig: (adapter, overrideRoleAdapters) => this.applyProviderConfig(adapter, overrideRoleAdapters),
+      runPeriodicReviewAcrossProjects: (review) => this.runPeriodicReviewAcrossProjects(review),
     };
-    const tracker = trackerSource ? {
-      getCachedIssue,
-      resolveIssue: async (issueIdOrIdentifier: string) => {
-        const cached = getCachedIssue(issueIdOrIdentifier);
-        if (cached) return { issueId: cached.issueId, identifier: cached.identifier, source: 'cache' as const };
-        if (!trackerSource.resolveIssue) return null;
-        const resolved = await trackerSource.resolveIssue(issueIdOrIdentifier);
-        if (!resolved.ok) throw new Error(`Tracker issue lookup failed: ${resolved.error}`);
-        return resolved.issue ? {
-          issueId: resolved.issue.id,
-          identifier: resolved.issue.identifier,
-          source: 'tracker' as const,
-        } : null;
-      },
-      addComment: (issueId: string, body: string, idempotencyKey: string) =>
-        trackerSource.addComment(issueId, body, idempotencyKey),
-    } : undefined;
-
-    const supervisor = new OrchestratorSupervisor({
-      config,
-      policy: this.config.mcpPolicies?.orchestrator,
-      getRepositories: () => this.getBackgroundServiceProjects(),
-      buildInstructionCapsule,
-      tracker,
-    });
-    try {
-      supervisor.start();
-      this.orchestratorSupervisor = supervisor;
-      console.log(
-        `[Orchestrator] supervisor enabled (${config.eventDriven ? 'events' : 'cron-only'}`
-        + `${config.schedule ? `, ${config.schedule}` : ''}; ${config.adapter ?? 'daemon-default'}/${config.model ?? 'adapter-default'})`,
-      );
-    } catch (error) {
-      // A bad optional schedule must not tear down the worker heartbeat after it
-      // has already started. No listener was registered if Cron construction failed.
-      console.error('[Orchestrator] supervisor disabled: invalid lifecycle configuration:', error);
-      void supervisor.stop();
-    }
+    return this.providerConfigHostCache;
   }
 
   getCoordinationConfig() {
@@ -1916,157 +1764,6 @@ export class AutonomousRunner {
       orchestrator: resolveOrchestratorConfig(this.config),
       orchestratorSchedule: this.config.orchestratorSchedule,
     };
-  }
-
-  async getAdapterSummary() {
-    const defaultAdapter = this.config.defaultAdapter ?? 'codex';
-    const defaultRoles = this.config.defaultRoles;
-    const workerAdapter = defaultRoles?.worker?.adapter ?? defaultAdapter;
-    const reviewerAdapter = defaultRoles?.reviewer?.adapter ?? defaultAdapter;
-
-    return {
-      defaultAdapter,
-      worker: {
-        adapter: workerAdapter,
-        // Resolve the adapter's real default when config omits the model, so the
-        // dashboard's PAIR bar shows what's running instead of "-". (INT-2393)
-        model: defaultRoles?.worker?.model ?? this.config.workerModel
-          ?? await resolveAdapterDefaultModel(workerAdapter, this.defaultModelCache),
-        enabled: defaultRoles?.worker?.enabled !== false,
-      },
-      reviewer: {
-        adapter: reviewerAdapter,
-        model: defaultRoles?.reviewer?.model ?? this.config.reviewerModel
-          ?? await resolveAdapterDefaultModel(reviewerAdapter, this.defaultModelCache),
-        enabled: defaultRoles?.reviewer?.enabled !== false,
-      },
-      tester: defaultRoles?.tester ? {
-        adapter: defaultRoles.tester.adapter ?? defaultAdapter,
-        model: defaultRoles.tester.model,
-        enabled: defaultRoles.tester.enabled !== false,
-      } : undefined,
-      documenter: defaultRoles?.documenter ? {
-        adapter: defaultRoles.documenter.adapter ?? defaultAdapter,
-        model: defaultRoles.documenter.model,
-        enabled: defaultRoles.documenter.enabled !== false,
-      } : undefined,
-    };
-  }
-
-  private applyProviderConfig(adapter: AdapterName, overrideRoleAdapters = true): void {
-    // On a provider switch, keep the model only if it clearly belongs to the new
-    // provider; otherwise drop it (undefined) so the target adapter resolves its
-    // own default via getDefaultModel(). Shared with the planner's model guard
-    // (src/adapters/modelCompat.ts) so both stay in sync. (INT-2510)
-    const mapModelForProvider = (model: string | undefined, role?: ModelRole): string | undefined =>
-      mapModelForAdapter(adapter, model, role);
-
-    this.config.defaultAdapter = adapter;
-
-    if (this.config.defaultRoles) {
-      // The role NAME travels with the model. Without it every entry here
-      // mapped anonymously, so an adapter that resolves per role — cursor, whose
-      // catalogue shares no id with any other provider — could not tell the
-      // worker from the reviewer and gave both the same model. That is the role
-      // split going missing at the one call site whose entire job is to preserve
-      // it. (AGT-4273)
-      const roleConfig = <T extends { adapter?: AdapterName; model?: string }>(role: T, roleName: ModelRole): T => {
-        if (!overrideRoleAdapters && role.adapter) return role;
-        return {
-          ...role,
-          adapter,
-          model: mapModelForProvider(role.model, roleName),
-        };
-      };
-      this.config.defaultRoles.worker = {
-        ...roleConfig(this.config.defaultRoles.worker, 'worker'),
-      };
-      this.config.defaultRoles.reviewer = {
-        ...roleConfig(this.config.defaultRoles.reviewer, 'reviewer'),
-      };
-
-      if (this.config.defaultRoles.tester) {
-        this.config.defaultRoles.tester = {
-          ...roleConfig(this.config.defaultRoles.tester, 'tester'),
-        };
-      }
-      if (this.config.defaultRoles.documenter) {
-        this.config.defaultRoles.documenter = {
-          ...roleConfig(this.config.defaultRoles.documenter, 'documenter'),
-        };
-      }
-      if (this.config.defaultRoles.auditor) {
-        this.config.defaultRoles.auditor = {
-          ...roleConfig(this.config.defaultRoles.auditor, 'auditor'),
-        };
-      }
-      if (this.config.defaultRoles['skill-documenter']) {
-        this.config.defaultRoles['skill-documenter'] = {
-          ...roleConfig(this.config.defaultRoles['skill-documenter'], 'skill-documenter'),
-        };
-      }
-    }
-
-    if (this.config.workerModel) {
-      this.config.workerModel = mapModelForProvider(this.config.workerModel, 'worker');
-    }
-    if (this.config.reviewerModel) {
-      this.config.reviewerModel = mapModelForProvider(this.config.reviewerModel, 'reviewer');
-    }
-    // The decomposition planner is a role too. Leaving it unmapped sent the
-    // config's codex id straight into `claude -p --model gpt-5.5` — a fast 404
-    // that killed EVERY decomposition on the new provider. (INT-2510)
-    if (this.config.plannerModel) {
-      this.config.plannerModel = mapModelForProvider(this.config.plannerModel, 'planner');
-    }
-
-    // jobProfiles ALSO pin per-role models (config's light/heavy → e.g. qwen), and getModelForRole
-    // gives the profile model precedence over defaultRoles. Remapping only defaultRoles left every
-    // estimate-matched task on its old provider's model → "I switched to Codex but it still uses the
-    // old provider". Remap the profiles too: an incompatible id becomes undefined so the adapter
-    // falls back to its OWN default model.
-    if (this.config.jobProfiles) {
-      for (const profile of this.config.jobProfiles) {
-        if (!profile.roles) continue;
-        for (const role of Object.keys(profile.roles) as Array<keyof typeof profile.roles>) {
-          const mapped = mapModelForProvider(profile.roles[role], role);
-          if (mapped === undefined) delete profile.roles[role];
-          else profile.roles[role] = mapped;
-        }
-      }
-    }
-  }
-
-  /**
-   * Why this runner may not be switched to `adapter`, or null. A delegated CLI owns its tool loop,
-   * so the fences the daemon refused to start without (AGT-4444) would not reach it; the operator's
-   * `allowDelegatedAdapters` is the only way past. Callers that take the adapter from outside the
-   * process (the dashboard toggle, `openswarm provider`) ask this before `switchProvider`.
-   */
-  providerSwitchViolation(adapter: AdapterName): string | null {
-    return providerSwitchViolation(adapter, this.config.allowDelegatedAdapters) ?? providerSwitchFamilyViolation(adapter); // nor same-family review (#886)
-  }
-
-  switchProvider(adapter: AdapterName): void {
-    const previousAdapter = this.config.defaultAdapter ?? 'codex';
-    this.applyProviderConfig(adapter);
-
-    // A provider quota belongs to the provider that reported it. Keeping the
-    // old reset timestamp after an explicit provider switch leaves every free
-    // scheduler slot idle even though the replacement provider is available.
-    // Only release quota-paused runs; task/infra failures and human gates keep
-    // their durable state.
-    if (adapter !== previousAdapter) {
-      this.rateLimitUntil = 0;
-      for (const run of this.durableRuns.listRuns(['RETRY_AT'])) {
-        if (run.lastErrorCode === 'rate_limited') this.durableRuns.markReady(run.issueId);
-      }
-      this.scheduleNextHeartbeat();
-    }
-
-    // Persist the choice so a daemon restart keeps it (in-memory switch was lost every restart).
-    writeProviderOverride(adapter);
-    console.log(`[AutonomousRunner] Provider switched: ${adapter.replace(/[\r\n]/g, '')}`);
   }
 
   pauseScheduler(): void { this.scheduler.pause(); }

@@ -1,11 +1,14 @@
 // Created: 2026-11-22
 // Purpose: the heartbeat's maintenance lanes — knowledge-graph refresh, code-registry scan, skip-summary
 //          logging, backlog-grooming cadence and the post-merge publication sweep — moved out of
-//          autonomousRunner.ts as host-taking functions with their per-runner state (AGT-4867 slice C)
+//          autonomousRunner.ts as host-taking functions with their per-runner state (AGT-4867 slice C);
+//          the ledger retrospective, decomposed-parent completion and stalled In Progress sweep joined
+//          them in AGT-4867 slice F
 // Dependencies: knowledge (graph refresh), registry/entityScanner, backlogGrooming, mergedPublications,
-//               readinessGate (exclusions), trackerTransition, taskState/store, runnerExecution (task source)
-// Test Status: autonomousRunner.coverage/enable/pause/durable/hostHealth/idleBackoff/agentEligibility tests,
-//              runnerMaintenance.test.ts (host contract)
+//               readinessGate (exclusions), trackerTransition, taskState/store, runnerExecution (task source),
+//               ledgerRetrospective, stalledInProgress, dependentRelease, runLedgerTypes
+// Test Status: autonomousRunner.coverage/enable/pause/durable/hostHealth/idleBackoff/agentEligibility/decompose
+//              tests, runnerMaintenance.test.ts (host contract), runnerMaintenance.sweeps.test.ts (slice F)
 
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { normalizeProjectPath, type TaskScheduler } from '../orchestration/taskScheduler.js';
@@ -13,7 +16,7 @@ import { broadcastEvent } from '../core/eventHub.js';
 import { refreshGraph, toProjectSlug } from '../knowledge/index.js';
 import { scanRepository } from '../registry/entityScanner.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
-import { updateTaskLinearState } from '../taskState/store.js';
+import { completeParentIfChildrenDone as completeParentLocally, getTaskState, updateTaskLinearState } from '../taskState/store.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { getTaskSource } from './runnerExecution.js';
@@ -26,6 +29,10 @@ import { DEFAULT_AGENT_SKIP } from './agentEligibility.js';
 import { exclusionCheck, exclusionLabelsForProject } from './readinessGate.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
 import { transitionWithReason } from './trackerTransition.js';
+import { releaseDependentsInTracker } from './dependentRelease.js';
+import { runLedgerRetrospective } from './ledgerRetrospective.js';
+import { planStalledInProgress } from './stalledInProgress.js';
+import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
 import type { DurableRunCoordinator } from './durableRunCoordinator.js';
 import type { AutonomousConfig } from './runnerTypes.js';
 
@@ -72,9 +79,11 @@ export const MERGED_PUBLICATION_SWEEP_INTERVAL_MS = 10 * 60_000;
  */
 export interface MaintenanceHost {
   readonly maintenance: MaintenanceState;
-  readonly config: Pick<AutonomousConfig, 'allowedProjects' | 'backlogGrooming' | 'plannerModel' | 'plannerTimeoutMs' | 'skip' | 'projectAgents'>;
+  readonly config: Pick<AutonomousConfig, 'allowedProjects' | 'backlogGrooming' | 'plannerModel' | 'plannerTimeoutMs' | 'skip' | 'projectAgents' | 'retrospectiveProjectId' | 'stalledInProgressHours'>;
   readonly scheduler: Pick<TaskScheduler, 'isTaskQueued' | 'isTaskRunning'>;
-  readonly durableRuns: Pick<DurableRunCoordinator, 'getRun' | 'recordPullRequestState'>;
+  readonly durableRuns: Pick<DurableRunCoordinator, 'getRun' | 'recordPullRequestState' | 'isPrimary'>;
+  /** The runner's shutdown flag, read at call time: a stopping runner files no retrospective. */
+  readonly stopping: boolean;
   syslog(line: string): void;
   resolveProjectPath(task: TaskItem): Promise<string | null>;
   resolveRegistryProjectId(projectPath: string): string;
@@ -324,4 +333,110 @@ export async function reconcileMergedPublications(host: MaintenanceHost, tasks: 
     if (targetState === 'Done') await host.completeParentIfChildrenMerged(issueId, source);
   }
   if (moved > 0) host.syslog(`✓ Reconciled ${moved} merged/closed publication(s)`);
+}
+
+/**
+ * The retrospective lane (AGT-4181): the runner reads its own ledger and
+ * files one evidence-rich issue on the largest failure bucket, so the
+ * systemic fixes an operator would derive from the same queries happen
+ * without one. Isolated — a lane failure must not fail the heartbeat.
+ */
+export async function maybeRunLedgerRetrospective(host: MaintenanceHost): Promise<void> {
+  if (!host.config.retrospectiveProjectId || !host.durableRuns.isPrimary || host.stopping) return;
+  try {
+    const source = getTaskSource();
+    if (source) {
+      const outcome = await runLedgerRetrospective({ taskSource: source, projectId: host.config.retrospectiveProjectId });
+      if (outcome.filed) host.syslog(`🔁 Retrospective filed ${outcome.identifier}: ${outcome.reason}`);
+    }
+  } catch (error) {
+    console.warn('[AutonomousRunner] Ledger retrospective failed:', error instanceof Error ? error.message : error);
+  }
+}
+
+export async function completeParentIfChildrenMerged(host: MaintenanceHost, childIssueId: string, source: TaskSource): Promise<void> {
+  const parentState = getTaskState(childIssueId)?.parentIssueId
+    ? getTaskState(getTaskState(childIssueId)!.parentIssueId!)
+    : undefined;
+  if (!parentState || parentState.childIssueIds.length === 0) return;
+  for (const childId of parentState.childIssueIds) {
+    const lookup = await source.lookupIssueState(childId).catch(() => null);
+    if (!lookup || !lookup.ok || !lookup.issue || lookup.issue.state.toLowerCase() !== 'done') return;
+  }
+  const parent = completeParentLocally(childIssueId);
+  if (!parent) return;
+  const accepted = await transitionWithReason(source, parent.issueId, 'Done', `All ${parent.childIssueIds.length} child tasks merged, so this parent closes as Done.`).catch(() => false);
+  if (!accepted) return;
+  await releaseDependentsInTracker(source, parent.issueId); // AGT-4817: tasks waiting on the parent go to Todo in the tracker too
+  host.syslog(`✓ ${parent.issueIdentifier ?? parent.issueId}: all children merged → Done`);
+}
+
+/**
+ * Keep Linear's In Progress column honest: it represents a scheduler-owned
+ * task or a live durable lease, never an abandoned claim. The bulk heartbeat
+ * fetch already carries updatedAt, so the sweep adds no read-side API calls.
+ */
+export async function reconcileStalledInProgress(host: MaintenanceHost, tasks: TaskItem[], now = Date.now()): Promise<TaskItem[]> {
+  const source = getTaskSource(); if (source?.kind !== 'linear') return tasks;
+
+  const staleAfterMs = (host.config.stalledInProgressHours ?? 6) * 60 * 60_000;
+  const candidates = planStalledInProgress(tasks, {
+    isExcluded: await exclusionCheck(tasks, host.config.skip ?? DEFAULT_AGENT_SKIP, host.config.projectAgents, (t: TaskItem) => host.resolveProjectPath(t)), // AGT-4784
+    now,
+    staleAfterMs,
+    hasOpenSwarmClaim: (issueId) =>
+      host.durableRuns.getRun(issueId) != null
+      && getTaskState(issueId)?.execution.status === 'in_progress',
+    isSchedulerOwned: (issueId) => host.scheduler.isTaskQueued(issueId) || host.scheduler.isTaskRunning(issueId),
+    hasLiveLease: (issueId) => {
+      const run = host.durableRuns.getRun(issueId);
+      return Boolean(
+        run
+        && ACTIVE_LEASE_STATES.includes(run.state)
+        && run.leaseExpiresAt != null
+        && run.leaseExpiresAt > now,
+      );
+    },
+    hasPublishedArtifact: (issueId) => Boolean(host.durableRuns.getRun(issueId)?.prUrl),
+  });
+
+  let moved = 0;
+  for (const { task, targetState } of candidates) {
+    const issueId = task.issueId || task.id;
+    // Re-read immediately before the write. The heartbeat snapshot may be
+    // minutes old; a person or another daemon could have reclaimed or edited
+    // the issue since then. Linear has no conditional issue-update mutation,
+    // so an exact state+updatedAt match is the strongest available optimistic
+    // guard and missing evidence must fail closed.
+    const refreshed = await source.lookupIssueState(task.issueIdentifier ?? issueId).catch((error) => ({
+      ok: false as const,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    if (
+      !refreshed.ok
+      || !refreshed.issue
+      || refreshed.issue.state.toLowerCase() !== 'in progress'
+      || !Number.isFinite(refreshed.issue.updatedAt)
+      || refreshed.issue.updatedAt !== task.trackerUpdatedAt
+    ) {
+      console.warn(
+        `[AutonomousRunner] Skipping stale-state repair for ${task.issueIdentifier ?? issueId}: tracker ownership changed or could not be revalidated`,
+      );
+      continue;
+    }
+    const reason = `No OpenSwarm run, lease or pull request has owned this issue for ${host.config.stalledInProgressHours ?? 6}h, so it returns to ${targetState}.`;
+    const accepted = await transitionWithReason(source, issueId, targetState, reason).catch((error) => {
+      console.warn(`[AutonomousRunner] Failed to retire stalled ${task.issueIdentifier ?? issueId}:`, error);
+      return false;
+    });
+    if (!accepted) {
+      console.warn(`[AutonomousRunner] Tracker refused stale-state repair for ${task.issueIdentifier ?? issueId}`);
+      continue;
+    }
+    task.linearState = targetState; updateTaskLinearState(issueId, targetState);
+    moved++;
+    host.syslog(`↩ ${task.issueIdentifier ?? issueId}: stale In Progress → ${targetState}`);
+  }
+  if (moved > 0) host.syslog(`✓ Retired ${moved} stalled In Progress issue(s)`);
+  return tasks;
 }
