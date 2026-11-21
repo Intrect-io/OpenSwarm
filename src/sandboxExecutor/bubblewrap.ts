@@ -198,6 +198,40 @@ export async function validatedGitCommonDirectory(workspace: string): Promise<st
   }
 }
 
+export interface SupportMount {
+  path: string;
+  writable: boolean;
+  kind: 'directory' | 'file';
+}
+
+/**
+ * The ordered support bind-mount plan for one execution. Bind fds follow array
+ * order. The common git dir is mounted only when it lies outside the workspace
+ * and inside an allowed root; every support mount is read-only.
+ */
+export function planSupportMounts(input: {
+  workspace: string;
+  commonGit: string | undefined;
+  dependencyTargets: readonly string[];
+  dotGitKind: 'directory' | 'file' | undefined;
+  allowedRoots: readonly string[];
+}): SupportMount[] {
+  const { workspace, commonGit, allowedRoots } = input;
+  const support: SupportMount[] = [];
+  if (commonGit && !pathInside(workspace, commonGit) && allowedRoots.some((root) => pathInside(root, commonGit))) {
+    support.push({ path: commonGit, writable: false, kind: 'directory' });
+  }
+  for (const target of input.dependencyTargets) support.push({ path: target, writable: false, kind: 'directory' });
+  if (input.dotGitKind) support.push({ path: join(workspace, '.git'), writable: false, kind: input.dotGitKind });
+  return support;
+}
+
+/** Whether the companion would mount `commonGit` for `workspace` under `allowedRoots`. */
+export function commonGitMountable(workspace: string, commonGit: string | undefined, allowedRoots: readonly string[]): boolean {
+  return !!commonGit && planSupportMounts({ workspace, commonGit, dependencyTargets: [], dotGitKind: undefined, allowedRoots })
+    .some((mount) => mount.path === commonGit && !mount.writable);
+}
+
 export async function validatedDependencyTargets(workspace: string, roots: string[]): Promise<string[]> {
   const targets: string[] = [];
   const mainCheckout = linkedMainCheckoutOf(workspace);
@@ -540,19 +574,14 @@ export class BubblewrapSandboxBackend implements SandboxIsolationBackend {
         throw new Error('Sandbox workspace escaped its registered root');
       }
 
-      const support: Array<{ path: string; writable: boolean; kind: 'directory' | 'file' }> = [];
-      const dotGit = join(workspace.path, '.git');
-      const dotGitMetadata = await lstat(dotGit).catch(() => undefined);
-      const commonGit = await validatedGitCommonDirectory(workspace.path);
-      if (commonGit && !pathInside(workspace.path, commonGit)
-          && this.allowedRoots.some((root) => pathInside(root, commonGit))) {
-        support.push({ path: commonGit, writable: false, kind: 'directory' });
-      }
-      for (const target of await validatedDependencyTargets(workspace.path, this.allowedRoots)) {
-        support.push({ path: target, writable: false, kind: 'directory' });
-      }
-      if (dotGitMetadata?.isDirectory()) support.push({ path: dotGit, writable: false, kind: 'directory' });
-      else if (dotGitMetadata?.isFile()) support.push({ path: dotGit, writable: false, kind: 'file' });
+      const dotGitMetadata = await lstat(join(workspace.path, '.git')).catch(() => undefined);
+      const support = planSupportMounts({
+        workspace: workspace.path,
+        commonGit: await validatedGitCommonDirectory(workspace.path),
+        dependencyTargets: await validatedDependencyTargets(workspace.path, this.allowedRoots),
+        dotGitKind: dotGitMetadata?.isDirectory() ? 'directory' : dotGitMetadata?.isFile() ? 'file' : undefined,
+        allowedRoots: this.allowedRoots,
+      });
       for (const entry of support) {
         const flags = constants.O_RDONLY | constants.O_NOFOLLOW
           | (entry.kind === 'directory' ? constants.O_DIRECTORY : 0);

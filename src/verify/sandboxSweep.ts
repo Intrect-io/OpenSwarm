@@ -17,7 +17,7 @@
 // under the executor's allowed root that contains the project, not in $TMPDIR,
 // so those roots are swept too.
 //
-// A base sandbox is a `git worktree add` checkout. When `git worktree remove`
+// A base sandbox (and a strict head sandbox) is a `git worktree add` checkout. When `git worktree remove`
 // fails the runner keeps the root on purpose, so the source repository's
 // worktree metadata does not point at a deleted path. Deleting it here is still
 // right (it is a stale 1 GB tree), and the metadata is pruned right after, but
@@ -66,7 +66,7 @@ async function worktreeOwner(sandboxRoot: string): Promise<string | undefined> {
   const pointerFile = join(sandboxRoot, 'worktree', '.git');
   try {
     const info = await lstat(pointerFile);
-    if (!info.isFile()) return undefined; // A head clone has a .git directory, not a worktree pointer.
+    if (!info.isFile()) return undefined; // A cloned head has a .git directory, not a worktree pointer.
     const match = /^gitdir: (.+)$/m.exec(await readFile(pointerFile, 'utf8'));
     if (!match) return undefined;
     const adminDir = match[1].trim();

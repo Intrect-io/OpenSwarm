@@ -2,10 +2,10 @@ import { spawn } from 'node:child_process';
 
 export const GIT_TIMEOUT_MS = 30_000;
 /**
- * The strict-companion head sandbox is a `--no-hardlinks` clone: a full copy of
- * the object store, because the sandbox runs the repository's own test commands
- * and hardlinked packs would share inodes with the real checkout (the host-sandbox
- * clone uses `--shared` alternates instead, AGT-4785). That copy is bounded by disk
+ * When the strict companion cannot mount the project's common git dir, its head
+ * sandbox falls back to a `--no-hardlinks` clone: a full copy of the object store
+ * (the usual strict head is a detached worktree and the host-sandbox clone uses
+ * `--shared` alternates, AGT-4785). That copy is bounded by disk
  * throughput, not by git, and on a loaded host it outgrows the 30 s every other
  * git call gets — cgf-portal's 135 MB took 33 s at load 55, and the runner fell
  * back to the LLM tester 29 times in one day, which is how `ruff`-red code shipped
