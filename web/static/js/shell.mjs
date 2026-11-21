@@ -29,6 +29,18 @@ export const MORE_NAV = [
   { href: '/settings', label: 'Settings' },
 ];
 
+/**
+ * The opt-in web terminal (AGT-4002). Listed under "More" only while the last
+ * successful shell-status says `webTerminal: true`; the page itself is routed
+ * only while the terminal is attached.
+ */
+export const TERMINAL_NAV = { href: '/terminal', label: 'Terminal' };
+
+/** Show the Terminal entry only for a successful poll whose webTerminal is exactly true. */
+export function terminalNavVisible(outcome) {
+  return outcome?.status?.webTerminal === true;
+}
+
 const POLL_MS = 15_000;
 
 function escapeHtml(text) {
@@ -41,7 +53,7 @@ function escapeHtml(text) {
 export function currentRoute(pathname) {
   const path = (pathname || '/').replace(/\/+$/, '') || '/';
   if (path === '/index.html') return '/';
-  return [...PRIMARY_NAV, ...MORE_NAV].find((item) => item.href === path)?.href ?? null;
+  return [...PRIMARY_NAV, ...MORE_NAV, TERMINAL_NAV].find((item) => item.href === path)?.href ?? null;
 }
 
 const MOON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" class="when-dark"><path d="M13.5 10.2A6 6 0 0 1 5.8 2.5a6 6 0 1 0 7.7 7.7Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>';
@@ -49,15 +61,16 @@ const SUN = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" 
 const CHEVRON = '<svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 /** Brand + navigation markup for the page at `current`. */
-export function navMarkup(current) {
+export function navMarkup(current, { terminal = false } = {}) {
   const link = ({ href, label }) => `<a href="${href}"${href === current ? ' aria-current="page"' : ''}>${escapeHtml(label)}</a>`;
-  const inMore = MORE_NAV.some((item) => item.href === current);
+  const more = terminal === true ? [...MORE_NAV, TERMINAL_NAV] : MORE_NAV;
+  const inMore = more.some((item) => item.href === current);
   // The links scroll on a phone; "More" sits outside that scroller so its menu
   // is not clipped by the overflow it would otherwise live in.
   return `<a class="brand" href="/">OpenSwarm</a>`
     + `<nav class="topbar-nav-group" aria-label="Pages"><div class="topbar-nav">${PRIMARY_NAV.map(link).join('')}</div>`
     + `<details class="nav-more"><summary${inMore ? ' class="is-current"' : ''}>More ${CHEVRON}</summary>`
-    + `<div class="nav-more-menu">${MORE_NAV.map(link).join('')}</div></details></nav>`;
+    + `<div class="nav-more-menu">${more.map(link).join('')}</div></details></nav>`;
 }
 
 export function formatUptime(ms) {
@@ -159,7 +172,7 @@ export function mountShell(doc, { fetchImpl, pollMs = POLL_MS, location } = {}) 
   // One h1 per page for heading navigation. The active tab already names the
   // page on screen, so the heading is for assistive tech only (step 10).
   const main = doc.querySelector('main');
-  const entry = [...PRIMARY_NAV, ...MORE_NAV].find((item) => item.href === current);
+  const entry = [...PRIMARY_NAV, ...MORE_NAV, TERMINAL_NAV].find((item) => item.href === current);
   if (main && entry && !doc.querySelector('h1')) {
     const heading = doc.createElement('h1');
     heading.className = 'sr-only';
@@ -218,6 +231,23 @@ export function mountShell(doc, { fetchImpl, pollMs = POLL_MS, location } = {}) 
   observer?.observe(header);
   syncHeight();
 
+  // Added or removed after every poll: a refused, failed or ambiguous answer hides it.
+  const menu = header.querySelector('.nav-more-menu');
+  const moreSummary = header.querySelector('.nav-more > summary');
+  const syncTerminalNav = (visible) => {
+    const existing = menu?.querySelector(`a[href="${TERMINAL_NAV.href}"]`);
+    if (visible && !existing && menu) {
+      const anchor = doc.createElement('a');
+      anchor.href = TERMINAL_NAV.href;
+      anchor.textContent = TERMINAL_NAV.label;
+      if (current === TERMINAL_NAV.href) anchor.setAttribute('aria-current', 'page');
+      menu.appendChild(anchor);
+    } else if (!visible && existing) {
+      existing.remove();
+    }
+    if (current === TERMINAL_NAV.href) moreSummary?.classList.toggle('is-current', visible);
+  };
+
   let last = '';
   const refresh = async () => {
     let outcome;
@@ -229,6 +259,7 @@ export function mountShell(doc, { fetchImpl, pollMs = POLL_MS, location } = {}) 
     } catch {
       outcome = { unreachable: true };
     }
+    syncTerminalNav(terminalNavVisible(outcome));
     const markup = statusMarkup(describeStatus(outcome));
     // Only touch the DOM when the sentence changed: the line is a live region.
     if (markup !== last) { line.innerHTML = markup; last = markup; }

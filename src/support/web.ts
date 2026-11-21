@@ -363,7 +363,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         writeJson(res, 200, await buildShellStatus({
           runner: runnerRef,
           pendingEvents: () => getCoordinationStore().snapshot().pending,
-          linearConfigured: isLinearInitialized,
+          linearConfigured: isLinearInitialized, webTerminalActive: (await import('./terminalServer.js')).isWebTerminalActive,
           projectNeeds: () => {
             const snapshot = queryProjectSnapshot(configuredChannelPaths(), runnerRef);
             return { ...snapshot.totals, unavailable: snapshot.unavailable };
