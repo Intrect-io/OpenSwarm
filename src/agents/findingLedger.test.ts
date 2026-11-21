@@ -1,4 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { getCoordinationThread, postCoordinationThreadMessage } from '../coordination/coordinationThreads.js';
+import { resetTraceDbForTests } from '../coordination/coordinationTrace.js';
+import { appendReviewRound, appendWorkerRound, findingRound, loadFindingLedger, type FindingLedgerThreadState } from './findingLedgerStore.js';
+import type { PipelineContext } from './pairPipelineTypes.js';
 import {
   buildReviewerFindingsSection,
   buildWorkerFindingsSection,
@@ -307,5 +314,77 @@ describe('review fixes (AGT-4535 follow-up)', () => {
     const v = ledgerVerdict(l, { maxRounds: 2 }) as Exclude<ReturnType<typeof ledgerVerdict>, { kind: 'continue' }>;
     expect(describeLedgerStop(l, v, 'ko')).toMatch(/^리뷰 루프 중단 \(round_cap\): F1이\(가\) 리뷰 2라운드/);
     expect(describeLedgerStop(l, v, 'en')).toMatch(/^Review loop stopped \(round_cap\)/);
+  });
+});
+
+describe('findingLedger persistence', () => {
+  let root: string;
+  const savedDb = process.env.OPENSWARM_AUTOMATION_DB;
+  const scope = { repository: '/repo', taskId: 'issue-uuid-1', taskLabel: 'AGT-9', issueKey: 'AGT-9' };
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'finding-ledger-store-'));
+    process.env.OPENSWARM_AUTOMATION_DB = join(root, 'automation.db');
+    resetTraceDbForTests();
+  });
+
+  afterEach(() => {
+    resetTraceDbForTests();
+    process.env.OPENSWARM_AUTOMATION_DB = savedDb;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const messageCount = (state: FindingLedgerThreadState) =>
+    getCoordinationThread({ repository: scope.repository, threadId: state.threadId, messageLimit: 200 }).messages.items.length;
+
+  it('restores ids and responses after a restart at round 2 without duplicates', async () => {
+    // Run A: two rounds, persisted as they happen.
+    const first = await loadFindingLedger(scope);
+    expect(first.ledger.findings).toEqual([]);
+    const stateA: FindingLedgerThreadState = { scope, threadId: first.threadId, roundBase: first.roundBase };
+    const l1 = revise(createFindingLedger(), 1, ['off-by-one in range()', 'missing empty-input check']);
+    await appendReviewRound(stateA, l1, 1);
+    const l2w = recordWorkerResponses(l1, { round: 2, summary: 'F1: disputed — README.md:4 says the bound is exclusive\nF2: fixed — src/a.ts:12 returns early' });
+    await appendWorkerRound(stateA, l2w, 2);
+    const l = revise(l2w, 2, ['F1: still stops one short', 'leaks the file handle'], 'F2: resolved');
+    await appendReviewRound(stateA, l, 2);
+    expect(l.findings.map((f) => [f.id, f.status, f.disputeStreak])).toEqual([['F1', 'open', 1], ['F2', 'resolved', 0], ['F3', 'open', 0]]);
+
+    // A worker-side entry may not close anything, and other actors are ignored.
+    postCoordinationThreadMessage({
+      repository: scope.repository, threadId: stateA.threadId, actor: 'worker-call-sign', actorRole: 'reviewer', taskId: scope.taskId,
+      body: JSON.stringify({ v: 1, kind: 'review', round: 2, nextSeq: 2, finding: { ...l.findings[0], status: 'resolved' } }),
+    });
+    const written = messageCount(stateA);
+
+    // Restart: a new process opens the database again.
+    resetTraceDbForTests();
+    const restored = await loadFindingLedger(scope);
+    expect(restored.threadId).toBe(stateA.threadId);
+    expect(restored.roundBase).toBe(2);
+    expect(restored.ledger).toEqual(l);
+    expect(restored.ledger.findings[0].lastWorkerResponse).toEqual({ kind: 'disputed', evidence: 'README.md:4 says the bound is exclusive', round: 2 });
+
+    // Replaying the persisted rounds writes nothing new.
+    const stateB: FindingLedgerThreadState = { scope, threadId: restored.threadId, roundBase: restored.roundBase };
+    await appendReviewRound(stateB, l1, 1);
+    await appendWorkerRound(stateB, l2w, 2);
+    await appendReviewRound(stateB, l, 2);
+    expect(messageCount(stateB)).toBe(written);
+
+    // Run B's first iteration is ledger round 3: ids continue (F4, not F1) and
+    // the dispute streak carries over into a deadlock.
+    const round = findingRound({ findingLedgerThread: stateB, currentIteration: 1 } as PipelineContext);
+    expect(round).toBe(3);
+    let m = recordWorkerResponses(restored.ledger, { round, summary: 'F1: disputed — README.md:4\nF3: fixed — src/a.ts:30 closes it' });
+    m = revise(m, round, ['F1: still wrong', 'F3: still leaks', 'no test for the close'], '');
+    expect(m.findings.map((f) => f.id)).toEqual(['F1', 'F2', 'F3', 'F4']);
+    expect(ledgerVerdict(m, { maxRounds: 10 })).toMatchObject({ kind: 'deadlock', ids: ['F1'] });
+    await appendWorkerRound(stateB, m, round);
+    await appendReviewRound(stateB, m, round);
+    resetTraceDbForTests();
+    const again = await loadFindingLedger(scope);
+    expect(again.ledger).toEqual(m);
+    expect(again.roundBase).toBe(3);
   });
 });

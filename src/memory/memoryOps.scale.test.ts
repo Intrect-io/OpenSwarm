@@ -59,7 +59,7 @@ function readRow(row: StoredRow): Record<string, unknown> {
 }
 
 /** Every query the code under test built, so pushdown can be asserted. */
-const queries: Array<{ where?: string; columns?: string[] }> = [];
+const queries: Array<{ where?: string; columns?: string[]; rows: number }> = [];
 
 /**
  * Evaluates the two predicate shapes memoryOps sends: an id lookup, and the
@@ -85,10 +85,11 @@ function query(spec: QuerySpec = {}) {
     offset: (offset: number) => query({ ...spec, offset }),
     limit: (limit: number) => query({ ...spec, limit }),
     toArray: async () => {
-      queries.push({ where: spec.where, columns: spec.columns });
       const rows = spec.where ? state.rows.filter(matches(spec.where)) : state.rows;
       const start = spec.offset ?? 0;
-      return rows.slice(start, start + (spec.limit ?? rows.length)).map((row) => {
+      const page = rows.slice(start, start + (spec.limit ?? rows.length));
+      queries.push({ where: spec.where, columns: spec.columns, rows: page.length });
+      return page.map((row) => {
         const read = readRow(row);
         return spec.columns ? Object.fromEntries(spec.columns.map((column) => [column, read[column]])) : read;
       });
@@ -124,6 +125,7 @@ vi.mock('./memoryCore.js', () => ({
 const {
   cleanupExpired,
   consolidateMemories,
+  getMemoryStats,
   getRecentConversations,
   selectNewestRows,
   withMemoryMutationLock,
@@ -293,6 +295,98 @@ describe('consolidateMemories', () => {
     expect([...(metadata.consolidatedFrom as string[])].sort()).toEqual(['early-mid', 'early-seed']);
     expect(kept?.confidence).toBeCloseTo(0.9 + 0.05 * 2, 5);
   }, 120_000);
+});
+
+describe('consolidateMemories bounded memory', () => {
+  it('consolidateMemories holds at most one bucket of rows at peak', async () => {
+    // "Materialised" counts rows that carry the embedding vector: the projected
+    // discovery and position scans read only ids/type/repo, so the rows whose
+    // size scales with the table are the vector-bearing ones. Each such query
+    // must be scoped to one (type, repo) bucket or one id, and no single read
+    // may return more rows than the largest bucket. Buckets here are smaller
+    // than a page, so a whole bucket arrives in one read.
+    const cluster = unitVector(900_001);
+    const largest = 30;
+    const fixture: FixtureRow[] = [
+      ...filler(200, 0),  // 50 filler buckets of 4 rows each
+      ...Array.from({ length: largest }, (_, i): FixtureRow => ({
+        id: `big-${i}`,
+        type: 'strategy',
+        repo: 'big',
+        vector: nearTwin(cluster, unitVector(900_100 + i), 0.02),
+        importance: 0.5,
+        confidence: i === 7 ? 0.9 : 0.5,
+      })),
+    ];
+    store(fixture);
+
+    const reference = pairwiseReference(fixture);
+    const result = await consolidateMemories();
+    expect(result.groups).toEqual(reference);
+    expect(result.groups).toContainEqual({
+      kept: 'big-7',
+      merged: Array.from({ length: largest }, (_, i) => `big-${i}`).filter((id) => id !== 'big-7'),
+    });
+
+    const vectorReads = queries.filter((q) => q.columns === undefined || q.columns.includes('vector'));
+    expect(vectorReads.length).toBeGreaterThan(0);
+    for (const q of vectorReads) {
+      expect(q.where).toBeDefined();
+      expect(q.where).toMatch(/^("type" = '[^']*' AND "repo" = '[^']*'|id = '[^']*')$/);
+    }
+    const peak = Math.max(...vectorReads.map((q) => q.rows));
+    expect(peak).toBeLessThanOrEqual(largest);
+    expect(peak).toBe(largest);
+  });
+});
+
+describe('getMemoryStats', () => {
+  function statsFixture(): FixtureRow[] {
+    const pageSize = memoryCore.LEGACY_MIGRATION_PAGE_SIZE;
+    const rows = filler(pageSize + 25, 0).map((row, i) => ({
+      ...row,
+      type: i % 3 === 0 ? 'strategy' : 'belief',
+      importance: (i % 10) / 10,
+    }));
+    // The init sentinel is never counted.
+    rows.unshift({ ...rows[0], id: 'init', repo: 'system', type: 'system_pattern' });
+    return rows;
+  }
+
+  it('getMemoryStats totals rows across more than one page', async () => {
+    const fixture = statsFixture();
+    store(fixture);
+
+    const counted = fixture.filter((row) => row.id !== 'init');
+    const byRepo: Record<string, number> = {};
+    for (const row of counted) byRepo[row.repo] = (byRepo[row.repo] ?? 0) + 1;
+
+    const stats = await getMemoryStats();
+
+    expect(stats.total).toBe(counted.length);
+    expect(stats.total).toBeGreaterThan(memoryCore.LEGACY_MIGRATION_PAGE_SIZE);
+    expect(stats.byType.strategy).toBe(counted.filter((row) => row.type === 'strategy').length);
+    expect(stats.byType.belief).toBe(counted.filter((row) => row.type === 'belief').length);
+    expect(stats.byType.system_pattern).toBe(0);
+    expect(stats.byRepo).toEqual(byRepo);
+    expect(stats.avgImportance).toBeCloseTo(
+      counted.reduce((sum, row) => sum + row.importance, 0) / counted.length, 9);
+    // The table was read in more than one page.
+    expect(queries.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('getMemoryStats never selects the vector column', async () => {
+    store(statsFixture());
+    await getMemoryStats();
+
+    expect(queries.length).toBeGreaterThan(0);
+    for (const q of queries) {
+      // An undefined projection would read every column, vector included.
+      expect(q.columns).toBeDefined();
+      expect(q.columns).not.toContain('vector');
+      expect(q.columns).toEqual(expect.arrayContaining(['id', 'type', 'repo', 'importance']));
+    }
+  });
 });
 
 /**

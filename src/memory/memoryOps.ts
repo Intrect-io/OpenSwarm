@@ -22,13 +22,21 @@ import {
   type CognitiveMemoryRecord,
 } from './memoryCore.js';
 import { embeddingTextFor } from './embeddingConfig.js';
+import {
+  SCAN_PAGE_SIZE,
+  columnEquals,
+  scanTablePages,
+  sqlString,
+  type PagedQuery,
+  type TableScan,
+} from './memoryScan.js';
 
 type MemoryTable = NonNullable<ReturnType<typeof getTable>>;
 const MAX_MEMORY_REVISIONS = 20;
 
 /** Rows deleted per Lance commit while sweeping expired records, and rows read
  *  per page by the bounded recent-conversation scan. */
-const PAGE_SIZE = 10_000;
+const PAGE_SIZE = SCAN_PAGE_SIZE;
 
 /**
  * In-process queue that serializes full read-modify-write memory mutations.
@@ -51,10 +59,6 @@ export async function withMemoryMutationLock<T>(op: () => Promise<T>): Promise<T
   await run;
   if (failure) throw failure;
   return result;
-}
-
-function sqlString(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function idPredicate(id: string): string {
@@ -452,6 +456,8 @@ const CONSOLIDATION_SIMILARITY = 0.85;  // Duplicate detection threshold
 
 /** One similarity group: a seed anchor plus the records that joined it. */
 interface ConsolidationGroup {
+  /** The seed's id, resolved to its global scan position before reporting. */
+  seedId: string;
   /** Scan position of the seed — restores the order the old all-pairs scan reported. */
   seedOrder: number;
   /** The seed's vector: the anchor every member is compared against. */
@@ -459,19 +465,83 @@ interface ConsolidationGroup {
   members: Array<{ id: string; score: number; order: number }>;
 }
 
+/** Columns the bucket-discovery and position scans read: never the vector. */
+const BUCKET_KEY_COLUMNS = ['id', 'type', 'repo'];
+/** Columns one bucket is compared on. */
+const BUCKET_COLUMNS = ['id', 'type', 'repo', 'vector', 'importance', 'confidence'];
+
+function bucketKey(type: unknown, repo: unknown): string {
+  return JSON.stringify([type ?? null, repo ?? null]);
+}
+
+/**
+ * Load one (type, repo) bucket through a pushed-down filter and return its
+ * duplicate groups (more than one member). Only the current page and one
+ * vector per group anchor are held; the bucket is released on return.
+ */
+async function groupBucket(table: MemoryTable, type: unknown, repo: unknown): Promise<ConsolidationGroup[]> {
+  const groups: ConsolidationGroup[] = [];
+  let order = 0;
+  await scanTablePages(table, (page) => {
+    for (const record of page) {
+      if (record.id === 'init') continue;
+      const at = order++;
+      // Stored vectors arrive as Arrow vectors; comparing one read as a JS
+      // array scores NaN, which matches nothing.
+      const vector = vectorAsNumberArray(record.vector);
+      let group = groups.find((candidate) =>
+        cosineSimilarity(vector, candidate.seedVector) >= CONSOLIDATION_SIMILARITY);
+      if (!group) {
+        group = { seedId: String(record.id), seedOrder: at, seedVector: vector, members: [] };
+        groups.push(group);
+      }
+      // importance * confidence, as before; ties keep the earlier record.
+      group.members.push({
+        id: String(record.id),
+        score: (record.importance ?? 0.5) * (record.confidence ?? 0.5),
+        order: at,
+      });
+    }
+  }, {
+    where: `${columnEquals('type', type)} AND ${columnEquals('repo', repo)}`,
+    columns: BUCKET_COLUMNS,
+  });
+  return groups.filter((group) => group.members.length > 1);
+}
+
+/** Global scan position of each wanted id, from an id-only projected scan. */
+async function scanPositions(table: MemoryTable, wanted: Set<string>): Promise<Map<string, number>> {
+  const positions = new Map<string, number>();
+  let position = 0;
+  await scanTablePages(table, (page) => {
+    for (const row of page) {
+      const id = String(row.id);
+      if (wanted.has(id) && !positions.has(id)) positions.set(id, position);
+      position++;
+    }
+  }, { columns: ['id'] });
+  return positions;
+}
+
 /**
  * Consolidate duplicate/similar memories.
  *
- * Records are grouped by the fields the similarity rule requires to be equal
- * (`type`, `repo`) and compared only inside their own group, so the traversal is
- * no longer every record against every other while the write lock is held.
- * Buckets hold only ids, scores, and one vector per group anchor — the kept row
- * is re-read by id when it is updated.
+ * Records are compared only against records with the same `type` and `repo`
+ * (the fields the similarity rule requires to be equal). A projected scan
+ * without vectors discovers the distinct (type, repo) pairs, then each bucket
+ * is loaded on its own through a pushed-down filter, compared, and released,
+ * so at most one bucket of rows is held at a time rather than the whole table.
+ * The kept row is re-read by id when it is updated, and every mutation happens
+ * after all scans so deletes cannot shift the scan offsets.
  *
  * Grouping matches the previous all-pairs scan exactly, which matters because
  * cosine similarity is not transitive: in scan order the first record of a group
  * becomes its seed and later records join the *earliest* seed they match, so the
  * anchor stays the seed rather than whichever member currently scores highest.
+ * Groups are reported in the global scan order of their seeds.
+ *
+ * Cost: one filtered scan per (type, repo) pair. Without a scalar index on
+ * those columns each is a full scan, trading time for bounded memory.
  */
 export async function consolidateMemories(): Promise<{
   merged: number;
@@ -483,44 +553,30 @@ export async function consolidateMemories(): Promise<{
       const table = getTable();
       if (!table) return { merged: 0, groups: [] };
 
-      // Read the complete table: the previous single `.limit(10000)` vector
-      // query both capped the scan and let vector ranking decide which rows were
-      // eligible for merging.
-      const allMemories = await fetchAllTableRows(table);
-
-      const buckets = new Map<string, ConsolidationGroup[]>();
-      let scanOrder = 0;
-
-      for (const record of allMemories) {
-        if (record.id === 'init') continue;
-
-        const order = scanOrder++;
-        const key = `${String(record.type)}\u0000${String(record.repo)}`;
-        const groups = buckets.get(key) ?? [];
-        if (groups.length === 0) buckets.set(key, groups);
-
-        // Stored vectors arrive as Arrow vectors; comparing one read as a JS
-        // array scores NaN, which matches nothing.
-        const vector = vectorAsNumberArray(record.vector);
-        let group = groups.find((candidate) =>
-          cosineSimilarity(vector, candidate.seedVector) >= CONSOLIDATION_SIMILARITY);
-
-        if (!group) {
-          group = { seedOrder: order, seedVector: vector, members: [] };
-          groups.push(group);
+      // Discover the (type, repo) buckets with a projected scan (no vectors),
+      // then load and compare one bucket at a time.
+      const bucketKeys = new Map<string, { type: unknown; repo: unknown }>();
+      await scanTablePages(table, (page) => {
+        for (const row of page) {
+          if (row.id === 'init') continue;
+          const key = bucketKey(row.type, row.repo);
+          if (!bucketKeys.has(key)) bucketKeys.set(key, { type: row.type, repo: row.repo });
         }
-        // importance * confidence, as before; ties keep the earlier record.
-        group.members.push({
-          id: String(record.id),
-          score: (record.importance ?? 0.5) * (record.confidence ?? 0.5),
-          order,
-        });
+      }, { columns: BUCKET_KEY_COLUMNS });
+
+      const duplicateGroups: ConsolidationGroup[] = [];
+      for (const { type, repo } of bucketKeys.values()) {
+        duplicateGroups.push(...await groupBucket(table, type, repo));
       }
 
-      const duplicateGroups = [...buckets.values()]
-        .flat()
-        .filter((group) => group.members.length > 1)
-        .sort((a, b) => a.seedOrder - b.seedOrder);
+      // Groups were found bucket by bucket; restore the global scan order the
+      // all-pairs scan reported them in. Runs before any mutation, because a
+      // seed is often merged away and deleting first would lose its position.
+      if (duplicateGroups.length > 1) {
+        const positions = await scanPositions(table, new Set(duplicateGroups.map((group) => group.seedId)));
+        for (const group of duplicateGroups) group.seedOrder = positions.get(group.seedId) ?? Infinity;
+        duplicateGroups.sort((a, b) => a.seedOrder - b.seedOrder);
+      }
 
       const groups: Array<{ kept: string; merged: string[] }> = [];
       const mergedIds: string[] = [];
@@ -647,6 +703,9 @@ const DEFAULT_BY_TYPE: Record<MemoryType, number> = {
   fact: 0,
 };
 
+/** Columns getMemoryStats reads: never the embedding vector. */
+const STATS_COLUMNS = ['id', 'type', 'repo', 'importance'];
+
 /**
  * Memory statistics.
  */
@@ -661,28 +720,28 @@ export async function getMemoryStats(): Promise<{
     const table = getTable();
     if (!table) return { total: 0, byType: { ...DEFAULT_BY_TYPE }, byRepo: {}, avgImportance: 0 };
 
-    // Aggregate over the complete table: the previous `.limit(10000)` vector
-    // query capped statistics at the first 10k rows and let vector ranking pick
-    // which rows were counted.
-    const results = await fetchAllTableRows(table);
-
+    // Aggregate over the complete table in pages, reading only the columns the
+    // totals need: the previous `.limit(10000)` vector query capped statistics
+    // at the first 10k rows, and a full-row read carried every embedding vector.
     const byType: Record<MemoryType, number> = { ...DEFAULT_BY_TYPE };
     const byRepo: Record<string, number> = {};
     let totalImportance = 0;
     let count = 0;
 
-    for (const row of results) {
-      if (typeof row !== 'object' || row === null) continue;
-      const r = row as Partial<CognitiveMemoryRecord>;
-      if (r.id === 'init' || typeof r.id !== 'string') continue;
-      if (byType[r.type as MemoryType] !== undefined) {
-        byType[r.type as MemoryType]++;
+    await scanTablePages(table, (page) => {
+      for (const row of page) {
+        if (typeof row !== 'object' || row === null) continue;
+        const r = row as Partial<CognitiveMemoryRecord>;
+        if (r.id === 'init' || typeof r.id !== 'string') continue;
+        if (byType[r.type as MemoryType] !== undefined) {
+          byType[r.type as MemoryType]++;
+        }
+        const repo = r.repo ?? 'unknown';
+        byRepo[repo] = (byRepo[repo] || 0) + 1;
+        totalImportance += r.importance ?? 0.5;
+        count++;
       }
-      const repo = r.repo ?? 'unknown';
-      byRepo[repo] = (byRepo[repo] || 0) + 1;
-      totalImportance += r.importance ?? 0.5;
-      count++;
-    }
+    }, { columns: STATS_COLUMNS });
 
     return {
       total: count,
@@ -717,19 +776,7 @@ export async function saveConversation(
   );
 }
 
-/** The slice of the LanceDB query builder selectNewestRows pages through. */
-interface PagedQuery {
-  where?: (predicate: string) => PagedQuery;
-  select?: (columns: string[]) => PagedQuery;
-  offset: (n: number) => { limit: (n: number) => { toArray: () => Promise<any[]> } };
-}
-
-export interface NewestRowsScan {
-  /** SQL filter pushed down to the store, so non-matching rows never cross into JS. */
-  where?: string;
-  /** Columns to read; leave out wide ones (the embedding `vector`) the caller never uses. */
-  columns?: string[];
-}
+export type NewestRowsScan = TableScan;
 
 /**
  * Walk every row of `table` in offset pages and return the newest `limit`
@@ -751,21 +798,11 @@ export async function selectNewestRows(
 ): Promise<any[]> {
   const keep = Math.max(0, Math.floor(limit));
   if (keep === 0) return [];
-  const size = Math.max(1, Math.floor(pageSize));
   const best: any[] = [];  // newest first, length <= keep
   const bestIds = new Set<unknown>();
   const stamp = (row: any): number => row.createdAt || 0;
-  const pageQuery = (): PagedQuery => {
-    let query = table.query();
-    if (scan.where) query = query.where!(scan.where);
-    if (scan.columns) query = query.select!(scan.columns);
-    return query;
-  };
 
-  let offset = 0;
-  for (;;) {
-    const page = await pageQuery().offset(offset).limit(size).toArray();
-    if (page.length === 0) break;
+  await scanTablePages(table, (page) => {
     for (const row of page) {
       if (typeof row !== 'object' || row === null || !accept(row)) continue;
       if (row.id !== undefined && bestIds.has(row.id)) continue;
@@ -778,9 +815,7 @@ export async function selectNewestRows(
       bestIds.add(row.id);
       if (best.length > keep) bestIds.delete(best.pop().id);
     }
-    offset += page.length;
-    if (page.length < size) break;
-  }
+  }, scan, pageSize);
   return best;
 }
 

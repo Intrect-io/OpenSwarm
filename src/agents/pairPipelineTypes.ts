@@ -1,5 +1,6 @@
 import type { ChangeRisk } from '../support/changeRisk.js';
 import type { FindingLedger } from './findingLedger.js';
+import type { FindingLedgerThreadState } from './findingLedgerStore.js';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import type { PipelineStage, RoleConfig, PipelineGuardsConfig, JobProfile, SecurityAuditConfig, VerifyConfig } from '../core/types.js';
 import type { CostInfo } from '../support/costTracker.js';
@@ -207,6 +208,8 @@ export interface PipelineContext {
   workerEscalation?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high' };
   /** Per-finding ids, worker answers and reviewer rulings across revise rounds (AGT-4535). */
   findingLedger?: FindingLedger;
+  /** Where this run persists the ledger; absent when it stays in memory (AGT-4535). */
+  findingLedgerThread?: FindingLedgerThreadState;
   /** The missing-validation-evidence gate has already nudged once this session — after that it defers to the reviewer instead of consuming more iterations (INT-2485). */
   validationNudged?: boolean;
   /** Tracked test / test-runner config files the worker may not edit this run (protectedFiles.ts). */

@@ -11,6 +11,7 @@ import { runGuards } from './pipelineGuards.js';
 import { adjudicateContractEvidenceStagnation } from './guardArbiter.js';
 import { recordReflection, similarReviewFeedback } from './reflection.js';
 import { approveDowngradeNote, createFindingLedger, describeLedgerStop, ledgerVerdict, markPriorSessionIds, openFindings, openIdsRuledOnApprove, recordReviewRound, recordWorkerResponses } from './findingLedger.js';
+import { attachDurableLedger, findingRound, persistReviewRound, persistWorkerRound, postDeadlockClarification } from './findingLedgerStore.js';
 import type { ReflectionSource } from './reflection.js';
 import { buildRepeatEscalation, resolveWorkerStageOverrides } from './workerEscalation.js';
 import { emitWorkerFanoutGateDecision, evaluateWorkerFanoutGate } from './workerFanoutGate.js';
@@ -84,6 +85,8 @@ async function runIterationLoopBody(host: PipelineLoopHost, context: PipelineCon
     const taskBudgetMs = host.config.taskBudgetMs ?? 0;
     const workerTimeoutMs = stageTimeoutMs('worker', host.config.roles?.worker?.timeoutMs);
     let longestIterationMs = 0;
+    // Continue the issue's finding ids and answers from an earlier run. (AGT-4535)
+    await attachDurableLedger(context);
 
     while (context.currentIteration < maxIterations) {
       host.throwIfAborted(); // bail before starting another iteration
@@ -179,11 +182,13 @@ async function runIterationLoopBody(host: PipelineLoopHost, context: PipelineCon
       // Record the worker's per-id answers to open review findings; an id it
       // does not answer is recorded as unresolved. (AGT-4535)
       if (openFindings(context.findingLedger).length > 0) {
+        const round = findingRound(context);
         context.findingLedger = recordWorkerResponses(context.findingLedger!, {
-          round: context.currentIteration,
+          round,
           summary: (workerResult.result as WorkerResult).summary ?? '',
           output: (workerResult.result as WorkerResult).output,
         });
+        await persistWorkerRound(context, round);
       }
 
       if (!workerResult.success) {
@@ -579,17 +584,24 @@ async function runIterationLoopBody(host: PipelineLoopHost, context: PipelineCon
           // stays open past the round cap, stops the loop — it is never waved
           // through. A reviewer that returns no structured issues leaves the
           // ledger empty and the text-similarity check below works as before.
+          const round = findingRound(context);
           context.findingLedger = recordReviewRound(context.findingLedger ?? createFindingLedger(), {
-            round: context.currentIteration,
+            round,
             decision,
             issues: (reviewerResult.result as ReviewResult).issues,
             feedback: reviseFeedback,
           });
+          await persistReviewRound(context, round);
           const ledgerStop = ledgerVerdict(context.findingLedger, { maxRounds: host.config.maxFindingRounds });
           if (ledgerStop.kind !== 'continue') {
             const reason = describeLedgerStop(context.findingLedger, ledgerStop);
             safeConsole.log(`[${context.taskPrefix}] ${reason.split('\n')[0]}`);
             host.emit('log', { line: `🛑 ${reason.split('\n')[0]}` });
+            // Ask the advisor which side is right, then stop as before.
+            if (ledgerStop.kind === 'deadlock') {
+              await postDeadlockClarification(context, context.findingLedger, ledgerStop,
+                taskBudgetMs > 0 ? loopStartedAt + taskBudgetMs : undefined);
+            }
             // Carried to the next attempt with the reviewer's own words.
             context.lastReviseFeedback = `${reviseFeedback}\n\n${reason}`;
             host.emit('iteration:fail', { iteration: context.currentIteration, stage: 'reviewer', context });
@@ -682,6 +694,13 @@ async function runIterationLoopBody(host: PipelineLoopHost, context: PipelineCon
         iteration: context.currentIteration,
         context,
       });
+      // The run passed: settle the ids it leaves open, so a later run of the
+      // issue does not restore them as open. In memory nothing reads it again.
+      if (openFindings(context.findingLedger).length > 0) {
+        const round = findingRound(context);
+        context.findingLedger = recordReviewRound(context.findingLedger!, { round, decision: 'approve' });
+        await persistReviewRound(context, round);
+      }
       return { success: true };
     }
 

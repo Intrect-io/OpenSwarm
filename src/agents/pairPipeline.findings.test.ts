@@ -54,6 +54,10 @@ vi.mock('../coordination/runCoordination.js', () => ({
   publishCoordination: vi.fn(async (event: Record<string, unknown>) => { boardEvents.list.push(event); }),
 }));
 
+// The deadlock clarification goes through the ask_human path; never page anyone from a test.
+const postHumanQuestion = vi.hoisted(() => vi.fn());
+vi.mock('../coordination/humanQuestions.js', () => ({ postHumanQuestion }));
+
 // Guards run only when a test sets `config.guards`; passing by default.
 const runGuards = vi.hoisted(() => vi.fn());
 vi.mock('./pipelineGuards.js', async () => {
@@ -74,6 +78,7 @@ describe('PairPipeline finding ledger', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     getDefaultModel.mockResolvedValue('codex-live-model');
+    postHumanQuestion.mockResolvedValue({ correlationId: 'hq-test', delivered: false, openAskCount: 1 });
   });
 
   afterEach(() => {
@@ -157,6 +162,129 @@ describe('PairPipeline finding ledger', () => {
     expect(runReviewer).toHaveBeenCalledTimes(3);
     expect(runWorker).toHaveBeenCalledTimes(3);
     expect(result.lastReviewFeedback).toContain('Review loop stopped (deadlock)');
+  });
+
+  it('posts a clarification question to the advisor on deadlock before stopping', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    runWorker
+      .mockResolvedValueOnce(worked('first pass'))
+      .mockResolvedValue(worked('F1: disputed — README.md:4 says the bound is exclusive'));
+    runReviewer
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'bound', issues: ['bound is wrong'] })
+      .mockResolvedValue({ decision: 'revise', feedback: 'F1: open', issues: ['F1: still wrong, README is stale'] });
+    const order: string[] = [];
+    postHumanQuestion.mockImplementation(async () => {
+      order.push('clarification');
+      return { correlationId: 'hq-test', delivered: false, openAskCount: 1 };
+    });
+
+    const pipeline = new PairPipeline(config(10, 10));
+    pipeline.on('iteration:fail', () => order.push('stop'));
+    const result = await pipeline.run(task({ issueIdentifier: 'AGT-77' }), process.cwd());
+
+    expect(result.finalStatus).toBe('failed');
+    expect(runReviewer).toHaveBeenCalledTimes(3);
+    expect(postHumanQuestion).toHaveBeenCalledTimes(1);
+    const asked = postHumanQuestion.mock.calls[0][0] as { questionClass: string; question: string; actorRole: string; taskLabel: string };
+    expect(asked.questionClass).toBe('clarification');
+    expect(asked.actorRole).toBe('worker');
+    expect(asked.taskLabel).toBe('AGT-77');
+    expect(asked.question).toContain('deadlocked on F1 (AGT-77)');
+    expect(asked.question).toContain('- F1: bound is wrong');
+    expect(asked.question).toContain('worker said disputed (round 3): README.md:4 says the bound is exclusive');
+    // Asked first, then the same stop as before: never an approval.
+    expect(order.slice(-2)).toEqual(['clarification', 'stop']);
+    expect(result.lastReviewFeedback).toContain('Review loop stopped (deadlock)');
+
+    // A round-cap stop is not a disagreement to settle; nothing is asked.
+    postHumanQuestion.mockClear();
+    runWorker.mockReset().mockResolvedValue(worked('tried'));
+    runReviewer.mockReset()
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'a', issues: ['missing null check'] })
+      .mockResolvedValue({ decision: 'revise', feedback: 'F1: still open', issues: [] });
+    expect((await new PairPipeline(config(10, 2)).run(task(), process.cwd())).finalStatus).toBe('failed');
+    expect(postHumanQuestion).not.toHaveBeenCalled();
+  });
+
+  it('reads F<n> responses from CLI adapter JSON event output', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const { ClaudeCliAdapter } = await import('../adapters/claude.js');
+    const { CodexCliAdapter } = await import('../adapters/codex.js');
+    const { recordWorkerResponses, createFindingLedger, recordReviewRound } = await import('./findingLedger.js');
+    const ndjson = (events: unknown[]) => events.map((event) => JSON.stringify(event)).join('\n');
+    const raw = (stdout: string) => ({ exitCode: 0, stdout, stderr: '', durationMs: 1 });
+    const report = JSON.stringify({ success: true, summary: 'F1: disputed — README.md:4 says the bound is exclusive\nF2: fixed — src/a.ts:12 returns early' });
+    const finalText = `Done.\n\`\`\`json\n${report}\n\`\`\``;
+    const toolQuote = { type: 'user', message: { content: [{ type: 'tool_result', content: 'F1: fixed — quoted/by/a/tool.ts:1' }] } };
+
+    // A claude stream cut off before its `result` event: the adapter finds no
+    // result, so it hands back the raw stream-json as `output` and a summary
+    // scraped from it. The answer is the last assistant message, not the tool
+    // result that quotes an F1 line.
+    const claude = new ClaudeCliAdapter();
+    const cutOff = claude.parseWorkerOutput(raw(ndjson([
+      { type: 'system', subtype: 'init' },
+      toolQuote,
+      { type: 'assistant', message: { content: [{ type: 'text', text: finalText }] } },
+    ])));
+    expect(cutOff.output).toContain('"type":"assistant"');
+    runWorker
+      .mockResolvedValueOnce(worked('first pass'))
+      .mockResolvedValue({ ...worked(cutOff.summary), output: cutOff.output });
+    runReviewer
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'two problems', issues: ['range() stops one short', 'no empty-input check'] })
+      .mockResolvedValue({ decision: 'approve', feedback: 'F1: resolved\nF2: resolved' });
+
+    const result = await new PairPipeline(config(5)).run(task(), process.cwd());
+
+    expect(result.finalStatus).toBe('approved');
+    const ledger = (runReviewer.mock.calls[1][0] as ReviewerOptions).findingLedger;
+    expect(ledger).toContain('worker said disputed (round 2): README.md:4 says the bound is exclusive');
+    expect(ledger).toContain('worker said fixed (round 2): src/a.ts:12 returns early');
+    expect(ledger).not.toContain('quoted/by/a/tool.ts');
+
+    // The other adapter outputs read the same answers: a complete claude
+    // stream (the adapter returns the result text), the same cut-off stream
+    // behind the retention marker, and a codex `exec --json` stream.
+    const open = recordReviewRound(createFindingLedger(), { round: 1, decision: 'revise', issues: ['a', 'b'] });
+    const answers = (parsed: { summary: string; output: string }) => recordWorkerResponses(open, { round: 2, ...parsed })
+      .findings.map((f) => `${f.id} ${f.lastWorkerResponse?.kind} ${f.lastWorkerResponse?.evidence}`);
+    const expected = ['F1 disputed README.md:4 says the bound is exclusive', 'F2 fixed src/a.ts:12 returns early'];
+    expect(answers(claude.parseWorkerOutput(raw(ndjson([toolQuote, { type: 'result', subtype: 'success', result: finalText }]))))).toEqual(expected);
+    expect(answers({ summary: cutOff.summary, output: `[openswarm: 99 earlier characters of output were not retained]\n${cutOff.output}` })).toEqual(expected);
+    const codex = new CodexCliAdapter().parseWorkerOutput(raw(ndjson([
+      { type: 'thread.started' },
+      { type: 'item.completed', item: { type: 'agent_message', text: 'F1: fixed — early.ts:1' } },
+      { type: 'item.completed', item: { type: 'command_execution', command: 'npm test', exit_code: 0 } },
+      { type: 'item.completed', item: { type: 'agent_message', text: finalText } },
+    ])));
+    expect(answers(codex)).toEqual(expected);
+  });
+
+  it('continues the ids of an earlier run of the same issue from the coordination thread', async () => {
+    const { PairPipeline } = await import('./pairPipeline.js');
+    const durable = (maxIterations: number) => ({
+      ...config(maxIterations, 10),
+      runMetadata: { coordinationRepository: '/repo/durable-ledger', repoKey: 'durable-ledger-key' },
+    });
+    const issue = task({ id: `task-durable-${Date.now()}`, issueIdentifier: 'AGT-88' });
+    runWorker.mockResolvedValue(worked('first pass'));
+    runReviewer.mockResolvedValue({ decision: 'revise', feedback: 'bound', issues: ['range() stops one short'] });
+    expect((await new PairPipeline(durable(1)).run(issue, process.cwd())).finalStatus).toBe('failed');
+
+    // A new process: the run starts over at iteration 1, the ledger does not.
+    runWorker.mockReset().mockResolvedValue(worked('F1: disputed — README.md:4 says the bound is exclusive'));
+    runReviewer.mockReset()
+      .mockResolvedValueOnce({ decision: 'revise', feedback: 'F1: open', issues: ['F1: still wrong', 'no empty-input test'] })
+      .mockResolvedValue({ decision: 'approve', feedback: 'F1: resolved\nF2: resolved' });
+    expect((await new PairPipeline(durable(3)).run(issue, process.cwd())).finalStatus).toBe('approved');
+
+    const firstWorker = runWorker.mock.calls[0][0] as WorkerOptions;
+    expect(firstWorker.previousFeedback).toContain('- F1: range() stops one short');
+    const reviewerFirst = runReviewer.mock.calls[0][0] as ReviewerOptions;
+    expect(reviewerFirst.findingLedger).toContain('worker said disputed (round 2): README.md:4');
+    const reviewerSecond = runReviewer.mock.calls[1][0] as ReviewerOptions;
+    expect(reviewerSecond.findingLedger).toContain('- F2: no empty-input test');
   });
 
   it('stops at the round cap while an id stays open', async () => {
