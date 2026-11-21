@@ -39,6 +39,7 @@ function checkName(label: string): string | undefined {
   if (label === 'codex' || label === 'claude' || label === 'claude auth') return 'providers';
   if (label === 'git') return 'git';
   if (label === 'gh') return 'gh';
+  if (label === 'task-state lock') return 'task-state-lock';
   return undefined;
 }
 
@@ -95,6 +96,27 @@ export async function spendVisibility(dbPath?: string, now = Date.now()): Promis
     }
   } catch (error) {
     return { status: 'warn', detail: `could not read ${path}: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+/**
+ * Whether a dot-lock-only (<=0.24.4) CLI has been seen writing the task-state
+ * store (AGT-4024). Warn-only and never throws: the evidence is best effort,
+ * and having none proves nothing.
+ */
+export async function taskStateLockCheck(): Promise<{ status: Status; detail: string }> {
+  try {
+    const { getStorePath } = await import('../taskState/store.js');
+    const { readLegacyWriterEvidence } = await import('../taskState/legacyLockWriter.js');
+    const evidence = readLegacyWriterEvidence(getStorePath());
+    if (evidence) {
+      return { status: 'warn', detail: `dot-lock-only (<=0.24.4) writer observed, last seen ${evidence.lastSeenAt}; CLI floor has not moved (or the SQLite mutex is not honoured on this filesystem)` };
+    }
+    return { status: 'ok', detail: 'no dot-lock-only writer observed (absence is not proof)' };
+  } catch (error) {
+    // ok, not warn: 'warn' would mark task-state-lock failed and read as a
+    // legacy writer; a broken native module is reported by its own check.
+    return { status: 'ok', detail: `lock evidence unavailable: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
 
@@ -193,6 +215,10 @@ export async function handleDoctor(): Promise<void> {
   // 8) Spend visibility: attempts whose cost the ledger never saw (round-1 redteam B-F2).
   const spend = await spendVisibility();
   if (spend) line(spend.status, 'spend ledger', spend.detail);
+
+  // 9) Task-state lock: evidence of an old CLI that takes the dot-lock alone (AGT-4024). Never fatal.
+  const lockCheck = await taskStateLockCheck();
+  line(lockCheck.status, 'task-state lock', lockCheck.detail);
 
   console.log('');
   // Which checks failed, by name. Twelve external installs ran `doctor` and only
