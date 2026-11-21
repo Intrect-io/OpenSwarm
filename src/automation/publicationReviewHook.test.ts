@@ -28,6 +28,11 @@ import {
   publicationReviewKey,
   type PublicationReviewOutcome,
 } from './reviewVerdictStore.js';
+import {
+  lookupStewardVerdict,
+  recordStewardVerdict,
+  type StewardVerdictWriter,
+} from './stewardVerdictLedger.js';
 
 const PR = 'https://github.com/Intrect-io/OpenSwarm/pull/580';
 const ctx = { prUrl: PR, headSha: 'abc1234', worktreeInfo: { originalPath: '/work/OpenSwarm' } };
@@ -412,3 +417,148 @@ describe('publication review hook durable reuse (Tier 1)', () => {
   });
 });
 
+
+describe('publication review hook steward verdicts (AGT-4803)', () => {
+  const HEAD = 'c'.repeat(40);
+  let ledgerPath: string;
+
+  function stewardHook(rollbackOnRejection: boolean, writer?: StewardVerdictWriter) {
+    return buildPublicationReviewHook({
+      task: { id: 't1', issueId: 'AGT-1', issueIdentifier: 'AGT-1', title: 'x' },
+      result: { success: true, finalStatus: 'approved' },
+      rollbackOnRejection,
+      workerSandbox: 'off',
+      verdictStore: store,
+      stewardVerdictWriter: writer ?? ((v) => { recordStewardVerdict(v, ledgerPath); }),
+    } as Parameters<typeof buildPublicationReviewHook>[0]);
+  }
+
+  beforeEach(() => {
+    ledgerPath = join(storeRoot, 'steward.db');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  it('records a steward verdict only when the reviewed SHA equals the head SHA', async () => {
+    const pr = (n: number) => `https://github.com/Intrect-io/OpenSwarm/pull/${n}`;
+    const stewardCtx = (n: number, headSha = HEAD) => ({ prUrl: pr(n), headSha, worktreeInfo: { originalPath: '/w' } });
+
+    // Equal sha: one row.
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: true, gateRan: true, changesRequested: false, reviewedSha: HEAD, decision: 'approve', coverage: null,
+    });
+    await stewardHook(true)(stewardCtx(1));
+    expect(lookupStewardVerdict(pr(1), HEAD, ledgerPath)).toMatchObject({ verdict: 'approve', coverage: null });
+
+    // The reviewer read an older commit than the published head: nothing.
+    const older = 'd'.repeat(40);
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: true, gateRan: true, changesRequested: false, reviewedSha: older, decision: 'approve',
+    });
+    await stewardHook(true)(stewardCtx(2));
+    expect(lookupStewardVerdict(pr(2), HEAD, ledgerPath)).toBeNull();
+    expect(lookupStewardVerdict(pr(2), older, ledgerPath)).toBeNull();
+
+    // Malformed sha (abbreviated, or uppercase even when it equals the head): nothing.
+    const writer = vi.fn();
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: true, gateRan: true, changesRequested: false, reviewedSha: 'abc1234', decision: 'approve',
+    });
+    await stewardHook(true, writer)({ prUrl: pr(3), headSha: 'abc1234', worktreeInfo: { originalPath: '/w' } });
+    const upper = 'E'.repeat(40);
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: true, gateRan: true, changesRequested: false, reviewedSha: upper, decision: 'approve',
+    });
+    await stewardHook(true, writer)(stewardCtx(4, upper));
+    expect(writer).not.toHaveBeenCalled();
+
+    // No decision (the review did not run): nothing.
+    reviewPublishedPullRequest.mockResolvedValueOnce({ success: false, gateRan: false, reviewedSha: HEAD, error: 'timeout' });
+    await stewardHook(true, writer)(stewardCtx(5));
+    expect(writer).not.toHaveBeenCalled();
+
+    // 'revise' is stored as a rejection.
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: false, gateRan: true, changesRequested: true, reviewedSha: HEAD, decision: 'revise', error: 'nits',
+    });
+    await stewardHook(false)(stewardCtx(6));
+    expect(lookupStewardVerdict(pr(6), HEAD, ledgerPath)).toMatchObject({ verdict: 'reject' });
+
+    // An in-process dedup hit on the draft path leaves the earlier row intact.
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: true, gateRan: true, changesRequested: false, reviewedSha: HEAD, decision: 'approve',
+    });
+    await stewardHook(false)(stewardCtx(7));
+    const first = lookupStewardVerdict(pr(7), HEAD, ledgerPath);
+    expect(first).toMatchObject({ verdict: 'approve' });
+    const dedupWriter = vi.fn();
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: false, gateRan: true, changesRequested: true, reviewedSha: HEAD, decision: 'reject',
+    });
+    await stewardHook(false, dedupWriter)(stewardCtx(7));
+    expect(dedupWriter).not.toHaveBeenCalled();
+    expect(lookupStewardVerdict(pr(7), HEAD, ledgerPath)).toEqual(first);
+  });
+
+  it('records the steward verdict on a durable reuse too', async () => {
+    const outcome: PublicationReviewOutcome = {
+      success: true, gateRan: true, changesRequested: false, reviewedSha: HEAD, decision: 'approve', coverage: null,
+    };
+    store.record(publicationReviewKey({ prUrl: PR, headSha: HEAD }), outcome);
+    await stewardHook(true)({ prUrl: PR, headSha: HEAD, worktreeInfo: { originalPath: '/w' } });
+    expect(reviewPublishedPullRequest).not.toHaveBeenCalled();
+    expect(lookupStewardVerdict(PR, HEAD, ledgerPath)).toMatchObject({ verdict: 'approve' });
+  });
+
+  it('stores a replayed coverage claim as null unless the outcome says the issue text was given', async () => {
+    const outcome: PublicationReviewOutcome = {
+      success: true, gateRan: true, changesRequested: false, reviewedSha: HEAD, decision: 'approve', coverage: 'complete',
+    };
+    store.record(publicationReviewKey({ prUrl: PR, headSha: HEAD }), outcome);
+    await stewardHook(true)({ prUrl: PR, headSha: HEAD, worktreeInfo: { originalPath: '/w' } });
+    expect(reviewPublishedPullRequest).not.toHaveBeenCalled();
+    expect(lookupStewardVerdict(PR, HEAD, ledgerPath)).toMatchObject({ verdict: 'approve', coverage: null });
+
+    const other = 'https://github.com/Intrect-io/OpenSwarm/pull/99';
+    store.record(publicationReviewKey({ prUrl: other, headSha: HEAD }), { ...outcome, issueTextProvided: true });
+    await stewardHook(true)({ prUrl: other, headSha: HEAD, worktreeInfo: { originalPath: '/w' } });
+    expect(lookupStewardVerdict(other, HEAD, ledgerPath)).toMatchObject({ verdict: 'approve', coverage: 'complete' });
+  });
+
+  it('never stores approve when the outcome contradicts it: stored as reject, replacing an earlier approve', async () => {
+    const pr = (n: number) => `https://github.com/Intrect-io/OpenSwarm/pull/${n}`;
+    const ctx = (n: number) => ({ prUrl: pr(n), headSha: HEAD, worktreeInfo: { originalPath: '/w' } });
+
+    // approve with success false.
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: false, gateRan: true, changesRequested: false, reviewedSha: HEAD, decision: 'approve',
+    });
+    await stewardHook(false)(ctx(11));
+    expect(lookupStewardVerdict(pr(11), HEAD, ledgerPath)).toMatchObject({ verdict: 'reject' });
+
+    // approve with success true but no gate run.
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: true, changesRequested: false, reviewedSha: HEAD, decision: 'approve',
+    });
+    await stewardHook(false)(ctx(12));
+    expect(lookupStewardVerdict(pr(12), HEAD, ledgerPath)).toMatchObject({ verdict: 'reject' });
+
+    // An earlier approve row for the same commit is overwritten, not left standing.
+    recordStewardVerdict({ prUrl: pr(13), reviewedSha: HEAD, decision: 'approve' }, ledgerPath);
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: false, gateRan: false, reviewedSha: HEAD, decision: 'approve',
+    });
+    await stewardHook(false)(ctx(13));
+    expect(lookupStewardVerdict(pr(13), HEAD, ledgerPath)).toMatchObject({ verdict: 'reject' });
+  });
+
+  it('does not fail the hook when the steward verdict cannot be written', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    reviewPublishedPullRequest.mockResolvedValueOnce({
+      success: true, gateRan: true, changesRequested: false, reviewedSha: HEAD, decision: 'approve',
+    });
+    const failing = vi.fn(() => { throw new Error('database is locked'); });
+    await expect(stewardHook(true, failing)({ prUrl: PR, headSha: HEAD, worktreeInfo: { originalPath: '/w' } }))
+      .resolves.toBeUndefined();
+    expect(failing).toHaveBeenCalledTimes(1);
+  });
+});

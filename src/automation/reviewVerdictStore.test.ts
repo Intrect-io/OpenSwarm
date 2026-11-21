@@ -20,6 +20,7 @@ import {
   getReviewVerdictStore,
   lookupStoredPublication,
   lookupStoredReview,
+  parsePublicationOutcome,
   publicationReviewKey,
   recordStoredVerdict,
   resetReviewVerdictStoreForTests,
@@ -317,5 +318,41 @@ describe('getReviewVerdictStore', () => {
 
     expect(second).not.toBe(first);
     expect(existsSync(relocated)).toBe(true);
+  });
+});
+
+describe('parsePublicationOutcome steward fields (AGT-4803)', () => {
+  const sha = 'b'.repeat(40);
+  const base = { success: true, gateRan: true, changesRequested: false };
+
+  it('accepts a well-typed reviewed sha, decision and coverage', () => {
+    for (const coverage of ['complete', 'partial', null] as const) {
+      const outcome = { ...base, reviewedSha: sha, decision: 'revise', coverage };
+      expect(parsePublicationOutcome(JSON.stringify(outcome))).toEqual(outcome);
+    }
+    expect(parsePublicationOutcome(JSON.stringify(base))).toEqual(base);
+  });
+
+  it('treats a malformed reviewed sha, decision or coverage as a miss', () => {
+    const bad: Array<Record<string, unknown>> = [
+      { reviewedSha: 'abc1234' },
+      { reviewedSha: sha.toUpperCase() },
+      { reviewedSha: 42 },
+      { decision: 'merge' },
+      { decision: true },
+      { coverage: 'full' },
+      { coverage: 1 },
+      { issueTextProvided: 'yes' },
+      // An approval its own outcome contradicts.
+      { decision: 'approve', success: false },
+    ];
+    for (const extra of bad) {
+      expect(parsePublicationOutcome(JSON.stringify({ ...base, ...extra }))).toBeUndefined();
+    }
+  });
+
+  it('accepts an approve with success true and a boolean issueTextProvided', () => {
+    const outcome = { ...base, reviewedSha: sha, decision: 'approve', coverage: 'complete', issueTextProvided: true };
+    expect(parsePublicationOutcome(JSON.stringify(outcome))).toEqual(outcome);
   });
 });

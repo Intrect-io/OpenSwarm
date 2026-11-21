@@ -368,7 +368,7 @@ export class PRProcessor {
   async freshReview(
     pr: PRInfo,
     projectPath: string,
-  ): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean; changesRequested?: boolean; partialFindingsPosted?: boolean }> {
+  ): Promise<{ success: boolean; error?: string; iterations: number; gateRan?: boolean; changesRequested?: boolean; partialFindingsPosted?: boolean; reviewedSha?: string; decision?: 'approve' | 'revise' | 'reject' }> {
     const key = `${pr.repo}#${pr.number}`;
     this.currentPR = key;
 
@@ -506,7 +506,7 @@ export class PRProcessor {
       );
 
       const approved = review.decision === 'approve';
-      return { success: approved, error: approved ? undefined : (review.feedback || 'Reviewer requested changes'), iterations: 0, gateRan: true, changesRequested };
+      return { success: approved, error: approved ? undefined : (review.feedback || 'Reviewer requested changes'), iterations: 0, gateRan: true, changesRequested, reviewedSha, decision: review.decision };
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[PRProcessor] ${key} fresh review error:`, errorMsg);

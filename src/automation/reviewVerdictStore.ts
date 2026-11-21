@@ -46,6 +46,17 @@ export interface PublicationReviewOutcome {
   changesRequested?: boolean;
   /** No verdict, but the reviewer's partial notes were posted on the PR as "no decision" (AGT-4413). */
   partialFindingsPosted?: boolean;
+  /** The full 40-hex commit the reviewer actually read; the steward binds its verdict to it (AGT-4803). */
+  reviewedSha?: string;
+  /** The reviewer's own decision, when one was reached. */
+  decision?: 'approve' | 'reject' | 'revise';
+  /** Completeness against the issue text; null when the review was never given the issue. */
+  coverage?: 'complete' | 'partial' | null;
+  /**
+   * True only when the review was handed the issue text. Without it a coverage
+   * claim is no evidence and the steward stores null. No producer sets it yet.
+   */
+  issueTextProvided?: boolean;
 }
 
 /**
@@ -145,7 +156,7 @@ export function cliReviewKey(input: {
   return { kind: input.kind, base: input.base ?? '', digest };
 }
 
-function parsePublicationOutcome(json: string): PublicationReviewOutcome | undefined {
+export function parsePublicationOutcome(json: string): PublicationReviewOutcome | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json);
@@ -166,6 +177,18 @@ function parsePublicationOutcome(json: string): PublicationReviewOutcome | undef
   if (outcome.error !== undefined && typeof outcome.error !== 'string') return undefined;
   if (outcome.gateRan !== undefined && typeof outcome.gateRan !== 'boolean') return undefined;
   if (outcome.changesRequested !== undefined && typeof outcome.changesRequested !== 'boolean') return undefined;
+  // The steward-facing fields bind a merge verdict to a commit, so a mangled one
+  // is a miss too rather than a verdict for a sha nobody reviewed.
+  if (outcome.reviewedSha !== undefined
+    && (typeof outcome.reviewedSha !== 'string' || !/^[0-9a-f]{40}$/.test(outcome.reviewedSha))) return undefined;
+  if (outcome.decision !== undefined
+    && outcome.decision !== 'approve' && outcome.decision !== 'reject' && outcome.decision !== 'revise') return undefined;
+  if (outcome.coverage !== undefined && outcome.coverage !== null
+    && outcome.coverage !== 'complete' && outcome.coverage !== 'partial') return undefined;
+  if (outcome.issueTextProvided !== undefined && typeof outcome.issueTextProvided !== 'boolean') return undefined;
+  // An approval the outcome itself contradicts (success not true) is a mangled
+  // row, not an approval to replay.
+  if (outcome.decision === 'approve' && outcome.success !== true) return undefined;
   return outcome;
 }
 

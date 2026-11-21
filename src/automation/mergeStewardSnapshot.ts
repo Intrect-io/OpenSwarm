@@ -1,6 +1,6 @@
 // Created: 2026-11-21
 // Purpose: gather a merge-steward StewardSnapshot for one PR from read-only gh calls and the run ledger (AGT-4803)
-// Dependencies: ./mergeStewardGuards (types), ./mergeGrant (operator grants), ../support/branchNaming (swarm branch test), better-sqlite3 (lazy, read-only)
+// Dependencies: ./mergeStewardGuards (types), ./mergeStewardEvidence (ledger and verdict evidence), ./mergeGrant (operator grants), ../support/branchNaming (swarm branch test)
 // Test Status: mergeStewardSnapshot.test.ts
 
 /**
@@ -27,12 +27,10 @@
  * - Risk (AGT-4804): the stricter of the ledger attempt's `changeRisk` and the body's
  *   `## Risk:` line, bound to the ledger's published head. With no ledger row the class is at least
  *   `medium` at the current head, so the engine demands a human approval on it.
- * - Reviewer verdict and completeness (AGT-4806, AGT-4786): nothing stores the reviewer's
- *   decision per head yet. The one signal the publisher derives from an approving,
- *   complete review is a non-draft PR whose body carries `Closes <issue>` and whose title
- *   is not `[partial]`. It is trusted only when bound to the ledger's published head of a
- *   run in SYNC_PENDING or DONE (a review rollback parks NEEDS_RECONCILE with the body
- *   unchanged); without a ledger row both are null and the engine refuses.
+ * - Reviewer verdict and completeness (AGT-4806, AGT-4786): the steward verdict ledger's
+ *   stored decision, which must be 'approve' on the current head, plus a ledger run bound
+ *   to that head in SYNC_PENDING or DONE, a non-draft PR, `Closes <issue>` on a title not
+ *   marked `[partial]`, and stored coverage that is not partial (mergeStewardEvidence.ts).
  * - Merge grant (AGT-4414): the operator's grants file (mergeGrant.ts), never the
  *   target repository. A missing, unreadable or malformed file grants nothing.
  * - gh output: REST reads project their fields with `--jq`, so a large PR does not
@@ -44,17 +42,33 @@ import type {
   StewardCheck,
   StewardFileList,
   StewardPrReview,
-  StewardRisk,
-  StewardRiskLevel,
   StewardSiblingPr,
   StewardSnapshot,
-  StewardReview,
-  StewardCompleteness,
   StewardMergeGrant,
 } from './mergeStewardGuards.js';
 import { readMergeGrant } from './mergeGrant.js';
 import { isSwarmBranch } from '../support/branchNaming.js';
-import { existsSync } from 'node:fs';
+import {
+  createVerdictLookup,
+  readStoredVerdict,
+  reviewEvidence,
+  riskEvidence,
+  type StewardLedgerEvidence,
+  type StewardLedgerLookup,
+  type StewardVerdictLookup,
+} from './mergeStewardEvidence.js';
+import { defaultAutomationDbPath } from './automationDbPath.js';
+
+// Evidence helpers moved to mergeStewardEvidence.ts; re-exported for existing callers.
+export {
+  createLedgerLookup,
+  createVerdictLookup,
+  latestChangeRiskLevel,
+  parseRiskSection,
+  reviewEvidence,
+  riskEvidence,
+} from './mergeStewardEvidence.js';
+export type { StewardLedgerEvidence, StewardLedgerLookup, StewardVerdictLookup } from './mergeStewardEvidence.js';
 
 /** Runs `gh <args>` and resolves stdout. Injected so tests use a fake. */
 export type GhRunner = (args: readonly string[]) => Promise<string>;
@@ -94,153 +108,6 @@ export function readOnlyGh(runner: GhRunner): GhRunner {
   return async (args) => {
     assertReadOnlyGhArgs(args);
     return runner(args);
-  };
-}
-
-/** What the run ledger knows about the run that published this PR. */
-export interface StewardLedgerEvidence {
-  issueId: string;
-  /** Tracker identifier (e.g. `AGT-123`), used to match the `Closes` line. */
-  identifier?: string;
-  state: string;
-  /** The head the publisher pushed and classified. */
-  headSha: string | null;
-  /** Risk level stored with the latest attempt that recorded one. */
-  changeRiskLevel: string | null;
-}
-
-export type StewardLedgerLookup = (prUrl: string) => StewardLedgerEvidence | null | Promise<StewardLedgerEvidence | null>;
-
-function storedRiskLevel(resultJson: string | null): string | null {
-  if (!resultJson) return null;
-  try {
-    const level = (JSON.parse(resultJson) as { changeRisk?: { level?: unknown } } | null)?.changeRisk?.level;
-    return typeof level === 'string' ? level : null;
-  } catch {
-    return null; // a malformed row is no evidence
-  }
-}
-
-/** The `changeRisk.level` of the newest attempt (rows newest first) that recorded one. */
-export function latestChangeRiskLevel(resultJsonNewestFirst: ReadonlyArray<string | null>): string | null {
-  for (const row of resultJsonNewestFirst) {
-    const level = storedRiskLevel(row);
-    if (level !== null) return level;
-  }
-  return null;
-}
-
-/**
- * Read-only ledger lookup. A missing database is "no evidence" (null); a database
- * that exists but cannot be opened or queried throws, and the collector notes it
- * as unreadable. Either way the engine refuses for want of a bound verdict.
- */
-export function createLedgerLookup(dbPath: string): StewardLedgerLookup {
-  return async (prUrl) => {
-    if (!existsSync(dbPath)) return null;
-    const { default: Database } = await import('better-sqlite3');
-    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    try {
-      const run = db.prepare(
-        'SELECT issue_id, identifier, state, head_sha FROM automation_runs WHERE pr_url = ? ORDER BY updated_at DESC LIMIT 1',
-      ).get(prUrl) as { issue_id: string; identifier: string | null; state: string; head_sha: string | null } | undefined;
-      if (!run) return null;
-      const attempts = db.prepare(
-        'SELECT result_json FROM automation_attempts WHERE issue_id = ? ORDER BY attempt_no DESC',
-      ).all(run.issue_id) as Array<{ result_json: string | null }>;
-      return {
-        issueId: run.issue_id,
-        identifier: run.identifier ?? undefined,
-        state: run.state,
-        headSha: run.head_sha,
-        changeRiskLevel: latestChangeRiskLevel(attempts.map((a) => a.result_json)),
-      };
-    } finally {
-      db.close();
-    }
-  };
-}
-
-const RISK_LEVELS: readonly StewardRiskLevel[] = ['low', 'medium', 'high'];
-
-function asRiskLevel(value: unknown): StewardRiskLevel | null {
-  return typeof value === 'string' && (RISK_LEVELS as readonly string[]).includes(value) ? value as StewardRiskLevel : null;
-}
-
-function normalizeBody(body: string): string {
-  return body.replace(/\r\n?/g, '\n');
-}
-
-/** The level in the body's `## Risk: <level>` heading, or null. */
-export function parseRiskSection(body: string): StewardRiskLevel | null {
-  const match = normalizeBody(body).match(/^## Risk: (low|medium|high)\s*$/m);
-  return match ? match[1] as StewardRiskLevel : null;
-}
-
-/** Risk class bound to the head it was classified on; unknown is medium, never low. */
-export function riskEvidence(ledger: StewardLedgerEvidence | null, body: string, prHead: string): { risk: StewardRisk; note: string } {
-  const fromBody = parseRiskSection(body);
-  if (ledger?.headSha) {
-    // The stored class can belong to an older attempt (a later one threw before recording
-    // one) while the body is rewritten on every publish: take the stricter of the two.
-    const stored = asRiskLevel(ledger.changeRiskLevel);
-    const known = [stored, fromBody].filter((l): l is StewardRiskLevel => l !== null);
-    const level = known.length > 0 ? known.reduce((a, b) => (RISK_LEVELS.indexOf(b) > RISK_LEVELS.indexOf(a) ? b : a)) : 'medium';
-    const source = known.length === 0 ? 'unknown, defaulted' : [stored && `ledger ${stored}`, fromBody && `PR body ${fromBody}`].filter(Boolean).join(', ');
-    return { risk: { level, headSha: ledger.headSha }, note: `risk ${level} (${source}) bound to published head ${ledger.headSha.slice(0, 12)}` };
-  }
-  // No published head to bind to: never report low.
-  const level: StewardRiskLevel = fromBody === 'high' ? 'high' : 'medium';
-  return { risk: { level, headSha: prHead }, note: `risk ${level}: no ledger row for this PR, so the class is at least medium` };
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** Run states a publication ends in when nothing rolled it back or parked it. */
-const CLEAN_PUBLISHED_STATES: ReadonlySet<string> = new Set(['SYNC_PENDING', 'DONE']);
-
-/** Reviewer verdict and completeness, bound to the ledger's published head. */
-export function reviewEvidence(
-  ledger: StewardLedgerEvidence | null,
-  pr: { body: string; title: string; isDraft: boolean },
-): { review: StewardReview | null; completeness: StewardCompleteness | null; note: string } {
-  if (!ledger?.headSha) {
-    return { review: null, completeness: null, note: 'no reviewer verdict: no ledger row binds this PR to a published head' };
-  }
-  const headSha = ledger.headSha;
-  if (!CLEAN_PUBLISHED_STATES.has(ledger.state)) {
-    // e.g. NEEDS_RECONCILE after a PR-time review rollback: the body may still say Closes.
-    return {
-      review: { verdict: 'unknown', headSha },
-      completeness: { verdict: 'unknown', headSha },
-      note: `ledger run is ${ledger.state}, not cleanly published: its PR body proves no approval`,
-    };
-  }
-  if (pr.isDraft) {
-    return {
-      review: { verdict: 'unknown', headSha },
-      completeness: { verdict: 'unknown', headSha },
-      note: 'PR is a draft: it never earned a review',
-    };
-  }
-  const body = normalizeBody(pr.body);
-  const issue = ledger.identifier ? escapeRegExp(ledger.identifier) : '[A-Z][A-Z0-9]*-\\d+';
-  const closes = new RegExp(`^Closes ${issue}\\s*$`, 'm').test(body);
-  const refs = new RegExp(`^Refs ${issue}\\s*$`, 'm').test(body);
-  const partialTitle = /^\s*\[partial\]/i.test(pr.title);
-  if (closes && !partialTitle) {
-    return {
-      review: { verdict: 'approve', headSha },
-      completeness: { verdict: 'complete', headSha },
-      note: 'reviewer approved with complete coverage (publisher wrote Closes on a non-partial PR)',
-    };
-  }
-  return {
-    review: { verdict: 'unknown', headSha },
-    completeness: { verdict: refs || partialTitle ? 'partial' : 'unknown', headSha },
-    note: 'no complete-coverage approval recorded on the PR',
   };
 }
 
@@ -465,6 +332,8 @@ export interface BuildStewardSnapshotOptions {
   /** Raw runner; it is wrapped in `readOnlyGh` here. */
   gh: GhRunner;
   ledger?: StewardLedgerLookup;
+  /** Stored reviewer verdict lookup; defaults to the steward verdict ledger on the automation DB, read-only. */
+  verdictLookup?: StewardVerdictLookup;
   /** Logins the factory acts as (AGT-4883 will give them a config home). */
   automationAccounts?: readonly string[];
   /** Operator merge grant lookup; defaults to `readMergeGrant` on the operator's grants file. */
@@ -574,7 +443,8 @@ export async function buildStewardSnapshot(options: BuildStewardSnapshotOptions)
   const ledger = await readLedger(options.ledger, prUrl, notes);
   const risk = riskEvidence(ledger, body, headSha);
   notes.push(risk.note);
-  const review = reviewEvidence(ledger, { body, title, isDraft: view.isDraft === true });
+  const verdict = await readStoredVerdict(options.verdictLookup ?? createVerdictLookup(defaultAutomationDbPath()), prUrl, headSha);
+  const review = reviewEvidence({ headSha, pr: { body, title, isDraft: view.isDraft === true }, ledger, verdict });
   notes.push(review.note);
   const mergeGrant = await readGrantEvidence(options.readGrant ?? ((r) => readMergeGrant(r)), repo, notes);
   await assertHeadUnchanged(gh, repo, prNumber, headSha);

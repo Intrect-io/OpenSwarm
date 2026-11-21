@@ -20,7 +20,7 @@ describe('PR-time publication review', () => {
     freshReview.mockResolvedValue({ success: true, iterations: 0, gateRan: true });
     await expect(reviewPublishedPullRequest({
       prUrl: 'https://github.com/acme/repo/pull/42', projectPath: '/work/repo',
-    })).resolves.toEqual({ success: true, error: undefined, gateRan: true, changesRequested: undefined });
+    })).resolves.toEqual({ success: true, error: undefined, gateRan: true, changesRequested: undefined, coverage: null });
     expect(freshReview).toHaveBeenCalledWith(
       expect.objectContaining({ repo: 'acme/repo', number: 42 }),
       '/work/repo',
@@ -32,5 +32,16 @@ describe('PR-time publication review', () => {
     await expect(reviewPublishedPullRequest({
       prUrl: 'https://github.com/acme/repo/pull/42', projectPath: '/work/repo',
     })).resolves.toMatchObject({ gateRan: false, partialFindingsPosted: true });
+  });
+
+  it('passes the reviewed sha and decision through, but never a coverage claim', async () => {
+    const sha = 'a'.repeat(40);
+    freshReview.mockResolvedValue({
+      success: false, iterations: 0, gateRan: true, changesRequested: true, reviewedSha: sha, decision: 'revise',
+    });
+    const outcome = await reviewPublishedPullRequest({
+      prUrl: 'https://github.com/acme/repo/pull/42', projectPath: '/work/repo', workerSandbox: 'off',
+    });
+    expect(outcome).toMatchObject({ reviewedSha: sha, decision: 'revise', coverage: null });
   });
 });
