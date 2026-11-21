@@ -32,6 +32,8 @@ jobs:
       - run: npm run lint
       - name: Docs are English (Hangul only in allowlisted program input/output)
         run: node scripts/check-doc-language.mjs
+      - name: Source comments are English (Hangul only in allowlisted program input/output)
+        run: node scripts/check-doc-language.mjs --comments
 
   typecheck:
     name: Type Check
