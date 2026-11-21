@@ -22,7 +22,7 @@ import Database from 'better-sqlite3'; import { isRetryableBusyError } from '../
 import { z } from 'zod';
 import type { TaskItem } from '../orchestration/decisionEngine.js';
 import { isProofCapableSpace, processAppearsAlive, processNamespaceId, sameProcessNamespace, writerProvablyGone } from '../support/processLiveness.js';
-import { getInstanceId } from '../support/healthEndpoint.js';
+import { getInstanceId } from '../support/healthEndpoint.js'; import { createLegacyWriterProbe } from './legacyLockWriter.js';
 
 const TASK_STATE_MARKER = '<!-- openswarm:task-state:v1 -->';
 
@@ -179,7 +179,7 @@ function storeFileStamp(path: string): string {
   return `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
 }
 
-function getStorePath(): string {
+export function getStorePath(): string {
   return process.env.OPENSWARM_TASK_STATE_FILE || join(homedir(), '.openswarm', 'task-state.json');
 }
 
@@ -227,23 +227,22 @@ function withStoreLock<T>(operation: () => T): T {
   const lockPath = `${path}.lock`;
   mkdirSync(directory, { recursive: true });
   // Transition mutex: SQLite first, then the legacy dot-lock for old CLI releases. One deadline bounds both waits.
-  const deadline = Date.now() + LOCK_TIMEOUT_MS; let lockFd: number | undefined; const lockToken = randomUUID(); let mutexDb: Database.Database | undefined;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS; let lockFd: number | undefined; const lockToken = randomUUID(); let mutexDb: Database.Database | undefined; const probe = createLegacyWriterProbe(path); // AGT-4024 evidence only
   try { mutexDb = new Database(`${path}.mutex.db`, { timeout: LOCK_TIMEOUT_MS }); mutexDb.exec('PRAGMA journal_mode = DELETE; CREATE TABLE IF NOT EXISTS task_state_mutex (id INTEGER PRIMARY KEY CHECK (id = 1)); INSERT OR IGNORE INTO task_state_mutex (id) VALUES (1); BEGIN IMMEDIATE'); } catch (error) {
     mutexDb?.close(); throw isRetryableBusyError(error) ? new Error(`Timed out waiting for task state lock: ${path}.mutex.db`) : error; } // never leak the handle
 
   try {
     while (lockFd === undefined) {
       try {
-        lockFd = openSync(lockPath, 'wx', 0o600);
-        // `?? null` deliberately: an omitted key would be indistinguishable from
-        // a pre-field lock, which readers are entitled to probe locally.
+        lockFd = openSync(lockPath, 'wx', 0o600); probe.vanished();
+        // `?? null` deliberately: an omitted key would be indistinguishable from a pre-field lock, which readers are entitled to probe locally.
         writeFileSync(lockFd, JSON.stringify(buildLockPayload(lockToken)), 'utf8');
         fsyncSync(lockFd);
       } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'EEXIST') throw error;
       try {
-        const owner = readStoreLockOwner(lockPath);
+        const owner = readStoreLockOwner(lockPath); probe.observe(owner);
         const judgedMtimeMs = statSync(lockPath).mtimeMs;
         const lockAgeMs = Date.now() - judgedMtimeMs;
         const staleMalformedLock = !owner && lockAgeMs > LOCK_STALE_MS;
@@ -309,7 +308,7 @@ function withStoreLock<T>(operation: () => T): T {
             && currentOwner?.token === owner?.token;
           if (sameLock) {
             try {
-              unlinkSync(lockPath);
+              probe.reclaimedByUs(); unlinkSync(lockPath);
             } catch (unlinkError) {
               const code = (unlinkError as NodeJS.ErrnoException).code;
               // Another reclaim raced (ENOENT) or claim markers make a dir lock
@@ -321,7 +320,7 @@ function withStoreLock<T>(operation: () => T): T {
           continue;
         }
       } catch (statError) {
-        if ((statError as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        if ((statError as NodeJS.ErrnoException).code === 'ENOENT') { probe.vanished(); continue; }
         throw statError;
       }
         if (Date.now() >= deadline) throw new Error(`Timed out waiting for task state lock: ${lockPath}`);
