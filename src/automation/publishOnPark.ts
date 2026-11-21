@@ -123,7 +123,7 @@ export function shouldPublishParkedWork(
  * Otherwise the commits sit on a branch that was never pushed: measured on the
  * deployed daemon, 23 commits across six branches with no PR, while the
  * operator was being asked 70 questions about work they could not see. (The
- * operator's own framing: "supersded할거면 PR은 올리고 가라".)
+ * operator's own framing: "if it is going to be superseded, still open the PR before you leave".)
  *
  * Called from the runner rather than from a later sweep. Three commit-gate
  * rounds rejected a sweep for the same reason: a parked run can be resumed and

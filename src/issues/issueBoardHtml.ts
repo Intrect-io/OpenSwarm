@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Issue Board HTML Template
 // Created: 2026-04-03
-// Purpose: 칸반 보드 + 이슈 생성/편집 웹 UI
+// Purpose: Kanban board + issue create/edit web UI
 // ============================================
 
 export const ISSUE_BOARD_HTML = `<!DOCTYPE html>

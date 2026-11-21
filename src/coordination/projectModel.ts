@@ -26,7 +26,7 @@ export interface ProjectSnapshot {
   scope: { participantsSince: number; source: string };
 }
 
-/** 이름이나 task ID만으로 전역 참가자를 합치지 않는다. */
+/** Do not merge global participants by name or task ID alone. */
 export function participantId(repoKey: string, taskId: string, actor: string): string {
   return JSON.stringify([repoKey, taskId, actor]);
 }

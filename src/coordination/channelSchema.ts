@@ -4,7 +4,7 @@ import { migrateCoordinationThreads } from './coordinationThreads.js';
 
 const migrated = new WeakSet<Database.Database>();
 
-/** 채널은 원본 ID만 투영한다. 기록용 trace의 성공 여부에 전달을 맡기지 않는다. */
+/** The channel projects only the source ID. Delivery does not depend on whether the recording trace succeeded. */
 export function channelDatabase(): Database.Database {
   const db = getTraceDb();
   if (!db) throw new Error('Channel store unavailable');
@@ -82,7 +82,7 @@ export function channelDatabase(): Database.Database {
   return db;
 }
 
-/** 이관은 원본을 복제하지 않는다. 고유 인덱스로 재접속/중복 publish를 흡수한다. */
+/** The migration does not duplicate the source. A unique index absorbs reconnects/duplicate publishes. */
 export function backfillChannelEntries(db: Database.Database): void {
   db.exec(`
     UPDATE coordination_channel_entries AS e SET repo_key=COALESCE(k.repo_key,t.repo_key,a.repo_key)

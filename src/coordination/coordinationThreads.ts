@@ -176,7 +176,7 @@ function database(): Database.Database {
   const handle = getTraceDb();
   if (!handle) throw new Error('Coordination thread store is unavailable');
   migrateCoordinationThreads(handle);
-  // 단독 Threads 사용도 과거 경로를 찾는다. 전달의 외부 원자 트랜잭션은 이미 준비된 상태를 쓴다.
+  // Standalone Threads usage also finds past paths. The outer atomic transaction of a handoff writes the already-prepared state.
   if (!handle.inTransaction) syncChannelState();
   return handle;
 }

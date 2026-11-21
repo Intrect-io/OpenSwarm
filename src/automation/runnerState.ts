@@ -160,10 +160,10 @@ export const PROJECT_SELECTION_FILE = process.env.OPENSWARM_PROJECT_SELECTION_FI
 const MAX_PIPELINE_HISTORY = 100;
 const MAX_REJECTION_ATTEMPTS = 3;
 
-// 5시간 롤링 윈도우 기반 프로젝트별 pace 제어
-// Claude Max는 5시간마다 quota가 리프레시되므로 이에 맞춤
+// Per-project pace control based on a 5-hour rolling window
+// Claude Max refreshes its quota every 5 hours, so this matches that
 
-const WINDOW_MS = 5 * 60 * 60 * 1000; // 5시간
+const WINDOW_MS = 5 * 60 * 60 * 1000; // 5 hours
 
 export interface ProjectPaceEntry {
   completedAt: string; // ISO-8601

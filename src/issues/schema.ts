@@ -1,12 +1,12 @@
 // ============================================
 // OpenSwarm - Issue Tracker Schema
 // Created: 2026-04-03
-// Purpose: Zod 스키마 + 타입 정의 (로컬 이슈 트래커)
+// Purpose: Zod schemas + type definitions (local issue tracker)
 // ============================================
 
 import { z } from 'zod';
 
-// 이슈 상태 (Linear 호환 + 로컬 확장)
+// Issue status (Linear-compatible + local extensions)
 export const IssueStatusSchema = z.enum([
   'backlog',
   'todo',
@@ -24,7 +24,7 @@ export const IssuePrioritySchema = z.enum([
   'none',     // P4
 ]);
 
-// 이슈 소스: 로컬 생성 vs Linear 동기화
+// Issue source: locally created vs synced from Linear
 export const IssueSourceSchema = z.enum([
   'local',
   'linear',
@@ -32,7 +32,7 @@ export const IssueSourceSchema = z.enum([
   'discord',
 ]);
 
-// 이슈 이벤트 타입 (이력 추적 + 메모리 연동)
+// Issue event types (history tracking + memory integration)
 export const IssueEventTypeSchema = z.enum([
   'created',
   'status_changed',
@@ -46,24 +46,24 @@ export const IssueEventTypeSchema = z.enum([
   'reopened',
 ]);
 
-// 이슈 이벤트 로그 (메모리 시스템 연동용)
+// Issue event log (for memory system integration)
 export const IssueEventSchema = z.object({
   id: z.string(),
   issueId: z.string(),
   type: IssueEventTypeSchema,
-  // 상태 변경 시 before/after
+  // Before/after on a state change
   oldValue: z.string().optional(),
   newValue: z.string().optional(),
-  // 코멘트
+  // Comment
   content: z.string().optional(),
-  // 메모리 연동
+  // Memory integration
   memoryId: z.string().optional(),
-  // 메타
+  // Meta
   actor: z.string().default('system'),
   createdAt: z.string(),
 });
 
-// 메인 이슈 스키마
+// Main issue schema
 export const IssueSchema = z.object({
   id: z.string(),
   projectId: z.string(),          // config.yaml 프로젝트 매핑
@@ -73,37 +73,37 @@ export const IssueSchema = z.object({
   priority: IssuePrioritySchema.default('medium'),
   source: IssueSourceSchema.default('local'),
 
-  // 분류
+  // Classification
   labels: z.array(z.string()).default([]),
   assignee: z.string().optional(),
   milestone: z.string().optional(),
 
-  // AI 메타데이터
+  // AI metadata
   relevantFiles: z.array(z.string()).default([]),
   acceptanceCriteria: z.array(z.string()).default([]),
   estimateMinutes: z.number().optional(),
   complexity: z.enum(['simple', 'moderate', 'complex', 'very_complex']).optional(),
 
-  // 의존성
+  // Dependencies
   dependencies: z.array(z.string()).default([]),  // 선행 이슈 IDs
   parentId: z.string().optional(),                 // 부모 이슈 (서브태스크)
   childIds: z.array(z.string()).default([]),       // 하위 이슈
 
-  // Linear 연동 (optional)
+  // Linear integration (optional)
   linearId: z.string().optional(),
   linearIdentifier: z.string().optional(),
   linearUrl: z.string().optional(),
 
-  // 메모리 연동
+  // Memory integration
   memoryIds: z.array(z.string()).default([]),      // 관련 장기 기억 IDs
 
-  // 추적
+  // Tracking
   createdAt: z.string(),
   updatedAt: z.string(),
   closedAt: z.string().optional(),
 });
 
-// 라벨 스키마
+// Label schema
 export const LabelSchema = z.object({
   id: z.string(),
   name: z.string().min(1),
@@ -111,7 +111,7 @@ export const LabelSchema = z.object({
   description: z.string().optional(),
 });
 
-// 마일스톤 스키마
+// Milestone schema
 export const MilestoneSchema = z.object({
   id: z.string(),
   name: z.string().min(1),
@@ -121,7 +121,7 @@ export const MilestoneSchema = z.object({
   createdAt: z.string(),
 });
 
-// 이슈 필터 옵션
+// Issue filter options
 export const IssueFilterSchema = z.object({
   projectId: z.string().optional(),
   status: z.array(IssueStatusSchema).optional(),
@@ -135,7 +135,7 @@ export const IssueFilterSchema = z.object({
   offset: z.number().default(0),
 });
 
-// 타입 export
+// Type exports
 export type IssueStatus = z.infer<typeof IssueStatusSchema>;
 export type IssuePriority = z.infer<typeof IssuePrioritySchema>;
 export type IssueSource = z.infer<typeof IssueSourceSchema>;

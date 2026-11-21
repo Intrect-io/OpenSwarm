@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - SQLite Issue Store
 // Created: 2026-04-03
-// Purpose: better-sqlite3 기반 이슈 저장소
+// Purpose: better-sqlite3-based issue store
 // Dependencies: better-sqlite3, nanoid
 // ============================================
 
@@ -19,9 +19,9 @@ import type {
 
 const DEFAULT_DB_PATH = resolve(homedir(), '.openswarm', 'issues.db');
 
-// SQLite 스토어 인터페이스 (향후 다른 백엔드 교체 가능)
+// SQLite store interface (other backends can be swapped in later)
 export interface IIssueStore {
-  // 이슈 CRUD
+  // Issue CRUD
   createIssue(input: CreateIssueInput): Issue;
   getIssue(id: string): Issue | null;
   getIssueByIdentifier(identifier: string): Issue | null;
@@ -29,31 +29,31 @@ export interface IIssueStore {
   deleteIssue(id: string): boolean;
   listIssues(filter?: IssueFilter): { issues: Issue[]; total: number };
 
-  // 상태 전이
+  // State transitions
   changeStatus(id: string, status: IssueStatus, actor?: string): Issue | null;
 
-  // 이벤트 로그
+  // Event log
   addEvent(issueId: string, type: IssueEventType, data?: EventData): IssueEvent;
   getEvents(issueId: string, limit?: number): IssueEvent[];
   getRecentEvents(limit?: number): IssueEvent[];
 
-  // 라벨
+  // Labels
   createLabel(name: string, color?: string, description?: string): Label;
   listLabels(): Label[];
   deleteLabel(id: string): boolean;
 
-  // 마일스톤
+  // Milestones
   createMilestone(name: string, description?: string, dueDate?: string): Milestone;
   listMilestones(): Milestone[];
 
-  // 메모리 연동
+  // Memory integration
   linkMemory(issueId: string, memoryId: string): void;
   getLinkedMemories(issueId: string): string[];
 
-  // 통계
+  // Statistics
   getStats(projectId?: string): IssueStats;
 
-  // 종료
+  // Shutdown
   close(): void;
 }
 
@@ -95,8 +95,8 @@ export interface IssueStats {
   byStatus: Record<string, number>;
   byPriority: Record<string, number>;
   byProject: Record<string, number>;
-  recentlyCreated: number;  // 최근 7일
-  recentlyClosed: number;   // 최근 7일
+  recentlyCreated: number;  // last 7 days
+  recentlyClosed: number;   // last 7 days
 }
 
 /**
@@ -339,7 +339,7 @@ export class SqliteIssueStore implements IIssueStore {
     }
   }
 
-  // ============ 이슈 CRUD ============
+  // ============ Issue CRUD ============
 
   createIssue(input: CreateIssueInput): Issue {
     const id = input.id ?? nanoid(12);
@@ -384,7 +384,7 @@ export class SqliteIssueStore implements IIssueStore {
       INSERT INTO issue_events (id, issue_id, type, new_value, actor, created_at)
       VALUES (?, ?, 'created', ?, 'system', ?)
     `);
-    // 부모 이슈의 child 목록은 쿼리 시 동적 조회
+    // A parent issue's child list is looked up dynamically at query time
 
     const findByLinearId = this.db.prepare('SELECT id FROM issues WHERE linear_id = ?');
     const findByLinearIdentifier = this.db.prepare(
@@ -662,7 +662,7 @@ export class SqliteIssueStore implements IIssueStore {
       params.push(...filter.labels, ...filter.labels);
     }
 
-    // FTS 전문검색
+    // FTS full-text search
     let ftsJoin = '';
     const ftsQuery = filter?.search ? toFtsQuery(filter.search) : null;
     if (ftsQuery) {
@@ -700,7 +700,7 @@ export class SqliteIssueStore implements IIssueStore {
     };
   }
 
-  // ============ 상태 전이 ============
+  // ============ State transitions ============
 
   changeStatus(id: string, status: IssueStatus, actor?: string): Issue | null {
     const run = this.db.transaction(() => {
@@ -735,7 +735,7 @@ export class SqliteIssueStore implements IIssueStore {
     }
   }
 
-  // ============ 이벤트 로그 ============
+  // ============ Event log ============
 
   addEvent(issueId: string, type: IssueEventType, data?: EventData): IssueEvent {
     const id = data?.idempotencyKey
@@ -795,7 +795,7 @@ export class SqliteIssueStore implements IIssueStore {
     ).all(normalizeLimit(limit, 20, 500)) as any[]).map(this.rowToEvent);
   }
 
-  // ============ 라벨 ============
+  // ============ Labels ============
 
   createLabel(name: string, color = '#6B7280', description?: string): Label {
     const existing = this.db.prepare('SELECT * FROM labels WHERE name = ? LIMIT 1').get(name) as any;
@@ -828,7 +828,7 @@ export class SqliteIssueStore implements IIssueStore {
     return this.db.prepare('DELETE FROM labels WHERE id = ?').run(id).changes > 0;
   }
 
-  // ============ 마일스톤 ============
+  // ============ Milestones ============
 
   createMilestone(name: string, description?: string, dueDate?: string): Milestone {
     const id = nanoid(8);
@@ -850,7 +850,7 @@ export class SqliteIssueStore implements IIssueStore {
     }));
   }
 
-  // ============ 메모리 연동 ============
+  // ============ Memory integration ============
 
   linkMemory(issueId: string, memoryId: string): void {
     const now = new Date().toISOString();
@@ -866,7 +866,7 @@ export class SqliteIssueStore implements IIssueStore {
     ).all(issueId) as any[]).map((r) => r.memory_id);
   }
 
-  // ============ 통계 ============
+  // ============ Statistics ============
 
   getStats(projectId?: string): IssueStats {
     const where = projectId ? 'WHERE project_id = ?' : '';
@@ -908,7 +908,7 @@ export class SqliteIssueStore implements IIssueStore {
     return { total, byStatus, byPriority, byProject, recentlyCreated, recentlyClosed };
   }
 
-  // ============ 유틸 ============
+  // ============ Utilities ============
 
   close(): void {
     this.db.close();
@@ -1072,7 +1072,7 @@ function normalizeOffset(value: number | undefined): number {
   return Math.max(0, Math.trunc(value!));
 }
 
-// 싱글톤 인스턴스
+// Singleton instance
 let storeInstance: SqliteIssueStore | null = null;
 let storeInstancePath: string | null = null;
 

@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - GPT CLI Adapter
 // Calls OpenAI Chat Completions API via OAuth token
-// Agentic tool loop 지원 (read/write/edit/search/bash)
+// Agentic tool loop support (read/write/edit/search/bash)
 // ============================================
 
 import type {
@@ -93,7 +93,7 @@ export class GptCliAdapter implements CliAdapter {
   }
 
   buildCommand(_options: CliRunOptions): { command: string; args: string[] } {
-    // GPT 어댑터는 run()을 사용하므로 이 메서드는 호출되지 않음
+    // The GPT adapter uses run(), so this method is never called
     return { command: 'echo', args: ['"GPT adapter uses run() — not shell spawn"'] };
   }
 
@@ -109,7 +109,7 @@ export class GptCliAdapter implements CliAdapter {
     const store = new AuthProfileStore();
     const startTime = Date.now();
 
-    // 1. 유효한 토큰 획득
+    // 1. Obtain a valid token
     let accessToken: string;
     try {
       accessToken = await ensureValidToken(store, PROFILE_KEY);
@@ -124,7 +124,7 @@ export class GptCliAdapter implements CliAdapter {
 
     const model = options.model ?? await this.getDefaultModel();
 
-    // 2. 에이전틱 루프로 실행 (도구 사용 가능)
+    // 2. Run via the agentic loop (tools available)
     const callApi = this.createApiCaller(accessToken, store, model, options.onToken, options.signal);
 
     // MCP tools: caller-provided, else self-source from the registry
@@ -201,8 +201,8 @@ export class GptCliAdapter implements CliAdapter {
   }
 
   /**
-   * OpenAI API 호출 함수 생성 (에이전틱 루프에 주입)
-   * 401 시 토큰 갱신 + 1회 재시도 포함
+   * Create the OpenAI API call function (injected into the agentic loop)
+   * Includes token refresh + one retry on 401
    */
   private createApiCaller(
     initialToken: string,
@@ -252,7 +252,7 @@ export class GptCliAdapter implements CliAdapter {
         if (!res.ok) {
           const errText = await res.text().catch(() => '');
 
-          // 401 → 토큰 갱신 후 1회 재시도
+          // 401 → refresh the token and retry once
           if (res.status === 401 && !retried) {
             retried = true;
             token = await refreshExpiredProfileForRetry(store);
@@ -299,7 +299,7 @@ export async function refreshExpiredProfileForRetry(store: AuthProfileStore): Pr
   if (!profile) {
     throw new Error('No auth profile found');
   }
-  // 강제 갱신 (expires를 0으로 설정)
+  // Force refresh (set expires to 0)
   store.setProfile(PROFILE_KEY, { ...profile, expires: 0 });
   return ensureValidToken(store, PROFILE_KEY);
 }

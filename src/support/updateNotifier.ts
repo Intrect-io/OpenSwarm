@@ -280,7 +280,7 @@ export async function maybeAutoUpdate(current: string, deps: AutoUpdateDeps = {}
     if (failedInstallVersion === latest) {
       // Already installed-and-verified this exact version as a no-op once —
       // reinstalling every run is the actual cost the bug report measured
-      // ("모든 명령이 수 초씩 느려지고"). Fall back to the passive notice.
+      // ("every command gets seconds slower"). Fall back to the passive notice.
       out(formatUpdateNotice(current, latest));
       return;
     }

@@ -110,12 +110,12 @@ export interface CliRunOptions {
   processContext?: ProcessContext;
   /** Identity stamped on usage and session records for this invocation. */
   usageAttribution?: UsageAttribution;
-  /** 시스템 프롬프트 (GPT/Local 에이전틱 루프에서 사용) */
+  /** System prompt (used by the GPT/Local agentic loop) */
   systemPrompt?: string;
   /**
-   * 추론(reasoning) 토큰 비활성화 요청 (OpenRouter). 기계적 실행 역할(worker 등)은
-   * 추론이 불필요하므로 토큰 낭비를 막는다. 모델이 추론 강제(thinking 전용)면
-   * OpenRouter가 거부할 수 있으나, 그런 모델은 경량 역할에 쓰지 않는다.
+   * Request to disable reasoning tokens (OpenRouter). Mechanical execution roles (worker, etc.)
+   * do not need reasoning, so this avoids wasting tokens. OpenRouter may reject it if the model
+   * forces reasoning (thinking-only), but such models are not used for lightweight roles.
    */
   disableReasoning?: boolean;
   /**
@@ -125,8 +125,8 @@ export interface CliRunOptions {
    */
   reasoningEffort?: 'low' | 'medium' | 'high';
   /**
-   * 수정 필수 작업의 no-edit 종료 가드 횟수 (agenticLoop). 모델이 edit/write 없이
-   * 끝내려 하면 N회까지 되민다. 기본 0(비활성).
+   * No-edit termination guard count for edit-required tasks (agenticLoop). If the model tries to
+   * finish without edit/write, it is pushed back up to N times. Default 0 (disabled).
    */
   nudgeMaxOnNoEdit?: number;
   /**

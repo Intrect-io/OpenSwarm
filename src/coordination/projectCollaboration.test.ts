@@ -37,7 +37,7 @@ const route = async (path: string, method = 'GET', body?: object, runner?: any, 
 const coldThread = () => {
   resetTraceDbForTests(); process.env.OPENSWARM_AUTOMATION_DB = join(root, 'cold-threads.db');
   const db = getTraceDb()!; migrateCoordinationThreads(db); const now = Date.now();
-  // 채널 스키마가 없던 구버전의 원본 행을 그대로 재현한다.
+  // Reproduces as-is the raw row of an old version that had no channel schema.
   db.prepare(`INSERT INTO coordination_threads(thread_id,repository,subject,status,created_by_actor,created_by_task_id,
     fingerprint,created_at,updated_at) VALUES ('cold-thread',?,'Legacy discussion','open','legacy','task-a','fixture',?,?)`).run(repo, now, now);
   db.prepare(`INSERT INTO coordination_thread_tasks VALUES ('cold-thread','task-a')`).run();
@@ -230,7 +230,7 @@ describe('durable project channels', () => {
     expect(listCoordinationThreads({ repository: canonical }).items.some((t) => t.id === other.id)).toBe(false);
   });
   it('preserves consumed board messages and reports the unavailable channel inbox on DB failure', async () => {
-    // 실제 DB open 실패를 사용한다. 존재하지 않는 부모는 자동 생성되므로 파일을 부모로 지정한다.
+    // Uses a real DB open failure. A nonexistent parent is auto-created, so point the file itself at the parent.
     resetTraceDbForTests(); writeFileSync(join(root, 'blocked'), 'file');
     process.env.OPENSWARM_AUTOMATION_DB = join(root, 'blocked', 'channel.db');
     const boardMessage = { id: 'board-only', summary: 'Do not lose this consumed message' };

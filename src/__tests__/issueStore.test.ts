@@ -19,7 +19,7 @@ describe('SqliteIssueStore', () => {
 
   afterEach(() => {
     store.close();
-    // WAL 관련 파일도 정리
+    // Also clean up the WAL-related files
     for (const suffix of ['', '-wal', '-shm']) {
       const p = dbPath + suffix;
       if (existsSync(p)) unlinkSync(p);
@@ -225,7 +225,7 @@ describe('SqliteIssueStore', () => {
       const mems = store.getLinkedMemories(issue.id);
       expect(mems).toEqual(['mem-123', 'mem-456']);
 
-      // 이슈 조회 시에도 반영
+      // Also reflected when the issue is queried
       const refreshed = store.getIssue(issue.id);
       expect(refreshed?.memoryIds).toEqual(['mem-123', 'mem-456']);
     });

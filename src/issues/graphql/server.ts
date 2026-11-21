@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Issue Tracker GraphQL Server
 // Created: 2026-04-03
-// Purpose: graphql-yoga 서버, 기존 HTTP 서버에 통합
+// Purpose: graphql-yoga server, integrated into the existing HTTP server
 // ============================================
 
 import { createSchema, createYoga, type Plugin } from 'graphql-yoga';
@@ -185,7 +185,7 @@ const costRulePlugin: Plugin = {
   },
 };
 
-// GraphQL Yoga 인스턴스 생성 (이슈 + 코드 레지스트리 스키마 머지)
+// Create the GraphQL Yoga instance (issue + code registry schemas merged)
 const yoga = createYoga({
   schema: createSchema({
     typeDefs: [typeDefs, registryTypeDefs],
@@ -206,8 +206,8 @@ const yoga = createYoga({
 });
 
 /**
- * 기존 웹서버의 요청 핸들러에서 /graphql 경로를 이 함수로 위임
- * graphql-yoga의 Node.js HTTP adapter 패턴 사용
+ * Delegate the /graphql path to this function from the existing web server's request handler
+ * Uses the graphql-yoga Node.js HTTP adapter pattern
  */
 export async function handleGraphQL(
   req: IncomingMessage,
@@ -222,8 +222,8 @@ export async function handleGraphQL(
     return;
   }
 
-  // graphql-yoga는 Node.js HTTP 서버에서 req, res를 직접 처리
-  // handle() 호출 시 내부적으로 res에 응답을 작성
+  // graphql-yoga handles req, res directly on a Node.js HTTP server
+  // Calling handle() writes the response to res internally
   await yoga.requestListener(req, res);
 }
 

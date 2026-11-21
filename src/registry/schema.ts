@@ -1,12 +1,12 @@
 // ============================================
 // OpenSwarm - Code Registry Schema
 // Created: 2026-04-10
-// Purpose: Zod 스키마 + 타입 정의 (코드 엔티티 레지스트리)
+// Purpose: Zod schemas + type definitions (code entity registry)
 // ============================================
 
 import { z } from 'zod';
 
-// 엔티티 종류
+// Entity kinds
 export const EntityKindSchema = z.enum([
   'function',
   'class',
@@ -15,7 +15,7 @@ export const EntityKindSchema = z.enum([
   'constant',
 ]);
 
-// 엔티티 상태
+// Entity states
 export const EntityStatusSchema = z.enum([
   'active',
   'deprecated',
@@ -24,19 +24,19 @@ export const EntityStatusSchema = z.enum([
   'broken',
 ]);
 
-// 리스크 수준
+// Risk levels
 export const RiskLevelSchema = z.enum(['low', 'medium', 'high']);
 
-// 경고 심각도
+// Warning severity
 export const WarningSeveritySchema = z.enum(['info', 'warning', 'error', 'critical']);
 
-// 경고 카테고리
+// Warning categories
 export const WarningCategorySchema = z.enum(['security', 'performance', 'correctness', 'style']);
 
-// 엔티티 간 관계 타입
+// Relation types between entities
 export const RelationTypeSchema = z.enum(['calls', 'extends', 'implements', 'uses', 'overrides']);
 
-// 이벤트 타입
+// Event types
 export const EntityEventTypeSchema = z.enum([
   'created',
   'updated',
@@ -51,13 +51,13 @@ export const EntityEventTypeSchema = z.enum([
   'note_added',
 ]);
 
-// 태그
+// Tags
 export const EntityTagSchema = z.object({
   tag: z.string().min(1),
   value: z.string().optional(),
 });
 
-// 경고
+// Warnings
 export const EntityWarningSchema = z.object({
   id: z.string(),
   entityId: z.string(),
@@ -69,14 +69,14 @@ export const EntityWarningSchema = z.object({
   createdAt: z.string(),
 });
 
-// 관계
+// Relations
 export const EntityRelationSchema = z.object({
   sourceId: z.string(),
   targetId: z.string(),
   relationType: RelationTypeSchema,
 });
 
-// 이벤트
+// Events
 export const EntityEventSchema = z.object({
   id: z.string(),
   entityId: z.string(),
@@ -88,7 +88,7 @@ export const EntityEventSchema = z.object({
   createdAt: z.string(),
 });
 
-// 메인 코드 엔티티 스키마
+// Main code entity schema
 export const CodeEntitySchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -112,7 +112,7 @@ export const CodeEntitySchema = z.object({
   notes: z.string().default(''),
   knowledgeNodeId: z.string().optional(),
 
-  // 런타임에 조인으로 채워지는 필드
+  // Fields populated by joins at runtime
   tags: z.array(EntityTagSchema).default([]),
   warnings: z.array(EntityWarningSchema).default([]),
   linkedIssueIds: z.array(z.string()).default([]),
@@ -122,7 +122,7 @@ export const CodeEntitySchema = z.object({
   updatedAt: z.string(),
 });
 
-// 엔티티 필터
+// Entity filter
 export const CodeEntityFilterSchema = z.object({
   projectId: z.string().optional(),
   kind: z.array(EntityKindSchema).optional(),
@@ -137,14 +137,14 @@ export const CodeEntityFilterSchema = z.object({
   offset: z.number().default(0),
 });
 
-// 파일 브리핑
+// File briefing
 export const FileBriefSchema = z.object({
   filePath: z.string(),
   summary: z.string(),
   entities: z.array(CodeEntitySchema),
 });
 
-// 레지스트리 통계
+// Registry statistics
 export const RegistryStatsSchema = z.object({
   total: z.number(),
   byKind: z.array(z.object({ kind: z.string(), count: z.number() })),
@@ -155,7 +155,7 @@ export const RegistryStatsSchema = z.object({
   withWarnings: z.number(),
 });
 
-// 타입 export
+// Type exports
 export type EntityKind = z.infer<typeof EntityKindSchema>;
 export type EntityStatus = z.infer<typeof EntityStatusSchema>;
 export type RiskLevel = z.infer<typeof RiskLevelSchema>;

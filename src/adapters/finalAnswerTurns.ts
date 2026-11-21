@@ -147,13 +147,13 @@ async function callToolless(ctx: FinalTurnContext): Promise<string | null | unde
 }
 
 /**
- * Final answer turn — maxTurns/타임아웃으로 끊겼는데 모델이 최종 텍스트를 못 낸 경우,
- * 도구 없이 호출해 결론을 강제한다. 이게 없으면 진단·분석형 작업이
- * 끝까지 도구만 호출하다 빈 결과("(no summary)")로 끝난다 — SWE 하이브리드 진단
- * 단계에서 발견된 결함.
- * 첫 salvage가 reasoning-only 응답처럼 사용자에게 보이는 content를 하나도 내지
- * 않으면 딱 한 번 재시도한다. 두 번 모두 비면 성공/REVISE로 위장하지 않고 실패로
- * 올려 보내 reviewer/worker 호출자가 명시적으로 처리하게 한다. (INT-1442, INT-2879)
+ * Final answer turn — when cut off by maxTurns/timeout and the model produced no final text,
+ * call it without tools to force a conclusion. Without this, diagnosis/analysis tasks
+ * keep calling tools to the end and finish with an empty result ("(no summary)") — a defect found in
+ * the SWE hybrid diagnosis phase.
+ * If the first salvage yields no user-visible content at all (like a reasoning-only response),
+ * retry exactly once. If both come back empty, do not disguise it as success/REVISE; escalate it as a
+ * failure so the reviewer/worker caller handles it explicitly. (INT-1442, INT-2879)
  */
 export async function salvageFinalAnswer(ctx: FinalTurnContext, repair?: TranscriptAwareRepair): Promise<string> {
   const { messages, session, onLog } = ctx;

@@ -1,6 +1,6 @@
 // OpenSwarm - GraphQL Schema Exporter
 // KnowledgeGraph → .openswarm/repo.graphql + repo-snapshot.json
-// 에이전트가 컨텍스트 윈도우 없이도 저장소를 완전히 이해할 수 있는 정적 파일 생성
+// Generate static files that let an agent fully understand the repository without a context window
 
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -9,7 +9,7 @@ import type { GraphNode, GraphEdge } from './types.js';
 import { pinChildDirectory, writeFileInPinnedDirectory } from '../support/containedWrite.js';
 import { safeConsole as console } from '../support/safeLog.js';
 
-// GraphQL 스키마 (고정 — 데이터 구조 정의)
+// GraphQL schema (fixed - defines the data structure)
 const REPO_SCHEMA = `# OpenSwarm Repository Graph Schema
 # 에이전트가 저장소를 이해하기 위한 정적 스키마
 # 데이터: repo-snapshot.json
@@ -100,7 +100,7 @@ enum RiskLevel { LOW MEDIUM HIGH }
 enum Scope { SMALL MEDIUM LARGE }
 `;
 
-// 아키텍처 레이어 추론
+// Infer architecture layers
 function inferLayer(modulePath: string): string {
   const segments = modulePath.split('/');
   const layerMap: Record<string, string> = {
@@ -126,7 +126,7 @@ function inferLayer(modulePath: string): string {
   return 'OTHER';
 }
 
-// 리스크 계산
+// Risk calculation
 function computeRisk(node: GraphNode, hasTests: boolean, dependentCount: number): string {
   const churn = node.gitInfo?.churnScore ?? 0;
   const loc = node.metrics?.loc ?? 0;
@@ -135,7 +135,7 @@ function computeRisk(node: GraphNode, hasTests: boolean, dependentCount: number)
   return 'LOW';
 }
 
-// 순환 의존성 탐지
+// Detect circular dependencies
 function detectCycles(nodes: GraphNode[], edges: GraphEdge[]): string[][] {
   const importEdges = edges.filter(e => e.type === 'imports');
   const adj = new Map<string, string[]>();
@@ -175,7 +175,7 @@ function detectCycles(nodes: GraphNode[], edges: GraphEdge[]): string[][] {
     dfs(node);
   }
 
-  // 중복 사이클 제거 (정규화: 사전순 최소 시작)
+  // Remove duplicate cycles (normalized: lexicographically smallest start)
   const seen = new Set<string>();
   return cycles.filter(cycle => {
     const minIdx = cycle.indexOf(cycle.slice().sort()[0]);
@@ -186,7 +186,7 @@ function detectCycles(nodes: GraphNode[], edges: GraphEdge[]): string[][] {
   });
 }
 
-// 진입점 탐지 (아무도 import하지 않는 모듈)
+// Detect entry points (modules nobody imports)
 function findEntrypoints(nodes: GraphNode[], edges: GraphEdge[]): Set<string> {
   const imported = new Set(edges.filter(e => e.type === 'imports').map(e => e.target));
   const entrypoints = new Set<string>();
@@ -303,7 +303,7 @@ export function buildSnapshot(graph: KnowledgeGraph, projectPath: string): RepoS
   );
   const summary = buildFilteredSummary(moduleNodes, testEdges);
 
-  // 의존성 맵 구축
+  // Build the dependency map
   const dependsOnMap = new Map<string, string[]>();
   const dependedByMap = new Map<string, string[]>();
   for (const e of importEdges) {
@@ -313,7 +313,7 @@ export function buildSnapshot(graph: KnowledgeGraph, projectPath: string): RepoS
     dependedByMap.get(e.target)!.push(e.source);
   }
 
-  // 테스트 맵
+  // Test map
   const testsMap = new Map<string, string[]>();
   for (const e of testEdges) {
     if (!testsMap.has(e.target)) testsMap.set(e.target, []);
@@ -324,7 +324,7 @@ export function buildSnapshot(graph: KnowledgeGraph, projectPath: string): RepoS
   const hotModulesSet = new Set(summary.hotModules);
   const cycles = detectCycles(moduleNodes, importEdges);
 
-  // 언어 통계
+  // Language statistics
   const langStats = new Map<string, { count: number; loc: number }>();
   for (const n of moduleNodes as GraphNode[]) {
     const lang = (n.metrics?.language ?? 'other').toUpperCase();
@@ -334,7 +334,7 @@ export function buildSnapshot(graph: KnowledgeGraph, projectPath: string): RepoS
     langStats.set(lang, cur);
   }
 
-  // 레이어 통계
+  // Layer statistics
   const layerStats = new Map<string, { count: number; modules: string[] }>();
   for (const n of moduleNodes as GraphNode[]) {
     const layer = inferLayer(n.path);
@@ -407,7 +407,7 @@ export function buildSnapshot(graph: KnowledgeGraph, projectPath: string): RepoS
   };
 }
 
-// .openswarm/ 디렉토리에 스키마 + 스냅샷 저장
+// Save the schema + snapshot to the .openswarm/ directory
 export function exportRepoGraph(graph: KnowledgeGraph, projectPath: string): {
   schemaPath: string;
   snapshotPath: string;
@@ -510,13 +510,13 @@ export function repoSnapshotDirRefused(projectPath: string): boolean {
   return !isRegularEntry(dir, 'directory');
 }
 
-// 스냅샷이 존재하는지 확인 — a symlinked snapshot counts as absent, so the
+// Check whether a snapshot exists — a symlinked snapshot counts as absent, so the
 // caller rescans and atomicWriteFileSync replaces the link with a real file.
 export function hasRepoSnapshot(projectPath: string): boolean {
   return plainSnapshotPath(projectPath) !== null;
 }
 
-// 스냅샷 로드 (에이전트가 읽을 때) — refuses symlinks and oversized files.
+// Load the snapshot (when an agent reads it) — refuses symlinks and oversized files.
 export function loadRepoSnapshot(projectPath: string): RepoSnapshot | null {
   const snapshotPath = plainSnapshotPath(projectPath);
   if (!snapshotPath) return null;
@@ -532,7 +532,7 @@ export function loadRepoSnapshot(projectPath: string): RepoSnapshot | null {
   }
 }
 
-// 스냅샷 나이 확인 (분)
+// Check snapshot age (minutes)
 export function snapshotAgeMinutes(projectPath: string): number | null {
   const snapshot = loadRepoSnapshot(projectPath);
   if (!snapshot) return null;

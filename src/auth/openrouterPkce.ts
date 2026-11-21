@@ -46,14 +46,14 @@ export interface OpenRouterFlowOptions {
 }
 
 /**
- * OpenRouter PKCE 흐름 실행.
+ * Run the OpenRouter PKCE flow.
  *
- *   1. PKCE verifier/challenge 생성
- *   2. https://openrouter.ai/auth?callback_url=...&code_challenge=...&code_challenge_method=S256 로 브라우저 오픈
- *   3. 로컬 콜백 서버에서 ?code=... 수신
- *   4. POST /api/v1/auth/keys 로 교환 → 영구 sk-or-* API key
+ *   1. Generate PKCE verifier/challenge
+ *   2. Open https://openrouter.ai/auth?callback_url=...&code_challenge=...&code_challenge_method=S256 in the browser
+ *   3. Receive ?code=... on the local callback server
+ *   4. Exchange via POST /api/v1/auth/keys -> permanent sk-or-* API key
  *
- * OpenAI 흐름과 달리 refresh token 개념이 없다 — 받은 키를 그대로 저장한다.
+ * Unlike the OpenAI flow there is no refresh token - the received key is stored as-is.
  */
 export async function runOpenRouterPkceFlow(
   options: OpenRouterFlowOptions = {},
@@ -203,8 +203,8 @@ export async function runOpenRouterPkceFlow(
 }
 
 /**
- * OpenRouter API key를 직접 받아 저장 (PKCE fallback).
- * `sk-or-` 접두사만 가볍게 검증한다.
+ * Take an OpenRouter API key directly and store it (PKCE fallback).
+ * Only lightly validates the `sk-or-` prefix.
  */
 export function saveOpenRouterApiKey(apiKey: string): void {
   const trimmed = apiKey.trim();
@@ -231,7 +231,7 @@ export function saveOpenRouterApiKey(apiKey: string): void {
 }
 
 /**
- * 전체 PKCE 흐름 + 저장
+ * Full PKCE flow + store
  */
 export async function loginAndSaveOpenRouterProfile(port?: number): Promise<void> {
   const result = await runOpenRouterPkceFlow({ port });

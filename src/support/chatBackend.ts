@@ -139,7 +139,7 @@ export function inferProviderFromModel(model?: string): AdapterName {
   if (model.includes('codex')) return 'codex';
   if (model.startsWith('gpt-') || model.startsWith('o3') || model.startsWith('o4')) return 'gpt';
   if (model.includes('/')) return 'openrouter';
-  // 로컬 모델 패턴: ollama 태그 형식 (name:tag) 또는 알려진 오픈소스 모델
+  // Local model pattern: ollama tag format (name:tag) or a known open-source model
   if (model.includes(':') || /^(gemma|llama|mistral|codestral|qwen|deepseek|phi|starcoder)/i.test(model)) return 'local';
   return getDefaultAdapterName();
 }

@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Code Registry GraphQL Resolvers
 // Created: 2026-04-10
-// Purpose: Query + Mutation 리졸버
+// Purpose: Query + Mutation resolvers
 // ============================================
 
 import { getRegistryStore, type RegisterEntityInput, type UpdateEntityInput } from '../sqliteStore.js';
@@ -266,7 +266,7 @@ export const registryResolvers = {
     },
   },
 
-  // 필드 리졸버: CodeEntity.relations, CodeEntity.events
+  // Field resolvers: CodeEntity.relations, CodeEntity.events
   CodeEntity: {
     relations: (entity: CodeEntity) => {
       return getRegistryStore().getRelations(entity.id);

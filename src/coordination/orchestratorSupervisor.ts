@@ -98,7 +98,7 @@ export function selectOrchestratorItems(
   for (const event of events) {
     const humanKey = `${event.repoKey ?? event.repository}:${event.taskId}:${event.correlationId}`;
     if (event.kind === 'human-question' && answered.has(humanKey)) continue;
-    // 일반 협업 응답의 taskId는 응답자의 작업이다. 같은 correlation의 원래 요청을 닫아야 한다.
+    // The taskId of a general collaboration reply is the responder's task. The original request with the same correlation must be closed.
     const human = event.kind === 'human-question' || event.kind === 'human-answer';
     const key = human ? `human:${humanKey}` : `${event.repoKey ?? event.repository}:${event.correlationId}`;
     const previous = latest.get(key);
@@ -263,7 +263,7 @@ export class OrchestratorSupervisor {
     this.started = true;
     this.stopping = false;
     getEventHub().on('coordination:channel', this.onChannelMessage);
-    // 별도 dashboard 프로세스가 같은 DB에 접수해도 인메모리 알림에 의존하지 않는다.
+    // Do not rely on in-memory notification even if a separate dashboard process accepts into the same DB.
     this.channelPoll = setInterval(this.onChannelMessage, 15_000);
     this.channelPoll.unref();
     // Reconcile events committed before this process subscribed. Event-only
@@ -362,7 +362,7 @@ export class OrchestratorSupervisor {
     };
     const cells = new Map<string, RepositoryCell>();
     try {
-      // 비활성화/제거된 프로젝트도 실행 결과가 불명확하면 중단 상태로 복구한다.
+      // Even a disabled/removed project is recovered to a stopped state when the execution result is unclear.
       for (const repoKey of processingCoordinatorProjects()) {
         if (signal.aborted) break;
         try {
@@ -383,7 +383,7 @@ export class OrchestratorSupervisor {
       try {
         await this.drainChannelQueue(cell, signal);
       } catch (error) {
-        // 채널 저장소 장애가 기존 보드 기반 감독까지 중단시키지 않게 한다.
+        // A channel store failure must not halt the existing board-based supervision.
         console.error('[Orchestrator] channel queue unavailable:', error);
       }
       if (signal.aborted) break;

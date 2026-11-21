@@ -3,7 +3,7 @@
 // ============================================
 //
 // cgf-portal 2026-09-17: 9 of 11 PRs added code with no test; #503 was titled
-// "재처리·회귀 검증" and changed two docs files. A title is the issue's claim;
+// "Verify reprocessing / regression" (Korean in the original) and changed two docs files. A title is the issue's claim;
 // this section is the diff's answer, computed from the file list so it cannot
 // be argued with.
 

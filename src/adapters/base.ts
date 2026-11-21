@@ -86,7 +86,7 @@ export async function spawnCli(
     options.signal?.removeEventListener('abort', relayCallerAbort);
   };
 
-  // 어댑터가 직접 실행을 지원하면 shell spawn 대신 사용
+  // Use instead of a shell spawn when the adapter supports direct execution
   if (adapter.run) {
     try {
       return await raceWithAbort(

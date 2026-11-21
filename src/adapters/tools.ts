@@ -1,8 +1,8 @@
 // ============================================
 // OpenSwarm - Agentic Tool Definitions & Executor
 // Created: 2026-04-11
-// Purpose: GPT/Local 어댑터가 Claude CLI와 동등한 도구 사용 능력을 갖도록
-//          공통 도구 정의 + 실행기 제공
+// Purpose: Provide common tool definitions + an executor so the GPT/Local adapters
+//          have tool-use capability equivalent to the Claude CLI
 // ============================================
 
 import fs from 'node:fs/promises';
@@ -51,7 +51,7 @@ export function buildBashToolEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.
   return buildWorkerShellEnv(base);
 }
 
-// ============ 도구 정의 (OpenAI function calling 포맷) ============
+// ============ Tool definitions (OpenAI function calling format) ============
 
 export interface ToolDefinition {
   type: 'function';
@@ -235,7 +235,7 @@ export const APPLY_PATCH_TOOL: ToolDefinition = {
   },
 };
 
-// ============ 안전 가드 ============
+// ============ Safety guards ============
 
 // Destructive-command matching lives in ./shellCommandGuard.ts (AGT-3436). It was
 // a regex sweep over raw text here, which both missed the shell's own rewriting
@@ -314,7 +314,7 @@ async function searchWithGitGrep(
   }
 }
 
-// ============ 도구 실행기 ============
+// ============ Tool executor ============
 
 export interface ToolCall {
   id: string;
@@ -345,10 +345,10 @@ function executedCommand(command: string, exitCode: number): string {
 }
 
 /**
- * 루프 단위 read 캐시. 같은 작업 루프 안에서 동일 파일을 반복 read하면
- * (모델이 edit 후 "고쳐졌나?" 확인하려 재read하는 패턴) 디스크를 다시 읽지 않고
- * 캐시된 내용 + "변경 없음" 힌트를 반환해 토큰·턴 낭비를 줄인다.
- * edit_file/write_file 성공 시 해당 경로를 무효화해 stale read를 막는다.
+ * Per-loop read cache. When the same file is read repeatedly within one work loop
+ * (the pattern of a model re-reading after an edit to check "is it fixed?"), skip hitting the disk again and
+ * return the cached content plus a "no change" hint, cutting wasted tokens and turns.
+ * A successful edit_file/write_file invalidates that path to prevent stale reads.
  *
  * LRU-bounded: a single 80-turn SWE run reading many offsets of large files
  * could otherwise retain megabytes of numbered content for the whole loop.
@@ -386,7 +386,7 @@ function cacheSet(cache: ReadCache, key: string, value: string): void {
   }
 }
 
-/** 캐시에서 한 파일의 모든 범위 엔트리를 제거 (edit/write 후 stale 방지) */
+/** Remove all range entries of one file from the cache (prevents stale reads after edit/write) */
 function invalidateCache(cache: ReadCache | undefined, filePath: string): void {
   if (!cache) return;
   for (const key of cache.store.keys()) {
@@ -651,7 +651,7 @@ export interface ValidatePathOptions {
   allowWarehouseRead?: boolean;
 }
 
-/** 프로젝트 경로 내로 접근을 제한하는 경로 검증 */
+/** Path validation that restricts access to within the project path */
 export function validatePath(filePath: string, cwd: string, options: ValidatePathOptions = {}): string {
   const requestedRoot = path.resolve(cwd);
   const projectRoot = existsSync(requestedRoot) ? realpathSync(requestedRoot) : requestedRoot;
@@ -667,15 +667,15 @@ export function validatePath(filePath: string, cwd: string, options: ValidatePat
   const warehouseRoot = options.allowWarehouseRead
     ? (process.env.OPENSWARM_WAREHOUSE_ROOT?.trim() || '/warehouse')
     : null;
-  // cwd 하위이거나, /tmp 하위만 허용. 문자열 prefix 비교는 상대 cwd를
-  // 전부 거부하고 `/repo-evil` 같은 sibling을 `/repo` 내부로 오인한다.
+  // Allow only paths under cwd or under /tmp. A string prefix comparison rejects
+  // every relative cwd and mistakes a sibling like `/repo-evil` for being inside `/repo`.
   if (
     !inside(projectRoot)
     && !inside('/tmp')
     && !(mainCheckout && inside(mainCheckout))
     && !(warehouseRoot && inside(warehouseRoot))
   ) {
-    // 모델이 자가수정하도록 안내 — 그냥 거부만 하면 같은 실수를 반복한다.
+    // Guide the model to self-correct; merely rejecting makes it repeat the same mistake.
     throw new Error(
       `Path "${filePath}" is outside the project root (${projectRoot}). ` +
       `Use a path relative to the project root instead, e.g. "." for the whole project or "src/...". ` +
@@ -736,7 +736,7 @@ function findFuzzyEditSpan(original: string, oldString: string): { start: number
 }
 
 /**
- * 단일 도구 호출 실행
+ * Execute a single tool call
  */
 export async function executeTool(
   toolCall: ToolCall,
@@ -815,8 +815,8 @@ export async function executeTool(
         const limit = normalizeReadFileLimit(args.limit);
         const cacheKey = `${filePath}#${offset}:${limit}`;
 
-        // 같은 루프에서 이미 같은 범위를 읽었으면 디스크 재접근 없이 캐시 반환.
-        // 모델에게 "변경 없음"을 알려 추가 확인 read를 유도하지 않는다.
+        // If the same range was already read in this loop, return the cache without touching the disk again.
+        // Tell the model "no change" so it is not prompted into further confirmation reads.
         const cached = cache ? cacheGet(cache, cacheKey) : undefined;
         if (cached !== undefined) {
           // Re-read of the same range: return a STUB, not the full content. Re-
@@ -862,7 +862,7 @@ export async function executeTool(
         if (syntaxError) {
           return { tool_call_id: callId, content: `REFUSED: ${path.basename(filePath)} would not parse — ${syntaxError}. Nothing was written.`, is_error: true };
         }
-        // 디렉토리 자동 생성
+        // Create directories automatically
         await fs.mkdir(path.dirname(filePath), { recursive: true });
         await atomicWriteFile(filePath, content);
         invalidateCache(cache, filePath);
@@ -1100,7 +1100,7 @@ export async function executeTool(
             env: buildBashToolEnv(),
           });
           const output = stdout + (stderr ? `\n[stderr] ${stderr}` : '');
-          // 출력이 너무 길면 잘라냄
+          // Truncate output if it is too long
           return audited({
             tool_call_id: callId,
             content: output.length > 8000 ? output.slice(0, 8000) + '\n... (truncated)' : output || '(no output, exit 0)',
@@ -1108,9 +1108,9 @@ export async function executeTool(
             executed: command,
           });
         } catch (err) {
-          // exit code != 0 → execFile이 throw. 하지만 grep/find 등은 "매치 없음"으로
-          // exit 1을 내며 이건 정상이다. 실제 stdout/stderr + exit code를 모델에게 줘서
-          // "no match"인지 진짜 에러인지 스스로 판단하게 한다(이게 없으면 같은 명령 반복).
+          // exit code != 0 -> execFile throws. But grep/find and similar exit 1 for "no match",
+          // which is normal. Give the model the actual stdout/stderr + exit code so it can
+          // judge for itself whether it is "no match" or a real error (without this it repeats the same command).
           const e = err as { code?: number; stdout?: string; stderr?: string; message?: string; killed?: boolean; signal?: string };
           const out = (e.stdout ?? '') + (e.stderr ? `\n[stderr] ${e.stderr}` : '');
           const code = typeof e.code === 'number' ? e.code : '?';
@@ -1135,7 +1135,7 @@ export async function executeTool(
           const body = out.trim()
             ? `exit ${code}:\n${out.slice(0, 4000)}${fenceHint}`
             : `exit ${code} (no output) — likely no matches or a non-fatal nonzero exit, not necessarily an error.`;
-          // exit 1 + 출력 없음은 보통 무해(grep no-match) → is_error를 false로 둬 모델이 안 헤매게.
+          // exit 1 + no output is usually harmless (grep no-match) -> set is_error to false so the model does not get lost.
           const benign = e.code === 1 && !out.trim();
           // A numeric exit code means the command ran; a string code (ENOENT…)
           // means it never started.
@@ -1279,7 +1279,7 @@ export async function executeTool(
 }
 
 /**
- * 여러 도구 호출을 병렬 실행
+ * Run multiple tool calls in parallel
  */
 export async function executeToolCalls(
   toolCalls: ToolCall[],

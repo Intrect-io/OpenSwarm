@@ -102,7 +102,7 @@ export function buildEntity(
   };
 }
 
-/** 단일 엔티티 변환 (개별 서브쿼리 — 단건 조회용) */
+/** Convert a single entity (individual subqueries — for single lookups) */
 export function rowToEntity(
   db: Database,
   row: EntityRow,
@@ -118,7 +118,7 @@ export function rowToEntity(
   );
 }
 
-/** 배치 엔티티 변환 (N+1 방지 — 리스트 조회용) */
+/** Convert entities in batch (avoids N+1 — for list queries) */
 export function rowsToEntities(db: Database, rows: EntityRow[]): CodeEntity[] {
   if (rows.length === 0) return [];
 
@@ -133,7 +133,7 @@ export function rowsToEntities(db: Database, rows: EntityRow[]): CodeEntity[] {
     return loaded;
   };
 
-  // 배치 태그 로딩
+  // Batch tag loading
   const tagRows = loadByIds<TagRow & { entity_id: string }>(
     placeholders => `SELECT entity_id, tag, value FROM code_entity_tags WHERE entity_id IN (${placeholders})`
   );
@@ -144,7 +144,7 @@ export function rowsToEntities(db: Database, rows: EntityRow[]): CodeEntity[] {
     tagsByEntity.set(r.entity_id, list);
   }
 
-  // 배치 경고 로딩
+  // Batch warning loading
   const warningRows = loadByIds<WarningRow>(
     placeholders => `SELECT * FROM code_entity_warnings WHERE entity_id IN (${placeholders}) ORDER BY created_at DESC`
   );
@@ -155,7 +155,7 @@ export function rowsToEntities(db: Database, rows: EntityRow[]): CodeEntity[] {
     warningsByEntity.set(r.entity_id, list);
   }
 
-  // 배치 이슈 링크 로딩
+  // Batch issue link loading
   const issueRows = loadByIds<IssueLinkRow>(
     placeholders => `SELECT entity_id, issue_id FROM code_entity_issue_links WHERE entity_id IN (${placeholders}) ORDER BY linked_at`
   );
@@ -166,7 +166,7 @@ export function rowsToEntities(db: Database, rows: EntityRow[]): CodeEntity[] {
     issuesByEntity.set(r.entity_id, list);
   }
 
-  // 배치 메모리 링크 로딩
+  // Batch memory link loading
   const memoryRows = loadByIds<MemoryLinkRow>(
     placeholders => `SELECT entity_id, memory_id FROM code_entity_memory_links WHERE entity_id IN (${placeholders}) ORDER BY linked_at`
   );

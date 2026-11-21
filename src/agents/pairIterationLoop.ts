@@ -50,7 +50,7 @@ function stopAtExecutionBoundary(host: PipelineLoopHost, context: PipelineContex
   return true;
 }
 
-/** 단계 정책을 분리해 실행·복구 코드가 같은 반복 루프를 공유한다. */
+/** Separate stage policy so execution and recovery code share the same iteration loop. */
 export async function runFullIterationLoop(host: PipelineLoopHost, context: PipelineContext, stages: StageResult[]): Promise<{ success: boolean }> {
   try {
     return await runIterationLoopBody(host, context, stages);
@@ -517,7 +517,7 @@ async function runIterationLoopBody(host: PipelineLoopHost, context: PipelineCon
       if (hasReviewer) {
         agentPair.updateSessionStatus(context.session.id, 'reviewing');
 
-        // Reviewer escalation: 로컬 모델이 N회 이상 REVISE → 상위 모델로 spot check
+        // Reviewer escalation: local model REVISEs N or more times → spot check with a higher-tier model
         const reviewerCfg = host.config.roles?.reviewer;
         const reviewerEscalateModel = reviewerCfg?.escalateModel;
         const reviewerEscalateThreshold = reviewerCfg?.escalateAfterIteration ?? 3;

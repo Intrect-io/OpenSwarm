@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Registry ↔ Memory Bridge
 // Created: 2026-04-10
-// Purpose: 코드 엔티티 이벤트를 장기 기억으로 연동
+// Purpose: Bridge code entity events into long-term memory
 // Dependencies: memoryCore
 // ============================================
 
@@ -9,9 +9,9 @@ import { saveMemory } from '../memory/memoryCore.js';
 import type { CodeEntity, EntityWarning } from './schema.js';
 
 /**
- * 엔티티 deprecated 시 장기기억 저장
- * - "X 함수는 Y 이유로 deprecated됨" 기억 저장
- * - 향후 에이전트가 해당 함수를 수정하려 할 때 참조
+ * Save to long-term memory when an entity is deprecated
+ * - Save a memory like "function X was deprecated because of Y"
+ * - Referenced later when an agent tries to modify that function
  */
 export async function onEntityDeprecated(entity: CodeEntity): Promise<void> {
   const reason = entity.deprecatedReason ?? '사유 미기재';
@@ -44,8 +44,8 @@ export async function onEntityDeprecated(entity: CodeEntity): Promise<void> {
 }
 
 /**
- * 보안/critical 경고 발생 시 장기기억 저장
- * - critical/error 수준 경고만 기억에 남김
+ * Save to long-term memory when a security/critical warning occurs
+ * - Only critical/error-level warnings are kept in memory
  */
 export async function onEntityWarningAdded(
   entity: CodeEntity,

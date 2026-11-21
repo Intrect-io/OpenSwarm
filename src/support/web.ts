@@ -108,7 +108,7 @@ interface ReposConfig {
   pinned: string[];             // user-added repos (shown in dashboard)
   enabled: string[];            // explicitly enabled for agent work
   basePaths: string[];          // custom scan base paths (added via dashboard)
-  removedConfigPaths?: string[]; // config 경로 중 대시보드에서 제거한 항목
+  removedConfigPaths?: string[]; // Config paths removed from the dashboard
 }
 
 function loadReposConfig(): ReposConfig {
@@ -321,7 +321,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         return;
       }
 
-      // ---- GraphQL API (이슈 트래커) ----
+      // ---- GraphQL API (issue tracker) ----
       if (isGraphQLRequest(req.url)) {
         await handleGraphQL(req, res);
 
@@ -707,7 +707,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
       // ---- Log buffer snapshot ----
       } else if (url === '/api/logs' && req.method === 'GET') {
-        // 성능 최적화: 최근 200개 로그만 반환 (응답 시간 단축)
+        // Performance optimization: return only the latest 200 logs (shortens response time)
         const allLogs = getLogBuffer();
         const recentLogs = allLogs.slice(-200);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -715,7 +715,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
       // ---- Stage buffer snapshot ----
       } else if (url === '/api/stages' && req.method === 'GET') {
-        // 성능 최적화: 최근 100개 스테이지만 반환 (응답 시간 단축)
+        // Performance optimization: return only the latest 100 stages (shortens response time)
         const allStages = getStageBuffer();
         const recentStages = allStages.slice(-100);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1004,7 +1004,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
 
       // ---- Scan Paths: list ----
       } else if (url === '/api/scan-paths' && req.method === 'GET') {
-        // removedConfigPaths에 있는 경로는 UI에 표시하지 않음
+        // Paths in removedConfigPaths are not shown in the UI
         const allConfigPaths = runnerRef?.getAllowedProjects() ?? [];
         const configPaths = allConfigPaths.filter(p => !removedConfigPaths.has(p));
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1041,9 +1041,9 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       } else if (url.startsWith('/api/scan-paths/') && req.method === 'DELETE') {
         const encodedPath = url.replace('/api/scan-paths/', '');
         const decodedPath = decodeURIComponent(encodedPath);
-        // customPaths에서 제거
+        // Remove from customPaths
         customBasePaths.delete(decodedPath);
-        // configPaths에서도 제거: removedConfigPaths에 기록하고 runner에서 즉시 반영
+        // Also remove from configPaths: record in removedConfigPaths and apply to the runner immediately
         const allConfigPaths = runnerRef?.getAllowedProjects() ?? [];
         if (allConfigPaths.includes(decodedPath)) {
           removedConfigPaths.add(decodedPath);

@@ -39,7 +39,7 @@ let configuration: { db: unknown; signature: string | undefined; traceId: number
 
 function physicalAliasKey(cell: RepositoryCell, known?: string): string {
   if (!known || known === cell.repoKey || cell.repoKey.startsWith('git:')) return cell.repoKey;
-  // path: fallback에는 삭제/접근 실패도 포함된다. 비Git임이 확인된 경로만 기존 alias를 교정한다.
+  // The path: fallback also covers delete/access failures. Only paths confirmed as non-Git get their existing alias corrected.
   const probe = spawnSync('git', ['-C', cell.worktreePath, 'rev-parse', '--git-common-dir'], {
     encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024,
     env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'pipe'],
@@ -54,7 +54,7 @@ function registerHistoricalChannel(db: ReturnType<typeof channelDatabase>, repos
   const known = db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(repository) as { repo_key: string } | undefined;
   const explicit = explicitKey ? db.prepare('SELECT repo_key FROM coordination_channel_aliases WHERE repository=?').get(explicitKey) as { repo_key: string } | undefined : undefined;
   const explicitCell = explicitKey && isAbsolute(expandPath(explicitKey)) ? repositoryCell(expandPath(explicitKey)) : undefined;
-  // opaque 이벤트 키는 경로 alias의 소유권을 바꾸지 않는다. Git 공통 경로는 실제 cell로 확인한다.
+  // An opaque event key does not change ownership of a path alias. Git common paths are confirmed against the real cell.
   const physicalKey = cell ? physicalAliasKey(cell, known?.repo_key) : repository;
   const explicitPathKey = explicitCell ? physicalAliasKey(explicitCell, explicit?.repo_key) : undefined;
   const key = explicitPathKey ?? explicitKey ?? physicalKey;
@@ -70,7 +70,7 @@ function registerHistoricalChannel(db: ReturnType<typeof channelDatabase>, repos
   return changed;
 }
 
-/** 설정 경로가 없는 Threads 호출도 기록 이관을 준비하되 configured 상태는 보존한다. */
+/** Threads calls without a configured path also prepare the record migration but keep the configured state. */
 export function syncChannelState(paths?: readonly string[]): void {
   const db = channelDatabase();
   const previous = configuration?.db === db ? configuration : undefined;
@@ -92,7 +92,7 @@ export function syncChannelState(paths?: readonly string[]): void {
             .run(alias, physicalAliasKey(cell, known?.repo_key));
         }
       }
-      // 새 기록의 경로만 확인한다. 실행 중 생긴 sibling도 재시작 없이 같은 채널로 묶는다.
+      // Check only the paths of new records. A sibling created while running is grouped into the same channel without a restart.
       const historical = db.prepare(`SELECT DISTINCT repository, repo_key FROM coordination_trace WHERE id>? AND id<=?`)
         .all(previous?.traceId ?? 0, traceId) as Array<{ repository: string; repo_key: string | null }>;
       for (const row of historical) {
@@ -111,11 +111,11 @@ export function syncChannelState(paths?: readonly string[]): void {
       }
       if (!aliasesChanged) return;
       backfillChannelEntries(db);
-      // 잘못 분리됐던 경로 채널의 읽음 위치를 병합하되 원본과 projection seq는 유지한다.
+      // Merge the read position of path channels that were wrongly split, while keeping the original and the projection seq.
       db.exec(`UPDATE coordination_channels SET read_seq=MAX(read_seq,COALESCE((
         SELECT MAX(old.read_seq) FROM coordination_channels old JOIN coordination_channel_aliases a
           ON a.repository=old.repo_key WHERE a.repo_key=coordination_channels.repo_key),0))`);
-      // 새로 이관한 채널만 기준점을 만든다. 재시작은 읽음 위치를 바꾸지 않는다.
+      // Only a newly migrated channel gets a baseline. A restart does not change the read position.
       const baseline = db.prepare(`UPDATE coordination_channels SET read_seq=COALESCE(
         (SELECT MAX(seq) FROM coordination_channel_entries WHERE repo_key=?),0) WHERE repo_key=?`);
       for (const row of db.prepare('SELECT repo_key FROM coordination_channels').all() as Array<{ repo_key: string }>) {
@@ -126,7 +126,7 @@ export function syncChannelState(paths?: readonly string[]): void {
   }
 }
 
-/** 실행 대상은 서버 설정에서만 등록한다. 클라이언트의 경로는 받지 않는다. */
+/** Run targets are registered from server config only. A client-supplied path is not accepted. */
 export function syncChannels(paths: readonly string[]): Channel[] {
   syncChannelState(paths);
   return readChannels();

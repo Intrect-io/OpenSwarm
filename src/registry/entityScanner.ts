@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Entity Scanner
 // Created: 2026-04-10
-// Purpose: 레포 소스 파일에서 함수/클래스/타입/상수 선언을 추출하여 레지스트리에 등록
+// Purpose: Extract function/class/type/constant declarations from repo source files and register them in the registry
 // Dependencies: registry/sqliteStore
 // Supported: TypeScript, JavaScript, Python, Go, Rust, Java, C, C++, C#
 // ============================================
@@ -15,7 +15,7 @@ import { getRegistryStore, LIST_ENTITIES_MAX_LIMIT, type EntitySyncRow } from '.
 import type { EntityKind, RiskLevel } from './schema.js';
 import { yieldToEventLoop } from '../support/yieldToEventLoop.js';
 
-// ============ 상수 ============
+// ============ Constants ============
 
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', '__pycache__',
@@ -73,7 +73,7 @@ function normalizeBound(value: number | undefined, fallback: number, min: number
   return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
-// ============ 언어 정의 ============
+// ============ Language definitions ============
 
 type Language = 'typescript' | 'python' | 'go' | 'rust' | 'java' | 'c' | 'cpp' | 'csharp';
 
@@ -82,7 +82,7 @@ interface LanguageConfig {
   testPatterns: RegExp[];
   patterns: Array<{ pattern: RegExp; kind: EntityKind; sigGroup?: number }>;
   blockStyle: 'brace' | 'indent';
-  // 라인 수준에서 스킵해야 하는 조건 (인덴트 있는 메서드 등)
+  // Conditions to skip at the line level (indented methods, etc.)
   skipIndented?: EntityKind[];
   commentPrefixes: string[];
 }
@@ -115,9 +115,9 @@ const PY_CONFIG: LanguageConfig = {
   patterns: [
     { pattern: /^(?:async\s+)?def\s+(\w+)\s*(\([^)]*\)(?:\s*->\s*[^:]+)?)?\s*:/, kind: 'function', sigGroup: 2 },
     { pattern: /^class\s+(\w+)/, kind: 'class' },
-    // 타입 별칭: Name = Literal[...] / Name = Union[...] / Name: TypeAlias = ...
+    // Type alias: Name = Literal[...] / Name = Union[...] / Name: TypeAlias = ...
     { pattern: /^([A-Z]\w+)\s*(?::\s*TypeAlias\s*)?=\s*(?:Literal|Union|Optional|Type|Annotated|Final)\[/, kind: 'type' },
-    // 상수: UPPER_CASE = ...
+    // Constant: UPPER_CASE = ...
     { pattern: /^([A-Z][A-Z0-9_]+)\s*(?::\s*\w[^=]*)?\s*=/, kind: 'constant' },
   ],
 };
@@ -131,7 +131,7 @@ const GO_CONFIG: LanguageConfig = {
   patterns: [
     // func FuncName(params) returnType {
     { pattern: /^func\s+(\w+)\s*(\([^)]*\)(?:\s*(?:\([^)]*\)|[^{]+))?)?\s*\{?/, kind: 'function', sigGroup: 2 },
-    // func (receiver) MethodName(params) — 메서드 (receiver 있음)
+    // func (receiver) MethodName(params) — method (has a receiver)
     { pattern: /^func\s+\([^)]+\)\s+(\w+)\s*(\([^)]*\)(?:\s*(?:\([^)]*\)|[^{]+))?)?\s*\{?/, kind: 'function', sigGroup: 2 },
     // type StructName struct {
     { pattern: /^type\s+(\w+)\s+struct\s*\{?/, kind: 'class' },
@@ -139,9 +139,9 @@ const GO_CONFIG: LanguageConfig = {
     { pattern: /^type\s+(\w+)\s+interface\s*\{?/, kind: 'type' },
     // type TypeName = ... / type TypeName ...
     { pattern: /^type\s+(\w+)\s+[^si]/, kind: 'type' },
-    // const ConstName = ... (단일 const)
+    // const ConstName = ... (single const)
     { pattern: /^const\s+(\w+)\s*(?:\w+)?\s*=/, kind: 'constant' },
-    // var VarName = ... (패키지 수준)
+    // var VarName = ... (package level)
     { pattern: /^var\s+(\w+)\s+/, kind: 'constant' },
   ],
 };
@@ -203,8 +203,8 @@ const C_CONFIG: LanguageConfig = {
   blockStyle: 'brace',
   commentPrefixes: ['//', '*', '/*'],
   patterns: [
-    // returnType funcName(params) { — top-level 함수
-    // 캡처: 반환형 다음 함수명, 괄호
+    // returnType funcName(params) { — top-level function
+    // Capture: function name after the return type, parentheses
     { pattern: /^(?:static\s+)?(?:inline\s+)?(?:extern\s+)?(?:const\s+)?(?:unsigned\s+)?(?:signed\s+)?(?:long\s+)?(?:short\s+)?\w+[\s*]+(\w+)\s*(\([^)]*\))\s*\{/, kind: 'function', sigGroup: 2 },
     // typedef struct { ... } Name;
     { pattern: /^typedef\s+struct\s+(?:\w+\s*)?\{/, kind: 'class' },
@@ -230,11 +230,11 @@ const CPP_CONFIG: LanguageConfig = {
   blockStyle: 'brace',
   commentPrefixes: ['//', '*', '/*'],
   patterns: [
-    // class ClassName { (C++ 우선 — 함수보다 먼저 매칭)
+    // class ClassName { (C++ first — matched before functions)
     { pattern: /^(?:template\s*<[^>]*>\s*)?(?:class|struct)\s+(?:\[\[.*?\]\]\s+)?(\w+)(?:\s*final)?\s*(?::\s*(?:public|private|protected)\s+[^{]+)?\s*\{/, kind: 'class' },
     // namespace Name {
     { pattern: /^namespace\s+(\w+)/, kind: 'module' },
-    // ReturnType ClassName::methodName(params) { — 이건 메서드이므로 별도 처리
+    // ReturnType ClassName::methodName(params) { — this is a method, so handle separately
     { pattern: /^(?:template\s*<[^>]*>\s*)?(?:\w+[\s*&]+)?(\w+)::(\w+)\s*(\([^)]*\))/, kind: 'function', sigGroup: 3 },
     // returnType funcName(params) {
     { pattern: /^(?:template\s*<[^>]*>\s*)?(?:static\s+)?(?:inline\s+)?(?:virtual\s+)?(?:explicit\s+)?(?:constexpr\s+)?(?:const\s+)?(?:unsigned\s+)?\w+[\s*&]+(\w+)\s*(\([^)]*\))\s*(?:const)?\s*(?:override|final|noexcept)?\s*\{?/, kind: 'function', sigGroup: 2 },
@@ -277,7 +277,7 @@ const CSHARP_CONFIG: LanguageConfig = {
   ],
 };
 
-// ============ 언어 레지스트리 ============
+// ============ Language registry ============
 
 const LANGUAGE_CONFIGS: Record<Language, LanguageConfig> = {
   typescript: TS_CONFIG,
@@ -290,7 +290,7 @@ const LANGUAGE_CONFIGS: Record<Language, LanguageConfig> = {
   csharp: CSHARP_CONFIG,
 };
 
-// 확장자 → 언어 매핑
+// Extension -> language mapping
 const EXT_TO_LANGUAGE: Record<string, Language> = {};
 for (const [lang, config] of Object.entries(LANGUAGE_CONFIGS)) {
   for (const ext of config.extensions) {
@@ -298,7 +298,7 @@ for (const [lang, config] of Object.entries(LANGUAGE_CONFIGS)) {
   }
 }
 
-// 지원되는 확장자 전체
+// All supported extensions
 const SOURCE_EXTENSIONS = new Set(Object.keys(EXT_TO_LANGUAGE));
 
 function detectLanguage(ext: string): Language | null {
@@ -313,7 +313,7 @@ function isTestFile(filePath: string, language: Language): boolean {
   return LANGUAGE_CONFIGS[language].testPatterns.some(p => p.test(name) || p.test(normalized));
 }
 
-// ============ 추출된 엔티티 정보 ============
+// ============ Extracted entity info ============
 
 export interface ExtractedEntity {
   kind: EntityKind;
@@ -328,10 +328,10 @@ export interface ExtractedEntity {
   paramCount: number;
 }
 
-// ============ 엔티티 추출 ============
+// ============ Entity extraction ============
 
 /**
- * 소스 파일 내용에서 엔티티 선언을 추출
+ * Extract entity declarations from source file content
  */
 export function extractEntities(
   content: string,
@@ -357,7 +357,7 @@ export function extractEntities(
       continue;
     }
 
-    // 주석 스킵
+    // Skip comments
     if (config.commentPrefixes.some(p => trimmed.startsWith(p))) continue;
 
     for (const { pattern, kind, sigGroup } of config.patterns) {
@@ -372,19 +372,19 @@ export function extractEntities(
       if (seen.has(key)) continue;
       seen.add(key);
 
-      // Python: 인덴트 있는 함수 = 메서드 → 스킵
+      // Python: indented function = method -> skip
       if (language === 'python' && kind === 'function' && lines[i].match(/^\s+/)) continue;
 
-      // TS: skipIndented 설정된 kind가 인덴트 있으면 스킵
+      // TS: skip if a kind with skipIndented set is indented
       if (config.skipIndented?.includes(kind) && lines[i].match(/^\s{2,}/)) continue;
 
       const isExported = language === 'go'
-        ? /^[A-Z]/.test(name)  // Go: 대문자 시작 = exported
+        ? /^[A-Z]/.test(name)  // Go: starts with an uppercase letter = exported
         : trimmed.startsWith('export') || trimmed.startsWith('pub');
 
       const signature = sigGroup ? match[sigGroup]?.trim() : undefined;
 
-      // 블록 끝 추정
+      // Estimate block end
       let lineEnd: number | undefined;
       if (config.blockStyle === 'brace') {
         lineEnd = findBraceBlockEnd(lines, i);
@@ -392,7 +392,7 @@ export function extractEntities(
         lineEnd = findIndentBlockEnd(lines, i);
       }
 
-      // 복잡도 산정
+      // Compute complexity
       const complexity = (kind === 'function' || kind === 'class')
         ? computeBlockMetrics(lines, i, lineEnd)
         : { loc: 0, nestingDepth: 0, paramCount: 0 };
@@ -417,9 +417,9 @@ export function extractEntities(
   return entities;
 }
 
-// ============ 블록 끝 추정 ============
+// ============ Block end estimation ============
 
-/** 중괄호 카운팅 (C계열, Go, Rust, Java, C#) */
+/** Brace counting (C-family, Go, Rust, Java, C#) */
 function findBraceBlockEnd(lines: string[], startIdx: number): number | undefined {
   let depth = 0;
   let started = false;
@@ -434,24 +434,24 @@ function findBraceBlockEnd(lines: string[], startIdx: number): number | undefine
   return undefined;
 }
 
-/** 인덴트 기반 (Python) */
+/** Indent-based (Python) */
 function findIndentBlockEnd(lines: string[], startIdx: number): number | undefined {
-  // 선언 줄의 인덴트 수준 파악
+  // Determine the indent level of the declaration line
   const startLine = lines[startIdx];
   const baseIndent = startLine.length - startLine.trimStart().length;
 
   for (let i = startIdx + 1; i < Math.min(startIdx + 500, lines.length); i++) {
     const line = lines[i];
-    // 빈 줄은 건너뜀
+    // Skip blank lines
     if (line.trim().length === 0) continue;
     const currentIndent = line.length - line.trimStart().length;
-    // 인덴트가 기본 수준 이하로 돌아오면 블록 끝
+    // Block ends when the indent returns to the base level or below
     if (currentIndent <= baseIndent) return i - 1;
   }
   return undefined;
 }
 
-// ============ 복잡도 산정 ============
+// ============ Complexity computation ============
 
 function computeBlockMetrics(
   lines: string[], startIdx: number, endIdx: number | undefined,
@@ -505,7 +505,7 @@ function computeRisk(complexityScore: number, hasTests: boolean): RiskLevel {
   return 'low';
 }
 
-// ============ 테스트 매핑 ============
+// ============ Test mapping ============
 
 interface TestFileInfo {
   testFilePath: string;
@@ -515,7 +515,7 @@ interface TestFileInfo {
 
 const TS_IMPORT_FROM = /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/g;
 
-// import 예약어 — 테스트 프레임워크 함수 등
+// import reserved words — test framework functions, etc.
 const RESERVED_NAMES = new Set([
   'describe', 'it', 'test', 'expect', 'beforeEach', 'afterEach',
   'beforeAll', 'afterAll', 'vi', 'jest', 'mock', 'fn', 'spyOn',
@@ -556,11 +556,11 @@ function parseTestFile(content: string, testFilePath: string, language: Language
     }
   }
 
-  // Go: 함수 호출 패턴으로 매핑 (import는 패키지 단위라 심볼 매핑 어려움)
-  // Java/C#: import/using 은 클래스 단위
+  // Go: map by function call pattern (imports are per package, so symbol mapping is hard)
+  // Java/C#: import/using is per class
   // Rust: use crate::module::Name
 
-  // 범용: 코드 내 함수 호출 참조 수집
+  // Generic: collect function call references in the code
   for (const line of content.split('\n')) {
     const trimmed = line.trim();
     const calls = trimmed.matchAll(/\b([a-zA-Z_]\w+)\s*\(/g);
@@ -600,7 +600,7 @@ function buildTestMap(
   }
 
   for (const tf of testFiles) {
-    // import 기반 매핑 (TS)
+    // Import-based mapping (TS)
     for (const [sourcePath, symbols] of tf.importedSymbols) {
       const candidates = [
         sourcePath + '.ts', sourcePath + '.tsx', sourcePath + '.js',
@@ -618,7 +618,7 @@ function buildTestMap(
       }
     }
 
-    // 참조 이름 기반 (범용)
+    // Reference-name based (generic)
     for (const refName of tf.referencedNames) {
       const matchingEntities = entityByName.get(refName);
       if (!matchingEntities) continue;
@@ -645,7 +645,7 @@ function isNearbyTest(sourceFile: string, testFile: string): boolean {
     .replace(/Test\.[^.]+$/, '')
     .replace(/Tests\.[^.]+$/, '');
 
-  // 파일명 매칭 (확장자 제외) — Python 등의 test_ 접두사 관례도 처리
+  // File name match (excluding extension) — also handles conventions like the Python test_ prefix
   const srcName = sourceBase.split('/').pop();
   const tstName = testBase.split('/').pop()?.replace(/\.[^.]+$/, '').replace(/^test_/, '');
   if (srcName && tstName && srcName === tstName) return true;
@@ -661,7 +661,7 @@ function isNearbyTest(sourceFile: string, testFile: string): boolean {
   return false;
 }
 
-// ============ 스캔 결과 ============
+// ============ Scan results ============
 
 export interface ScanResult {
   scanned: number;
@@ -677,7 +677,7 @@ export interface ScanResult {
   languageBreakdown: Record<string, number>;
 }
 
-// ============ 메인 스캔 함수 ============
+// ============ Main scan function ============
 
 export async function scanRepository(
   projectPath: string,
@@ -777,13 +777,13 @@ export async function scanRepository(
 
   await walk(projectPath, '', 0);
 
-  // 테스트 매핑 빌드
+  // Build the test mapping
   const testMap = buildTestMap(allExtracted, testFiles);
   if (verbose && testMap.size > 0) {
     console.log(`  [test-map] ${testMap.size} entities mapped to tests`);
   }
 
-  // 레지스트리 동기화 — read existing rows as keyset pages of the light sync
+  // Registry sync — read existing rows as keyset pages of the light sync
   // projection (only the compared columns, no tags/warnings/links), capped at the
   // store's page limit, and index them straight into the lookup map instead of
   // first materialising every full CodeEntity.
@@ -874,7 +874,7 @@ export async function scanRepository(
     await yieldToEventLoop();
   }
 
-  // 사라진 엔티티 → broken
+  // Entities that disappeared -> broken
   let removed = 0;
   let pendingBroken: string[] = [];
   const flushBroken = async (): Promise<void> => {

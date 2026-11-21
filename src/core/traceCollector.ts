@@ -1,6 +1,6 @@
 // ============================================
 // OpenSwarm - Trace Collector
-// 에이전트 실행 추적을 위한 Span 모델 및 TraceCollector
+// Span model and TraceCollector for agent execution tracing
 // ============================================
 
 import { randomUUID } from 'node:crypto';
@@ -57,26 +57,26 @@ function boundError(error: { message: string; stack?: string; code?: string }): 
 export type SpanStatus = 'running' | 'completed' | 'failed';
 
 /**
- * 개별 작업 단위 (도구 호출, 에이전트 실행 등)
+ * A single unit of work (tool call, agent run, etc.)
  */
 export type Span = {
-  /** 고유 span ID */
+  /** Unique span ID */
   spanId: string;
-  /** 소속 trace ID */
+  /** Owning trace ID */
   traceId: string;
-  /** 부모 span ID (없으면 root span) */
+  /** Parent span ID (root span if absent) */
   parentSpanId?: string;
-  /** span 이름 (예: 'worker', 'tool:git-commit') */
+  /** Span name (e.g. 'worker', 'tool:git-commit') */
   name: string;
-  /** 상태 */
+  /** Status */
   status: SpanStatus;
-  /** 시작 시간 (epoch ms) */
+  /** Start time (epoch ms) */
   startTime: number;
-  /** 종료 시간 (epoch ms) */
+  /** End time (epoch ms) */
   endTime?: number;
-  /** 추가 메타데이터 */
+  /** Additional metadata */
   metadata: Record<string, unknown>;
-  /** 에러 정보 */
+  /** Error info */
   errorInfo?: {
     message: string;
     stack?: string;
@@ -85,31 +85,31 @@ export type Span = {
 };
 
 /**
- * 세션 레벨 trace (여러 span을 포함)
+ * Session-level trace (contains multiple spans)
  */
 export type Trace = {
   /** trace ID */
   traceId: string;
-  /** trace 이름 (예: 세션/이슈 식별자) */
+  /** Trace name (e.g. session/issue identifier) */
   name: string;
-  /** 시작 시간 */
+  /** Start time */
   startTime: number;
-  /** 종료 시간 */
+  /** End time */
   endTime?: number;
-  /** 상태 */
+  /** Status */
   status: SpanStatus;
-  /** 소속 span 목록 */
+  /** Owned span list */
   spans: Span[];
-  /** 추가 메타데이터 (에이전트명, 이슈 ID 등) */
+  /** Additional metadata (agent name, issue ID, etc.) */
   metadata: Record<string, unknown>;
 };
 
 // TraceCollector
 
 /**
- * 에이전트 실행 추적 수집기
+ * Agent execution trace collector
  *
- * 사용법:
+ * Usage:
  *   const traceId = collector.startTrace('agent-run');
  *   const spanId = collector.startSpan(traceId, 'worker');
  *   const childId = collector.startSpan(traceId, 'tool:git', spanId);
@@ -130,7 +130,7 @@ export class TraceCollector {
   }
 
   /**
-   * 새 trace 시작
+   * Start a new trace
    * @returns trace ID
    */
   startTrace(name: string, metadata: Record<string, unknown> = {}): string {
@@ -153,7 +153,7 @@ export class TraceCollector {
   }
 
   /**
-   * trace 종료
+   * End a trace
    */
   endTrace(traceId: string, status: SpanStatus = 'completed'): Trace | undefined {
     const trace = this.traces.get(traceId);
@@ -164,7 +164,7 @@ export class TraceCollector {
     trace.endTime = Date.now();
     trace.status = status;
 
-    // 아직 running인 span을 모두 종료
+    // End every span that is still running
     for (const span of trace.spans) {
       if (span.status === 'running') {
         span.endTime = trace.endTime;
@@ -176,8 +176,8 @@ export class TraceCollector {
   }
 
   /**
-   * trace 내에 새 span 시작
-   * @param parentSpanId - 부모 span ID (계층 구조용)
+   * Start a new span within a trace
+   * @param parentSpanId - parent span ID (for hierarchy)
    * @returns span ID
    */
   startSpan(
@@ -207,7 +207,7 @@ export class TraceCollector {
   }
 
   /**
-   * span 종료
+   * End a span
    */
   endSpan(traceId: string, spanId: string, status: SpanStatus = 'completed'): Span | undefined {
     const trace = this.traces.get(traceId);
@@ -224,7 +224,7 @@ export class TraceCollector {
   }
 
   /**
-   * span에 에러 기록
+   * Record an error on a span
    */
   recordError(
     traceId: string,
@@ -244,14 +244,14 @@ export class TraceCollector {
   }
 
   /**
-   * trace 조회
+   * Look up a trace
    */
   getTrace(traceId: string): Trace | undefined {
     return this.traces.get(traceId);
   }
 
   /**
-   * 특정 span의 자식 span 목록 조회
+   * List the child spans of a given span
    */
   getChildSpans(traceId: string, parentSpanId: string): Span[] {
     const trace = this.traces.get(traceId);
@@ -260,14 +260,14 @@ export class TraceCollector {
   }
 
   /**
-   * 모든 trace 목록 조회
+   * List all traces
    */
   getAllTraces(): Trace[] {
     return Array.from(this.traces.values());
   }
 
   /**
-   * 완료된 trace 제거 (메모리 관리)
+   * Remove completed traces (memory management)
    */
   pruneCompleted(): number {
     let pruned = 0;

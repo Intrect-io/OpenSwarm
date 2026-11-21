@@ -52,9 +52,9 @@ export interface WorkerOptions {
   /** Route worker status through onLog without printing raw console lines. */
   suppressStatusLogs?: boolean;
   processContext?: ProcessContext;
-  /** 코드 컨텍스트 (impact analysis + registry briefs) */
+  /** Code context (impact analysis + registry briefs) */
   workerContext?: WorkerContext;
-  /** no-edit 종료 가드 횟수 — 수정 필수 작업에서 모델이 edit 없이 끝내면 N회 되밂 */
+  /** No-edit termination guard count — on tasks that require edits, push the model back up to N times if it finishes without an edit */
   nudgeMaxOnNoEdit?: number;
   /** Verification-harness file protection — listed files reject edit/write */
   protectedFiles?: string[];

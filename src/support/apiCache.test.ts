@@ -1,7 +1,7 @@
 // Created: 2026-03-09
-// Purpose: APICache 유틸리티 단위 테스트
+// Purpose: Unit tests for the APICache utility
 // Dependencies: vitest
-// Test Status: 완료
+// Test Status: Complete
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { APICache, CachedAPI, apiCache } from './apiCache';
@@ -163,9 +163,9 @@ describe('APICache', () => {
 
       expect(cache.getSize()).toBe(3);
 
-      await new Promise((resolve) => setTimeout(resolve, 200)); // cleanup interval 포함
+      await new Promise((resolve) => setTimeout(resolve, 200)); // includes the cleanup interval
 
-      // cleanup이 실행되어 TTL 만료 항목 제거
+      // cleanup runs and removes TTL-expired entries
       expect(cache.getSize()).toBeLessThanOrEqual(1);
     });
   });
@@ -175,7 +175,7 @@ describe('APICache', () => {
       const cache2 = new APICache(50);
       expect(cache2.getSize()).toBe(0);
       cache2.destroy();
-      // 추가 정리 없이 destroy 호출 가능해야 함
+      // destroy must be callable without extra cleanup
       expect(() => cache2.destroy()).not.toThrow();
     });
   });
@@ -195,7 +195,7 @@ describe('CachedAPI', () => {
 
       expect(result1).toEqual({ data: 'test' });
       expect(result2).toEqual({ data: 'test' });
-      expect(fn).toHaveBeenCalledTimes(1); // 캐시된 결과 사용
+      expect(fn).toHaveBeenCalledTimes(1); // cached result used
     });
 
     it('캐시 미스 시 함수를 실행한다', async () => {
@@ -224,7 +224,7 @@ describe('CachedAPI', () => {
     it('기본 TTL은 10초이다', async () => {
       const fn = vi.fn(async () => 'cached');
 
-      // TTL 미지정
+      // TTL not specified
       const _result1 = await CachedAPI.cached('key4', fn);
       const _result2 = await CachedAPI.cached('key4', fn);
 

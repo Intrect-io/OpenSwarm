@@ -35,8 +35,8 @@ export interface PlannerOptions {
   /** The project's standing goal, appended after the plan request (AGT-4662). */
   projectGoal?: string;
   onLog?: (line: string) => void;  // Stream planner stdout to dashboard
-  impactAnalysis?: ImpactAnalysis;  // KG 영향 분석 (파일 분리 유도)
-  /** Draft Analyzer 결과 (Haiku 사전 분석) */
+  impactAnalysis?: ImpactAnalysis; // KG impact analysis (to encourage splitting files)
+  /** Draft Analyzer result (Haiku pre-analysis) */
   draftAnalysis?: {
     taskType: string;
     intentSummary: string;

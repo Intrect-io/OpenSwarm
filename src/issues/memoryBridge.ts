@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Issue ↔ Memory Bridge
 // Created: 2026-04-03
-// Purpose: 이슈 이벤트를 장기 기억으로 수선 + 메모리 검색으로 이슈 컨텍스트 강화
+// Purpose: Consolidate issue events into long-term memory + enrich issue context via memory search
 // Dependencies: memoryCore, sqliteStore
 // ============================================
 
@@ -11,7 +11,7 @@ import type { Issue } from './schema.js';
 import { createHash } from 'node:crypto';
 import { withDeadline } from '../mcp/mcpClient.js';
 
-/** auto-link 메모리 검색 상한(ms) — 검색이 AbortSignal을 무시해도 기한에 정산된다. */
+/** Upper bound (ms) of the auto-link memory search — settles on the deadline even if the search ignores AbortSignal. */
 export const AUTO_LINK_SEARCH_DEADLINE_MS = 10_000;
 
 function digestSource(kind: string, values: string[]): string {
@@ -19,9 +19,9 @@ function digestSource(kind: string, values: string[]): string {
 }
 
 /**
- * 이슈 생성 시 관련 기억 자동 연결
- * - 이슈 제목+설명으로 기존 메모리 검색
- * - 유사도 높은 기억을 자동 링크
+ * Auto-link related memories when an issue is created
+ * - Search existing memories with the issue title + description
+ * - Auto-link memories with high similarity
  */
 export async function autoLinkMemories(
   store: SqliteIssueStore,
@@ -43,7 +43,7 @@ export async function autoLinkMemories(
       'autoLinkMemories search',
     );
   } catch (err) {
-    // 기한 초과: 검색 결과 없음으로 정산 — 호출자와 스케줄 슬롯이 pending 검색에 묶이지 않는다.
+    // Deadline exceeded: settle as no search results — the caller and the schedule slot are not tied up by the pending search.
     if (err instanceof Error && err.message.startsWith('autoLinkMemories search timed out')) return [];
     throw err;
   }
@@ -63,8 +63,8 @@ export async function autoLinkMemories(
 }
 
 /**
- * 이슈 완료 시 학습 기억 저장
- * - 해결 과정에서 얻은 통찰을 장기 기억으로 수선
+ * Save a learning memory when an issue is completed
+ * - Consolidate insights gained during resolution into long-term memory
  */
 export async function saveCompletionInsight(
   store: SqliteIssueStore,
@@ -76,23 +76,23 @@ export async function saveCompletionInsight(
     store.linkMemory(issue.id, existingIds[0]);
     return existingIds[0];
   }
-  // 이슈 이벤트 히스토리 수집
+  // Collect the issue event history
   const events = store.getEvents(issue.id, 100);
   if (events.length === 0) return null;
 
-  // 이벤트에서 코멘트 추출
+  // Extract comments from the events
   const comments = events
     .filter((e) => e.type === 'commented' && e.content)
     .map((e) => e.content!)
     .join('\n');
 
-  // 상태 전이 히스토리
+  // State transition history
   const statusChanges = events
     .filter((e) => e.type === 'status_changed')
     .map((e) => `${e.oldValue} → ${e.newValue}`)
     .join(', ');
 
-  // 이슈에 대한 요약 컨텐츠 생성
+  // Build summary content for the issue
   const content = [
     `## 이슈 해결: ${issue.title}`,
     `프로젝트: ${issue.projectId}`,
@@ -106,7 +106,7 @@ export async function saveCompletionInsight(
       : '',
   ].filter(Boolean).join('\n');
 
-  // 장기 기억으로 저장
+  // Save to long-term memory
   const memoryId = await saveMemory('decision', issue.projectId, issue.title, content, {
     trust: 0.85,
     importance: issue.priority === 'urgent' ? 0.95 : issue.priority === 'high' ? 0.85 : 0.7,
@@ -131,8 +131,8 @@ export async function saveCompletionInsight(
 }
 
 /**
- * 이슈 블로킹 시 제약 조건 기억 저장
- * - 블로킹 원인을 constraint 타입으로 저장 → 향후 유사 이슈 방지
+ * Save a constraint memory when an issue is blocked
+ * - Save the blocking cause as a constraint type -> prevents similar issues in the future
  */
 export async function saveBlockingConstraint(
   store: SqliteIssueStore,
@@ -156,7 +156,7 @@ export async function saveBlockingConstraint(
 }
 
 /**
- * 이슈 컨텍스트 강화: 관련 기억 + 유사 이슈 조회
+ * Enrich issue context: look up related memories + similar issues
  */
 export async function enrichIssueContext(
   store: SqliteIssueStore,
@@ -172,7 +172,7 @@ export async function enrichIssueContext(
   }
   const seenMemoryIds = new Set(linkedIds);
 
-  // 2. 의미적으로 유사한 기억 검색
+  // 2. Search semantically similar memories
   const query = `${issue.title} ${issue.description}`;
   const result = await searchMemorySafe(query, {
     limit: 10,
@@ -191,7 +191,7 @@ export async function enrichIssueContext(
     }
   }
 
-  // 3. 유사 이슈 검색 (FTS)
+  // 3. Search similar issues (FTS)
   const searchTerms = issue.title.split(/\s+/).filter((t) => t.length > 2).slice(0, 3);
   const similarIssues: Issue[] = [];
 
@@ -222,8 +222,8 @@ export async function enrichIssueContext(
 }
 
 /**
- * 이벤트 스트림 → 메모리 수선 (백그라운드)
- * - 주기적으로 최근 이벤트를 분석하여 패턴/전략 기억 생성
+ * Event stream -> memory consolidation (background)
+ * - Periodically analyze recent events to create pattern/strategy memories
  */
 export async function digestRecentEvents(
   store: SqliteIssueStore,
@@ -232,8 +232,8 @@ export async function digestRecentEvents(
   const events = store.getRecentEvents(limit);
   if (events.length === 0) return 0;
 
-  // 패턴 분석: 반복 블로킹. IssueStatus에는 blocked가 없으므로,
-  // 로컬 자동화가 실제로 남기는 blocked/stuck 코멘트 이벤트를 기준으로 본다.
+  // Pattern analysis: repeated blocking. IssueStatus has no blocked state, so
+  // base this on the blocked/stuck comment events that local automation actually leaves.
   const blockEvents = events.filter((e) => (
     e.type === 'commented'
     && (/\b(blocked|stuck)\b/i.test(e.content ?? '') || /블로킹|차단/.test(e.content ?? ''))
@@ -257,7 +257,7 @@ export async function digestRecentEvents(
     }
   }
 
-  // 패턴 분석: 빈번한 우선순위 변경
+  // Pattern analysis: frequent priority changes
   const priorityChanges = events.filter((e) => e.type === 'priority_changed');
   if (priorityChanges.length >= 5) {
     const derivedFrom = digestSource('priority', priorityChanges.map((event) => `${event.id}:${event.oldValue}:${event.newValue}`));

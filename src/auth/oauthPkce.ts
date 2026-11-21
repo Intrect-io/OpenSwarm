@@ -55,7 +55,7 @@ export function isLoopbackRemote(address: string | undefined): boolean {
 // PKCE helpers
 
 function generateCodeVerifier(): string {
-  // 43-128자 base64url-safe 랜덤 문자열
+  // Random string of 43-128 base64url-safe characters
   return randomBytes(96).toString('base64url');
 }
 
@@ -85,8 +85,8 @@ export interface OAuthFlowOptions {
 }
 
 /**
- * OAuth 2.1 PKCE 흐름 실행.
- * 로컬 HTTP 서버에서 callback을 받고, token을 교환하여 저장한다.
+ * Run the OAuth 2.1 PKCE flow.
+ * Receives the callback on a local HTTP server, exchanges the token, and stores it.
  */
 export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<OAuthFlowResult> {
   const {
@@ -100,12 +100,12 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
   // triggers Hydra's authorize_hydra_invalid_request error.
   const redirectUri = `http://localhost:${port}/auth/callback`;
 
-  // 1. PKCE 생성
+  // 1. Generate PKCE
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = generateCodeChallenge(codeVerifier);
   const state = generateState();
 
-  // 2. Authorization URL 구성.
+  // 2. Build the Authorization URL.
   // The simplified_flow + id_token_add_organizations params mirror the official
   // codex CLI so the ChatGPT side recognises this as a first-party desktop login.
   const authParams = new URLSearchParams({
@@ -122,7 +122,7 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
   });
   const authUrl = `${OPENAI_AUTH_ENDPOINT}?${authParams.toString()}`;
 
-  // 3. 로컬 HTTP 서버 시작 + callback 대기
+  // 3. Start the local HTTP server + wait for the callback
   return new Promise<OAuthFlowResult>((resolve, reject) => {
     const settlement = new PkceSettlement();
     const exchangeAbort = new AbortController();
@@ -222,11 +222,11 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
           id_token: (raw as { id_token?: unknown }).id_token as string | undefined,
         };
 
-        // Codex 백엔드(/responses, /models)는 `chatgpt-account-id` 헤더를 요구한다.
-        // 그 값은 access_token JWT의 `https://api.openai.com/auth` claim 안의
-        // `chatgpt_account_id`다. (과거엔 id_token.sub를 저장했는데, 그건 IdP
-        // subject — 예: `google-oauth2|...` — 라서 codex account_id가 아니다.)
-        // access_token 우선, 없으면 id_token으로 폴백.
+        // The Codex backend (/responses, /models) requires a `chatgpt-account-id` header.
+        // That value is `chatgpt_account_id` inside the `https://api.openai.com/auth` claim
+        // of the access_token JWT. (We used to store id_token.sub, but that is the IdP
+        // subject — e.g. `google-oauth2|...` — so it is not the codex account_id.)
+        // Prefer access_token, fall back to id_token if absent.
         let accountId: string | undefined;
         for (const jwt of [tokens.access_token, tokens.id_token]) {
           if (!jwt) continue;
@@ -298,7 +298,7 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
 }
 
 /**
- * OAuth 로그인 → 토큰 저장 (온보딩 전체 흐름)
+ * OAuth login → store the token (full onboarding flow)
  */
 export async function loginAndSaveProfile(
   clientId: string = DEFAULT_OPENAI_CLIENT_ID,

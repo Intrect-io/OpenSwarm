@@ -169,7 +169,7 @@ export function recordTraceEvent(event: CoordinationEvent): void {
   }
 }
 
-/** 영속 명령의 동일 트랜잭션 안에서 답변 증거를 쓸 때는 실패를 전파한다. */
+/** Propagate failures when writing answer evidence inside the same transaction as a persisted command. */
 export function recordTraceEventRequired(handle: Database.Database, event: CoordinationEvent): void {
     handle.prepare(`
       INSERT OR IGNORE INTO coordination_trace(

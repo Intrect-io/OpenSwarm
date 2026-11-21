@@ -315,7 +315,7 @@ async function postHumanQuestionOnce(input: HumanQuestionInput, correlationId: s
       `${input.actorName ? ` (asked by ${input.actorName})` : ''}.\n${input.question}\n\n` +
       answerHint(correlationId),
   );
-  // 알림 I/O 도중 채널·운영자 답변이 먼저 저장될 수 있다. 늦은 알림으로 대기를 되살리지 않는다.
+  // A channel or operator answer may be stored first during notification I/O. A late notification must not revive the wait.
   const answerDuringNotify = store.exchange(correlationId).find((event) =>
     event.kind === 'human-answer' && event.status === 'completed');
   if (answerDuringNotify) return answeredPost(correlationId, answerDuringNotify);

@@ -240,7 +240,7 @@ function runRegistryCheck(workerResult: WorkerResult): GuardResult {
       const brief = store.fileBrief(filePath);
       if (brief.entities.length === 0) continue;
 
-      // deprecated 엔티티가 있는 파일 수정 시 경고
+      // Warn when modifying a file that has deprecated entities
       const deprecated = brief.entities.filter(e => e.status === 'deprecated');
       if (deprecated.length > 0) {
         issues.push(
@@ -249,7 +249,7 @@ function runRegistryCheck(workerResult: WorkerResult): GuardResult {
         );
       }
 
-      // broken 엔티티가 있는 파일 수정 시 경고
+      // Warn when modifying a file that has broken entities
       const broken = brief.entities.filter(e => e.status === 'broken');
       if (broken.length > 0) {
         issues.push(
@@ -257,7 +257,7 @@ function runRegistryCheck(workerResult: WorkerResult): GuardResult {
         );
       }
 
-      // 미해결 critical/error 경고가 있는 엔티티
+      // Entities with unresolved critical/error warnings
       const withCriticalWarnings = brief.entities.filter(e =>
         e.warnings.some(w => !w.resolved && (w.severity === 'critical' || w.severity === 'error'))
       );
@@ -270,7 +270,7 @@ function runRegistryCheck(workerResult: WorkerResult): GuardResult {
         }
       }
 
-      // high-risk + untested 조합 경고
+      // Warn on the high-risk + untested combination
       const riskyUntested = brief.entities.filter(
         e => e.riskLevel === 'high' && !e.hasTests && e.status === 'active'
       );
@@ -281,7 +281,7 @@ function runRegistryCheck(workerResult: WorkerResult): GuardResult {
       }
     }
   } catch (err) {
-    // 레지스트리 DB가 없거나 접근 불가 시 무시
+    // Ignore when the registry DB is missing or inaccessible
     console.warn('[Guard:registryCheck] Registry unavailable:', err);
   }
 
