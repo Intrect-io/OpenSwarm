@@ -42,7 +42,7 @@ export interface PauseCommandResult {
   pauses?: FactoryPause[];
 }
 
-function resolveDbPath(deps: PauseCommandDeps): string {
+export function resolveDbPath(deps: Pick<PauseCommandDeps, 'loadConfig'> = {}): string {
   // A missing or broken config must not stop an operator from pulling the
   // kill switch: fall back to the default database path.
   try {
@@ -56,7 +56,7 @@ function resolveDbPath(deps: PauseCommandDeps): string {
   return defaultAutomationDbPath();
 }
 
-function defaultActor(): string {
+export function defaultActor(): string {
   try { return `cli:${userInfo().username}`; } catch { return 'cli'; }
 }
 

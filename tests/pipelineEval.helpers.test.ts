@@ -1,12 +1,14 @@
 // The eval harness's pure helpers (AGT-4811). The harness entrypoint
 // itself drives real pipeline runs and is a coverage boundary (vitest.config.ts);
 // these are the parts that decide where evidence lives and whether a run counts.
-import { existsSync, mkdtempSync, mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  classifyChanges, cleanupRun, findGraderAccess, parseArgs, phantomExists, resolveRunRoot, sealEvidence, unsealEvidence,
+  classifyChanges, cleanupRun, countWorkflowRuns, dispatchGuardScript, findGraderAccess, parseArgs, phantomExists,
+  resolveRunRoot, sealEvidence, unsealEvidence,
 } from '../benchmarks/pipelineEval.js';
 
 describe('resolveRunRoot', () => {
@@ -123,5 +125,66 @@ describe('cleanupRun', () => {
     expect(() => cleanupRun(checkout, 'linked', [])).toThrow(/not a plain directory/);
     expect(existsSync(outside)).toBe(true);
     expect(() => cleanupRun(checkout, '../outside', [])).toThrow(/invalid run id/);
+  });
+});
+
+describe('classifyChanges with an allowed scope', () => {
+  it('allows exactly the listed files and directories', () => {
+    expect(classifyChanges(['tools/textkit/src/a.mjs', 'tools/textkit/src/a.mjsx', 'tools/textkit/lib/b.mjs', 'tools/textkit/c.mjs'], ['src/a.mjs', 'lib/']))
+      .toEqual({ testsTampered: false, outOfScopeFiles: ['tools/textkit/src/a.mjsx', 'tools/textkit/c.mjs'] });
+  });
+});
+
+// The gh every eval pipeline runs with (AGT-4811): workflow dispatches are
+// refused and logged (as a run when a token came with them), everything else
+// reaches the real gh.
+describe('dispatchGuardScript', () => {
+  let dir = '';
+  afterEach(() => { if (dir) { rmSync(dir, { recursive: true, force: true }); dir = ''; } });
+  const setup = (log: string) => {
+    const realGh = join(dir, 'real gh');
+    writeFileSync(realGh, '#!/bin/sh\necho "real $*"\n', { mode: 0o755 });
+    const guard = join(dir, 'gh');
+    writeFileSync(guard, dispatchGuardScript(realGh, log, 'n0nce'), { mode: 0o755 });
+    return guard;
+  };
+  const noToken = { ...process.env, GH_TOKEN: '', GITHUB_TOKEN: '', GH_ENTERPRISE_TOKEN: '' };
+
+  it('refuses and logs every workflow dispatch, and passes other commands to the real gh', () => {
+    dir = mkdtempSync(join(tmpdir(), 'eval-guard-'));
+    const log = join(dir, 'dispatch.log');
+    const guard = setup(log);
+    for (const args of [['workflow', 'run', 'x.yml', '--ref', 'main'], ['workflow', 'dispatch', 'x.yml'], ['api', '-X', 'POST', 'repos/o/r/actions/workflows/1/dispatches']]) {
+      const res = spawnSync(guard, args, { encoding: 'utf8', env: noToken });
+      expect(res.status).toBe(1);
+      expect(res.stdout).toBe('');
+      expect(res.stderr).toContain('n0ncea');
+    }
+    const withToken = spawnSync(guard, ['workflow', 'run', 'x.yml'], { encoding: 'utf8', env: { ...noToken, GH_TOKEN: 't' } });
+    expect(withToken.status).toBe(1);
+    expect(withToken.stderr).toContain('n0ncer');
+    const logged = readFileSync(log, 'utf8');
+    expect(countWorkflowRuns(logged, '', 'n0nce')).toEqual({ runs: 1, attempts: 3 });
+    expect(execFileSync(guard, ['pr', 'view', '1', '--json', 'url'], { encoding: 'utf8' })).toBe('real pr view 1 --json url\n');
+    expect(execFileSync(guard, ['run', 'list'], { encoding: 'utf8' })).toBe('real run list\n');
+  });
+
+  it('still refuses, silently about its log, when the log cannot be written', () => {
+    dir = mkdtempSync(join(tmpdir(), 'eval-guard-'));
+    const log = join(dir, 'missing-dir', 'dispatch.log');
+    const res = spawnSync(setup(log), ['workflow', 'run', 'x.yml'], { encoding: 'utf8', env: noToken });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain('n0ncea');
+    expect(res.stderr).not.toContain('dispatch.log');
+    expect(existsSync(log)).toBe(false);
+  });
+});
+
+describe('countWorkflowRuns', () => {
+  it('counts logged dispatches, or transcript lines with the marker when the log could not be written', () => {
+    expect(countWorkflowRuns('', '{"output":"ok"}', 'n0nce')).toEqual({ runs: 0, attempts: 0 });
+    expect(countWorkflowRuns('run workflow run a.yml\nattempt workflow run b.yml\n', '', 'n0nce')).toEqual({ runs: 1, attempts: 1 });
+    expect(countWorkflowRuns('', '{"output":"HTTP 403 (request n0ncea)"}\n{"output":"(request n0ncer)"}\n{"output":"ok"}', 'n0nce'))
+      .toEqual({ runs: 1, attempts: 1 });
   });
 });

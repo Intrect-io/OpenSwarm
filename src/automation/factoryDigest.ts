@@ -7,17 +7,27 @@
 // on numbers. This computes those numbers from what the automation database
 // already records, and renders them for Discord and the dashboard.
 //
-// Every figure says where it comes from. A figure whose input is not recorded
-// anywhere yet is reported as "not measured" with the reason, never as 0, never
-// estimated and never replaced by a proxy:
-// - merges: the automation database records no merge. PR merge state is read
-//   from GitHub only to move the tracker (reconcileMergedPublications), and the
-//   integration coordinator's merge log lives in the PR processor's state file,
-//   baselined per repository and not linked to runs;
-// - cycle time: needs the merge time, which is not recorded (see above);
-// - human minutes (review, answer, intervention time) are not recorded;
-// - post-merge reverts/hotfixes are not linked back to runs;
-// - nobody can mark a run "should not have run" yet.
+// Every figure says where it comes from. A figure whose input has no records
+// is reported as "not measured" with the reason, never as 0, never estimated
+// and never replaced by a proxy. The outcome inputs are recorded in
+// factoryOutcomes.ts:
+// - merges: the PR's GitHub state, recorded by the merge sweep
+//   (reconcileMergedPublications) each time it reads it. A run counts as
+//   merged only when GitHub said MERGED, windowed on GitHub's merge time; the
+//   tracker's Done is never used, and a run with no recorded PR state does not
+//   count. Not measured while no PR state was ever recorded;
+// - cycle time: the run's first start to its recorded merge, median over the
+//   runs merged in the window;
+// - post-merge defect rate: merged runs in the window with a recorded revert
+//   or hotfix within 7 days of the merge (and before `now`), over the merged
+//   runs in the window. Not measured while no defect was ever recorded or
+//   nothing merged in the window. A daily window is right-censored: a defect
+//   on yesterday's merge can still be recorded for 6 more days;
+// - wrong-dispatch rate: runs dispatched in the window (an attempt started in
+//   it) marked "should not have run", over the runs dispatched in it. Not
+//   measured while no run was ever marked or nothing was dispatched;
+// - human minutes (review, answer, intervention time) are not recorded, so
+//   merged changes per human minute stays not measured.
 //
 // The window is the previous full UTC day [00:00Z, 00:00Z), the same day the
 // spend ceiling counts against (runLedgerCost.ts). Definitions within it:
@@ -56,11 +66,17 @@ export interface CostFigure {
   estimatePerUnpricedUsd: number;
 }
 
+/** Runs whose PR GitHub reported MERGED, merged in the window (factoryOutcomes.ts). */
+export interface MergeCount { measured: true; count: number }
+/** `numerator` of `denominator` runs; `rate` = numerator / denominator. */
+export interface Rate { measured: true; rate: number; numerator: number; denominator: number }
+export interface MedianDuration { measured: true; medianMs: number; issues: number }
+
 export interface FactoryDigest {
   from: number;
   to: number;
   runs: {
-    merged: NotMeasured;
+    merged: NotMeasured | MergeCount;
     doneWithPr: number;
     publishedNotDone: number;
     parkedNow: number;
@@ -80,9 +96,9 @@ export interface FactoryDigest {
   circuits: Array<{ projectPath: string; reason: string; openUntil: number }>;
   kpis: {
     mergedPerHumanMinute: NotMeasured;
-    postMergeDefectRate: NotMeasured;
-    wrongDispatchRate: NotMeasured;
-    cycleTimePerIssue: NotMeasured;
+    postMergeDefectRate: NotMeasured | Rate;
+    wrongDispatchRate: NotMeasured | Rate;
+    cycleTimePerIssue: NotMeasured | MedianDuration;
     /** All attempts ever of the issues counted as Done with a PR in the window. */
     costPerDoneIssue?: CostFigure & { issues: number; basis: string };
   };
@@ -93,18 +109,21 @@ export interface NotMeasured {
   reason: string;
 }
 
-const NO_MERGE_RECORD = 'the automation database records no merge (GitHub merge state only moves the tracker; the PR processor keeps its merge log in its own state file, not linked to runs)';
+const NO_MERGE_RECORD = 'the automation database records no merge yet (no PR state has been recorded by the merge sweep)';
+const NO_MERGE_IN_WINDOW = 'no run merged in the window (GitHub PR state)';
 
 const NOT_MEASURED = {
   mergedPerHumanMinute: { measured: false, reason: 'human review/answer/intervention minutes are not recorded anywhere yet' },
-  postMergeDefectRate: { measured: false, reason: 'reverts and hotfixes are not linked back to the run that merged' },
-  wrongDispatchRate: { measured: false, reason: 'there is no way yet to mark a run "should not have run"' },
+  postMergeDefectRate: { measured: false, reason: 'no revert or hotfix has been recorded yet (`openswarm outcome defect`)' },
+  wrongDispatchRate: { measured: false, reason: 'no run has been marked "should not have run" yet (`openswarm outcome wrong-dispatch`)' },
   cycleTimePerIssue: { measured: false, reason: `needs the merge time: ${NO_MERGE_RECORD}` },
 } as const satisfies Record<string, NotMeasured>;
 
 const COST_PER_DONE_BASIS = 'issues the tracker marks Done with a PR, merge not verified; all their attempts';
 
 const DAY_MS = 24 * 60 * 60_000;
+/** A revert or hotfix counts against a merge when recorded within this long after it. */
+const POST_MERGE_DEFECT_MS = 7 * DAY_MS;
 /** An unanswered question older than this, or on a finished run, is reported as stale, not as waiting. */
 const QUESTION_HORIZON_MS = 14 * DAY_MS;
 /** Threads with no activity in twice the horizon are not read at all: the trace is never pruned. */
@@ -223,9 +242,57 @@ export function computeFactoryDigest(
     }
   }
 
+  if (hasTable(db, 'automation_runs')) measureOutcomes(db, digest, now);
   if (hasTable(db, 'coordination_trace')) countQuestions(db, digest, now);
   collectPausesAndAnomalies(db, digest, now);
   return digest;
+}
+
+const any = (db: Database.Database, table: string): boolean =>
+  hasTable(db, table) && !!db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get();
+
+/**
+ * Merges, cycle time, defect rate and wrong-dispatch rate from the recorded
+ * outcomes (factoryOutcomes.ts). Each stays "not measured" while its input
+ * has no records, or while its denominator is empty in the window.
+ */
+function measureOutcomes(db: Database.Database, digest: FactoryDigest, now: number): void {
+  const { from, to } = digest;
+  if (any(db, 'automation_pr_states')) {
+    // One row per merged run: its earliest recorded merge, in the window.
+    const mergedRuns = `
+      SELECT p.issue_id AS issueId, MIN(p.merged_at) AS mergedAt, r.started_at AS startedAt
+      FROM automation_pr_states p JOIN automation_runs r ON r.issue_id = p.issue_id
+      WHERE p.state = 'MERGED' GROUP BY p.issue_id HAVING MIN(p.merged_at) >= ? AND MIN(p.merged_at) < ?`;
+    const merged = db.prepare(mergedRuns).all(from, to) as Array<{ issueId: string; mergedAt: number; startedAt: number | null }>;
+    digest.runs.merged = { measured: true, count: merged.length };
+    const cycles = merged.filter((m) => m.startedAt != null).map((m) => m.mergedAt - m.startedAt!).sort((a, b) => a - b);
+    const mid = cycles.length >> 1;
+    digest.kpis.cycleTimePerIssue = cycles.length === 0
+      ? { measured: false, reason: merged.length === 0 ? NO_MERGE_IN_WINDOW : 'no run merged in the window has a recorded start' }
+      : { measured: true, medianMs: cycles.length % 2 ? cycles[mid] : (cycles[mid - 1] + cycles[mid]) / 2, issues: cycles.length };
+    if (any(db, 'automation_run_defects')) {
+      // Same population as the denominator: the runs merged in the window.
+      const { numerator } = db.prepare(`
+        SELECT COUNT(*) AS numerator FROM (${mergedRuns}) m WHERE EXISTS (
+          SELECT 1 FROM automation_run_defects d
+          WHERE d.issue_id = m.issueId AND d.at >= m.mergedAt AND d.at <= m.mergedAt + ? AND d.at <= ?)
+      `).get(from, to, POST_MERGE_DEFECT_MS, now) as { numerator: number };
+      digest.kpis.postMergeDefectRate = merged.length === 0
+        ? { measured: false, reason: NO_MERGE_IN_WINDOW }
+        : { measured: true, rate: numerator / merged.length, numerator, denominator: merged.length };
+    }
+  }
+  if (any(db, 'automation_dispatch_marks') && hasTable(db, 'automation_attempts')) {
+    const row = db.prepare(`
+      SELECT COUNT(*) AS denominator, COUNT(m.issue_id) AS numerator FROM
+        (SELECT DISTINCT issue_id FROM automation_attempts WHERE started_at >= ? AND started_at < ?) a
+      LEFT JOIN automation_dispatch_marks m ON m.issue_id = a.issue_id
+    `).get(from, to) as { denominator: number; numerator: number };
+    digest.kpis.wrongDispatchRate = row.denominator === 0
+      ? { measured: false, reason: 'no run was dispatched in the window' }
+      : { measured: true, rate: row.numerator / row.denominator, numerator: row.numerator, denominator: row.denominator };
+  }
 }
 
 /** Active pauses, lifts and signals in the window, and circuits open now. Each table is optional. */
@@ -350,7 +417,8 @@ export function formatFactoryDigest(d: FactoryDigest, options: { maxItems?: numb
   const lines: string[] = [];
   lines.push(`📋 **Factory digest** ${windowLabel(d.from, d.to)}`);
   const finished = Object.entries(d.runs.finishedByStatus).map(([s, n]) => `${s} ${n}`).join(', ') || 'none';
-  lines.push(`**Runs merged**: not measured (${d.runs.merged.reason})`);
+  const merged = d.runs.merged;
+  lines.push(`**Runs merged**: ${merged.measured ? `${merged.count} (GitHub PR state recorded by the merge sweep, merged in the window)` : `not measured (${merged.reason})`}`);
   lines.push(`**Runs**: Done with a PR ${d.runs.doneWithPr} (tracker state; merge not verified), published not Done ${d.runs.publishedNotDone}, parked runs ${d.runs.parkedRunsInWindow} in window / ${d.runs.parkedNow} now`);
   lines.push(`**Attempts finished**: ${finished}`);
   const staleSince = new Date(d.questions.staleSince).toISOString().slice(0, 10);
@@ -368,13 +436,17 @@ export function formatFactoryDigest(d: FactoryDigest, options: { maxItems?: numb
   const k = d.kpis;
   lines.push(KPI_HEADING);
   lines.push(`  cost per Done issue (${COST_PER_DONE_BASIS}): ${k.costPerDoneIssue ? `${usd(k.costPerDoneIssue, k.costPerDoneIssue.issues)} per issue` : 'n/a (nothing Done)'}`);
-  for (const [name, value] of [
-    ['cycle time per issue', k.cycleTimePerIssue],
-    ['merged changes per human minute', k.mergedPerHumanMinute],
-    ['post-merge defect rate (7 d)', k.postMergeDefectRate],
-    ['wrong-dispatch rate', k.wrongDispatchRate],
+  const pct = (r: Rate, of: string) => `${(r.rate * 100).toFixed(1)}% (${r.numerator} of ${r.denominator} ${of})`;
+  const ct = k.cycleTimePerIssue;
+  const dr = k.postMergeDefectRate;
+  const wd = k.wrongDispatchRate;
+  for (const [name, text] of [
+    ['cycle time per issue', ct.measured ? `median ${hours(ct.medianMs)} over ${ct.issues} merged issues (first start to GitHub merge)` : `not measured (${ct.reason})`],
+    ['merged changes per human minute', `not measured (${k.mergedPerHumanMinute.reason})`],
+    ['post-merge defect rate (7 d)', dr.measured ? pct(dr, 'runs merged in the window reverted or hotfixed within 7 days of the merge') : `not measured (${dr.reason})`],
+    ['wrong-dispatch rate', wd.measured ? pct(wd, 'runs dispatched in the window marked should-not-have-run') : `not measured (${wd.reason})`],
   ] as const) {
-    lines.push(`  ${name}: not measured (${value.reason})`);
+    lines.push(`  ${name}: ${text}`);
   }
   return lines.join('\n');
 }

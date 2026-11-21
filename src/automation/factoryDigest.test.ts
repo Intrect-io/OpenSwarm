@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { RunLedger } from './runLedger.js';
+import { DurableRunCoordinator } from './durableRunCoordinator.js';
 import { PAUSE_TABLE_DDL } from './factoryPause.js';
 import { SIGNAL_TABLE_DDL } from './anomalyPause.js';
 import { dailySpend } from './runLedgerCost.js';
@@ -11,6 +12,8 @@ import {
   computeFactoryDigest, fitForDiscord, formatFactoryDigest, readFactoryDigest, startFactoryDigest, KPI_HEADING, type FactoryDigest,
 } from './factoryDigest.js';
 import { FACTORY_DIGEST_MEMO_MS, handleFactoryDigest } from '../support/webFactoryDigest.js';
+import { recordPullRequestStateInDb } from './factoryOutcomes.js';
+import { runDefectCommand, runWrongDispatchCommand } from '../cli/outcomeCommand.js';
 import type { ServerResponse } from 'node:http';
 
 const cron = vi.hoisted(() => ({ calls: [] as Array<{ pattern: string; options: { timezone?: string }; fn: () => Promise<void>; stop: ReturnType<typeof vi.fn> }> }));
@@ -202,6 +205,101 @@ describe('computeFactoryDigest against hand counts', () => {
     expect(d.pauseLifts).toEqual([]);
     expect(d.signals).toEqual([]);
     expect(formatFactoryDigest(d)).toContain('cost per Done issue (issues the tracker marks Done with a PR, merge not verified; all their attempts): n/a (nothing Done)');
+  });
+});
+
+// AGT-4810: merges, defects and wrong dispatches from the recorded outcomes
+// (factoryOutcomes.ts), written through the same paths the daemon and the
+// `openswarm outcome` CLI use.
+describe('recorded outcomes', () => {
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const quiet = { actor: 'test', out: () => {} };
+
+  /** r3 merged in the window, r4 and r2 too (defect test), r1 closed unmerged, r6 merged the day before. */
+  /** Recorded through the coordinator the merge sweep calls (reconcileMergedPublications). */
+  function withPrStates(merges: Array<[string, string, 'OPEN' | 'CLOSED' | 'MERGED', number?]>): string {
+    const dbPath = fixtureDb();
+    const ledger = new RunLedger(dbPath);
+    const runs = new DurableRunCoordinator({ mode: 'primary', ledger });
+    for (const [issueId, prUrl, state, mergedAt] of merges) {
+      expect(runs.recordPullRequestState(issueId, prUrl, { state, mergedAt: mergedAt === undefined ? undefined : iso(mergedAt) }, T + D)).toBe(true);
+    }
+    ledger.close();
+    expect(new DurableRunCoordinator({ mode: 'off' }).recordPullRequestState('r1', 'pr/1', { state: 'MERGED' })).toBe(false);
+    return dbPath;
+  }
+
+  it('counts a change as completed only from its GitHub state', () => {
+    const dbPath = withPrStates([
+      ['r3', 'pr/3', 'OPEN'],                 // first read: still open ...
+      ['r3', 'pr/3', 'MERGED', T + 4 * H],    // ... then merged in the window: counts (tracker never Done)
+      ['r1', 'pr/1', 'CLOSED'],               // tracker Done, PR closed unmerged: does not count
+      // r2: tracker Done, no PR state recorded: does not count
+      ['r6', 'pr/6', 'MERGED', T - 2 * H],    // merged before the window
+      ['ghost', 'pr/9', 'MERGED', T + 5 * H], // no run in the ledger: does not count
+    ]);
+    const db = new Database(dbPath);
+    db.prepare("UPDATE automation_runs SET started_at = ? WHERE issue_id = 'r3'").run(T + 1 * H);
+    db.close();
+    const d = readFactoryDigest(dbPath, T + D);
+    expect(d.runs.merged).toEqual({ measured: true, count: 1 });
+    expect(d.runs.doneWithPr).toBe(2); // the tracker figure stays separate and labelled
+    expect(d.kpis.cycleTimePerIssue).toEqual({ measured: true, medianMs: 3 * H, issues: 1 });
+    const text = formatFactoryDigest(d);
+    expect(text).toContain('**Runs merged**: 1 (GitHub PR state recorded by the merge sweep, merged in the window)');
+    expect(text).toContain('cycle time per issue: median 3.0h over 1 merged issues (first start to GitHub merge)');
+    // Recording never throws into the merge sweep.
+    const closed = new Database(':memory:');
+    closed.close();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(recordPullRequestStateInDb(closed, 'r1', 'pr/1', { state: 'MERGED' })).toBe(false);
+  });
+
+  it('computes the defect rate from reverts within 7 days', () => {
+    const merges: Array<[string, string, 'MERGED' | 'CLOSED', number?]> = [
+      ['r3', 'pr/3', 'MERGED', T + 4 * H], ['r4', 'pr/4', 'MERGED', T + 10 * H], ['r2', 'pr/2', 'MERGED', T + 12 * H], ['r1', 'pr/1', 'CLOSED'],
+    ];
+    const dbPath = withPrStates(merges);
+    const before = readFactoryDigest(dbPath, T + D);
+    expect(before.kpis.postMergeDefectRate).toEqual({ measured: false, reason: expect.stringContaining('no revert or hotfix has been recorded') });
+    const deps = { ...quiet, dbPath, now: T + 10 * D };
+    runDefectCommand('AGT-3', { kind: 'revert', at: iso(T + 4 * H + 2 * D), ref: 'abc123' }, deps); // r3: 2 days after merge, counts
+    runDefectCommand('r4', { kind: 'revert', at: iso(T + 10 * H + 8 * D) }, deps);                  // r4: day 8, outside 7 days
+    runDefectCommand('r2', { kind: 'hotfix', at: iso(T + 11 * H) }, deps);                           // r2: before its merge
+    runDefectCommand('r1', { kind: 'revert', at: iso(T + 5 * H) }, deps);                            // r1: never merged
+    expect(() => runDefectCommand('r3', { kind: 'oops' }, deps)).toThrow(/--kind/);
+    expect(() => runDefectCommand('AGT-404', { kind: 'revert' }, deps)).toThrow(/no run/);
+
+    const db = new Database(dbPath, { readonly: true });
+    const d = computeFactoryDigest(db, { from: T, to: T + D }, T + 10 * D);
+    // Read at the day's end, r3's revert (two days later) has not happened yet: 0 of 3, measured.
+    const early = computeFactoryDigest(db, { from: T, to: T + D }, T + D);
+    // The day before has no merge: nothing to divide by.
+    const empty = computeFactoryDigest(db, { from: T - D, to: T }, T + 10 * D);
+    db.close();
+    expect(d.kpis.postMergeDefectRate).toEqual({ measured: true, rate: 1 / 3, numerator: 1, denominator: 3 });
+    expect(early.kpis.postMergeDefectRate).toEqual({ measured: true, rate: 0, numerator: 0, denominator: 3 });
+    expect(empty.kpis.postMergeDefectRate).toEqual({ measured: false, reason: 'no run merged in the window (GitHub PR state)' });
+    // Merged, but none of the fixture's runs was ever started: no cycle time, said so.
+    expect(d.kpis.cycleTimePerIssue).toEqual({ measured: false, reason: 'no run merged in the window has a recorded start' });
+    expect(formatFactoryDigest(d)).toContain('post-merge defect rate (7 d): 33.3% (1 of 3 runs merged in the window reverted or hotfixed within 7 days of the merge)');
+  });
+
+  it('computes wrong-dispatch rate from runs marked should-not-have-run', () => {
+    const dbPath = fixtureDb();
+    expect(readFactoryDigest(dbPath, T + D).kpis.wrongDispatchRate).toEqual({ measured: false, reason: expect.stringContaining('should not have run') });
+    const deps = { ...quiet, dbPath, now: T + D + H };
+    runWrongDispatchCommand('AGT-5', { reason: 'blocked on a design decision' }, deps); // r5: dispatched in the window
+    runWrongDispatchCommand('r4', { reason: 'duplicate' }, deps);                       // r4: no attempt in the window
+    runWrongDispatchCommand('AGT-5', { reason: 'blocked upstream' }, deps);             // marking again replaces, still one run
+    expect(() => runWrongDispatchCommand('r6', { reason: ' ' }, deps)).toThrow(/reason/);
+    // Dispatched in the window (an attempt started in it): r1, r2, r5, r6. Marked among them: r5.
+    const d = readFactoryDigest(dbPath, T + D);
+    expect(d.kpis.wrongDispatchRate).toEqual({ measured: true, rate: 0.25, numerator: 1, denominator: 4 });
+    expect(formatFactoryDigest(d)).toContain('wrong-dispatch rate: 25.0% (1 of 4 runs dispatched in the window marked should-not-have-run)');
+    // Merged per human minute stays unmeasured: human minutes are not recorded.
+    expect(d.kpis.mergedPerHumanMinute.measured).toBe(false);
+    expect(readFactoryDigest(dbPath, T + 30 * D).kpis.wrongDispatchRate).toEqual({ measured: false, reason: 'no run was dispatched in the window' });
   });
 });
 

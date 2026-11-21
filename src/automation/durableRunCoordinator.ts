@@ -260,9 +260,9 @@ export class DurableRunCoordinator {
     return this.mode === 'primary';
   }
 
-  getRun(issueId: string): RunRecord | null {
-    return this.ledger?.getRun(issueId) ?? null;
-  }
+  getRun(issueId: string): RunRecord | null { return this.ledger?.getRun(issueId) ?? null; }
+  /** Record the PR's GitHub state for the digest's merge count (AGT-4810). Never throws. */
+  recordPullRequestState(...args: Parameters<RunLedger['recordPullRequestState']>): boolean { return this.ledger?.recordPullRequestState(...args) ?? false; }
 
   getRecoveryStatus(issueId: string) { return this.ledger?.recovery.status(issueId); }
 
