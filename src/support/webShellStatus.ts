@@ -26,6 +26,12 @@ export interface ShellStatus {
    * depends on it — Cockpit lists Linear issues only.
    */
   tracker: 'linear' | 'local';
+  /**
+   * Whether the opt-in web terminal is attached right now (AGT-4002), so the
+   * shell can offer a Terminal link. Always a strict boolean; only this
+   * read-gated endpoint carries it, never /api/health.
+   */
+  webTerminal: boolean;
   generatedAt: number;
 }
 
@@ -42,8 +48,12 @@ export async function buildShellStatus(deps: {
   linearConfigured?: () => boolean;
   now?: () => number;
   projectNeeds?: () => { questions: number; parked: number; needsYou: number | null; unavailable: string[] };
+  webTerminalActive?: () => boolean;
 }): Promise<ShellStatus> {
   const tracker = deps.linearConfigured?.() ? 'linear' : 'local';
+  // Anything but a literal true (a throw, a truthy non-boolean) reads as off.
+  let webTerminal = false;
+  try { webTerminal = deps.webTerminalActive?.() === true; } catch { webTerminal = false; }
   const now = deps.now?.() ?? Date.now();
   // A human question is the one pending exchange that waits on the operator;
   // the board holds it until a human-answer or an expiry settles it.
@@ -58,6 +68,7 @@ export async function buildShellStatus(deps: {
       needsYou: { questions, parked: common?.parked ?? 0, total: common?.needsYou ?? questions },
       ...partial,
       tracker,
+      webTerminal,
       generatedAt: now,
     };
   }
@@ -79,6 +90,7 @@ export async function buildShellStatus(deps: {
     needsYou: { questions, parked, total: common?.needsYou ?? questions + parked },
     ...partial,
     tracker,
+    webTerminal,
     generatedAt: now,
   };
 }

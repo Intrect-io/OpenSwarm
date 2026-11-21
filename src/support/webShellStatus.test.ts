@@ -23,6 +23,7 @@ describe('buildShellStatus', () => {
       provider: null,
       needsYou: { questions: 1, parked: 0, total: 1 },
       tracker: 'local',
+      webTerminal: false,
       generatedAt: 5_000,
     });
   });
@@ -52,5 +53,17 @@ describe('buildShellStatus', () => {
     const status = await buildShellStatus({ runner: runner({ adapterFails: true }), pendingEvents: () => [] });
     expect(status.provider).toBeNull();
     expect(status.daemon.state).toBe('running');
+  });
+
+  it('shell-status reports webTerminal only as a strict boolean', async () => {
+    const base = { runner: runner(), pendingEvents: () => [] as CoordinationEvent[] };
+    expect((await buildShellStatus(base)).webTerminal).toBe(false);
+    expect((await buildShellStatus({ ...base, webTerminalActive: () => true })).webTerminal).toBe(true);
+    expect((await buildShellStatus({ ...base, webTerminalActive: () => false })).webTerminal).toBe(false);
+    // A truthy non-boolean or a throwing probe never turns the link on.
+    expect((await buildShellStatus({ ...base, webTerminalActive: () => 'yes' as unknown as boolean })).webTerminal).toBe(false);
+    expect((await buildShellStatus({ ...base, webTerminalActive: () => { throw new Error('probe failed'); } })).webTerminal).toBe(false);
+    // The dashboard-only answer carries it too.
+    expect((await buildShellStatus({ pendingEvents: () => [], webTerminalActive: () => true })).webTerminal).toBe(true);
   });
 });
