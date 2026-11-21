@@ -101,9 +101,17 @@ export interface StewardSnapshot extends StewardFileList {
   siblings: readonly StewardSiblingPr[] | null;
   review: StewardReview | null;
   completeness: StewardCompleteness | null;
+  /** Operator merge grant for the repository (AGT-4414). Null means it was never read. */
+  mergeGrant: StewardMergeGrant | null;
 }
 
-export type StewardGuardName = 'required-checks' | 'risk' | 'sibling-overlap' | 'review-completeness';
+/** Evidence from the operator's grants file (see mergeGrant.ts). */
+export interface StewardMergeGrant {
+  granted: boolean;
+  reason: string;
+}
+
+export type StewardGuardName = 'required-checks' | 'risk' | 'sibling-overlap' | 'review-completeness' | 'merge-grant';
 
 export interface StewardGuardResult {
   guard: StewardGuardName;
@@ -292,12 +300,24 @@ const reviewCompletenessGuard: StewardGuard = {
   },
 };
 
+/** The operator must have granted steward merges for this repository (AGT-4414). */
+const mergeGrantGuard: StewardGuard = {
+  name: 'merge-grant',
+  check(s) {
+    const name = 'merge-grant';
+    if (!s.mergeGrant) return fail(name, 'no operator merge grant was read for this repository');
+    if (s.mergeGrant.granted !== true) return fail(name, `no operator merge grant: ${s.mergeGrant.reason}`);
+    return pass(name, `operator merge grant: ${s.mergeGrant.reason}`);
+  },
+};
+
 /** Every guard, in report order. The steward always runs all of them. */
 export const STEWARD_GUARDS: readonly StewardGuard[] = Object.freeze([
   requiredChecksGuard,
   riskGuard,
   siblingOverlapGuard,
   reviewCompletenessGuard,
+  mergeGrantGuard,
 ]);
 
 /**
@@ -354,4 +374,30 @@ export function formatStewardDecision(decision: StewardDecision): string {
   return decision.mergeable
     ? `${head}would merge — ${decision.results.map((r) => r.reason).join('; ')}`
     : `${head}would NOT merge — ${decision.blockedBy.join(' | ')}`;
+}
+
+/** What `formatStewardAudit` needs; a full `StewardDecision` qualifies. */
+export interface StewardAuditInput {
+  prNumber: number;
+  headSha?: string | null;
+  results?: readonly StewardGuardResult[];
+}
+
+/**
+ * One audit line: repo, PR, head and the ci / review / grant guards as pass|fail.
+ * A guard that did not run (or no decision at all) reads as fail.
+ */
+export function formatStewardAudit(decision: StewardAuditInput, repo?: string): string {
+  const verdict = (guard: StewardGuardName): 'pass' | 'fail' =>
+    decision.results?.find((r) => r.guard === guard)?.pass === true ? 'pass' : 'fail';
+  const head = decision.headSha ? decision.headSha : 'unknown';
+  return [
+    '[steward audit]',
+    `repo=${repo ? repo : 'unknown'}`,
+    `pr=#${decision.prNumber}`,
+    `head=${head}`,
+    `ci=${verdict('required-checks')}`,
+    `review=${verdict('review-completeness')}`,
+    `grant=${verdict('merge-grant')}`,
+  ].join(' ');
 }

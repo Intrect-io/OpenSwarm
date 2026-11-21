@@ -3,11 +3,11 @@
 // Dependencies: vitest
 // Test Status: passing
 
-import { mkdtempSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Command } from 'commander';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { assertReadOnlyGhArgs, type GhRunner, type StewardLedgerEvidence } from '../automation/mergeStewardSnapshot.js';
 import { parsePrRef, registerStewardCommand, runStewardCommand } from './stewardCommand.js';
 
@@ -44,18 +44,26 @@ function fakeGh(opts: { failView?: boolean; failingCheck?: boolean } = {}): { gh
   return { gh, calls };
 }
 
-function harness(opts: Parameters<typeof fakeGh>[0] = {}) {
+const harnessDirs: string[] = [];
+afterEach(() => {
+  for (const dir of harnessDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function harness(opts: Parameters<typeof fakeGh>[0] = {}, grant: Record<string, unknown> | null = { [REPO]: true }) {
   const dir = mkdtempSync(join(tmpdir(), 'steward-'));
+  harnessDirs.push(dir);
   const logPath = join(dir, 'decisions.jsonl');
+  const mergeGrantsPath = join(dir, 'merge-grants.json');
+  if (grant !== null) writeFileSync(mergeGrantsPath, JSON.stringify(grant));
   const out: string[] = [];
   const err: string[] = [];
   const fake = fakeGh(opts);
   const deps = {
-    gh: fake.gh, ledger: () => LEDGER, logPath,
+    gh: fake.gh, ledger: () => LEDGER, logPath, mergeGrantsPath,
     out: (l: string) => out.push(l), err: (l: string) => err.push(l), now: () => new Date('2026-11-21T00:00:00Z'),
   };
   const log = () => (existsSync(logPath) ? readFileSync(logPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
-  return { deps, out, err, calls: fake.calls, log };
+  return { deps, out, err, calls: fake.calls, log, dir, mergeGrantsPath };
 }
 
 describe('openswarm steward', () => {
@@ -123,6 +131,55 @@ describe('openswarm steward', () => {
     expect(parsePrRef('12', 'a/b')).toEqual({ repo: 'a/b', prNumber: 12 });
     expect(() => parsePrRef('0')).toThrow();
     expect(() => parsePrRef('1', 'not-a-repo')).toThrow(/owner\/name/);
+  });
+
+  it('PR opened -> no merge without the grant', async () => {
+    // Open, non-draft PR with green checks and complete review evidence; no grants file.
+    const denied = harness({}, null);
+    try {
+      expect(existsSync(denied.mergeGrantsPath)).toBe(false);
+      expect(await runStewardCommand('5', { dryRun: true, repo: REPO }, denied.deps)).toBe(0);
+      expect(denied.out[0]).toContain('would NOT merge');
+      expect(denied.out[0]).toContain('merge-grant: no operator merge grant: no grants file at');
+      expect(denied.out[1]).toBe(`[steward audit] repo=${REPO} pr=#5 head=${HEAD} ci=pass review=pass grant=fail`);
+      expect(denied.log()[0]).toMatchObject({ mergeable: false, audit: denied.out[1] });
+      expect(denied.log()[0].results.filter((r: { pass: boolean }) => !r.pass).map((r: { guard: string }) => r.guard)).toEqual(['merge-grant']);
+    } finally {
+      rmSync(denied.dir, { recursive: true, force: true });
+    }
+
+    // The same PR once the operator grants the repository (key case does not matter).
+    const granted = harness({}, { 'ACME/Widgets': true });
+    try {
+      expect(await runStewardCommand('5', { dryRun: true, repo: REPO }, granted.deps)).toBe(0);
+      expect(granted.out[0]).toContain('would merge');
+      expect(granted.out[1]).toBe(`[steward audit] repo=${REPO} pr=#5 head=${HEAD} ci=pass review=pass grant=pass`);
+      expect(granted.log()[0]).toMatchObject({ mergeable: true, audit: granted.out[1] });
+    } finally {
+      rmSync(granted.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads OPENSWARM_MERGE_GRANTS when no grants path is injected', async () => {
+    const h = harness({}, { [REPO]: true });
+    const deps = { ...h.deps, mergeGrantsPath: undefined };
+    const previous = process.env.OPENSWARM_MERGE_GRANTS;
+    process.env.OPENSWARM_MERGE_GRANTS = h.mergeGrantsPath;
+    try {
+      expect(await runStewardCommand('5', { dryRun: true, repo: REPO }, deps)).toBe(0);
+      expect(h.out[1]).toContain('grant=pass');
+    } finally {
+      if (previous === undefined) delete process.env.OPENSWARM_MERGE_GRANTS;
+      else process.env.OPENSWARM_MERGE_GRANTS = previous;
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a REFUSE also prints and logs an audit line with every guard failing', async () => {
+    const h = harness({ failView: true });
+    expect(await runStewardCommand('5', { dryRun: true, repo: REPO }, h.deps)).toBe(1);
+    expect(h.out[1]).toBe(`[steward audit] repo=${REPO} pr=#5 head=unknown ci=fail review=fail grant=fail`);
+    expect(h.log()[0]).toMatchObject({ audit: h.out[1] });
   });
 
   it('registers `steward` with --dry-run in its help', () => {

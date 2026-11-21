@@ -84,9 +84,11 @@ function fakeGh(o: FakeOptions = {}): { gh: GhRunner; calls: string[][] } {
   return { gh, calls };
 }
 
+const GRANTED = () => ({ granted: true, reason: `${REPO} granted by test` });
+
 const build = (o: FakeOptions = {}, ledger: StewardLedgerEvidence | null = LEDGER) => {
   const fake = fakeGh(o);
-  return { fake, result: buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => ledger }) };
+  return { fake, result: buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => ledger, readGrant: GRANTED }) };
 };
 
 describe('mergeStewardSnapshot: checks and required checks', () => {
@@ -281,6 +283,35 @@ describe('mergeStewardSnapshot: risk and reviewer fallbacks', () => {
   });
 });
 
+describe('mergeStewardSnapshot: operator merge grant (AGT-4414)', () => {
+  it('puts the grant on the snapshot and notes a missing one', async () => {
+    const seen: string[] = [];
+    const fake = fakeGh();
+    const denied = await buildStewardSnapshot({
+      repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => LEDGER,
+      readGrant: (repo) => { seen.push(repo); return { granted: false, reason: 'no grants file at /x' }; },
+    });
+    expect(seen).toEqual([REPO]);
+    expect(denied.snapshot.mergeGrant).toEqual({ granted: false, reason: 'no grants file at /x' });
+    expect(denied.notes.join('\n')).toContain(`no operator merge grant for ${REPO}: no grants file at /x`);
+    expect(evaluateMergeSteward(denied.snapshot).blockedBy).toEqual([expect.stringMatching(/^merge-grant: /)]);
+
+    const granted = await build().result;
+    expect(granted.snapshot.mergeGrant).toEqual({ granted: true, reason: `${REPO} granted by test` });
+    expect(evaluateMergeSteward(granted.snapshot).mergeable).toBe(true);
+  });
+
+  it('a throwing grant reader grants nothing', async () => {
+    const fake = fakeGh();
+    const { snapshot } = await buildStewardSnapshot({
+      repo: REPO, prNumber: 7, gh: fake.gh, ledger: () => LEDGER,
+      readGrant: () => { throw new Error('boom'); },
+    });
+    expect(snapshot.mergeGrant).toEqual({ granted: false, reason: 'grant lookup failed (boom)' });
+    expect(evaluateMergeSteward(snapshot).mergeable).toBe(false);
+  });
+});
+
 describe('ledger lookup (read-only SQLite)', () => {
   const makeDb = async () => {
     const { default: Database } = await import('better-sqlite3');
@@ -309,7 +340,7 @@ describe('ledger lookup (read-only SQLite)', () => {
     writeFileSync(broken, 'not a database');
     await expect(createLedgerLookup(broken)('u')).rejects.toThrow();
     const fake = fakeGh();
-    const { notes, snapshot } = await buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fake.gh, ledger: createLedgerLookup(broken) });
+    const { notes, snapshot } = await buildStewardSnapshot({ repo: REPO, prNumber: 7, gh: fake.gh, ledger: createLedgerLookup(broken), readGrant: GRANTED });
     expect(notes.join('\n')).toMatch(/ledger unreadable/);
     expect(snapshot.review).toBeNull();
   });
@@ -331,11 +362,12 @@ describe('read-only gh allowlist', () => {
 
 describe('no code path that could merge', () => {
   it('has no code path that could merge: the collector and the steward command import nothing that can', () => {
-    for (const rel of ['./mergeStewardSnapshot.ts', '../cli/stewardCommand.ts']) {
+    for (const rel of ['./mergeStewardSnapshot.ts', './mergeGrant.ts', '../cli/stewardCommand.ts']) {
       const source = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
       const imports = source.match(/(?:^\s*import\s[^;]*?from\s+'[^']+'|import\('[^']+'\))/gm) ?? [];
       const allowed = [
-        "'./mergeStewardGuards.js'", "'../support/branchNaming.js'", "'better-sqlite3'",
+        "'./mergeStewardGuards.js'", "'./mergeGrant.js'", "'../automation/mergeGrant.js'",
+        "'../support/branchNaming.js'", "'better-sqlite3'",
         "'commander'", "'node:fs'", "'node:os'", "'node:path'",
         "'../automation/mergeStewardSnapshot.js'", "'../automation/mergeStewardGuards.js'",
         "'../automation/automationDbPath.js'", "'../support/ghPullRequests.js'",

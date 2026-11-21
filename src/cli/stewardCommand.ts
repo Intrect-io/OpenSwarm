@@ -1,6 +1,6 @@
 // Created: 2026-11-21
 // Purpose: `openswarm steward --dry-run <pr>` — judge one PR with the merge-steward guards and log the decision (AGT-4803)
-// Dependencies: ../automation/mergeStewardSnapshot, ../automation/mergeStewardGuards, ../support/ghPullRequests (read-only via allowlist)
+// Dependencies: ../automation/mergeStewardSnapshot, ../automation/mergeStewardGuards, ../automation/mergeGrant, ../support/ghPullRequests (read-only via allowlist)
 // Test Status: stewardCommand.test.ts
 
 /**
@@ -8,6 +8,10 @@
  * `dryRun: true`, prints the one-line decision and appends it to a JSONL log.
  * There is no merge path here: the engine throws on `dryRun: false`, and every
  * gh call goes through the snapshot module's read-only allowlist.
+ *
+ * Every decision also prints and logs one audit line (`formatStewardAudit`):
+ * repo, PR, head and ci / review / grant as pass|fail. The grant is read from the
+ * operator's grants file only (AGT-4414).
  *
  * Exit codes: 0 for any decision (would merge or would not: both are a
  * successful dry run); 1 for an infrastructure failure — nothing to judge (the
@@ -33,6 +37,8 @@ export interface StewardCommandDeps {
   gh?: GhRunner;
   ledger?: StewardLedgerLookup;
   logPath?: string;
+  /** Operator merge grants file; defaults to `defaultMergeGrantsPath()` (OPENSWARM_MERGE_GRANTS or ~/.openswarm). */
+  mergeGrantsPath?: string;
   out?: (line: string) => void;
   err?: (line: string) => void;
   now?: () => Date;
@@ -116,7 +122,9 @@ export async function runStewardCommand(
   const at = (deps.now ?? (() => new Date()))().toISOString();
   const gh = deps.gh ?? defaultGh();
   const { buildStewardSnapshot, createLedgerLookup } = await import('../automation/mergeStewardSnapshot.js');
-  const { evaluateMergeSteward, formatStewardDecision } = await import('../automation/mergeStewardGuards.js');
+  const { evaluateMergeSteward, formatStewardAudit, formatStewardDecision } = await import('../automation/mergeStewardGuards.js');
+  const { readMergeGrant } = await import('../automation/mergeGrant.js');
+  const grantsPath = deps.mergeGrantsPath;
   let repo = parsed.repo ?? '';
   try {
     repo = await resolveRepo(gh, parsed.repo);
@@ -127,18 +135,23 @@ export async function runStewardCommand(
     }
     const { snapshot, prUrl, notes } = await buildStewardSnapshot({
       repo, prNumber: parsed.prNumber, gh, ledger, automationAccounts: opts.automationAccount ?? [],
+      readGrant: (r) => readMergeGrant(r, grantsPath !== undefined ? { path: grantsPath } : {}),
     });
     const decision = evaluateMergeSteward(snapshot, { dryRun: true });
     const line = formatStewardDecision(decision);
+    const audit = formatStewardAudit(decision, repo);
     out(line);
+    out(audit);
     for (const note of notes) out(`  - ${note}`);
-    const logged = appendLog(logPath, { at, repo, prUrl, prNumber: decision.prNumber, headSha: decision.headSha, mergeable: decision.mergeable, dryRun: true, line, results: decision.results, notes }, err);
+    const logged = appendLog(logPath, { at, repo, prUrl, prNumber: decision.prNumber, headSha: decision.headSha, mergeable: decision.mergeable, dryRun: true, line, audit, results: decision.results, notes }, err);
     return logged ? 0 : 1;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     const line = `[steward dry-run] PR #${parsed.prNumber}: REFUSE — ${reason}`;
+    const audit = formatStewardAudit({ prNumber: parsed.prNumber }, repo);
     out(line);
-    appendLog(logPath, { at, repo, prNumber: parsed.prNumber, mergeable: false, dryRun: true, error: reason, line }, err);
+    out(audit);
+    appendLog(logPath, { at, repo, prNumber: parsed.prNumber, mergeable: false, dryRun: true, error: reason, line, audit }, err);
     return 1;
   }
 }

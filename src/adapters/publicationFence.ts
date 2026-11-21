@@ -15,8 +15,26 @@ const PUBLICATION_COMMANDS: ReadonlyArray<{ pattern: RegExp; what: string }> = [
   { pattern: /\bgit\s+push\b/, what: 'git push' },
   { pattern: /\bgit\s+commit\b/, what: 'git commit' },
   { pattern: /\bgit\s+remote\s+(add|set-url|rename|remove|rm)\b/, what: 'git remote change' },
-  { pattern: /\bgh\s+pr\s+(create|merge|ready|close|edit|review|comment|checkout)\b/, what: 'gh pr' },
+  // `gh pr -R o/r merge 7`, `gh pr --repo=o/r merge 7`: the repo flag may precede the verb (AGT-4414).
+  // The flag value excludes whitespace and | ; & so the match cannot reach into a later command.
+  {
+    pattern: /\bgh\s+pr(?:\s+(?:-R=?|--repo=|(?:-R|--repo)\s+)[^\s|;&]+)*\s+(create|merge|ready|close|edit|review|comment|checkout)\b/,
+    what: 'gh pr',
+  },
   { pattern: /\bgh\s+api\b[^|;&]*\/pulls\b/, what: 'gh api …/pulls' },
+  // Branch-merge endpoint (`repos/o/r/merges`) and fork sync (`merge-upstream`).
+  { pattern: /\bgh\s+api\b[^|;&\n]*\/merge(?:s|-upstream)?(?![\w-])/, what: 'gh api …/merges' },
+  // A gh alias can hide any verb behind a new name, so defining one is refused.
+  { pattern: /\bgh\s+alias\s+(set|import)\b/, what: 'gh alias' },
+  // GraphQL mutations may sit in a variable or span lines, so both halves are matched anywhere in the text.
+  {
+    pattern: /^(?=[\s\S]*\bgh\s+api\b)(?=[\s\S]*\b(?:mergePullRequest|enablePullRequestAutoMerge|mergeBranch)\b)/,
+    what: 'gh api graphql merge mutation',
+  },
+  {
+    pattern: /^(?=[\s\S]*\bgh\s+api\b)(?=[\s\S]*\b(?:createPullRequest|markPullRequestReadyForReview|closePullRequest|updatePullRequest|addPullRequestReview|submitPullRequestReview)\b)/,
+    what: 'gh api graphql PR mutation',
+  },
   { pattern: /\bgh\s+issue\s+(create|close|edit|comment)\b/, what: 'gh issue' },
   { pattern: /\bopenswarm\s+(pr|review|work|exec|run)\b/, what: 'openswarm CLI' },
 ];
@@ -30,7 +48,8 @@ const PUBLICATION_COMMANDS: ReadonlyArray<{ pattern: RegExp; what: string }> = [
  * too, and a worker has no need to say it.
  */
 export function publicationCommandIn(command: string): string | null {
-  const stripped = command.replace(/["'\\]/g, '');
+  // Drop the $ of ANSI-C quoting ($'word') before removing the quotes themselves.
+  const stripped = command.replace(/\$(?=['"])/g, '').replace(/["'\\]/g, '');
   for (const { pattern, what } of PUBLICATION_COMMANDS) {
     if (pattern.test(command) || pattern.test(stripped)) return what;
   }

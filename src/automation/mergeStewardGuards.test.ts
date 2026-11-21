@@ -10,6 +10,7 @@ import {
   STEWARD_GUARDS,
   applyStewardGuards,
   evaluateMergeSteward,
+  formatStewardAudit,
   formatStewardDecision,
   isDecisionCurrent,
   type StewardGuardName,
@@ -38,6 +39,7 @@ function baseline(overrides: Partial<StewardSnapshot> = {}): StewardSnapshot {
     siblings: [{ number: 102, headRefName: 'swarm/AX-2-docs', files: ['docs/guide.md'], complete: true }],
     review: { verdict: 'approve', headSha: HEAD },
     completeness: { verdict: 'complete', headSha: HEAD },
+    mergeGrant: { granted: true, reason: 'acme/api granted by /etc/grants.json' },
     ...overrides,
   };
 }
@@ -64,15 +66,17 @@ describe('merge steward baseline', () => {
       'risk',
       'sibling-overlap',
       'review-completeness',
+      'merge-grant',
     ]);
   });
 
-  it('runs all four guards', () => {
+  it('runs all five guards', () => {
     expect(STEWARD_GUARDS.map((g) => g.name)).toEqual([
       'required-checks',
       'risk',
       'sibling-overlap',
       'review-completeness',
+      'merge-grant',
     ]);
   });
 
@@ -339,5 +343,48 @@ describe('steward fail-closed gaps found in review (#911, #912)', () => {
   it('an unknown list of sibling PRs is refused, an empty one is not', () => {
     expectLoadBearing('sibling-overlap', baseline({ siblings: null }));
     expect(evaluateMergeSteward(baseline({ siblings: [] })).mergeable).toBe(true);
+  });
+});
+
+// AGT-4414 — a repository is eligible only when the operator granted it.
+describe('guard: operator merge grant for the repository', () => {
+  const ungranted = () => baseline({ mergeGrant: { granted: false, reason: 'no grants file at /home/op/.openswarm/steward/merge-grants.json' } });
+
+  it('refuses a PR whose repository has no operator merge grant', () => {
+    for (const snapshot of [ungranted(), baseline({ mergeGrant: null })]) {
+      const decision = evaluateMergeSteward(snapshot);
+      expect(decision.mergeable).toBe(false);
+      expect(decision.results.filter((r) => !r.pass).map((r) => r.guard)).toEqual(['merge-grant']);
+      expect(decision.blockedBy).toHaveLength(1);
+      expect(decision.blockedBy[0]).toMatch(/^merge-grant: /);
+    }
+    expect(evaluateMergeSteward(ungranted()).blockedBy[0]).toContain('no grants file at');
+  });
+
+  it('the merge-grant guard is load-bearing', () => {
+    const snapshot = ungranted();
+    expect(applyStewardGuards(snapshot, STEWARD_GUARDS).mergeable).toBe(false);
+    expect(applyStewardGuards(snapshot, STEWARD_GUARDS.filter((g) => g.name !== 'merge-grant')).mergeable).toBe(true);
+  });
+
+  it('a truthy but non-true grant does not pass', () => {
+    expectLoadBearing('merge-grant', baseline({ mergeGrant: { granted: 'yes' as never, reason: 'odd' } }));
+  });
+});
+
+describe('formatStewardAudit', () => {
+  it('prints repo, PR, head and ci/review/grant as pass|fail on one line', () => {
+    expect(formatStewardAudit(evaluateMergeSteward(baseline()), 'acme/api'))
+      .toBe(`[steward audit] repo=acme/api pr=#101 head=${HEAD} ci=pass review=pass grant=pass`);
+    const refused = evaluateMergeSteward(baseline({ mergeGrant: null, review: null }));
+    expect(formatStewardAudit(refused, 'acme/api'))
+      .toBe(`[steward audit] repo=acme/api pr=#101 head=${HEAD} ci=pass review=fail grant=fail`);
+    const red = evaluateMergeSteward(baseline({ checks: [] }));
+    expect(formatStewardAudit(red)).toBe(`[steward audit] repo=unknown pr=#101 head=${HEAD} ci=fail review=pass grant=pass`);
+  });
+
+  it('with no decision every guard reads as fail', () => {
+    expect(formatStewardAudit({ prNumber: 9 }, 'acme/api'))
+      .toBe('[steward audit] repo=acme/api pr=#9 head=unknown ci=fail review=fail grant=fail');
   });
 });

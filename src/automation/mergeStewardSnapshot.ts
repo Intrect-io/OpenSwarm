@@ -1,6 +1,6 @@
 // Created: 2026-11-21
 // Purpose: gather a merge-steward StewardSnapshot for one PR from read-only gh calls and the run ledger (AGT-4803)
-// Dependencies: ./mergeStewardGuards (types), ../support/branchNaming (swarm branch test), better-sqlite3 (lazy, read-only)
+// Dependencies: ./mergeStewardGuards (types), ./mergeGrant (operator grants), ../support/branchNaming (swarm branch test), better-sqlite3 (lazy, read-only)
 // Test Status: mergeStewardSnapshot.test.ts
 
 /**
@@ -33,6 +33,8 @@
  *   is not `[partial]`. It is trusted only when bound to the ledger's published head of a
  *   run in SYNC_PENDING or DONE (a review rollback parks NEEDS_RECONCILE with the body
  *   unchanged); without a ledger row both are null and the engine refuses.
+ * - Merge grant (AGT-4414): the operator's grants file (mergeGrant.ts), never the
+ *   target repository. A missing, unreadable or malformed file grants nothing.
  * - gh output: REST reads project their fields with `--jq`, so a large PR does not
  *   overflow the runner's output buffer and turn into a standing refusal.
  */
@@ -48,7 +50,9 @@ import type {
   StewardSnapshot,
   StewardReview,
   StewardCompleteness,
+  StewardMergeGrant,
 } from './mergeStewardGuards.js';
+import { readMergeGrant } from './mergeGrant.js';
 import { isSwarmBranch } from '../support/branchNaming.js';
 import { existsSync } from 'node:fs';
 
@@ -463,6 +467,23 @@ export interface BuildStewardSnapshotOptions {
   ledger?: StewardLedgerLookup;
   /** Logins the factory acts as (AGT-4883 will give them a config home). */
   automationAccounts?: readonly string[];
+  /** Operator merge grant lookup; defaults to `readMergeGrant` on the operator's grants file. */
+  readGrant?: StewardGrantReader;
+}
+
+export type StewardGrantReader = (repo: string) => StewardMergeGrant | Promise<StewardMergeGrant>;
+
+async function readGrantEvidence(reader: StewardGrantReader, repo: string, notes: string[]): Promise<StewardMergeGrant> {
+  let grant: StewardMergeGrant;
+  try {
+    grant = await reader(repo);
+  } catch (err) {
+    grant = { granted: false, reason: `grant lookup failed (${errorText(err)})` };
+  }
+  // Copy only the two fields, and only a literal true grants.
+  const evidence = { granted: grant.granted === true, reason: String(grant.reason) };
+  notes.push(evidence.granted ? `merge grant: ${evidence.reason}` : `no operator merge grant for ${repo}: ${evidence.reason}`);
+  return evidence;
 }
 
 export interface StewardSnapshotResult {
@@ -555,6 +576,7 @@ export async function buildStewardSnapshot(options: BuildStewardSnapshotOptions)
   notes.push(risk.note);
   const review = reviewEvidence(ledger, { body, title, isDraft: view.isDraft === true });
   notes.push(review.note);
+  const mergeGrant = await readGrantEvidence(options.readGrant ?? ((r) => readMergeGrant(r)), repo, notes);
   await assertHeadUnchanged(gh, repo, prNumber, headSha);
 
   const snapshot: StewardSnapshot = {
@@ -570,6 +592,7 @@ export async function buildStewardSnapshot(options: BuildStewardSnapshotOptions)
     siblings,
     review: review.review,
     completeness: review.completeness,
+    mergeGrant,
     files: own.files,
     complete: own.complete,
   };
