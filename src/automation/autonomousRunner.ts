@@ -8,9 +8,6 @@ import {
   buildProjectsInfo,
   getPipelineHistory,
   aggregateFailureCauses,
-  clearRejection,
-  isRejectionLimitReached,
-  clearRetryTime,
   getDailyPaceInfo,
   loadProjectSelection,
   saveProjectSelection,
@@ -22,9 +19,6 @@ import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngi
 import { resolveOrchestratorConfig } from '../coordination/orchestratorConfig.js';
 import { OrchestratorSupervisor } from '../coordination/orchestratorSupervisor.js';
 import { repositoryCell } from '../coordination/repositoryCell.js';
-import { interruptEndedTaskDeliveries } from '../coordination/channelQueue.js';
-import { runningProjectSessions } from '../coordination/projectRuntime.js';
-import { drainCoordinationThreadOutbox } from '../coordination/coordinationThreadOutbox.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { resolveOwningProject, resolveProjectGoal } from '../support/projectGoal.js';
@@ -43,6 +37,8 @@ import type { CachedDraftScope, CandidateAdmissionHost } from './runnerCandidate
 import * as maintenance from './runnerMaintenance.js';
 import { createMaintenanceState, type MaintenanceHost } from './runnerMaintenance.js';
 import { attachSchedulerEvents, type SchedulerEventsHost } from './runnerSchedulerEvents.js';
+import * as durableReconcile from './runnerDurableReconcile.js';
+import { createDurableReconcileState, type DurableReconcileHost } from './runnerDurableReconcile.js';
 import { pruneDraftCache } from './draftCache.js';
 import { pruneSessionLogs } from '../support/sessionLog.js';
 import { pruneScratchpads } from '../support/scratchpad.js';
@@ -59,14 +55,10 @@ import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState } from
 import { defaultAutomationDbPath, setAutomationDbPath } from './automationDbPath.js';
 import { RunnerPauseControl } from './runnerPauseControl.js';
 import { providerSwitchViolation } from '../adapters/unattendedPolicy.js'; import { providerSwitchFamilyViolation } from '../adapters/reviewerIndependence.js';
-import { findPullRequestForBranch, inspectWorktreeRecovery, pruneWorktrees } from '../support/worktreeManager.js';
-import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
-import { draftPullRequestCause } from './draftPullRequestCause.js';
-import { reconcileMissingWorktrees } from './missingWorktreeReconciler.js';
+import { pruneWorktrees } from '../support/worktreeManager.js';
 import { isExecutionLive } from './executionLiveness.js';
 import { loadRepoMetadata } from '../support/repoMetadata.js';
 import { startEventLoopMonitor } from '../support/eventLoopMonitor.js';
-import { STUCK_LABEL } from '../linear/index.js';
 import { dirname } from 'node:path';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
 import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
@@ -77,20 +69,14 @@ import type { AdapterName } from '../adapters/types.js';
 
 import { mapModelForProvider as mapModelForAdapter } from '../adapters/modelCompat.js';
 import type { ModelRole } from '../adapters/modelCompat.js';
-import { resolvePerIssueAttemptsPerDay } from './runLedgerCost.js';
 import {
   DurableRunCoordinator,
-  runRecordToTask,
   type ExecutionDurabilityHooks,
-  type RepositoryAdmissionPolicy,
 } from './durableRunCoordinator.js';
-import type { EffectClaim, ImportRunInput, RunLedgerMode } from './runLedger.js';
+import type { EffectClaim, RunLedgerMode } from './runLedger.js';
 import {
-  buildCancellationEffect,
-  buildCompletionEffect,
   buildIntegrationRequeueEffect,
   completionStats,
-  deliverTrackerEffect,
 } from './trackerEffects.js';
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
@@ -104,7 +90,6 @@ import {
 } from './explicitDispatchRecovery.js';
 import { buildInstructionCapsule } from '../agents/instructionCapsule.js';
 import type { IntegrationConflictEvidence } from './integrationCoordinator.js';
-import { planCoordinatorResolution } from './coordinatorResolution.js';
 import { globalRateLimit } from './rateLimitBackoff.js';
 
 // Re-export types and integration setters (used by service.ts)
@@ -121,7 +106,6 @@ export {
 import {
   decisionSelectionBudget,
   effectiveProjectConcurrency,
-  worktreeFanoutEnabled,
   type RunnableCandidate,
 } from './runnerAdmissionPolicy.js';
 
@@ -136,7 +120,6 @@ export class AutonomousRunner {
   private engine: DecisionEngine;
   private scheduler: TaskScheduler;
   private readonly durableRuns: DurableRunCoordinator;
-  private outboxDrain: Promise<void> | null = null;
   private readonly schedulerHandlers = new Set<Promise<void>>();
   /** Adapter default-model cache for the dashboard PAIR bar (INT-2393). */
   private defaultModelCache = new Map<string, Promise<string | undefined>>();
@@ -506,363 +489,44 @@ export class AutonomousRunner {
     });
   }
 
-  private async executeDurably(task: TaskItem, projectPath: string, signal?: AbortSignal): Promise<PipelineResult> {
-    const cancelled = (): PipelineResult => ({
-      success: false,
-      sessionId: `runner-stopping-${Date.now()}`,
-      stages: [],
-      finalStatus: 'cancelled',
-      totalDuration: 0,
-      iterations: 0,
-      taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectPath, taskTitle: task.title },
-    });
-    if (this.stopping || signal?.aborted) return cancelled();
-    const paused = this.pauses.pausedResult(task, projectPath); if (paused) return paused; // AGT-4808, fresh read, fails closed
+  // Durable execution admission, the missing-worktree sweep, artifact reconciliation, legacy
+  // import and the outbox drain live in runnerDurableReconcile.ts (AGT-4867 slice E). These
+  // delegators keep the runner's names, which tests call and reassign; the moved code calls
+  // back through the host, so a reassignment is honoured.
+  private readonly durableReconcileState = createDurableReconcileState();
+  private executeDurably(task: TaskItem, projectPath: string, signal?: AbortSignal): Promise<PipelineResult> { return durableReconcile.executeDurably(this.durableReconcileHost(), task, projectPath, signal); }
+  private reconcileMissingWorktreePointers(): Promise<void> { return durableReconcile.reconcileMissingWorktreePointers(this.durableReconcileHost()); }
+  private reconcileDurableArtifacts(tasks: TaskItem[]): Promise<void> { return durableReconcile.reconcileDurableArtifacts(this.durableReconcileHost(), tasks); }
+  private migrateLegacyRunState(tasks: TaskItem[]): Promise<void> { return durableReconcile.migrateLegacyRunState(this.durableReconcileHost(), tasks); }
+  private deliverOutboxEffect(effect: EffectClaim): Promise<void> { return durableReconcile.deliverOutboxEffect(effect); }
+  private drainDurableOutbox(): Promise<void> { return durableReconcile.drainDurableOutbox(this.durableReconcileHost()); }
 
-    let admission: RepositoryAdmissionPolicy;
-    try {
-      const metadata = await loadRepoMetadata(projectPath);
-      if (metadata?.automation?.enabled === false) {
-        return {
-          success: false,
-          sessionId: `repo-admission-disabled-${Date.now()}`,
-          stages: [],
-          finalStatus: 'superseded',
-          totalDuration: 0,
-          iterations: 0,
-          taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectPath, taskTitle: task.title },
-        };
-      }
-      const sameRepoParallelAllowed = worktreeFanoutEnabled(this.config);
-      admission = {
-        maxConcurrent: sameRepoParallelAllowed
-          ? (metadata?.automation?.maxConcurrent ?? effectiveProjectConcurrency(this.config))
-          : 1,
-        // Worktrees isolate live filesystem writes, not the branches that must
-        // later merge. Always carry the predicted write set into the durable
-        // claim so another daemon / `openswarm work` process cannot race past
-        // this heartbeat's in-memory conflict check. An empty scope fails
-        // closed while another same-repository run is active.
-        conflictScope: task.fileScope ?? [],
-        unknownScopeAdmission: this.config.unknownScopeAdmission,
-        // A fixed default attempt budget of 12 made a 32-slot daemon trip its
-        // repository circuit before the first pool could even fill. Treat this
-        // as an explicit repository policy; failure and cost circuits remain
-        // independent safety boundaries.
-        maxAttemptsPerHour: metadata?.automation?.maxAttemptsPerHour,
-        maxFailuresPerHour: metadata?.automation?.maxFailuresPerHour ?? 6,
-        maxCostUsdPerDay: metadata?.automation?.maxCostUsdPerDay ?? this.config.budget?.perProjectDailyUsd, globalMaxCostUsdPerDay: this.config.spend?.maxCostUsdPerDay, unknownAttemptCostUsd: this.config.spend?.unknownAttemptCostUsd, maxCostUsdPerIssue: this.config.budget?.perIssueUsd, maxAttemptsPerIssuePerDay: resolvePerIssueAttemptsPerDay(this.config.budget), // budget: AGT-4807, AGT-4787
-        circuitCooldownMs: (metadata?.automation?.circuitCooldownMinutes ?? 60) * 60_000,
-      };
-    } catch (error) {
-      console.error(`[Admission] Invalid/unreadable repository policy for ${projectPath}:`, error);
-      return {
-        success: false,
-        sessionId: `repo-admission-error-${Date.now()}`,
-        failureDetail: `repository admission policy: ${error instanceof Error ? error.message : String(error)}`,
-        stages: [],
-        finalStatus: 'infra_error',
-        totalDuration: 0,
-        iterations: 0,
-        taskContext: { issueIdentifier: task.issueIdentifier || task.issueId, projectPath, taskTitle: task.title },
-      };
-    }
-
-    if (this.stopping || signal?.aborted) return cancelled();
-
-    return this.durableRuns.execute(
-      task,
-      projectPath,
-      (durability, leaseSignal) => this.executePipeline(
-        task,
-        projectPath,
-        signal ? AbortSignal.any([signal, leaseSignal]) : leaseSignal,
-        durability,
-      ),
-      {
-        admission,
-        successEffect: (result, claim) => buildCompletionEffect(task, result, claim.attemptNo),
-        cancelEffect: (_result, claim) => buildCancellationEffect(task, claim.attemptNo),
-        retryCancellation: () => this.stopping || this.pauses.consumePauseCancel(task.id), // a `now` pause resumes after unpause
-        resolveOperatorPark: (parkedTask, parkedResult, attemptNo) => planCoordinatorResolution({
-          task: parkedTask,
-          result: parkedResult,
-          attemptNo,
-        }),
-      },
-    );
-  }
-
-  /** Sweep stale ledger pointers before artifact recovery or pruning can act on them. */
-  // Classified failures, durable per-run backoff, concurrent probes: missingWorktreeReconciler.ts (round-1 redteam B-F3).
-  private async reconcileMissingWorktreePointers(): Promise<void> {
-    await reconcileMissingWorktrees({
-      durableRuns: this.durableRuns,
-      stopping: () => this.stopping,
-      findPullRequestForBranch,
-      findDuplicateIssuePRs,
-    });
-  }
-
-  private async reconcileDurableArtifacts(tasks: TaskItem[]): Promise<void> {
-    if (!this.durableRuns.isPrimary || this.stopping) return;
-    const taskById = new Map(tasks.map((task) => [task.issueId || task.id, task]));
-
-    for (const run of this.durableRuns.listRuns(['NEEDS_RECONCILE'])) {
-      if (this.stopping) return;
-      // One row's failure must not take the heartbeat with it. This loop runs
-      // inside `heartbeat()`'s try, with no per-row catch, so a throw here
-      // aborts the ENTIRE cycle before any task is selected — which is how the
-      // AGT-4518 dedupe collision produced `[HB] ✗ Heartbeat error: Outbox
-      // dedupe key collision` and stopped all work, not just that row. The
-      // throw itself is fixed, but the blast radius was the real defect: park
-      // this row, log it, and keep reconciling the others.
-      try {
-      // A task may legitimately be absent: the fetch asks only for Todo /
-      // In Progress / In Review / Backlog, so an issue that reached Done is
-      // structurally invisible here. That makes absence ambiguous for the
-      // worktree path below — which re-runs work — but not for the branch
-      // path, where GitHub is the authority. So the guard moved down to the
-      // one place it actually protects something. (AGT-4094)
-      const task = taskById.get(run.issueId);
-      if (run.ownerInstanceId || run.leaseToken) {
-        // Not "until its executor exits": a container restart replaces the
-        // process holding the claim, so that exit is never observed and the
-        // line reads as a permanent wedge. What actually frees the row is the
-        // age sweep in durableRunCoordinator, so report its deadline. (AGT-4126)
-        console.warn(this.durableRuns.fenceWaitMessage(run));
-        continue;
-      }
-
-      if (run.branchName) {
-        let pr;
-        try {
-          pr = await findPullRequestForBranch(run.projectPath, run.branchName);
-        } catch (error) {
-          console.warn(`[Reconciler] GitHub lookup failed for ${run.identifier ?? run.issueId}; keeping NEEDS_RECONCILE:`, error);
-          continue;
-        }
-
-        if (pr) {
-          if (pr.state === 'CLOSED') {
-            this.durableRuns.markNeedsHuman(run.issueId, `Published PR was closed without merge: ${pr.url}`);
-            continue;
-          }
-          // A draft is the branch saying it is not finished, and recovering
-          // one as 'approved' would close the issue on work nobody accepted
-          // with no human prompted to look (AGT-4270). But the three reasons a
-          // PR is a draft want three different things (AGT-4272):
-          //
-          // - the PR-time review rejected it and moved it back: re-run. The
-          //   commits stay on the branch, so the next attempt fixes rather
-          //   than restarts. Unlike the recovery below this RE-RUNS work, so
-          //   it needs the live tracker card the note at the top of this loop
-          //   describes — re-queueing an issue the heartbeat cannot see pays
-          //   a worker attempt for a card nobody can see (AGT-4094);
-          // - a sibling PR already closes the issue (INT-2544): the draft is
-          //   deliberate and survives every republish, so a re-run can never
-          //   make it ready — it only burns attempts. The work is delivered;
-          //   record it as such;
-          // - anything else is a publication a human has to judge: park it
-          //   with the draft in the reason instead of re-running it.
-          if (pr.isDraft) {
-            const siblings = run.identifier
-              ? await findDuplicateIssuePRs(run.projectPath, run.identifier, run.branchName)
-              : [];
-            const cause = draftPullRequestCause(run.lastErrorCode, siblings.length);
-            if (cause === 'review_rollback') {
-              if (!task) {
-                console.warn(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) rolled back by review but no live tracker card — leaving it for the terminal-run reconciler`);
-                continue;
-              }
-              if (this.durableRuns.markReady(run.issueId)) {
-                console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) rolled back by review — returned to the queue rather than completed`);
-              }
-              continue;
-            }
-            if (cause === 'parked_publication') {
-              if (this.durableRuns.markNeedsHuman(run.issueId, `Draft PR needs a human: ${pr.url} — not a review rollback and no sibling PR closes the issue`)) {
-                console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) of no recorded cause — parked for a human rather than re-run`);
-              }
-              continue;
-            }
-            console.log(`[Reconciler] ${run.identifier ?? run.issueId} has a draft PR (${pr.url}) because ${siblings.length} sibling PR(s) already close the issue — recording it as delivered`);
-          }
-          const publishedTask = task ?? runRecordToTask(run);
-          const recoveredResult: PipelineResult = {
-            success: true,
-            sessionId: `recovered-publication-${run.attemptNo}`,
-            stages: [],
-            finalStatus: 'approved',
-            totalDuration: 0,
-            iterations: Math.max(1, run.attemptNo),
-            prUrl: pr.url,
-            taskContext: {
-              issueIdentifier: publishedTask.issueIdentifier || run.identifier,
-              projectName: publishedTask.linearProject?.name,
-              projectPath: run.projectPath,
-              taskTitle: publishedTask.title,
-            },
-          };
-          if (this.durableRuns.recoverPublishedRun(
-            run.issueId,
-            { prUrl: pr.url, headSha: pr.headSha },
-            buildCompletionEffect(publishedTask, recoveredResult, run.attemptNo),
-          )) {
-            console.log(`[Reconciler] Recovered published run ${run.identifier ?? run.issueId}: ${pr.url}`);
-          }
-          continue;
-        }
-      }
-
-      // No PR exists, so nothing was published and the only way out of this
-      // state is to run the work again — which needs a live tracker card.
-      // Log it: this branch used to be the loop's one silent exit, which is
-      // exactly why a row stuck here was invisible to log-reading. (AGT-4094)
-      if (!task) {
-        console.warn(`[Reconciler] Keeping ${run.identifier ?? run.issueId} in NEEDS_RECONCILE (no published PR and no actionable task)`);
-        continue;
-      }
-
-      // Never overlap a replacement with an executor that lost its lease but
-      // still owns the filesystem. Missing/ambiguous markers stay parked;
-      // preserved work or a dead owner is safe for createWorktree to resume.
-      const recovery = await inspectWorktreeRecovery(run.projectPath, run.issueId, run.worktreePath, this.durableRuns.deadMarkerOwners(run.issueId))
-        .catch((error) => {
-          console.warn(`[Reconciler] Worktree evidence unreadable for ${run.identifier ?? run.issueId}:`, error);
-          return null;
-        });
-      if (!recovery || recovery.state === 'active_owner' || recovery.state === 'ambiguous') {
-        console.warn(`[Reconciler] Keeping ${run.identifier ?? run.issueId} in NEEDS_RECONCILE (${recovery?.state ?? 'inspection_failed'})`);
-        continue;
-      }
-      if (this.durableRuns.markReady(run.issueId)) {
-        console.log(`[Reconciler] ${recovery.state === 'missing' ? 'Reopening branch' : 'Resuming worktree'} for ${run.identifier ?? run.issueId}`);
-      }
-      } catch (error) { // cxt-ignore: error_swallow — one row's failure stays this row's; the rest of the sweep and the rest of the heartbeat continue
-        const detail = error instanceof Error ? error.message : String(error);
-        console.error(`[Reconciler] Reconciliation failed for ${run.identifier ?? run.issueId}; keeping NEEDS_RECONCILE:`, detail);
-      }
-    }
-    await this.drainDurableOutbox();
-  }
-
-  private async migrateLegacyRunState(tasks: TaskItem[]): Promise<void> {
-    if (!this.durableRuns.isPrimary || this.stopping) return;
-    let imported = 0;
-    for (const task of tasks) {
-      if (this.stopping) return;
-      const issueId = task.issueId || task.id;
-      if (this.durableRuns.getRun(issueId)) continue;
-
-      const canonical = getTaskState(issueId);
-      const failedCount = this.failedTaskCounts.get(issueId) ?? 0;
-      const retryAt = this.failedTaskRetryTimes.get(issueId);
-      const legacyCompleted = this.completedTaskIds.has(issueId);
-      const canonicalStatus = canonical?.execution.status;
-      const hasLegacySignal = legacyCompleted
-        || failedCount > 0
-        || retryAt != null
-        || ['in_progress', 'in_review', 'failed', 'halted', 'done', 'decomposed'].includes(canonicalStatus ?? '');
-      if (!hasLegacySignal) continue;
-
-      const projectPath = task.projectPath ?? await this.resolveProjectPath(task);
-      if (!projectPath || this.stopping) continue;
-
-      let state: ImportRunInput['state'];
-      let reason: string;
-      if (
-        task.labels?.includes(STUCK_LABEL)
-        || failedCount >= AutonomousRunner.MAX_RETRY_COUNT
-        || isRejectionLimitReached(issueId)
-        || canonicalStatus === 'failed'
-        || canonicalStatus === 'halted'
-      ) {
-        state = 'NEEDS_HUMAN';
-        reason = 'Legacy state indicates exhausted or human-blocked execution';
-      } else if (canonicalStatus === 'done' || task.linearState === 'Done') {
-        state = 'DONE';
-        reason = 'Legacy and tracker state agree that the issue is complete';
-      } else if (canonicalStatus === 'decomposed') {
-        state = 'DECOMPOSED';
-        reason = 'Legacy task state records successful decomposition';
-      } else if (
-        legacyCompleted
-        || canonicalStatus === 'in_progress'
-        || canonicalStatus === 'in_review'
-        || canonical?.worktree.branchName
-        || canonical?.worktree.worktreePath
-      ) {
-        state = 'NEEDS_RECONCILE';
-        reason = 'Legacy state may have in-flight or published work; artifact reconciliation required';
-      } else if (retryAt != null && retryAt > Date.now()) {
-        state = 'RETRY_AT';
-        reason = 'Legacy retry backoff imported';
-      } else {
-        state = 'READY';
-        reason = 'Legacy nonterminal state imported as claimable work';
-      }
-
-      const result = this.durableRuns.importLegacyRun({
-        issueId,
-        source: task.source ?? 'unknown',
-        identifier: task.issueIdentifier,
-        title: task.title,
-        projectPath,
-        state,
-        retryAt,
-        branchName: canonical?.worktree.branchName,
-        worktreePath: canonical?.worktree.worktreePath,
-        errorCode: 'legacy_import',
-        errorMessage: reason,
-        metadata: {
-          legacyCompleted,
-          failedCount,
-          canonicalStatus,
-          importedAt: new Date().toISOString(),
-        },
-      });
-      if (result?.imported) imported++;
-    }
-    if (imported > 0) this.syslog(`✓ Imported ${imported} legacy run state(s) into automation.db`);
-  }
-
-  private async deliverOutboxEffect(effect: EffectClaim): Promise<void> {
-    return deliverTrackerEffect(effect, getTaskSource());
-  }
-
-  private async drainDurableOutbox(): Promise<void> {
-    try { interruptEndedTaskDeliveries(runningProjectSessions(this)); }
-    catch (error) { console.warn('[Channels] Recipient reconciliation unavailable:', error instanceof Error ? error.message : String(error)); }
-    const threadOutcome = await drainCoordinationThreadOutbox();
-    if (threadOutcome.warnings.length > 0) {
-      console.warn(
-        `[ThreadOutbox] delivered=${threadOutcome.delivered} pending=${threadOutcome.pending} `
-        + `warnings=${threadOutcome.warnings.length}`,
-      );
-    }
-    if (!this.durableRuns.isPrimary) return;
-    if (this.outboxDrain) return this.outboxDrain;
-    const finalized = new Set<string>();
-    this.outboxDrain = (async () => {
-      const outcome = await this.durableRuns.drainOutbox(async (effect) => {
-        await this.deliverOutboxEffect(effect);
-        finalized.add(effect.issueId);
-      });
-      for (const issueId of finalized) {
-        if (this.durableRuns.getRun(issueId)?.state !== 'DONE') continue;
-        this.completedTaskIds.add(issueId);
-        clearRejection(issueId);
-        clearRetryTime(issueId, this.failedTaskRetryTimes);
-        this.consecutiveInfraErrorCounts.delete(issueId);
-        this.lastFailureDetails.delete(issueId);
-      }
-      if (finalized.size > 0) this.saveTaskState();
-      if (outcome.retried > 0 || outcome.dead > 0) {
-        console.warn(`[Outbox] applied=${outcome.applied} retried=${outcome.retried} dead=${outcome.dead}`);
-      }
-    })().finally(() => { this.outboxDrain = null; });
-    return this.outboxDrain;
+  private durableReconcileHostCache: DurableReconcileHost | undefined;
+  /** Built once; every member reads the runner at call time (see DurableReconcileHost). */
+  private durableReconcileHost(): DurableReconcileHost {
+    if (this.durableReconcileHostCache) return this.durableReconcileHostCache;
+    const runner = () => this;
+    this.durableReconcileHostCache = {
+      get durableReconcile() { return runner().durableReconcileState; },
+      get config() { return runner().config; },
+      get durableRuns() { return runner().durableRuns; },
+      get pauses() { return runner().pauses; },
+      get stopping() { return runner().stopping; },
+      get completedTaskIds() { return runner().completedTaskIds; },
+      get failedTaskCounts() { return runner().failedTaskCounts; },
+      get failedTaskRetryTimes() { return runner().failedTaskRetryTimes; },
+      get consecutiveInfraErrorCounts() { return runner().consecutiveInfraErrorCounts; },
+      get lastFailureDetails() { return runner().lastFailureDetails; },
+      maxRetryCount: AutonomousRunner.MAX_RETRY_COUNT,
+      getRunningTasks: () => this.getRunningTasks(),
+      syslog: (line) => this.syslog(line),
+      saveTaskState: () => this.saveTaskState(),
+      resolveProjectPath: (task) => this.resolveProjectPath(task),
+      executePipeline: (task, projectPath, signal, durability) => this.executePipeline(task, projectPath, signal, durability),
+      deliverOutboxEffect: (effect) => this.deliverOutboxEffect(effect),
+      drainDurableOutbox: () => this.drainDurableOutbox(),
+    };
+    return this.durableReconcileHostCache;
   }
 
   private getRolesForProject(projectPath: string): DefaultRolesConfig | undefined {
