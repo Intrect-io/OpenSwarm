@@ -18,7 +18,7 @@ import { maybeAutoUpdate } from './support/updateNotifier.js';
 import { safeConsole } from './support/safeLog.js';
 import { atomicWriteFileSync } from './support/atomicFile.js';
 import { daemonPort, parsePositiveIntegerOption, parseTcpPortOption } from './cli/optionParsers.js';
-import { registerPauseCommands } from './cli/registerPauseCommands.js'; import { registerStewardCommand } from './cli/stewardCommand.js';
+import { registerPauseCommands } from './cli/registerPauseCommands.js'; import { registerStewardCommand } from './cli/stewardCommand.js'; import { registerOutcomeCommand } from './cli/outcomeCommand.js';
 
 // Load .env so CLI commands (e.g. `auth login --provider linear` reading
 // LINEAR_OAUTH_CLIENT_ID) see the same env the daemon does. Idempotent; never
@@ -263,8 +263,8 @@ program
     await launchChatTui(session);
   });
 
-// openswarm resume (chat session, or --factory/--project to lift a pause), pause, unpause (AGT-4808); steward --dry-run (AGT-4803)
-registerPauseCommands(program, launchChatTui); registerStewardCommand(program);
+// openswarm resume (chat session, or --factory/--project to lift a pause), pause, unpause (AGT-4808); steward --dry-run (AGT-4803); outcome defect|wrong-dispatch (AGT-4810)
+registerPauseCommands(program, launchChatTui); registerStewardCommand(program); registerOutcomeCommand(program);
 
 // openswarm mcp add|list|remove
 

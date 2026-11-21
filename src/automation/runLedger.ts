@@ -20,10 +20,8 @@ import { queueIntegrationRequeueInDb } from './runLedgerIntegration.js';
 import { listClaimOwnersInDb } from './runLedgerOwners.js';
 import { reconcileMissingWorktreeInDb, type MissingWorktreeDisposition } from './runLedgerMissingWorktree.js';
 import { consecutiveIdenticalInfraFailuresInDb, consecutiveIdenticalVerdictsInDb, consecutiveSupersessionsInDb } from './infraFailureCircuit.js';
-import {
-  markNeedsHumanForQuestionsInDb,
-  resumeNeedsHumanForQuestionsInDb,
-} from './runLedgerOperatorQuestions.js';
+import { markNeedsHumanForQuestionsInDb, resumeNeedsHumanForQuestionsInDb } from './runLedgerOperatorQuestions.js';
+import { recordPullRequestStateInDb, type PullRequestStateObservation } from './factoryOutcomes.js';
 import {
   acquireIntegrationReservationInDb,
   integrationReservationBlocksClaim,
@@ -119,6 +117,7 @@ export class RunLedger {
     }
   }
   issueBudgetPark(task: Parameters<typeof issueBudgetsPark>[2], projectPath: string, capUsd: number | undefined, claim: RunClaim, unknownAttemptCostUsd?: number, maxAttemptsPerDay?: number): ReturnType<typeof issueBudgetsPark> { return issueBudgetsPark(this.db, claim, task, projectPath, { capUsd, maxAttemptsPerDay, unknownAttemptCostUsd }); } // NEEDS_HUMAN park past autonomous.budget.perIssueUsd (AGT-4807) / perIssueAttemptsPerDay (AGT-4787)
+  recordPullRequestState(issueId: string, prUrl: string, pr: PullRequestStateObservation, now = Date.now()): boolean { return recordPullRequestStateInDb(this.db, issueId, prUrl, pr, now); } // the digest's merge count (AGT-4810); never throws
 
   registerRun(input: RegisterRunInput, now = Date.now()): RunRecord {
     if (!input.issueId.trim()) throw new Error('issueId is required');

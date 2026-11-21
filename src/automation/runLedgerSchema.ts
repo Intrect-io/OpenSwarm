@@ -9,11 +9,13 @@
 import type Database from 'better-sqlite3';
 import { AUTOMATION_SCHEMA_VERSION } from './runLedgerTypes.js';
 import { PAUSE_TABLE_DDL } from './factoryPause.js';
+import { OUTCOME_TABLE_DDL } from './factoryOutcomes.js';
 
 export function migrateAutomationSchema(db: Database.Database): void {
     const migrate = db.transaction(() => {
       db.exec(`
       ${PAUSE_TABLE_DDL}
+      ${OUTCOME_TABLE_DDL}
 
       CREATE TABLE IF NOT EXISTS automation_meta (
         key TEXT PRIMARY KEY,

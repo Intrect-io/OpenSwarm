@@ -2489,8 +2489,8 @@ export class AutonomousRunner {
         console.warn(`[AutonomousRunner] Could not read ${prUrl} for ${label}:`, error instanceof Error ? error.message : error);
         continue;
       }
-      const decision = decideMergedPublication(lifecycle, prUrl, task.description);
-      if (decision.action === 'none') continue;
+      this.durableRuns.recordPullRequestState(issueId, prUrl, lifecycle); // AGT-4810: the digest counts merges from this record, never from tracker Done
+      const decision = decideMergedPublication(lifecycle, prUrl, task.description); if (decision.action === 'none') continue;
 
       const refreshed = await source.lookupIssueState(label).catch(() => null);
       if (!refreshed || !refreshed.ok || !refreshed.issue || refreshed.issue.state.toLowerCase() !== 'in review') {
