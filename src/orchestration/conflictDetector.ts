@@ -1,8 +1,8 @@
 // ============================================
 // OpenSwarm - Worktree File Conflict Detector
-// Knowledge Graph 기반 태스크 간 파일 충돌 감지
+// Knowledge Graph-based file conflict detection between tasks
 // Created: 2026-03-14
-// Purpose: 병렬 워크트리 실행 시 동일 파일 수정 충돌 방지
+// Purpose: Prevent conflicting edits to the same file during parallel worktree runs
 
 import type { TaskItem } from './decisionEngine.js';
 import { analyzeIssue } from '../knowledge/index.js';
@@ -257,7 +257,7 @@ export async function detectFileConflicts(
   projectPath: string,
   options: ConflictDetectionOptions = {},
 ): Promise<ConflictDetectionResult> {
-  // Step 1: 각 태스크의 영향 모듈 집합 수집
+  // Step 1: Collect each task's set of affected modules
   const taskImpacts: Map<number, Set<string>> = new Map();
   const unknownScopeIndices = new Set<number>();
 
@@ -269,9 +269,9 @@ export async function detectFileConflicts(
     })
   );
 
-  // Step 2: 태스크 쌍 비교로 교집합 계산 → Union-Find로 충돌 그룹 병합
+  // Step 2: Compare task pairs to compute intersections -> merge conflict groups with Union-Find
   const uf = new UnionFind(tasks.length);
-  // 쌍별 공유 모듈 기록
+  // Record the shared modules per pair
   const pairShared: Map<string, Set<string>> = new Map();
 
   for (let i = 0; i < tasks.length; i++) {
@@ -316,7 +316,7 @@ export async function detectFileConflicts(
     }
   }
 
-  // Step 3: 그룹 구성
+  // Step 3: Build groups
   const groups: Map<number, number[]> = new Map();
   for (let i = 0; i < tasks.length; i++) {
     const root = uf.find(i);
@@ -326,13 +326,13 @@ export async function detectFileConflicts(
     groups.get(root)!.push(i);
   }
 
-  // Step 4: safe / conflictGroups 분류
+  // Step 4: Classify into safe / conflictGroups
   const safe: TaskItem[] = [];
   const conflictGroups: ConflictGroup[] = [];
 
   for (const [, indices] of groups) {
     if (indices.length === 1) {
-      // 단일 태스크 → safe
+      // Single task -> safe
       for (const idx of indices) {
         safe.push(tasks[idx]);
       }
@@ -380,7 +380,7 @@ export async function detectFileConflicts(
       (left, right) => pairShared.has(pairKey(left, right)),
     );
     safe.push(...admittedIndices.map(index => tasks[index]));
-    // 나머지는 충돌 그룹으로 기록
+    // Record the rest as conflict groups
     conflictGroups.push({
       tasks: groupTasks,
       sharedModules,

@@ -513,7 +513,7 @@ async function consumeProjectInbox(
   context: CoordinationToolContext,
 ): Promise<unknown[]> {
   const repoKey = repositoryKey(context.repoKey, context.repository);
-  // 두 source 모두 소비 상태를 바꾼다. 한쪽 장애로 다른 쪽에서 이미 받은 메시지를 버리지 않는다.
+  // Both sources change consumption state. A failure in one must not discard messages already received from the other.
   const results = await Promise.allSettled([
     store.consume(context.actor, { repository: context.repository, repoKey, taskId: context.taskId }),
     Promise.resolve().then(() => consumeChannelTaskInbox(repoKey, context.taskId, context.actor)),

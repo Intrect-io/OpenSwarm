@@ -7,10 +7,13 @@
 // the file and the exact quoted fragment, never a line number or a whole
 // file, so new Korean prose on the same line or in the same file still fails.
 //
-// Usage: node scripts/check-doc-language.mjs   (run by CI's Lint job)
+// Usage: node scripts/check-doc-language.mjs              (Markdown docs)
+//        node scripts/check-doc-language.mjs --comments   (src TypeScript comments)
+// Both run in CI's Lint job.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { COMMENT_ALLOWLIST, findHangulCommentLines, trackedSources } from './docLanguageComments.mjs';
 
 const HANGUL = /\p{Script=Hangul}/u;
 
@@ -82,7 +85,33 @@ function readOrNull(file) {
   }
 }
 
+function mainComments() {
+  let failed = false;
+  let files = 0;
+  for (const file of trackedSources()) {
+    const text = readOrNull(file);
+    if (text === null) continue;
+    const hits = findHangulCommentLines(file, text);
+    if (hits.length > 0) files++;
+    for (const hit of hits) {
+      failed = true;
+      const shown = hit.text.length > 160 ? `${hit.text.slice(0, 157)}...` : hit.text;
+      console.error(`${file}:${hit.line}: Hangul in a comment: ${shown}`);
+    }
+  }
+  for (const entry of findStaleEntries(readOrNull, COMMENT_ALLOWLIST)) {
+    failed = true;
+    console.error(`comment allowlist entry no longer matches ${entry.file}: ${entry.fragment}`);
+  }
+  if (failed) {
+    console.error(`${files} file(s) carry Hangul comments. Source comments must be English; allowlist quoted program input/output in scripts/docLanguageComments.mjs.`);
+    process.exit(1);
+  }
+  console.log('check-doc-language --comments: tracked src comments carry no Hangul outside the allowlist');
+}
+
 function main() {
+  if (process.argv.includes('--comments')) return mainComments();
   let failed = false;
   for (const file of trackedMarkdown()) {
     const text = readOrNull(file);

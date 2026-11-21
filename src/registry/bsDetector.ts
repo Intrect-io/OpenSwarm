@@ -1,14 +1,14 @@
 // ============================================
 // OpenSwarm - BS Detector
 // Created: 2026-04-10
-// Purpose: 소스 코드에서 BS 패턴을 탐지하는 정적 분석 엔진
+// Purpose: Static analysis engine that detects BS patterns in source code
 // ============================================
 
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { extname } from 'node:path';
 
-// ============ 타입 ============
+// ============ Types ============
 
 export type BsSeverity = 'critical' | 'warning' | 'minor';
 
@@ -32,20 +32,20 @@ export interface BsScanResult {
   bsScore: number; // (critical*10 + warning*3 + minor*1) / filesScanned
 }
 
-// ============ 패턴 정의 ============
+// ============ Pattern definitions ============
 
 interface BsPattern {
   severity: BsSeverity;
   category: string;
   message: string;
   pattern: RegExp;
-  // 특정 언어에서만 적용 (없으면 전체)
+  // Applies only to specific languages (all if omitted)
   languages?: string[];
-  // 이 패턴이 매칭되어도 예외인 경우 (주석 내, 테스트 파일 등)
+  // Cases exempt even when this pattern matches (inside comments, test files, etc.)
   excludeIf?: (line: string, filePath: string) => boolean;
 }
 
-// 테스트 파일 판별
+// Test file detection
 function isTestPath(filePath: string): boolean {
   return /\.test\.|\.spec\.|_test\.|test_|__tests__/.test(filePath);
 }
@@ -53,7 +53,7 @@ function isTestPath(filePath: string): boolean {
 const BS_PATTERNS: BsPattern[] = [
   // ============ CRITICAL ============
 
-  // 예외 은폐
+  // Exception swallowing
   {
     severity: 'critical',
     category: 'exception_hiding',
@@ -76,7 +76,7 @@ const BS_PATTERNS: BsPattern[] = [
     languages: ['python'],
   },
 
-  // 가짜 성공
+  // Fake success
   {
     severity: 'critical',
     category: 'fake_execution',
@@ -84,7 +84,7 @@ const BS_PATTERNS: BsPattern[] = [
     pattern: /return\s+(?:true|'ok'|"ok"|'success'|"success")\s*;?\s*\/\/\s*(?:always|todo|fixme|hack)/i,
   },
 
-  // 하드코딩 시크릿
+  // Hardcoded secrets
   {
     severity: 'critical',
     category: 'hardcoded_secret',
@@ -93,7 +93,7 @@ const BS_PATTERNS: BsPattern[] = [
     excludeIf: (line, fp) => isTestPath(fp) || /example|sample|template|placeholder|dummy|config\.example/i.test(fp) || /token:\s*'[a-z_]+'/.test(line),
   },
 
-  // 디버그 코드 잔류
+  // Leftover debug code
   {
     severity: 'critical',
     category: 'debug_leftover',
@@ -104,7 +104,7 @@ const BS_PATTERNS: BsPattern[] = [
 
   // ============ WARNING ============
 
-  // TODO + 빈 구현
+  // TODO + empty implementation
   {
     severity: 'warning',
     category: 'incomplete',
@@ -112,7 +112,7 @@ const BS_PATTERNS: BsPattern[] = [
     pattern: /(?:\/\/|#)\s*(?:TODO|FIXME|XXX|HACK)\b.*$/i,
   },
 
-  // console.log 남발 (테스트 제외)
+  // console.log overuse (tests excluded)
   {
     severity: 'warning',
     category: 'debug_leftover',
@@ -122,13 +122,13 @@ const BS_PATTERNS: BsPattern[] = [
     excludeIf: (line, fp) =>
       isTestPath(fp) ||
       /scripts\//.test(fp) ||
-      /cli\/|cli\.ts|runners\//.test(fp) ||          // CLI 도구 — console.log는 사용자 출력
-      /support\/chat|support\/chatTui/.test(fp) ||    // TUI — console.log는 UI 출력
-      fp.endsWith('index.ts') ||                       // 서비스 진입점
-      /core\/service/.test(fp) ||                      // 서비스 로깅
-      /discord\//.test(fp) ||                          // Discord 핸들러 로깅
-      /memory\//.test(fp) ||                           // 메모리 시스템 로깅
-      /automation\//.test(fp) ||                       // 자동화 시스템 로깅
+      /cli\/|cli\.ts|runners\//.test(fp) ||          // CLI tools — console.log is user output
+      /support\/chat|support\/chatTui/.test(fp) ||    // TUI — console.log is UI output
+      fp.endsWith('index.ts') ||                       // Service entry point
+      /core\/service/.test(fp) ||                      // Service logging
+      /discord\//.test(fp) ||                          // Discord handler logging
+      /memory\//.test(fp) ||                           // Memory system logging
+      /automation\//.test(fp) ||                       // Automation system logging
       /console\.(?:warn|error|info)/.test(line) ||
       /\[\w+\]/.test(line) || /`\[/.test(line) || /\$\{.*(?:taskPrefix|prefix)/.test(line),
   },
@@ -145,7 +145,7 @@ const BS_PATTERNS: BsPattern[] = [
       /JSON\.parse|URLSearchParams|\.map\(/.test(line),  // JSON/API 결과 캐스트
   },
 
-  // any 타입 사용
+  // any type usage
   {
     severity: 'warning',
     category: 'type_safety',
@@ -167,7 +167,7 @@ const BS_PATTERNS: BsPattern[] = [
     excludeIf: (_line, fp) => isTestPath(fp),
   },
 
-  // eval 사용
+  // eval usage
   {
     severity: 'warning',
     category: 'security',
@@ -187,7 +187,7 @@ const BS_PATTERNS: BsPattern[] = [
 
   // ============ MINOR ============
 
-  // 매직 넘버
+  // Magic numbers
   {
     severity: 'minor',
     category: 'magic_number',
@@ -196,7 +196,7 @@ const BS_PATTERNS: BsPattern[] = [
     excludeIf: (line, fp) => isTestPath(fp) || /const|timeout|limit|max|min|port|size|width|height|delay|interval|ms|sec/i.test(line),
   },
 
-  // 긴 줄 (200자 이상)
+  // Long lines (200+ characters)
   {
     severity: 'minor',
     category: 'readability',
@@ -206,7 +206,7 @@ const BS_PATTERNS: BsPattern[] = [
   },
 ];
 
-// ============ 언어 감지 ============
+// ============ Language detection ============
 
 function detectLanguageForBs(ext: string): string | null {
   const map: Record<string, string> = {
@@ -220,7 +220,7 @@ function detectLanguageForBs(ext: string): string | null {
   return map[ext] ?? null;
 }
 
-// ============ 단일 파일 스캔 ============
+// ============ Single-file scan ============
 
 export function scanFileContent(
   content: string,
@@ -234,13 +234,13 @@ export function scanFileContent(
     const line = lines[i];
 
     for (const bp of BS_PATTERNS) {
-      // 언어 필터
+      // Language filter
       if (bp.languages && !bp.languages.includes(language)) continue;
 
       const match = line.match(bp.pattern);
       if (!match) continue;
 
-      // 예외 필터
+      // Exemption filter
       if (bp.excludeIf && bp.excludeIf(line, filePath)) continue;
 
       issues.push({
@@ -257,7 +257,7 @@ export function scanFileContent(
   return issues;
 }
 
-// ============ 파일 스캔 (비동기) ============
+// ============ File scan (async) ============
 
 export async function scanFile(filePath: string): Promise<BsIssue[]> {
   const ext = extname(filePath);
@@ -268,7 +268,7 @@ export async function scanFile(filePath: string): Promise<BsIssue[]> {
   return scanFileContent(content, filePath, language);
 }
 
-// ============ 결과 집계 ============
+// ============ Result aggregation ============
 
 export function aggregateResults(
   issues: BsIssue[],
@@ -294,7 +294,7 @@ export function aggregateResults(
   };
 }
 
-// ============ 레포 전체 스캔 ============
+// ============ Whole-repo scan ============
 
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';

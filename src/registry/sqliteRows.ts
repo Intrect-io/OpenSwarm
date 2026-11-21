@@ -6,7 +6,7 @@
 
 import type { EntityStatus, RiskLevel } from './schema.js';
 
-// ============ DB Row 타입 (better-sqlite3 반환값) ============
+// ============ DB row types (better-sqlite3 return values) ============
 
 export interface EntityRow {
   id: string;

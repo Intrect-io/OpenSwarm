@@ -2,7 +2,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { recoveryText } from './loopRecoveryEvidence.js';
 
-/** 도구를 허용하지 않고 원래 diff의 저장소 내부 소스만 진단 패킷에 제공한다. */
+/** Disallow tools and give the diagnosis packet only in-repo source from the original diff. */
 export async function premiseSources(cwd: string, files: string[]): Promise<Record<string, string>> {
   const root = await realpath(cwd);
   const evidence: Record<string, string> = {};
@@ -17,7 +17,7 @@ export async function premiseSources(cwd: string, files: string[]): Promise<Reco
         continue;
       }
       const text = await readFile(path, 'utf8');
-      // 일부 코드만 보았다는 사실을 유지한다. 긴 파일에서 임의의 결론을 내릴 수 없다.
+      // Keep the fact that only part of the code was seen. No arbitrary conclusion can be drawn from a long file.
       for (let offset = 0; offset < Math.min(text.length, 2000); offset += 400) {
         evidence[`source:${rel}:${offset}`] = recoveryText(text.slice(offset, offset + 400));
       }

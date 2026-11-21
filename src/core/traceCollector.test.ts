@@ -40,7 +40,7 @@ describe('TraceCollector', () => {
   });
 
   // ============================================
-  // Trace 생성/종료
+  // Trace creation/termination
   // ============================================
 
   describe('startTrace / endTrace', () => {
@@ -88,7 +88,7 @@ describe('TraceCollector', () => {
   });
 
   // ============================================
-  // Span 생성/종료
+  // Span creation/termination
   // ============================================
 
   describe('startSpan / endSpan', () => {
@@ -131,7 +131,7 @@ describe('TraceCollector', () => {
   });
 
   // ============================================
-  // Parent-Child 관계
+  // Parent-Child relations
   // ============================================
 
   describe('parent-child span 관계', () => {
@@ -150,7 +150,7 @@ describe('TraceCollector', () => {
       const parentId = collector.startSpan(traceId, 'agent')!;
       collector.startSpan(traceId, 'tool:git', parentId);
       collector.startSpan(traceId, 'tool:test', parentId);
-      collector.startSpan(traceId, 'other-root'); // 부모 없는 span
+      collector.startSpan(traceId, 'other-root'); // span without a parent
 
       const children = collector.getChildSpans(traceId, parentId);
       expect(children).toHaveLength(2);
@@ -163,12 +163,12 @@ describe('TraceCollector', () => {
       const agentSpan = collector.startSpan(traceId, 'agent')!;
       const toolSpan = collector.startSpan(traceId, 'tool:lint', agentSpan)!;
 
-      // tool span의 parent는 agent span
+      // the tool span's parent is the agent span
       const trace = collector.getTrace(traceId);
       const tool = trace!.spans.find((s) => s.spanId === toolSpan);
       expect(tool!.parentSpanId).toBe(agentSpan);
 
-      // agent span의 parent는 없음 (root)
+      // the agent span has no parent (root)
       const agent = trace!.spans.find((s) => s.spanId === agentSpan);
       expect(agent!.parentSpanId).toBeUndefined();
     });
@@ -180,7 +180,7 @@ describe('TraceCollector', () => {
   });
 
   // ============================================
-  // 에러 기록
+  // Error recording
   // ============================================
 
   describe('recordError', () => {
@@ -217,7 +217,7 @@ describe('TraceCollector', () => {
   });
 
   // ============================================
-  // trace 종료 시 running span 자동 종료
+  // Running spans auto-terminate when the trace ends
   // ============================================
 
   describe('trace 종료 시 running span 정리', () => {
@@ -243,13 +243,13 @@ describe('TraceCollector', () => {
       collector.endTrace(traceId, 'completed');
       const trace = collector.getTrace(traceId);
       const span = trace!.spans[0];
-      // 이미 failed인 span은 그대로 유지
+      // A span that is already failed is left unchanged
       expect(span.status).toBe('failed');
     });
   });
 
   // ============================================
-  // 전체 목록 및 정리
+  // Full listing and cleanup
   // ============================================
 
   describe('getAllTraces / pruneCompleted', () => {
@@ -269,7 +269,7 @@ describe('TraceCollector', () => {
 
       collector.endTrace(t1);
       collector.endTrace(t3, 'failed');
-      // t2는 running 상태
+      // t2 is in the running state
 
       const pruned = collector.pruneCompleted();
       expect(pruned).toBe(2);

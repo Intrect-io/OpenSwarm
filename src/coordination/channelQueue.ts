@@ -29,7 +29,7 @@ export interface SendChannelMessage {
   taskId?: string; recipient?: string; correlationId?: string;
 }
 
-/** 수신자 확인은 HTTP 경계에서 수행한다. 이 함수는 저장과 큐 등록을 원자적으로 묶는다. */
+/** Recipient validation happens at the HTTP boundary. This function binds persistence and queue enrollment atomically. */
 export function sendChannelMessage(input: SendChannelMessage): ChannelDelivery {
   requireChannel(input.repoKey);
   if (!input.body?.trim() || input.body.length > 4_000) throw new Error('Message must contain 1–4000 characters');
@@ -144,7 +144,7 @@ export function respondToChannelDelivery(id: string, runId: string, actor: strin
     const item = getChannelDelivery(id);
     if (item.status !== 'processing' || item.runId !== runId) throw new Error('Delivery ownership conflict');
     if (!output.trim()) throw new Error('Coordinator returned no response');
-    // 긴 결과는 Threads의 메시지 한도에 맞춰 나누되 전체 결과를 보존한다.
+    // Split a long result to fit the Threads message limit while preserving the whole result.
     let responseId: string | undefined;
     for (let offset = 0; offset < output.length; offset += 4_000) {
       responseId = postCoordinationThreadMessage({ repository: item.repoKey, threadId: item.threadId,
@@ -159,7 +159,7 @@ export function respondToChannelDelivery(id: string, runId: string, actor: strin
   broadcastEvent({ type: 'coordination:channel-status', data: { repoKey: getChannelDelivery(id).repoKey } });
 }
 
-/** 프로젝트 잠금을 확보한 coordinator만 호출한다. 실행 결과가 없으면 자동 재실행하지 않는다. */
+/** Called only by the coordinator that holds the project lock. With no execution result, it does not re-run automatically. */
 export function recoverCoordinatorDeliveries(repoKey: string): void {
   const db = channelDatabase();
   const rows = db.prepare(`SELECT d.id,d.run_id,r.status FROM coordination_channel_deliveries d
@@ -180,7 +180,7 @@ export function retryChannelDelivery(repoKey: string, id: string): ChannelDelive
   return getChannelDelivery(id);
 }
 
-/** 보드 밖에서도 정확한 프로젝트·작업·주소로 영속 메시지를 가져온다. */
+/** Fetch a persistent message by exact project, task, and address even outside the board. */
 export function consumeChannelTaskInbox(repoKey: string, taskId: string, actor: string): CoordinationEvent[] {
   const db = channelDatabase();
   return db.transaction(() => {

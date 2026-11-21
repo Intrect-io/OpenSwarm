@@ -82,7 +82,7 @@ export interface RecoveryCheckpoint {
   runSnapshotHash?: string;
 }
 
-/** 동일 SQLite 연결과 현재 claim으로만 원장을 변경한다. */
+/** Mutates the ledger only through the same SQLite connection and the current claim. */
 export interface RecoveryHooks {
   isCurrent(): boolean;
   canAdvise(): boolean;

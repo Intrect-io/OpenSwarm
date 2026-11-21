@@ -42,7 +42,7 @@ export interface AuthLoginOpts {
 }
 
 /**
- * 로그인 흐름 (provider별 분기)
+ * Login flow (branches per provider)
  */
 export async function handleAuthLogin(
   provider: string,
@@ -130,7 +130,7 @@ function printOpenRouterPostLoginHint(): void {
 }
 
 /**
- * 저장된 인증 프로필 상태 표시
+ * Show the status of stored auth profiles
  */
 export function handleAuthStatus(): void {
   const store = new AuthProfileStore();
@@ -169,9 +169,9 @@ export function handleAuthStatus(): void {
 }
 
 /**
- * 사용 가능한 Codex 모델 목록 표시.
- * GPT/Codex OAuth 토큰이 있으면 라이브로(chatgpt.com Codex 백엔드) 조회하고,
- * 없으면 ~/.codex 로컬 소스 + 큐레이트 fallback으로 표시한다.
+ * Show the list of available Codex models.
+ * If a GPT/Codex OAuth token exists, query live (chatgpt.com Codex backend),
+ * otherwise show ~/.codex local sources + a curated fallback.
  */
 export async function handleAuthModels(): Promise<void> {
   const store = new AuthProfileStore();
@@ -201,7 +201,7 @@ export async function handleAuthModels(): Promise<void> {
 }
 
 /**
- * 인증 프로필 삭제
+ * Delete an auth profile
  */
 export function handleAuthLogout(provider: string): void {
   assertProvider(provider);

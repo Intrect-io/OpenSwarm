@@ -1052,7 +1052,7 @@ program
     handleProjectRm(path);
   });
 
-// 서브커맨드 없이 `openswarm`만 입력 시 → TUI chat 실행 (`openswarm chat`과 동일)
+// With no subcommand, plain `openswarm` -> launch the TUI chat (same as `openswarm chat`)
 
 async function launchChatTui(sessionId?: string): Promise<void> {
   // Auto-start the background daemon so the monitor tabs (Projects/Tasks/Stuck/

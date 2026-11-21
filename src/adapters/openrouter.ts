@@ -122,7 +122,7 @@ export class OpenRouterCliAdapter implements CliAdapter {
   }
 
   buildCommand(_options: CliRunOptions): { command: string; args: string[] } {
-    // 어댑터가 직접 fetch하므로 spawn 진입점은 미사용.
+    // The adapter calls fetch directly, so the spawn entry point is unused.
     return { command: 'echo', args: ['"OpenRouter adapter uses run() — not shell spawn"'] };
   }
 
@@ -256,7 +256,7 @@ export class OpenRouterCliAdapter implements CliAdapter {
 // Streamed chat/completions responses are parsed by consumeChatCompletionsStream.
 
 export interface ApiCallerOptions {
-  /** worker 등 기계적 역할: 추론 토큰 비활성화 (지원 모델 한정) */
+  /** Mechanical roles such as worker: disable reasoning tokens (supported models only) */
   disableReasoning?: boolean;
   /**
    * OpenRouter's unified `reasoning.effort`. Wins over disableReasoning when
@@ -265,9 +265,9 @@ export interface ApiCallerOptions {
    * request — on openrouter they degraded to "not disabled".
    */
   reasoningEffort?: 'low' | 'medium' | 'high';
-  /** 스트리밍 토큰 콜백 (chat TUI). 없으면 비스트리밍과 동일하게 동작. */
+  /** Streaming token callback (chat TUI). Without it, behaves the same as non-streaming. */
   onToken?: (delta: string) => void;
-  /** 사용자 중단(Esc/Ctrl+C) — fetch에 전달. */
+  /** User abort (Esc/Ctrl+C) - passed to fetch. */
   signal?: AbortSignal;
   /** Per-call ceiling covering the streamed body (see requestDeadline.ts) —
    * #345 wired this into atlascloud/codexResponses but missed this adapter,
@@ -299,10 +299,10 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
     if (pinnedProviders.length > 0) {
       body.provider = { only: pinnedProviders, allow_fallbacks: false };
     } else if (!/^openai\//i.test(model)) {
-      // ZDR(Zero Data Retention) — 데이터를 보존하지 않는 provider로만 라우팅.
-      // 단, OpenAI provider는 data_collection:deny 플래그를 거부("Provider returned
-      // error")하므로 제외한다. OpenAI는 API 데이터를 학습에 쓰지 않아(정책상) ZDR
-      // 강제가 불필요하다. non-OpenAI 모델에만 적용한다.
+      // ZDR (Zero Data Retention) - route only to providers that do not retain data.
+      // OpenAI providers are excluded because they reject the data_collection:deny flag
+      // ("Provider returned error"). OpenAI does not train on API data (per policy), so
+      // forcing ZDR is unnecessary there. Applies to non-OpenAI models only.
       //
       // sort: 'throughput' picks the fastest ZDR-eligible endpoint instead of
       // OpenRouter's default (load-balanced / cheapest-first) order. The
@@ -313,11 +313,11 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
       // gain, so throughput is worth more here than shaving cents off price.
       body.provider = { data_collection: 'deny', sort: 'throughput' };
     }
-    // 추론 불필요 역할은 reasoning 토큰을 끈다. glm-4.7-flash처럼 non-thinking
-    // 모델엔 무영향, 추론형 모델(glm-5 등)을 worker로 바꿔도 토큰 낭비를 막는다.
-    // 단, OpenAI 추론 모델(gpt-5 등)은 "Reasoning is mandatory"로 이 플래그를
-    // 거부하므로 제외한다 — worker escalate 대상이 gpt-5라 이걸 안 빼면 escalation이
-    // 항상 깨진다. OpenAI는 단순 작업엔 추론을 자동 최소화하므로 끌 필요도 없다.
+    // Turn reasoning tokens off for roles that do not need reasoning. No effect on non-thinking
+    // models such as glm-4.7-flash; avoids token waste if a reasoning model (glm-5, etc.) becomes
+    // worker. OpenAI reasoning models (gpt-5, etc.) are excluded: they reject this flag
+    // ("Reasoning is mandatory"), and the worker escalation target is gpt-5, so escalation would
+    // always break. OpenAI minimizes reasoning on simple tasks anyway, so there is nothing to turn off.
     if (opts.reasoningEffort) {
       // A model that does not take the parameter answers 400; the fallback
       // below drops `reasoning` and retries, same as for `enabled: false`.
@@ -387,24 +387,24 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
 }
 
 /**
- * Prompt caching breakpoint 삽입.
+ * Insert prompt caching breakpoints.
  *
- * OpenAI/Gemini 모델은 OpenRouter가 자동 캐싱하므로 메시지를 건드리지 않는다.
- * Anthropic 모델은 명시적 cache_control breakpoint가 필요하다 — 매 API 호출마다
- * 전체 히스토리가 재전송되는데, 시스템 프롬프트 + 직전 누적 히스토리는 턴마다
- * 거의 동일하므로 그 경계에 ephemeral 캐시 마커를 두면 입력 토큰이 ~90% 할인된다.
+ * OpenRouter caches OpenAI/Gemini models automatically, so messages are left untouched.
+ * Anthropic models need explicit cache_control breakpoints - the full history is
+ * resent on every API call, and the system prompt plus the preceding accumulated
+ * history is nearly identical from turn to turn, so an ephemeral cache marker at that boundary gives ~90% off input tokens.
  *
- * breakpoint 2개: (1) 시스템 메시지 끝, (2) 마지막 user/tool 메시지 직전 경계.
- * Anthropic은 최대 4개 breakpoint를 허용하므로 2개는 안전하다.
+ * Two breakpoints: (1) end of the system message, (2) boundary just before the last user/tool message.
+ * Anthropic allows up to 4 breakpoints, so 2 is safe.
  */
 export function applyPromptCaching(messages: ChatMessage[], model: string): unknown[] {
-  // OpenAI/Gemini 등은 자동 캐싱 — 변환 불필요 (cache_control을 넣으면 거부될 수 있음)
+  // OpenAI/Gemini etc. cache automatically - no conversion needed (cache_control may be rejected)
   if (!/anthropic\/|claude/i.test(model)) {
     return messages;
   }
 
-  // 캐시 마커를 달 인덱스: 시스템 메시지(있으면) + 마지막 직전 메시지.
-  // 마지막 메시지(가장 최근 tool 결과)는 매 턴 바뀌므로 캐시하지 않는다.
+  // Indexes to mark for caching: the system message (if any) + the message just before the last.
+  // The last message (the newest tool result) changes every turn, so it is not cached.
   const cacheable = new Set<number>();
   if (messages[0]?.role === 'system') cacheable.add(0);
   if (messages.length >= 2) cacheable.add(messages.length - 2);
@@ -413,7 +413,7 @@ export function applyPromptCaching(messages: ChatMessage[], model: string): unkn
     if (!cacheable.has(i) || typeof m.content !== 'string' || !m.content) {
       return m;
     }
-    // string content → content-part 배열로 변환하며 마지막 파트에 cache_control 부착
+    // Convert string content to a content-part array and attach cache_control to the last part
     return {
       ...m,
       content: [

@@ -45,7 +45,7 @@ function string(body: Record<string, unknown>, key: string, required = false): s
   return v;
 }
 
-/** web.ts가 인증·Origin·본문 크기 제한을 적용한 후에만 위임한다. */
+/** Delegates only after web.ts has applied auth, Origin and body-size limits. */
 export async function tryHandleProjectRoutes(
   req: IncomingMessage, res: ServerResponse, path: string, url: URL,
   runner: AutonomousRunner | undefined, paths: readonly string[], readBody: (req: IncomingMessage) => Promise<string>,
@@ -159,7 +159,7 @@ export async function tryHandleProjectRoutes(
     }
     const result = sendChannelMessage({ repoKey, body: string(body, 'body', true)!, idempotencyKey,
       taskId, recipient, correlationId, threadId: string(body, 'threadId') });
-    // 원자 커밋된 답변은 기존 재개 정책이 읽는다. 보드는 알림이며 실패해도 접수 상태를 바꾸지 않는다.
+    // An atomically committed answer is read by the existing resume policy. The board is a notification; its failure does not change the accepted state.
     if (correlationId) {
       const rows = channelDatabase().prepare(`SELECT * FROM coordination_trace WHERE event_id LIKE ?`).all(`channel-answer:${result.id}:%`) as Array<Parameters<typeof toEvent>[0]>;
       for (const row of rows) {

@@ -3239,7 +3239,7 @@ export class AutonomousRunner {
         for (const cg of result.conflictGroups) {
           const ids = cg.tasks.map(t => t.issueIdentifier || t.id.slice(0, 8)).join(', ');
           this.syslog(`Conflict group: [${ids}] shared: ${cg.sharedModules.join(', ')}`);
-          // 충돌 그룹의 연기된 태스크 로그
+          // Log of the conflict group's deferred tasks
           for (const t of cg.tasks) {
             if (!safeTasks.has(t.id)) {
               this.syslog(`Conflict detected — deferring: ${t.issueIdentifier || t.id.slice(0, 8)} ${t.title}`);
@@ -3247,8 +3247,8 @@ export class AutonomousRunner {
           }
         }
       } catch (err) {
-        // 분석 실패는 동시 편집 안전성을 증명하지 못한 상태다. 저장소마다
-        // 하나만 통과시켜 직렬화하고, 나머지는 다음 heartbeat로 미룬다.
+        // A failed analysis means concurrent-edit safety was not proven. Let only one
+        // task per repository through to serialize them, and defer the rest to the next heartbeat.
         console.warn(`[AutonomousRunner] Conflict detection failed for ${projPath}:`, err);
         for (const id of failClosedConflictFallback(claimable)) safeTasks.add(id);
         for (const deferred of claimable.slice(1)) {

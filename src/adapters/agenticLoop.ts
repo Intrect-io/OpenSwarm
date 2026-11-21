@@ -3,9 +3,9 @@ import { createHash } from 'node:crypto';
 // ============================================
 // OpenSwarm - Agentic Tool Loop
 // Created: 2026-04-11
-// Purpose: Codex/OpenRouter/Local 어댑터용 범용 에이전틱 루프 엔진.
-//          OpenAI function calling 포맷 기반.
-//          VEGA token_count.py 패턴 이식 — 토큰 기반 히스토리 압축.
+// Purpose: General-purpose agentic loop engine for the Codex/OpenRouter/Local adapters.
+//          Based on the OpenAI function calling format.
+//          Ported from the VEGA token_count.py pattern — token-based history compaction.
 // ============================================
 
 import { TOOL_DEFINITIONS, APPLY_PATCH_TOOL, executeToolCalls, createReadCache, isProtectedPath, validatePath, type ToolCall, type ToolResult, type ToolDefinition } from './tools.js';
@@ -27,9 +27,9 @@ import { getSandboxExecutorConfig } from '../sandboxExecutor/runtime.js';
 import type { SandboxExecutorSession } from '../sandboxExecutor/protocol.js';
 import { withMcpSessionScope } from '../mcp/mcpClient.js';
 
-// ============ 토큰 카운팅 (VEGA token_count.py 이식) ============
+// ============ Token counting (ported from VEGA token_count.py) ============
 
-// cl100k_base 근사: 한국어 0.78t/char, 영어 0.27t/char
+// cl100k_base approximation: Korean 0.78t/char, English 0.27t/char
 function countTokensApprox(text: string): number {
   if (!text) return 0;
   const hangul = [...text].filter(c => c >= '가' && c <= '힣').length;
@@ -53,8 +53,8 @@ function countMessageTokens(messages: ChatMessage[]): number {
   return total;
 }
 
-// 도구 결과 길이 제한: 너무 작게 자르면 모델이 파일 절반만 보고 잘못 수정한다.
-// 코딩 작업에 맞춰 넉넉히 보존(2500자), 초과 시 앞 1500 + 뒤 700자 유지.
+// Tool result length limit: truncating too hard makes the model see only half a file and edit it wrongly.
+// Keep generously for coding tasks (2500 chars); when exceeded, keep the first 1500 + last 700 chars.
 function truncateToolResult(content: string, maxLen = 2500): string {
   if (content.length <= maxLen) return content;
   const head = content.slice(0, 1500);
@@ -75,9 +75,9 @@ export function formatToolErrorLog(content: string, maxLen = 240): string {
   return `${content.slice(0, head)}…${content.slice(-tail)}`;
 }
 
-// ============ 타입 ============
+// ============ Types ============
 
-/** OpenAI Chat Completions API 메시지 포맷 */
+/** OpenAI Chat Completions API message format */
 export type ChatMessage =
   | { role: 'system'; content: string }
   | { role: 'user'; content: string }
@@ -136,31 +136,31 @@ export function recordObservedCommand(list: string[], command: string): void {
   if (list.length > OBSERVED_COMMAND_LIMIT) list.splice(0, list.length - OBSERVED_COMMAND_LIMIT);
 }
 
-/** 에이전틱 루프 설정 */
+/** Agentic loop configuration */
 export interface AgenticLoopOptions {
-  /** 시스템 프롬프트 */
+  /** System prompt */
   systemPrompt?: string;
-  /** 사용자 프롬프트 (작업 지시) */
+  /** User prompt (task instructions) */
   prompt: string;
-  /** 프로젝트 작업 디렉토리 (도구 실행 cwd) */
+  /** Project working directory (cwd for tool execution) */
   cwd: string;
-  /** 모델명 */
+  /** Model name */
   model: string;
-  /** API 호출 함수 (어댑터별로 주입) */
+  /** API call function (injected per adapter) */
   callApi: (messages: ChatMessage[], tools: ToolDefinition[]) => Promise<ChatCompletionResponse>;
   /**
-   * 최대 도구 사용 턴 수 (기본: 20). `0` = 상한 없음 (UNBOUNDED_TURNS) — 코딩
-   * 단계는 턴 수가 아니라 벽시계(timeoutMs)·반복 호출 가드(NO_PROGRESS_LIMIT)·
-   * 파이프라인 iteration 상한으로 끝난다. (AGT-4388)
+   * Max tool-use turns (default: 20). `0` = no cap (UNBOUNDED_TURNS) — coding
+   * phases end on wall-clock (timeoutMs), the repeated-call guard (NO_PROGRESS_LIMIT),
+   * or the pipeline iteration cap, not on a turn count. (AGT-4388)
    */
   maxTurns?: number;
-  /** 전체 타임아웃 (ms, 기본: 300000) */
+  /** Overall timeout (ms, default: 300000) */
   timeoutMs?: number;
-  /** 실시간 로그 콜백 */
+  /** Real-time log callback */
   onLog?: (line: string) => void;
-  /** 도구 사용 허용 여부 (기본: true) */
+  /** Whether tool use is allowed (default: true) */
   enableTools?: boolean;
-  /** 토큰 기반 압축 트리거 임계값 — 모델 창을 모를 때의 폴백 (기본: 60000) */
+  /** Token-based compaction trigger threshold — fallback when the model window is unknown (default: 60000) */
   compactTokenThreshold?: number;
   /**
    * Advertised context window of `model`, when the adapter knows it (catalog
@@ -170,15 +170,15 @@ export interface AgenticLoopOptions {
   contextWindowTokens?: number;
   /** Tokens the request must leave for the model's own output (adapter max_tokens; default 16384). */
   reservedOutputTokens?: number;
-  /** 이 메시지 수를 넘어야 압축 후보 (VEGA compact_threshold, 기본: 24) */
+  /** A message count above this makes compaction a candidate (VEGA compact_threshold, default: 24) */
   compactAfterMessages?: number;
-  /** 압축 시 항상 원본 유지할 최근 메시지 수 (VEGA keep_recent, 기본: 8) */
+  /** Number of recent messages always kept verbatim on compaction (VEGA keep_recent, default: 8) */
   keepRecentMessages?: number;
   /**
-   * 수정이 필수인 작업의 no-edit 종료 가드. 모델이 edit/write 도구를 한 번도 안 쓰고
-   * 최종 텍스트로 끝내려 하면 "아직 수정 안 했다, 계속하라"고 N회까지 되민다.
-   * 경량 모델(gemini 등)이 탐색만 하고 일찍 결론 내는 패턴 차단 (SWE 하이브리드에서 발견).
-   * 기본 0 (비활성) — 수정 없는 작업(진단·분석)도 정상이므로 옵트인.
+   * No-edit termination guard for tasks that require edits. If the model tries to finish
+   * with final text without ever using an edit/write tool, push back "you have not edited yet, continue" up to N times.
+   * Blocks the pattern where lightweight models (gemini etc.) explore only and conclude early (found in the SWE hybrid).
+   * Default 0 (disabled) — tasks without edits (diagnosis/analysis) are legitimate, so this is opt-in.
    */
   nudgeMaxOnNoEdit?: number;
   /**
@@ -269,21 +269,21 @@ export interface AgenticLoopOptions {
   usageAttribution?: UsageAttribution;
 }
 
-/** 루프 실행 결과 */
+/** Loop execution result */
 export interface AgenticLoopResult {
-  /** 최종 텍스트 응답 */
+  /** Final text response */
   text: string;
-  /** 사용한 도구 호출 횟수 */
+  /** Number of tool calls used */
   toolCallCount: number;
-  /** 총 API 호출 횟수 */
+  /** Total API calls */
   apiCallCount: number;
-  /** 총 토큰 사용량 (추적 가능한 경우) */
+  /** Total token usage (when trackable) */
   totalTokens: number;
-  /** 입력(prompt) 토큰 누적 — costInfo/로그의 in/out 분리 표기용 (INT-2508) */
+  /** Cumulative input (prompt) tokens — for separate in/out display in costInfo/logs (INT-2508) */
   inputTokens: number;
-  /** 출력(completion) 토큰 누적 */
+  /** Cumulative output (completion) tokens */
   outputTokens: number;
-  /** 캐시 적중 입력 토큰 누적 (totalTokens의 부분집합) — prompt-cache 효율 측정용 */
+  /** Cumulative cache-hit input tokens (subset of totalTokens) — for measuring prompt-cache efficiency */
   cachedTokens: number;
   /** Sum of the provider's metered charges (USD) across calls that reported one. */
   costUsd: number;
@@ -297,14 +297,14 @@ export interface AgenticLoopResult {
   operatorQuestionCorrelationIds?: string[];
   /** A side-effecting sandbox RPC lost its authoritative result; quarantine. */
   executionOutcomeUnknown?: boolean;
-  /** 소요 시간 (ms) */
+  /** Elapsed time (ms) */
   durationMs: number;
   /** Shell commands the worker actually ran via the `bash` tool — ground truth
    *  for the validation-evidence gate (self-reported `commands` is often empty). */
   executedCommands: string[];
 }
 
-// ============ 에이전틱 루프 ============
+// ============ Agentic loop ============
 
 /**
  * Apply a role's declarative `tools.allow` / `tools.deny` (RoleConfig) to the
@@ -334,12 +334,12 @@ function applyRoleToolScope(
 }
 
 /**
- * 에이전틱 도구 루프 실행
+ * Run the agentic tool loop
  *
- * 흐름:
- * 1. 프롬프트로 API 호출 (도구 정의 포함)
- * 2. 응답에 tool_calls가 있으면 → 도구 실행 → 결과를 메시지에 추가 → 2로
- * 3. 응답에 tool_calls가 없으면 (finish_reason = 'stop') → 최종 텍스트 반환
+ * Flow:
+ * 1. Call the API with the prompt (including tool definitions)
+ * 2. If the response has tool_calls → run the tools → append results to messages → back to 2
+ * 3. If the response has no tool_calls (finish_reason = 'stop') → return the final text
  */
 /**
  * Run one agent invocation, recording what it did.
@@ -388,9 +388,9 @@ async function runAgenticLoopInner(
     timeoutMs = 300000,
     onLog,
     enableTools = true,
-    // 긴 작업(SWE-bench급 실전 repo)에서 압축이 너무 일찍·자주 터지면 모델이 읽은
-    // 파일 컨텍스트를 잃고 같은 파일을 반복 read하다 수정에 도달 못 한다(무한 탐색).
-    // 현대 모델 컨텍스트(128k+)에 맞춰 임계를 넉넉히, 최근 보존 블록도 늘린다.
+    // On long tasks (SWE-bench-grade real repos), if compaction fires too early/often the model loses the read
+    // file context and keeps re-reading the same file without ever reaching an edit (endless exploration).
+    // Set the threshold generously for modern model contexts (128k+) and widen the recent-keep block too.
     compactTokenThreshold = 60000,
     compactAfterMessages = 60,
     keepRecentMessages = 16,
@@ -451,14 +451,14 @@ async function runAgenticLoopInner(
   const { wrapUpAt, softDeadline: deadline } = loopDeadlines(startTime, timeoutMs);
   let wrapUpNudged = false;
 
-  // 메시지 히스토리 구성
+  // Build the message history
   const messages: ChatMessage[] = [];
   if (systemPrompt) {
     messages.push({ role: 'system', content: systemPrompt });
   }
-  // 작업 루트(cwd)를 명시 — 모델이 모르면 '/'나 repo명 같은 절대경로를 추측해
-  // 경로 검증(project 밖 접근)에 막힌다. 실전 repo(pylint 등)에서 search_files가
-  // 전부 차단되던 결함(SWE-bench에서 발견). 도구는 이 루트 기준 상대경로를 쓰라고 안내.
+  // State the working root (cwd) explicitly — if the model does not know it, it guesses absolute paths like '/' or the repo name
+  // and is blocked by path validation (access outside the project). This was the defect where search_files was
+  // entirely blocked on real repos (pylint etc.; found in SWE-bench). Tools are told to use paths relative to this root.
   const cwdNote =
     `# Working directory\n` +
     `Your project root is: ${cwd}\n` +
@@ -521,7 +521,7 @@ async function runAgenticLoopInner(
   // exact same set into dispatch so a hidden tool call cannot reach a globally
   // registered MCP route (or another built-in withheld for this run).
   const allowedToolNames = new Set(tools.map((tool) => tool.function.name));
-  const readCache = createReadCache(); // 루프 단위 read 캐시 (중복 read 차단)
+  const readCache = createReadCache(); // Per-loop read cache (blocks duplicate reads)
   const compaction = resolveCompactionThreshold(contextWindowTokens, {
     fallback: compactTokenThreshold,
     reservedOutputTokens,
@@ -533,11 +533,11 @@ async function runAgenticLoopInner(
       : `📐 Context window unknown → compact at ${compaction.compactAt} (fallback)`,
   );
   let toolCallCount = 0;
-  let editToolCount = 0; // edit_file/write_file 호출 수 (no-edit 가드용)
-  const executedCommands: string[] = []; // `bash` 도구로 실제 실행한 명령 (검증 증거 ground truth)
-  // 진전 정체 감지: 이번 턴의 도구 호출이 모두 이전과 동일(name+args)하면 새 정보·변경
-  // 없는 반복이다. N턴 연속이면 루프로 보고 조기 종료한다 — 고정 turn 한도(작업 제한)가
-  // 아니라 진전 기반 중단. maxTurns는 비상 천장으로만 남는다.
+  let editToolCount = 0; // Number of edit_file/write_file calls (for the no-edit guard)
+  const executedCommands: string[] = []; // Commands actually run via the `bash` tool (ground truth for verification evidence)
+  // Stall detection: if this turn's tool calls are all identical to before (name+args), it is a repeat with no new information or change.
+  // N consecutive such turns are treated as a loop and end early — progress-based stopping, not a fixed turn limit
+  // (a task cap). maxTurns remains only as an emergency ceiling.
   const servedModels = new Set<string>();
   let modelIdentityMissing = false;
   let blockedOnOperator = false;
@@ -619,14 +619,14 @@ async function runAgenticLoopInner(
   // repeated-call guard and the pipeline's iteration cap remain.
   const turnCap = maxTurns > 0 ? maxTurns : Number.POSITIVE_INFINITY;
   for (let turn = 0; turn < turnCap + 1; turn++) {
-    // 사용자 중단 (Esc/Ctrl+C) — 현재 텍스트가 있으면 유지, 없으면 표시만.
+    // User abort (Esc/Ctrl+C) — keep the current text if there is any, otherwise just mark it.
     if (signal?.aborted) {
       onLog?.('■ Stopped by user');
       finalText = finalText || '(stopped)';
       break;
     }
 
-    // 타임아웃 체크
+    // Timeout check
     if (Date.now() > deadline) {
       onLog?.(`⏰ Agentic loop timeout after ${turn} turns`);
       break;
@@ -641,11 +641,11 @@ async function runAgenticLoopInner(
       messages.push({ role: 'user', content: wrapUpNotice(minutesLeft) });
     }
 
-    // 히스토리 압축 — VEGA compaction.py 패턴 이식.
-    // 트리거: 메시지 수가 compactAfterMessages를 넘고 + 토큰이 임계값 초과일 때만.
-    // 과거에는 turn>=2부터 매 턴 무조건 압축해 모델이 방금 읽은 파일·작업 맥락을
-    // 즉시 잃고 헛돌았다(루프 재발). 이제 정말 길어질 때만 압축하고, 압축해도
-    // 최근 keepRecentMessages 블록은 원본 유지한다.
+    // History compaction — ported from the VEGA compaction.py pattern.
+    // Trigger: only when the message count exceeds compactAfterMessages AND tokens exceed the threshold.
+    // It used to compact unconditionally every turn from turn>=2, so the model immediately lost the files it had just read
+    // and the task context and spun in place (loop recurrence). Now it compacts only when the history is really long, and even then
+    // the most recent keepRecentMessages block stays verbatim.
     //
     // AGT-4386: the threshold is sized to the model's window when the adapter
     // knows it (0.75 × what the request can carry), and oversized old tool
@@ -680,7 +680,7 @@ async function runAgenticLoopInner(
       }
     }
 
-    // API 호출
+    // API call
     apiCallCount++;
     onLog?.(`▸ API call #${apiCallCount}${turn > 0 ? ` (tool turn ${turn})` : ''}`);
 
@@ -778,10 +778,10 @@ async function runAgenticLoopInner(
       toolCalls: (assistantMsg.tool_calls ?? []).map((tc) => `${tc.function.name} ${tc.function.arguments}`),
     });
 
-    // 도구 호출이 없으면 최종 응답
+    // No tool calls means the final response
     if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
-      // SEARCH/REPLACE 모드 — 도구 호출이 아니라 응답 본문의 S/R 블록으로 편집한다.
-      // 블록이 있으면 직접 적용하고(보호 파일은 거부) 결과를 되돌려 루프를 잇는다. (INT-1676)
+      // SEARCH/REPLACE mode — edits come from S/R blocks in the response body, not from tool calls.
+      // If blocks are present, apply them directly (protected files are rejected) and feed the result back to continue the loop. (INT-1676)
       if (!readOnly && editFormat === 'search-replace' && assistantMsg.content) {
         const parsed = parseSearchReplaceBlocks(assistantMsg.content);
         if (parsed.blocks.length > 0) {
@@ -828,8 +828,8 @@ async function runAgenticLoopInner(
         }
       }
 
-      // no-edit 종료 가드 — 수정 필수 작업인데 edit/write를 한 번도 안 하고 끝내려 하면
-      // 되밀어 계속하게 한다(경량 모델의 조기 결론 패턴 차단).
+      // No-edit termination guard — if the task requires edits but the model tries to finish without ever using edit/write,
+      // push it back to continue (blocks the early-conclusion pattern of lightweight models).
       if (editToolCount === 0 && noEditNudgesUsed < nudgeMaxOnNoEdit) {
         noEditNudgesUsed++;
         onLog?.(`↩ No-edit guard: model tried to finish without editing (nudge ${noEditNudgesUsed}/${nudgeMaxOnNoEdit})`);
@@ -880,13 +880,13 @@ async function runAgenticLoopInner(
       break;
     }
 
-    // 어시스턴트 메시지를 히스토리에 추가 (tool_calls 포함)
+    // Append the assistant message to the history (including tool_calls)
     messages.push({
       role: 'assistant',
       content: assistantMsg.content,
       tool_calls: assistantMsg.tool_calls,
     });
-    // 도구 실행
+    // Run tools
     const toolCalls: ToolCall[] = assistantMsg.tool_calls.map(tc => ({
       id: tc.id,
       function: {
@@ -977,7 +977,7 @@ async function runAgenticLoopInner(
     }
     for (const key of observed) seenToolResults.add(key);
 
-    // 도구 결과를 메시지에 추가 (길이 초과 시 자동 truncate)
+    // Append the tool result to the messages (auto-truncated when too long)
     for (const result of results) {
       const content = truncateToolResult(result.content);
       messages.push({
@@ -1097,7 +1097,7 @@ async function runAgenticLoopInner(
 }
 
 /**
- * AgenticLoopResult → CliRunResult 변환
+ * AgenticLoopResult → CliRunResult conversion
  *
  * costUsd is the provider's own metered charge summed over the run (OpenRouter
  * prices every response); it stays 0 for unmetered providers — codex-responses
@@ -1247,18 +1247,18 @@ export function shouldNudgeCoordinationCheck(
   return hasCoordinationContext && turnsSinceLastCheck >= COORDINATION_CHECK_NUDGE_EVERY;
 }
 
-// ============ 히스토리 압축 (VEGA compaction.py 패턴 이식) ============
+// ============ History compaction (ported from the VEGA compaction.py pattern) ============
 
 /**
- * 이전 턴(assistant+tool 쌍)을 요약 1줄로 교체.
- * OpenAI API 제약: tool 메시지는 직전 assistant의 tool_call_id와 대응해야 하므로
- * 오래된 assistant+tool 쌍은 텍스트 요약으로 대체해 API 오류를 방지.
+ * Replace earlier turns (assistant+tool pairs) with a one-line summary.
+ * OpenAI API constraint: a tool message must match the tool_call_id of the preceding assistant, so
+ * old assistant+tool pairs are replaced with a text summary to avoid API errors.
  *
- * 보존 기준 (VEGA keep_recent): 최근 keepRecent개 메시지 블록은 항상 원본 유지.
- * tool 메시지는 직전 assistant의 tool_call_id와 짝이 맞아야 하므로, 보존 경계는
- * keepRecent 지점 이후 첫 assistant로 정렬해 짝이 깨진 tool 메시지가 남지 않게 한다.
- * 기존 [Prior turns compacted] 요약이 있으면 새 요약에 합산 후 교체.
- * (테스트를 위해 export — 외부에서 직접 호출할 일은 없음)
+ * Retention rule (VEGA keep_recent): the most recent keepRecent message block is always kept verbatim.
+ * Because a tool message must pair with the preceding assistant tool_call_id, the retention boundary is
+ * aligned to the first assistant after the keepRecent point so no orphaned tool message is left.
+ * If an existing [Prior turns compacted] summary is present, merge it into the new summary and replace it.
+ * (Exported for tests — nothing outside calls it directly)
  */
 /** What the adapters ask for as max_tokens; the request must leave this much of the window free. */
 export const DEFAULT_RESERVED_OUTPUT_TOKENS = 16384;
@@ -1342,9 +1342,9 @@ export function trimOversizedToolOutputs(
 export function compactPriorTurns(messages: ChatMessage[], keepRecent = 8): void {
   const headerCount = messages[0]?.role === 'system' ? 2 : 1;
 
-  // 최근 keepRecent개 메시지는 보존 — 압축 상한 인덱스 산출
+  // Keep the most recent keepRecent messages — compute the upper-bound index for compaction
   const desired = Math.max(headerCount, messages.length - keepRecent);
-  // 보존 경계를 assistant 시작점으로 정렬 (orphan tool 메시지 방지)
+  // Align the retention boundary to an assistant start (avoids orphan tool messages)
   let boundary = desired;
   while (boundary < messages.length && messages[boundary].role === 'tool') {
     boundary++;
@@ -1383,7 +1383,7 @@ export function compactPriorTurns(messages: ChatMessage[], keepRecent = 8): void
         });
         summaryParts.push(calls.join(', '));
       } else {
-        // 기존 compacted 요약이면 내용 그대로 흡수, 아니면 어시스턴트 설명 텍스트 보존
+        // If it is an existing compacted summary, absorb its content as-is; otherwise keep the assistant explanatory text
         const text = (msg.content ?? '').trim();
         if (text) summaryParts.push(text.startsWith('[Prior') ? text : `note: ${text.slice(0, 200)}`);
       }

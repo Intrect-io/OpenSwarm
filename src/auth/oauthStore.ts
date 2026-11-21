@@ -63,7 +63,7 @@ function isAuthProfile(value: unknown): value is AuthProfile {
 
 const STORE_PATH = join(homedir(), '.openswarm', 'auth-profiles.json');
 const STORE_LOCK = `${STORE_PATH}.lock`;
-const REFRESH_BUFFER_MS = 5 * 60 * 1000; // 5분 전에 갱신
+const REFRESH_BUFFER_MS = 5 * 60 * 1000; // refresh 5 minutes before expiry
 const OPENAI_TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token';
 const LINEAR_TOKEN_ENDPOINT = 'https://api.linear.app/oauth/token';
 
@@ -284,7 +284,7 @@ export class TokenRefreshError extends Error {
 }
 
 /**
- * 유효한 access token 반환. 만료 임박 시 자동 refresh.
+ * Return a valid access token. Auto-refreshes when close to expiry.
  *
  * Concurrent refreshes of the same key serialize on {@link STORE_LOCK}: the
  * second waiter re-reads disk under the lock and returns the already-rotated

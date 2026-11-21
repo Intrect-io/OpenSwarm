@@ -300,8 +300,8 @@ export class PairPipeline extends EventEmitter {
     });
   }
   /**
-   * Worker에 주입할 코드 컨텍스트 수집
-   * Draft 분석이 있으면 재사용, 없으면 직접 수집
+   * Collect the code context to inject into the Worker
+   * Reuse the Draft analysis if present, otherwise collect directly
    */
   /** Check if a stage is enabled. */
   private hasStage(stage: PipelineStage): boolean {
@@ -356,7 +356,7 @@ export class PairPipeline extends EventEmitter {
     return testerResult;
   }
 
-  /** 복구 판정은 실제 단계 바깥에서 기록해 lease 실패를 단계 성공으로 바꾸지 않는다. */
+  /** Record the recovery verdict outside the real stage so a lease failure is not turned into a stage success. */
   private async runStage(stage: PipelineStage, context: PipelineContext,
     overrides?: { model?: string; reasoningEffort?: 'low' | 'medium' | 'high'; modelRole?: ModelRole }): Promise<StageResult> {
     const recovery = context.recovery;
@@ -432,7 +432,7 @@ export class PairPipeline extends EventEmitter {
           const onLog = (line: string) =>
             broadcastEvent({ type: 'log', data: { taskId, stage: 'worker', line: `[${prefix}] ${line}` } });
 
-          // 코드 컨텍스트 수집 (첫 시도 정확도 향상 목적)
+          // Collect code context (to improve first-attempt accuracy)
           const workerContext = await collectWorkerContext(context, this.config.draftAnalysis);
           if (workerContext && this.config.verbose) {
             const modCount = (workerContext.impactAnalysis?.directModules.length ?? 0)

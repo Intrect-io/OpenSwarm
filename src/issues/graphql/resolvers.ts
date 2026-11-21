@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Issue Tracker GraphQL Resolvers
 // Created: 2026-04-03
-// Purpose: Query + Mutation 리졸버
+// Purpose: Query + Mutation resolvers
 // ============================================
 
 import { getIssueStore } from '../sqliteStore.js';

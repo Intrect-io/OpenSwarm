@@ -10,7 +10,7 @@ import { runningProjectSessions } from './projectRuntime.js';
 
 export type ProjectRunner = Pick<AutonomousRunner, 'getAllowedProjects' | 'getRunningTasks' | 'getQueuedTasks' | 'getStats'>;
 
-/** 집계는 페이지 크기와 라이브 보드 상한으로 잘리지 않는다. */
+/** Aggregates are not truncated by the page size or the live board cap. */
 export function queryProjectSnapshot(paths: readonly string[], runner?: ProjectRunner): ProjectSnapshot {
   const channels = syncChannels(paths);
   const db = channelDatabase();
@@ -67,7 +67,7 @@ export function queryProjectSnapshot(paths: readonly string[], runner?: ProjectR
   return buildProjectSnapshot({ channels, sessions, knownTasks, events, parked, unavailable });
 }
 
-/** 전체 관계 목록은 원본을 서버에서 집계한다. 표시용 그래프 상한과 무관하다. */
+/** The full relation list is aggregated from the source on the server, independent of the display graph cap. */
 export function queryTaskRelations(repoKey: string, taskId: string): { nodes: Array<{
   id: string; address: string; name: string; role?: string;
 }>; edges: Array<{ source: string; target: string; count: number }> } {
@@ -82,7 +82,7 @@ export function queryTaskRelations(repoKey: string, taskId: string): { nodes: Ar
   for (const e of rows.map(toEvent)) {
     const source = JSON.stringify([repoKey, e.sourceTaskId ?? e.taskId, e.actor]);
     nodes.set(source, { id: source, address: e.actor, name: e.actorName ?? e.actor, role: e.actorRole });
-    // 명시적인 수신 작업이 없으면 다른 프로젝트/작업 관계를 추측하지 않는다.
+    // Without an explicit receiving task, do not guess relations to other projects/tasks.
     if (!e.recipient || !e.targetTaskId) continue;
     const target = JSON.stringify([repoKey, e.targetTaskId, e.recipient]);
     nodes.set(target, { id: target, address: e.recipient, name: e.recipientName ?? e.recipient, role: e.recipientRole });

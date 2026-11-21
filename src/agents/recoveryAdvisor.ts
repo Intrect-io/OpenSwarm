@@ -49,7 +49,7 @@ export function parseRecoveryAdvice(text: string, evidence: Record<string, strin
     ...(v.premiseDisposition ? { premiseDisposition: v.premiseDisposition as AdviceDecision['premiseDisposition'] } : {}) };
 }
 
-/** 진단만 수행한다. 외부 CLI의 read-only 플래그를 도구 없는 실행과 동일시하지 않는다. */
+/** Diagnose only. Do not equate an external CLI's read-only flag with a tool-free run. */
 export async function runRecoveryAdvisor(input: RecoveryAdvisorInput, deps: {
   spawn?: typeof spawnCli;
   resolve?: typeof getAdapter;

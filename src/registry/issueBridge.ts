@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Registry ↔ Issue Bridge
 // Created: 2026-04-10
-// Purpose: 코드 엔티티와 이슈 간 연결 헬퍼
+// Purpose: Helpers linking code entities and issues
 // ============================================
 
 import { getRegistryStore, ISSUE_ENTITIES_DEFAULT_LIMIT } from './sqliteStore.js';
@@ -36,9 +36,9 @@ export interface EntitiesForIssueResult {
 }
 
 /**
- * 이슈에 연결된 코드 엔티티 조회
- * - 명시적으로 linkEntityToIssue된 엔티티
- * - issue의 relevantFiles 경로로 해당 파일의 엔티티를 자동 검색
+ * Look up the code entities linked to an issue
+ * - entities explicitly linked via linkEntityToIssue
+ * - entities of the issue's relevantFiles paths, found automatically by file
  *
  * Aggregation is bounded: at most `maxEntities` entities are returned (explicit
  * links are fetched with that limit in SQL and take precedence), and at most
@@ -64,7 +64,7 @@ export function getEntitiesForIssueBounded(
   const entityMap = new Map<string, CodeEntity>();
   let truncated = files.length > maxFiles;
 
-  // 1. 명시적 연결된 엔티티 (정식 store 메서드 사용, SQL LIMIT). One extra row
+  // 1. Explicitly linked entities (uses the official store method, SQL LIMIT). One extra row
   // reveals overflow; the store clamps at ISSUE_ENTITIES_DEFAULT_LIMIT, so a
   // result that hits that clamp may also hide more links.
   const explicit = store.getEntitiesByIssueId(issueId, projectId, maxEntities + 1);
@@ -73,7 +73,7 @@ export function getEntitiesForIssueBounded(
     entityMap.set(entity.id, entity);
   }
 
-  // 2. relevantFiles 경로로 암시적 연결
+  // 2. Implicit links via relevantFiles paths
   const consulted = files.slice(0, maxFiles);
   fileLoop: for (let i = 0; i < consulted.length; i++) {
     if (entityMap.size >= maxEntities) {

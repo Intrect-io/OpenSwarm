@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Code Registry Module
 // Created: 2026-04-10
-// Purpose: 코드 엔티티 레지스트리 퍼블릭 API
+// Purpose: Public API of the code entity registry
 // ============================================
 
 // Store

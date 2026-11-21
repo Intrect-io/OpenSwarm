@@ -955,7 +955,7 @@ export function loadConfig(customPath?: string): SwarmConfig {
   // 3. Substitute environment variables
   const substituted = substituteEnvVarsDeep(rawData) as Record<string, unknown>;
 
-  // 3.5. Optional 블록 정리: 환경변수 미설정 시 빈 문자열이 들어온 블록 제거
+  // 3.5. Optional block cleanup: drop blocks that received an empty string because the env var is unset
   const discordBlock = substituted.discord as Record<string, unknown> | undefined;
   if (discordBlock && (!discordBlock.token || !discordBlock.channelId)) {
     console.log(status.warn('[Config] Discord credentials not set — disabling Discord integration'));

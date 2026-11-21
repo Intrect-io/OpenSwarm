@@ -1,4 +1,4 @@
-/** Native 실행 경계는 모델의 성공 주장보다 우선하며 어느 필수 단계에서도 유지한다. */
+/** The native execution boundary takes precedence over the model's success claim and holds at every required stage. */
 export interface ExecutionBoundarySignals {
   executionOutcomeUnknown?: boolean;
   blockedOnOperator?: boolean;

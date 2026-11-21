@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Code Registry SQLite Store
 // Created: 2026-04-10
-// Purpose: better-sqlite3 기반 코드 엔티티 레지스트리
+// Purpose: better-sqlite3-based code entity registry
 // Dependencies: better-sqlite3, nanoid
 // ============================================
 
@@ -68,7 +68,7 @@ function toLiteralFtsQuery(search: string): string | null {
   return terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(' AND ');
 }
 
-// ============ 인터페이스 ============
+// ============ Interfaces ============
 
 export interface RegisterEntityInput {
   projectId: string;
@@ -112,7 +112,7 @@ export interface EventData {
   actor?: string;
 }
 
-// ============ Store 구현 ============
+// ============ Store implementation ============
 
 export class SqliteRegistryStore {
   private db: Database.Database;
@@ -280,7 +280,7 @@ export class SqliteRegistryStore {
     return this.db.transaction(fn)();
   }
 
-  // ============ 엔티티 CRUD ============
+  // ============ Entity CRUD ============
 
   registerEntity(input: RegisterEntityInput): CodeEntity {
     const id = nanoid(12);
@@ -385,7 +385,7 @@ export class SqliteRegistryStore {
 
     if (fields.length === 0) return existing;
 
-    // qualified_name 갱신 (name 변경 시)
+    // Update qualified_name (when name changes)
     if (patch.name && patch.name !== existing.name) {
       fields.push('qualified_name = ?');
       values.push(`${existing.filePath}::${patch.name}`);
@@ -449,7 +449,7 @@ export class SqliteRegistryStore {
       params.push(...filter.tags);
     }
 
-    // FTS 전문검색
+    // FTS full-text search
     let ftsJoin = '';
     const ftsQuery = filter?.search ? toLiteralFtsQuery(filter.search) : null;
     if (ftsQuery) {
@@ -498,7 +498,7 @@ export class SqliteRegistryStore {
     return rows.map(toEntitySyncRow);
   }
 
-  // ============ 상태 관리 ============
+  // ============ State management ============
 
   deprecateEntity(id: string, reason?: string, actor = 'system'): CodeEntity | null {
     const existing = this.getEntity(id);
@@ -538,7 +538,7 @@ export class SqliteRegistryStore {
     return this.getEntity(id);
   }
 
-  // ============ 태그 ============
+  // ============ Tags ============
 
   addTag(entityId: string, tag: string, value?: string): void {
     this.db.prepare(
@@ -571,7 +571,7 @@ export class SqliteRegistryStore {
     ).all(entityId) as TagRow[]).map(r => ({ tag: r.tag, value: r.value ?? undefined }));
   }
 
-  // ============ 경고 ============
+  // ============ Warnings ============
 
   addWarning(
     entityId: string, severity: WarningSeverity,
@@ -651,7 +651,7 @@ export class SqliteRegistryStore {
     ).all(...params, clampInteger(limit, 200, 200), clampInteger(offset, 0, 200)) as WarningRow[]).map(this.rowToWarning);
   }
 
-  // ============ 관계 ============
+  // ============ Relations ============
 
   addRelation(sourceId: string, targetId: string, relationType: RelationType): void {
     this.db.prepare(
@@ -678,7 +678,7 @@ export class SqliteRegistryStore {
     }));
   }
 
-  // ============ 이슈/메모리 연결 ============
+  // ============ Issue/memory links ============
 
   linkIssue(entityId: string, issueId: string): void {
     const now = new Date().toISOString();
@@ -734,7 +734,7 @@ export class SqliteRegistryStore {
     ).all(entityId) as MemoryLinkRow[]).map(r => r.memory_id);
   }
 
-  // ============ 이벤트 ============
+  // ============ Events ============
 
   addEvent(entityId: string, type: EntityEventType, data?: EventData): EntityEvent {
     const id = nanoid(12);
@@ -772,7 +772,7 @@ export class SqliteRegistryStore {
     ).all(entityId, limit) as EventRow[]).map(this.rowToEvent);
   }
 
-  // ============ 특화 쿼리 ============
+  // ============ Specialized queries ============
 
   fileBrief(filePath: string, projectId?: string): FileBrief {
     const rows = projectId
@@ -880,7 +880,7 @@ export class SqliteRegistryStore {
   searchEntities(query: string, limit = 20, projectId?: string): CodeEntity[] {
     const ftsQuery = toLiteralFtsQuery(query);
     if (!ftsQuery) return [];
-    // FTS5 검색 시도
+    // Try FTS5 search
     let ftsRows: EntityRow[] = [];
     try {
       const projectFilter = projectId ? 'AND e.project_id = ?' : '';
@@ -901,7 +901,7 @@ export class SqliteRegistryStore {
 
     let results = this.rowsToEntities(ftsRows);
 
-    // FTS 결과가 부족하면 LIKE 폴백 (camelCase, 부분 매칭)
+    // Fall back to LIKE when FTS results are insufficient (camelCase, partial match)
     if (results.length < limit) {
       const escapedQuery = query.replace(/[\\%_]/g, ch => `\\${ch}`);
       const likePattern = `%${escapedQuery}%`;
@@ -925,7 +925,7 @@ export class SqliteRegistryStore {
     return results;
   }
 
-  // ============ 통계 ============
+  // ============ Statistics ============
 
   /** Per-project stats kept for callers that pass `maxAgeMs` (see getStats). */
   private statsCache = new Map<string, { at: number; value: RegistryStats }>();
@@ -985,7 +985,7 @@ export class SqliteRegistryStore {
     return value;
   }
 
-  // ============ 유틸 ============
+  // ============ Utilities ============
 
   close(): void {
     this.db.close();
@@ -999,7 +999,7 @@ export class SqliteRegistryStore {
   private rowToEvent(row: EventRow) { return mapRowToEvent(row); }
 }
 
-// 싱글톤
+// Singleton
 let storeInstance: SqliteRegistryStore | null = null;
 let storeInstancePath: string | null = null;
 

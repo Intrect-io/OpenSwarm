@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Issue Tracker Module Index
 // Created: 2026-04-03
-// Purpose: 이슈 트래커 퍼블릭 API
+// Purpose: Public API of the issue tracker
 // ============================================
 
 export { getIssueStore, closeIssueStore, SqliteIssueStore } from './sqliteStore.js';

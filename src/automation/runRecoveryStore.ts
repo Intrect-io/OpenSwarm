@@ -7,7 +7,7 @@ import type { AdviceRecord, ExecutionContract, ProgressSnapshot, RecoveryCheckpo
 const DAY = 24 * 60 * 60_000;
 export const recoveryHash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-/** 기존 원장에 추가하는 테이블. JSON task-state나 관측 요청으로 실행 권한을 만들지 않는다. */
+/** Tables added to the existing ledger. Neither JSON task-state nor observation requests create execution authority. */
 export class RunRecoveryStore {
   constructor(private readonly db: Database.Database) {
     db.transaction(() => db.exec(`CREATE TABLE IF NOT EXISTS automation_recovery (
@@ -164,7 +164,7 @@ export class RunRecoveryStore {
       nextAction: advice?.decision?.action, reason: advice?.reason ?? advice?.decision?.diagnosis };
   }
 
-  /** 운영자의 재개 전환과 같은 트랜잭션에서만 terminal 권고의 적용을 해제한다. */
+  /** Releases the applied terminal recommendation only within the same transaction as the operator's resume transition. */
   operatorResumed(issueId: string): void {
     if (!this.db.inTransaction) throw new Error('Operator recovery must share the run transition transaction');
     const rows = this.db.prepare('SELECT id,data_json FROM automation_advice WHERE issue_id=?').all(issueId) as Array<{ id: string; data_json: string }>;

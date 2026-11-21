@@ -618,7 +618,7 @@ describe('Path validation', () => {
       TMP_DIR,
     );
     expect(result.is_error).toBe(true);
-    // 거부 메시지는 모델 자가수정을 돕도록 안내형 — "outside the project root" 포함.
+    // The rejection message is guidance-style to help the model self-correct - includes "outside the project root".
     expect(result.content).toContain('outside the project root');
   });
 

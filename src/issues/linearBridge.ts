@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Linear ↔ Local Issue Bridge
 // Created: 2026-04-03
-// Purpose: Linear 이슈를 로컬 DB와 양방향 동기화 (optional)
+// Purpose: Bidirectional sync between Linear issues and the local DB (optional)
 // Dependencies: @linear/sdk, sqliteStore
 // ============================================
 
@@ -28,7 +28,7 @@ import {
   sameProcessNamespace,
 } from '../support/processLiveness.js';
 
-// Linear SDK는 동적 import (Linear 미사용 시 로드 안 함)
+// The Linear SDK is imported dynamically (not loaded when Linear is unused)
 let linearClient: any = null;
 let linearTeamId: string = '';
 let linearInitPromise: Promise<void> | null = null;
@@ -140,11 +140,11 @@ async function withOutboundClaim<T>(issueId: string, operation: () => Promise<T>
 }
 
 /**
- * Linear 브릿지 초기화
- * config.yaml에서 linear.enabled: true 일 때만 호출
+ * Initialize the Linear bridge
+ * Called only when linear.enabled: true in config.yaml
  */
 export function initLinearBridge(apiKey: string, teamId: string): Promise<void> {
-  // 기존 linear.ts의 클라이언트를 재사용하기 위해 동적 import
+  // Dynamic import to reuse the existing linear.ts client
   linearTeamId = teamId;
   linearClient = null;
   linearInitPromise = import('@linear/sdk').then(({ LinearClient }) => {
@@ -230,11 +230,11 @@ export async function drainLinearIssuesToStore(
         const linearData = await mapLinearToLocal(issue, projectId);
 
         if (existing) {
-          // 이미 존재 → 업데이트
+          // Already exists → update
           store.updateIssue(existing.id, linearData);
           updated++;
         } else {
-          // 새 이슈 → 생성
+          // New issue → create
           store.createIssue({
             ...linearData,
             source: 'linear',
@@ -272,7 +272,7 @@ export async function drainLinearIssuesToStore(
 }
 
 /**
- * Linear → 로컬: Linear 이슈를 로컬 DB에 동기화
+ * Linear → local: sync Linear issues into the local DB
  *
  * Returns the full {@link LinearSyncProgress} so callers can tell a complete
  * sync from a truncated (limit/page cap) or failed one, not just the counts.
@@ -324,9 +324,9 @@ export async function syncFromLinear(
 }
 
 /**
- * 로컬 → Linear: 로컬 이슈를 Linear에 생성 (durable claim + per-issue serialize).
- * Linear create와 로컬 mapping persist를 분리해, mapping 실패 시 linearId로
- * 재연결/재시도하고 동일 프로세스 재호출에서 중복 create를 막는다.
+ * Local → Linear: create a local issue in Linear (durable claim + per-issue serialize).
+ * Separates the Linear create from persisting the local mapping, so on mapping failure it reconnects/retries
+ * via linearId and prevents duplicate creates on a same-process re-call.
  */
 const pendingLinearMappings = new Map<string, {
   linearId: string;
@@ -450,7 +450,7 @@ export async function createOutboundIssue(
 
       const issue = store.getIssue(issueId);
       if (!issue) return null;
-      if (issue.linearId) return issue.linearId; // 이미 연결됨
+      if (issue.linearId) return issue.linearId; // Already linked
 
       try {
         const stateId = await resolveLinearStateId(mapStatusToLinear(issue.status));
@@ -496,7 +496,7 @@ export async function createOutboundIssue(
 }
 
 /**
- * 상태 동기화: 로컬 상태 변경 → Linear 반영
+ * State sync: local state change → reflected in Linear
  */
 export async function syncStatusToLinear(
   store: SqliteIssueStore,
@@ -523,7 +523,7 @@ export async function syncStatusToLinear(
   }
 }
 
-// ============ 매핑 유틸 ============
+// ============ Mapping utilities ============
 
 async function waitForLinearBridgeInit(): Promise<void> {
   if (linearInitPromise) {

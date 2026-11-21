@@ -157,9 +157,9 @@ export async function fetchLinearTasks(): Promise<{ tasks: TaskItem[]; error?: s
 
 export interface ExecutionContext {
   allowedProjects: string[];
-  /** Draft analyzer 모델. 미설정 시 어댑터의 getDefaultModel()로 동적 해석. */
+  /** Draft analyzer model. When unset, resolved dynamically via the adapter's getDefaultModel(). */
   draftModel?: string;
-  /** Draft analyzer 활성화 (기본: true) */
+  /** Enable the Draft analyzer (default: true) */
   enableDraftAnalysis?: boolean;
   plannerModel?: string;
   plannerTimeoutMs?: number;
@@ -265,7 +265,7 @@ export async function resolveProjectPath(
     return null;
   }
 
-  // 0순위: explicit openswarm.json mapping — the Linear projectId the user picked
+  // Priority 0: explicit openswarm.json mapping — the Linear projectId the user picked
   // in `openswarm add` (written to <repo>/openswarm.json). Highest confidence, no
   // name guessing; this is the source of truth for repo↔Linear connection.
   for (const allowed of ctx.allowedProjects) {
@@ -281,7 +281,7 @@ export async function resolveProjectPath(
     }
   }
 
-  // 1순위: allowedProjects에서 정확한 basename 매칭 (fuzzy보다 신뢰도 높음)
+  // Priority 1: exact basename match in allowedProjects (more reliable than fuzzy)
   for (const allowed of ctx.allowedProjects) {
     const expanded = allowed.replace('~', process.env.HOME || '');
     const dirName = expanded.split('/').pop();
@@ -293,7 +293,7 @@ export async function resolveProjectPath(
     }
   }
 
-  // 2순위: ~/dev/{name} 직접 경로
+  // Priority 2: direct path ~/dev/{name}
   const directPath = `${process.env.HOME}/dev/${projectName}`;
   if (await isValidProjectPath(directPath) && isAllowed(directPath)) {
     console.log(`[AutonomousRunner] Direct path found: ${projectName} → ${directPath}`);
@@ -306,14 +306,14 @@ export async function resolveProjectPath(
     return lowerPath;
   }
 
-  // 3순위: ~/dev/tools/ 서브디렉토리
+  // Priority 3: ~/dev/tools/ subdirectory
   const toolsPath = `${process.env.HOME}/dev/tools/${projectName}`;
   if (await isValidProjectPath(toolsPath) && isAllowed(toolsPath)) {
     console.log(`[AutonomousRunner] Tools path found: ${projectName} → ${toolsPath}`);
     return toolsPath;
   }
 
-  // 4순위: fuzzy match (스캔 기반, 오탐 가능성 있음)
+  // Priority 4: fuzzy match (scan-based, may produce false positives)
   const mappedPath = await projectMapper.mapLinearProject(
     projectId,
     projectName,
@@ -660,7 +660,7 @@ export async function decomposeTask(
     broadcastEvent({ type: 'log', data: { taskId, stage: 'decompose', line: `⏱ Planner running... ${elapsed}s` } });
   }, 30000);
 
-  // KG 영향 분석 — Draft가 이미 가지고 있으면 재사용
+  // KG impact analysis - reuse it if Draft already has it
   const impactAnalysis = draftAnalysis?.impactAnalysis
     ?? await analyzeIssue(projectPath, task.title, task.description).catch(() => null);
 
@@ -790,8 +790,8 @@ export async function executePipeline(
   if (operatorFeedback) task = { ...task, authoritativeOperatorFeedback: operatorFeedback };
 
   // ============================================
-  // Draft Analysis (Haiku 사전 분석 — ~3초)
-  // Planner + Worker에 enriched context 제공
+  // Draft Analysis (Haiku pre-analysis - ~3s)
+  // Provide enriched context to Planner + Worker
   // ============================================
   let draftResult: DraftAnalysis | undefined = task.preAdmissionDraft;
   const projectGoal = ctx.getProjectGoal?.(projectPath);

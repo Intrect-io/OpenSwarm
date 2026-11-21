@@ -271,7 +271,7 @@ export class CoordinationStore {
     // locked mutate, so a replayed answer cannot double-publish.
     const event = await this.mutate((state) => {
       if (normalized.kind === 'human-question' && ['open', 'waiting', 'running'].includes(normalized.status)) {
-        // notify 완료 뒤 board lock을 기다리는 동안 답변이 도착한 경우도 같은 잠금 안에서 막는다.
+        // Also block, inside the same lock, an answer that arrives while waiting for the board lock after notify completes.
         const answered = [...this.exchange(normalized.correlationId!), ...state.events].find((candidate) =>
           candidate.correlationId === normalized.correlationId && candidate.kind === 'human-answer'
           && candidate.status === 'completed'

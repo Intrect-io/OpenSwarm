@@ -82,7 +82,7 @@ describe('stage lifecycle on the coordination board', () => {
 
     // Caught by the fresh PR review, not self-caught: the adapters emit the
     // ACTIVE locale's placeholder (`t('common.fallback.noSummary')`), so an
-    // English-only comparison still published `(요약 없음)` verbatim on a
+    // English-only comparison still published the Korean placeholder verbatim on a
     // Korean deployment — which is this repo's own default locale.
     it("recognizes the placeholder in whatever locale the adapters emitted it", async () => {
       const { initLocale, t } = await import('../locale/index.js');

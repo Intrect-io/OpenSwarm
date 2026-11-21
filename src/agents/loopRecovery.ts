@@ -9,7 +9,7 @@ import { premiseSources } from './recoveryPremise.js';
 
 export class RecoveryParkError extends Error {}
 
-/** 실제 durable claim이 없는 ad-hoc/legacy 실행에는 권한·실행 원장을 발명하지 않는다. */
+/** Do not invent an authority/execution ledger for ad-hoc/legacy runs that have no real durable claim. */
 export class LoopRecovery {
   private readonly contract: ExecutionContract;
   private readonly contractHash: string;
@@ -44,9 +44,9 @@ export class LoopRecovery {
         if (advice.premiseVerification) recovery.feedback = `Independent premise verification (${advice.premiseVerification.disposition}); original review still blocks. ${advice.premiseVerification.reason}`;
       }
       const previous = hooks.resume(recovery.contractHash, digest, recovery.environmentHash);
-      // worker가 보존되지 않았다면 뒤 단계 결과만으로 작업을 완료할 수 없다.
+      // If the worker was not preserved, the task cannot be completed from later-stage results alone.
       if (previous.some((c) => c.stage === 'worker')) {
-        // 외부 서비스와 설치된 의존성을 완전히 attestation하지 못한다. 필수 검증은 다시 실행한다.
+        // External services and installed dependencies cannot be fully attested. Rerun required verification.
         for (const checkpoint of previous.filter((c) => c.stage === 'worker')) recovery.restored.set(checkpoint.stage, checkpoint.result);
         context.runSnapshotHash = previous.find((c) => c.stage === 'worker')?.runSnapshotHash;
       }
@@ -77,7 +77,7 @@ export class LoopRecovery {
 
   start(stage: string): void {
     if (!this.hooks.isCurrent() || this.context.abortSignal?.aborted) throw new Error('Recovery lease fence rejected');
-    // 실행 도중 crash는 결과가 불명확하다. 알려진 인프라 실패가 기록된 뒤에만 재사용을 허용한다.
+    // A crash mid-run leaves the outcome unclear. Allow reuse only after a known infrastructure failure has been recorded.
     if (stage === 'worker') this.hooks.settle(false);
     else this.hooks.resumable(undefined);
   }
@@ -97,7 +97,7 @@ export class LoopRecovery {
     const successful = result.success && !boundary.executionOutcomeUnknown && !boundary.blockedOnOperator;
     const nativeStall = boundary.terminationCause === 'no_progress';
     const error = nativeStall ? 'Native execution stopped after repeated unchanged tool results' : successful ? '' : stageFailure(result);
-    // Native 종료 신호는 진단 자료다. 실제 단계 성공을 복구 실패로 재분류하지 않는다.
+    // Native exit signals are diagnostic data. Do not reclassify actual stage success as a recovery failure.
     const cause = successful ? undefined : recoveryCause(error, result.result, transportError);
     const fingerprint = cause ? failureFingerprint(cause, label, error) : undefined;
     const value = result.result as { terminationCause?: string; costInfo?: { model?: string; servedModels?: string[] } };
@@ -140,7 +140,7 @@ export class LoopRecovery {
         observations: JSON.stringify(progress), acceptance: JSON.stringify(this.contract.acceptance) },
       allowedModels, remainingMs, timeoutMs: cfg.timeoutMs, signal: this.context.abortSignal });
     if (outcome.costInfo) this.costs.push(outcome.costInfo);
-    // 늦은 모델 응답은 lease를 재확인하기 전까지 적용하지 않는다.
+    // Do not apply a late model response until the lease has been re-verified.
     if (!this.hooks.canAdvise() || this.context.abortSignal?.aborted) return;
     const update: Pick<AdviceRecord, 'status' | 'decision' | 'reason' | 'applied' | 'costInfo' | 'premiseVerification'> = {
       status: outcome.decision ? 'completed' : 'unavailable', decision: outcome.decision,
@@ -171,13 +171,13 @@ export class LoopRecovery {
     } else if (advice.action === 'ask_operator' || advice.action === 'stop') {
       this.parkReason = recoveryText(`${advice.diagnosis}\n${advice.condition}`);
     } else if (!(['wait', 'retry_stage'].includes(advice.action) && ['infra', 'quota'].includes(cause))) return false;
-    // 대기와 재시도는 기존 coordinator의 backoff/예산을 사용한다.
+    // Waiting and retries use the existing coordinator's backoff/budget.
     return true;
   }
 
   private async verifyPremise(key: string, digest: string, claim: string, failedModel?: string, failedModels?: string[], advisorModels?: string[]): Promise<AdviceRecord['premiseVerification']> {
     const cfg = this.context.config.loopAdvisor!;
-    // 첫 Advisor의 권고를 같은 모델로 재확인하지 않는다. 설정된 tier가 없으면 원래 검토를 유지한다.
+    // Do not re-verify the first Advisor's recommendation with the same model. If no tier is configured, keep the original review.
     if (!advisorModels?.length) return undefined;
     const excluded = [failedModel, ...(failedModels ?? []), ...advisorModels].filter((m): m is string => !!m);
     const candidates = [this.context.config.roles?.reviewer, this.context.config.advisorRole];

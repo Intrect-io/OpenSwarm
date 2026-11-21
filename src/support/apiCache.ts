@@ -1,15 +1,15 @@
 /**
- * API 응답 캐싱 매니저
+ * API response cache manager
  *
- * 목적:
- * - 빈번한 API 호출의 응답 시간 단축 (30-40% 개선 목표)
- * - 메모리 효율성 유지
- * - 캐시 무효화 전략 통합
+ * Purpose:
+ * - Shorten response time of frequent API calls (target: 30-40% improvement)
+ * - Keep memory use efficient
+ * - Integrate cache invalidation strategies
  *
- * 구현:
- * - 메모리 기반 LRU 캐시
- * - TTL(Time-To-Live) 기반 자동 만료
- * - 캐시 통계 추적
+ * Implementation:
+ * - In-memory LRU cache
+ * - Automatic expiry based on TTL (Time-To-Live)
+ * - Cache statistics tracking
  */
 
 interface CacheEntry<T> {
@@ -37,13 +37,13 @@ export class APICache {
   constructor(cleanupIntervalMs: number = 60000, maxEntries: number = 1000, maxStats: number = 2000) {
     this.maxEntries = maxEntries;
     this.maxStats = maxStats;
-    // 1분마다 만료된 캐시 정리
+    // Purge expired entries every minute
     this.cleanupInterval = setInterval(() => this.cleanup(), cleanupIntervalMs);
     this.cleanupInterval.unref?.();
   }
 
   /**
-   * 캐시에서 데이터 조회
+   * Look up data in the cache
    */
   get<T>(key: string): T | null {
     const result = this.lookup<T>(key);
@@ -51,7 +51,7 @@ export class APICache {
   }
 
   /**
-   * null 값도 캐시 히트로 구분해야 하는 호출자를 위한 조회
+   * Lookup for callers that must distinguish a null value as a cache hit
    */
   lookup<T>(key: string): CacheLookup<T> {
     const entry = this.cache.get(key) as CacheEntry<T> | undefined;
@@ -61,14 +61,14 @@ export class APICache {
       return { hit: false };
     }
 
-    // TTL 확인
+    // Check TTL
     if (Date.now() - entry.timestamp > entry.ttlMs) {
       this.cache.delete(key);
       this.recordMiss(key);
       return { hit: false };
     }
 
-    // 히트 기록
+    // Record a hit
     entry.hits++;
     this.cache.delete(key);
     this.cache.set(key, entry);
@@ -77,7 +77,7 @@ export class APICache {
   }
 
   /**
-   * 캐시에 데이터 저장
+   * Store data in the cache
    */
   set<T>(key: string, data: T, ttlMs: number): void {
     if (this.cache.has(key)) {
@@ -93,7 +93,7 @@ export class APICache {
   }
 
   /**
-   * 캐시 초기화
+   * Clear the cache
    */
   clear(): void {
     this.cache.clear();
@@ -101,14 +101,14 @@ export class APICache {
   }
 
   /**
-   * 특정 키 무효화
+   * Invalidate a specific key
    */
   invalidate(key: string): void {
     this.cache.delete(key);
   }
 
   /**
-   * 패턴 기반 무효화 (와일드카드)
+   * Pattern-based invalidation (wildcard)
    */
   invalidatePattern(pattern: string): void {
     if (pattern.length > 1_000) throw new Error('Cache invalidation pattern is too long');
@@ -124,7 +124,7 @@ export class APICache {
   }
 
   /**
-   * 캐시 통계 조회
+   * Look up cache statistics
    */
   getStats(key?: string): Record<string, CacheStats> | CacheStats | null {
     if (key) {
@@ -134,14 +134,14 @@ export class APICache {
   }
 
   /**
-   * 캐시 크기 조회
+   * Look up cache size
    */
   getSize(): number {
     return this.cache.size;
   }
 
   /**
-   * 캐시 정리 (만료된 항목 제거)
+   * Clean up the cache (remove expired entries)
    */
   private cleanup(): void {
     const now = Date.now();
@@ -153,7 +153,7 @@ export class APICache {
   }
 
   /**
-   * 히트 기록
+   * Record a hit
    */
   private recordHit(key: string): void {
     const stat = this.stats.get(key) ?? { hits: 0, misses: 0, hitRate: 0 };
@@ -165,7 +165,7 @@ export class APICache {
   }
 
   /**
-   * 미스 기록
+   * Record a miss
    */
   private recordMiss(key: string): void {
     const stat = this.stats.get(key) ?? { hits: 0, misses: 0, hitRate: 0 };
@@ -193,7 +193,7 @@ export class APICache {
   }
 
   /**
-   * 정리 타이머 중단
+   * Stop the cleanup timer
    */
   destroy(): void {
     if (this.cleanupInterval) {
@@ -203,38 +203,38 @@ export class APICache {
   }
 }
 
-// 글로벌 캐시 인스턴스
+// Global cache instance
 export const apiCache = new APICache();
 
 /**
- * 캐시 유틸리티
+ * Cache utilities
  */
 export class CachedAPI {
   /**
-   * 캐시를 활용한 비동기 함수 래핑
+   * Wrap an async function with caching
    */
   static async cached<T>(
     key: string,
     fn: () => Promise<T>,
     ttlMs: number = 10000,
   ): Promise<T> {
-    // 캐시 확인
+    // Check the cache
     const cached = apiCache.lookup<T>(key);
     if (cached.hit) {
       return cached.data;
     }
 
-    // 캐시 미스: 함수 실행
+    // Cache miss: run the function
     const result = await fn();
 
-    // 결과 캐시
+    // Cache the result
     apiCache.set(key, result, ttlMs);
 
     return result;
   }
 
   /**
-   * 다중 캐시 키 검증
+   * Validate multiple cache keys
    */
   static invalidateMultiple(patterns: string[]): void {
     for (const pattern of patterns) {

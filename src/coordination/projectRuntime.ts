@@ -4,7 +4,7 @@ import { taskEventKey } from '../orchestration/decisionEngine.js';
 import { repositoryCell } from './repositoryCell.js';
 import type { ProjectSession } from './projectModel.js';
 
-/** 최근 발화가 아닌 현재 scheduler 세션과 실제 stage start/complete 기록을 사용한다. */
+/** Uses the current scheduler session and actual stage start/complete records, not recent utterances. */
 export function runningProjectSessions(runner: Pick<AutonomousRunner, 'getRunningTasks'>): ProjectSession[] {
   const stages = getStageBuffer().filter((e) => e.type === 'pipeline:stage');
   return runner.getRunningTasks().map((r) => {

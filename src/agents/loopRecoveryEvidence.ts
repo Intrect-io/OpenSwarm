@@ -27,7 +27,7 @@ export function executionContract(context: PipelineContext): ExecutionContract {
     allowedFiles: enforcedFileScope(task) ?? [] };
 }
 
-/** 예외의 transport 분류를 먼저 보존하고 모델 문장을 실행 권한으로 해석하지 않는다. */
+/** Preserve the exception's transport classification first and never treat model prose as execution authority. */
 export function recoveryCause(message: string, result?: StageResult['result'], transportError?: unknown): RecoveryCause {
   const worker = result as { blockedOnOperator?: boolean; executionOutcomeUnknown?: boolean; terminationCause?: string } | undefined;
   if (worker?.executionOutcomeUnknown) return 'outcome_unknown';
@@ -36,7 +36,7 @@ export function recoveryCause(message: string, result?: StageResult['result'], t
   if (transportError instanceof RateLimitError) return 'quota';
   if (/unauthori[sz]ed|authentication|invalid api key|not installed|not found.*(?:CLI|command)/i.test(message)) return 'configuration';
   if (transportError !== undefined && isInfraError(transportError)) return 'infra';
-  // issues 필드가 비었다는 이유만으로 객관적인 검증 충돌을 발명하지 않는다.
+  // Do not invent an objective verification conflict merely because the issues field is empty.
   return 'quality';
 }
 
@@ -50,7 +50,7 @@ export const failureFingerprint = (cause: RecoveryCause, stage: string, message:
 
 export function observedChecks(result: StageResult): string[] {
   const value = result.result as { executedCommands?: string[]; verificationEvidence?: Array<{ command?: unknown; status?: unknown; exitCode?: unknown }> };
-  // 자기 보고 commands는 제외한다. 원시 command/body 대신 안정적인 증거 식별자만 저장한다.
+  // Exclude self-reported commands. Store only stable evidence identifiers instead of raw command/body.
   return [...(value.executedCommands ?? []).map((c) => recoveryHash(c)),
     ...(value.verificationEvidence ?? []).map((e) => recoveryHash([e.command, e.status, e.exitCode]))].sort();
 }

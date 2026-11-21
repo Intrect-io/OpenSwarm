@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - CLI Check Handler
 // Created: 2026-04-10
-// Purpose: `openswarm check` 명령어 — 코드 레지스트리 조회
+// Purpose: `openswarm check` command — code registry lookup
 // ============================================
 
 import { daemonPort } from '../core/daemonPort.js';
@@ -25,9 +25,9 @@ export function cappedCountLabel(shown: number, total: () => number): string {
   return real > shown ? `(showing ${shown} of ${real}, capped at ${HELPER_QUERY_MAX_LIMIT})` : `(${shown})`;
 }
 
-/** package.json name → Cargo.toml → go.mod → 폴더명 순으로 프로젝트 ID 추론 */
+/** Infer the project ID in this order: package.json name -> Cargo.toml -> go.mod -> folder name */
 function resolveProjectId(projectPath: string): string {
-  // 1. package.json의 name 필드
+  // 1. name field of package.json
   const pkgPath = join(projectPath, 'package.json');
   if (existsSync(pkgPath)) {
     try {
@@ -40,7 +40,7 @@ function resolveProjectId(projectPath: string): string {
     }
   }
 
-  // 2. Cargo.toml의 name (Rust)
+  // 2. name in Cargo.toml (Rust)
   const cargoPath = join(projectPath, 'Cargo.toml');
   if (existsSync(cargoPath)) {
     try {
@@ -52,7 +52,7 @@ function resolveProjectId(projectPath: string): string {
     }
   }
 
-  // 3. go.mod의 module path (Go)
+  // 3. module path in go.mod (Go)
   const goModPath = join(projectPath, 'go.mod');
   if (existsSync(goModPath)) {
     try {
@@ -67,7 +67,7 @@ function resolveProjectId(projectPath: string): string {
     }
   }
 
-  // 4. 폴더명 폴백
+  // 4. Folder name fallback
   return projectPath.split('/').pop() ?? 'unknown';
 }
 
@@ -153,7 +153,7 @@ export async function handleCheck(
   try {
     const store = getRegistryStore();
 
-    // --scan: 레포 전체 스캔 → 레지스트리 동기화
+    // --scan: scan the whole repo -> sync the registry
     if (opts.scan) {
       const projectPath = process.cwd();
       const projectId = opts.project ?? resolveProjectId(projectPath);
@@ -200,7 +200,7 @@ export async function handleCheck(
         }
       }
 
-      // 스캔 후 통계 표시
+      // Show statistics after the scan
       const stats = store.getStats(projectId);
       console.log(`\n${c.bold('Registry Status')}`);
       console.log(`  Total: ${stats.total}  deprecated: ${stats.deprecated}  untested: ${stats.untested}  high-risk: ${stats.highRisk}  warnings: ${stats.withWarnings}\n`);
@@ -208,7 +208,7 @@ export async function handleCheck(
       return;
     }
 
-    // --bs: BS 패턴 탐지
+    // --bs: detect BS patterns
     if (opts.bs) {
       const { scanRepository: scanBs } = await import('../registry/bsDetector.js');
       const projectPath = process.cwd();
@@ -218,7 +218,7 @@ export async function handleCheck(
 
       const result = await scanBs(projectPath, { verbose: opts.verbose });
 
-      // 결과 출력
+      // Print results
       const statusColor = result.critical > 0 ? c.red : result.warning > 0 ? c.yellow : c.green;
       const statusText = result.critical > 0 ? 'FAIL' : result.warning > 0 ? 'WARN' : 'CLEAN';
 
@@ -239,7 +239,7 @@ export async function handleCheck(
       }
 
       if (result.issues.length > 0) {
-        // CRITICAL 먼저
+        // CRITICAL first
         const criticals = result.issues.filter(i => i.severity === 'critical');
         if (criticals.length > 0) {
           console.log(`\n  ${c.red(c.bold('CRITICAL (즉시 수정 필요)'))}`);
@@ -391,7 +391,7 @@ export async function handleCheck(
       return;
     }
 
-    // --stats: full statistics (기본: 현재 디렉터리 프로젝트 스코프)
+    // --stats: full statistics (default: current directory project scope)
     if (opts.stats) {
       const statsProjectId = opts.project ?? resolveProjectId(process.cwd());
       const stats = store.getStats(statsProjectId);
@@ -491,7 +491,7 @@ export async function handleCheck(
       return;
     }
 
-    // 파일 경로 지정: fileBrief
+    // File path given: fileBrief
     if (filePath) {
       const brief = store.fileBrief(filePath, opts.project ?? resolveProjectId(process.cwd()));
       console.log(`\n${c.bold(`File Brief: ${filePath}`)}`);
@@ -508,7 +508,7 @@ export async function handleCheck(
       return;
     }
 
-    // 인자 없이 호출 시: 간단 통계 + 도움말 (현재 프로젝트 스코프)
+    // Called with no arguments: brief stats + help (current project scope)
     const summaryProjectId = resolveProjectId(process.cwd());
     const stats = store.getStats(summaryProjectId);
     if (stats.total === 0) {
@@ -531,7 +531,7 @@ export async function handleCheck(
 }
 
 /**
- * openswarm annotate <qualifiedName> — 엔티티 어노테이션
+ * openswarm annotate <qualifiedName> — entity annotation
  */
 export async function handleAnnotate(
   qualifiedName: string,
@@ -548,10 +548,10 @@ export async function handleAnnotate(
   try {
     const store = getRegistryStore();
 
-    // qualified name으로 검색, 없으면 FTS 검색
+    // Search by qualified name, fall back to FTS search if none
     let entity = store.getEntityByName(qualifiedName);
     if (!entity) {
-      // 부분 매칭 시도: name만으로 검색
+      // Try a partial match: search by name only
       const results = store.searchEntities(qualifiedName, 5);
       if (results.length === 0) {
         console.error(c.red(`Entity not found: "${qualifiedName}"`));
@@ -644,7 +644,7 @@ export async function handleAnnotate(
       console.log(`  ${c.dim('No changes. Use --deprecate, --status, --tag, --note, --risk, or --warn')}`);
     }
 
-    // 변경 후 엔티티 상태 표시
+    // Show the entity state after the change
     if (changed) {
       const updated = store.getEntity(entity.id);
       if (updated) {

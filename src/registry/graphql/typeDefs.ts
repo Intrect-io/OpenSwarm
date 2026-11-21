@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Code Registry GraphQL Type Definitions
 // Created: 2026-04-10
-// Purpose: 코드 엔티티 레지스트리 GraphQL 스키마
+// Purpose: GraphQL schema for the code entity registry
 // ============================================
 
 export const registryTypeDefs = /* GraphQL */ `

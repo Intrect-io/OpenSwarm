@@ -154,14 +154,14 @@ describe('autoLinkMemories', () => {
   it('frees the scheduler slot after the deadline so a subsequent job can start while the search is still pending', async () => {
     vi.useFakeTimers();
     try {
-      // 1-슬롯 스케줄러 모의: 작업이 정산될 때만 slotFreed를 내보낸다.
+      // 1-slot scheduler mock: emits slotFreed only when a job settles.
       const scheduler = new EventEmitter();
       const MAX_CONCURRENT_JOBS = 1;
       let running = 0;
       let secondJobStarted = false;
       let searchSettled = false;
 
-      // AbortSignal을 무시하고 영원히 pending인 검색
+      // A search that ignores the AbortSignal and stays pending forever
       mockSearchMemorySafe.mockImplementation(() => {
         const pending = new Promise<never>(() => {});
         void pending.then(
@@ -190,25 +190,25 @@ describe('autoLinkMemories', () => {
       expect(running).toBe(1);
       expect(mockSearchMemorySafe).toHaveBeenCalledTimes(1);
 
-      // 슬롯 1개가 점유 중이라 두 번째 작업은 대기 상태
+      // One slot is occupied, so the second job is waiting
       const secondJob = runJob('second');
       await vi.advanceTimersByTimeAsync(1_000);
       expect(secondJobStarted).toBe(false);
       expect(running).toBe(1);
 
-      // 기한 만료 → 첫 작업 정산 → slotFreed → 두 번째 작업이 슬롯 획득
+      // Deadline expires → first job settles → slotFreed → second job acquires the slot
       await vi.advanceTimersByTimeAsync(AUTO_LINK_SEARCH_DEADLINE_MS);
       expect(secondJobStarted).toBe(true);
       expect(mockSearchMemorySafe).toHaveBeenCalledTimes(2);
 
-      // 두 번째 작업도 자체 기한 내 정산
+      // The second job also settles within its own deadline
       await vi.advanceTimersByTimeAsync(AUTO_LINK_SEARCH_DEADLINE_MS);
       const [firstResult, secondResult] = await Promise.all([firstJob, secondJob]);
       expect(firstResult).toEqual([]);
       expect(secondResult).toEqual([]);
       expect(running).toBe(0);
 
-      // 첫 검색은 여전히 pending — 그럼에도 슬롯은 회수됐다
+      // The first search is still pending — yet the slot was reclaimed
       expect(searchSettled).toBe(false);
     } finally {
       vi.useRealTimers();

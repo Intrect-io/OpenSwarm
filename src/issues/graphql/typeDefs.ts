@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Issue Tracker GraphQL Type Definitions
 // Created: 2026-04-03
-// Purpose: GraphQL 스키마 정의
+// Purpose: GraphQL schema definition
 // ============================================
 
 export const typeDefs = /* GraphQL */ `

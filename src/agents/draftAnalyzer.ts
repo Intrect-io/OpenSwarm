@@ -1,8 +1,8 @@
 // ============================================
 // OpenSwarm - Draft Analyzer
 // Created: 2026-04-11
-// Purpose: drafter 모델 기반 사전 분석 — 이슈 의도 파악 + 코드베이스 상태 수집
-//          Planner/Worker에 enriched context를 제공하여 첫 시도 정확도 향상
+// Purpose: drafter-model pre-analysis — infer issue intent + collect codebase state
+//          Gives Planner/Worker enriched context to improve first-attempt accuracy
 // ============================================
 
 import { execFile } from 'node:child_process';
@@ -24,7 +24,7 @@ import { formatProjectGoalSection } from '../support/projectGoal.js';
 import { parseScopeVerdict, isScopeDeclined, scopePromptParts, type DraftScopeVerdict } from './draftScope.js';
 import { findBaseCommitsForIssue, formatBaseCommitsSection } from './baseBranchCommits.js';
 
-// ============ drafter 모델 / 게이트 정책 ============
+// ============ drafter model / gate policy ============
 
 /**
  * Explicit per-provider drafter model (INT-1915). The draft brief gates every
@@ -123,20 +123,20 @@ function isDraftSettled(d: Partial<DraftAnalysis>): boolean {
   return isDraftSufficient(d) || isScopeDeclined(d.scope);
 }
 
-// ============ 타입 ============
+// ============ Types ============
 
-/** Draft 분석 결과 — Planner와 Worker 모두에 주입 */
+/** Draft analysis result — injected into both Planner and Worker */
 export interface DraftAnalysis {
   /**
-   * 작업 유형 분류. Few-shot, not a closed set (INT-1916): the model may return a
+   * Task type classification. Few-shot, not a closed set (INT-1916): the model may return a
    * more specific label than the common bugfix/feature/refactor/docs/test/config.
    */
   taskType: string;
-  /** drafter가 요약한 핵심 의도 (1-2문장) */
+  /** Core intent summarized by the drafter (1-2 sentences) */
   intentSummary: string;
-  /** drafter가 식별한 관련 파일/모듈 목록 */
+  /** Related files/modules identified by the drafter */
   relevantFiles: string[];
-  /** drafter가 제안한 접근 방식 (1-3문장) */
+  /** Approach proposed by the drafter (1-3 sentences) */
   suggestedApproach: string;
   /**
    * Execution-grounded definition of done (INT-1914). Each item must be
@@ -155,11 +155,11 @@ export interface DraftAnalysis {
   sufficient: boolean;
   /** Knowledge Graph impact analysis */
   impactAnalysis?: ImpactAnalysis;
-  /** Code Registry 요약 (영향 파일별 상태) */
+  /** Code Registry summary (state per affected file) */
   registrySnapshot: RegistryBrief[];
-  /** 프로젝트 전체 통계 요약 */
+  /** Project-wide statistics summary */
   projectStats?: string;
-  /** 소요 시간 (ms) */
+  /** Elapsed time (ms) */
   durationMs: number;
   /** High-confidence duplicate grooming recommendation against an open peer issue. */
   duplicateOfIssueId?: string;
@@ -204,7 +204,7 @@ export interface DraftAnalyzerOptions {
   taskId?: string;
   /** Fast model for draft analysis (default: gpt-5-codex) */
   model?: string;
-  /** 타임아웃 (기본: 30초 — drafter는 빠름) */
+  /** Timeout (default: 30s — the drafter is fast) */
   timeoutMs?: number;
   onLog?: (line: string) => void;
   /** Open issues in the same Linear project, used only for duplicate grooming. */
@@ -215,11 +215,11 @@ export interface DraftAnalyzerOptions {
   askScopeVerdict?: boolean;
 }
 
-// ============ 코드베이스 상태 수집 (로컬, LLM 불필요) ============
+// ============ Codebase state collection (local, no LLM needed) ============
 
 /**
- * Code Registry + Knowledge Graph에서 코드베이스 상태를 수집
- * LLM 호출 없이 로컬 DB 조회만으로 완료
+ * Collect codebase state from Code Registry + Knowledge Graph
+ * Completes with local DB queries only, no LLM call
  */
 /**
  * Registry rows are keyed by the SCAN-time project id (package.json name, else
@@ -255,7 +255,7 @@ function collectCodebaseState(
   try {
     const store = getRegistryStore();
 
-    // 1. 프로젝트 전체 통계 — always scoped; global stats are cross-repo noise.
+    // 1. Project-wide statistics — always scoped; global stats are cross-repo noise.
     // One query serves every draft started within a minute: the brief only needs
     // a rough count, and 41 drafts at once each scanning the table blocked the
     // daemon for over a minute (AGT-4668).
@@ -271,7 +271,7 @@ function collectCodebaseState(
     if (stats.highRisk > 0) statParts.push(`${stats.highRisk} high-risk`);
     projectStats = statParts.join(', ');
 
-    // 2. 영향받는 파일의 entity 상태
+    // 2. Entity state of the affected files
     const affectedFiles = new Set<string>();
     if (impactAnalysis) {
       for (const mod of impactAnalysis.directModules) affectedFiles.add(mod);
@@ -290,7 +290,7 @@ function collectCodebaseState(
         if (critical.length > 0) highlights.push(`${e.name} (${critical.length} critical)`);
       }
 
-      // entity 목록 추가 — Worker가 파일을 읽지 않고 구조 파악 가능
+      // Append the entity list — lets the Worker grasp structure without reading files
       const entities = brief.entities.slice(0, 15).map(e => ({
         kind: e.kind,
         name: e.name,
@@ -307,7 +307,7 @@ function collectCodebaseState(
       });
     }
 
-    // 3. 검색으로 못 찾은 high-risk entity가 있으면 추가 (상위 5개)
+    // 3. Add high-risk entities not found by search (top 5)
     if (registrySnapshot.length < 3) {
       const highRisk = store.highRiskEntities(registryKey).slice(0, 5);
       for (const e of highRisk) {
@@ -321,17 +321,17 @@ function collectCodebaseState(
       }
     }
   } catch {
-    // Registry 미초기화 — 빈 상태로 진행
+    // Registry not initialized — proceed with empty state
   }
 
   return { registrySnapshot, projectStats, totalEntities };
 }
 
-// ============ drafter 의도 분석 ============
+// ============ drafter intent analysis ============
 
 /**
- * drafter에게 이슈 의도를 분석시키는 프롬프트 구성
- * 코드베이스 상태를 컨텍스트로 제공하여 더 정확한 분류 유도
+ * Build the prompt that has the drafter analyze issue intent
+ * Supply codebase state as context to steer toward more accurate classification
  */
 function buildDraftPrompt(
   options: DraftAnalyzerOptions,
@@ -367,7 +367,7 @@ and stop early, forcing rework — so be specific and grounded in the actual cod
 (reference real files, functions, call sites; read them when unsure). Do not defer
 the hard parts.`);
 
-  // 코드베이스 상태 주입 (project-stable — see ordering note above)
+  // Inject codebase state (project-stable — see ordering note above)
   if (codeContext.projectStats) {
     parts.push(`## Codebase State
 - **Project stats:** ${codeContext.projectStats}`);
@@ -486,7 +486,7 @@ ${scopeParts.rules}`);
 }
 
 /**
- * drafter 응답 파싱 — measured live: a large share of "type=unknown" drafts were
+ * Parse the drafter response — measured live: a large share of "type=unknown" drafts were
  * models answering WITHIN budget but not in the one strict shape the old parser
  * accepted (```json fence containing "taskType"). Accept fence variants, anchor
  * on any brief field, repair trailing commas, and finally salvage a markdown
@@ -655,16 +655,16 @@ function isProviderQuotaError(message?: string): boolean {
   );
 }
 
-// ============ 메인 실행 ============
+// ============ Main execution ============
 
 /**
- * Draft 분석 실행
+ * Run draft analysis
  *
- * 흐름:
- * 1. Knowledge Graph impact analysis (로컬)
- * 2. Code Registry 상태 수집 (로컬)
- * 3. drafter에게 의도 분석 (API, ~3초)
- * 4. 결과 병합
+ * Flow:
+ * 1. Knowledge Graph impact analysis (local)
+ * 2. Collect Code Registry state (local)
+ * 3. Intent analysis by the drafter (API, ~3s)
+ * 4. Merge results
  */
 export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<DraftAnalysis> {
   const startTime = Date.now();
@@ -676,7 +676,7 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
 
   onLog?.('[Draft] Starting pre-analysis...');
 
-  // 1. Knowledge Graph — 영향 분석 (로컬, 즉시)
+  // 1. Knowledge Graph — impact analysis (local, immediate)
   let impactAnalysis: ImpactAnalysis | null = null;
   try {
     impactAnalysis = await analyzeIssue(
@@ -693,10 +693,10 @@ export async function runDraftAnalysis(options: DraftAnalyzerOptions): Promise<D
       onLog?.(`[Draft] Impact: ${impactAnalysis.directModules.length} direct, ${impactAnalysis.dependentModules.length} dependent, scope=${impactAnalysis.estimatedScope}`);
     }
   } catch {
-    // KG 미초기화 — 무시
+    // KG not initialized — ignore
   }
 
-  // 2. Code Registry 상태 수집 (로컬, 즉시)
+  // 2. Collect Code Registry state (local, immediate)
   const codeContext = collectCodebaseState(options.projectPath, options.projectId, impactAnalysis);
   if (codeContext.projectStats) {
     onLog?.(`[Draft] Registry: ${codeContext.projectStats}`);

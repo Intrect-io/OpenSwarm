@@ -1,7 +1,7 @@
 // ============================================
 // OpenSwarm - Local Model Adapter
 // Created: 2026-04-10
-// Purpose: Ollama, LMStudio, llama.cpp 등 로컬 OpenAI 호환 서버 지원
+// Purpose: Support for local OpenAI-compatible servers such as Ollama, LMStudio, llama.cpp
 // ============================================
 
 import type {
@@ -22,7 +22,7 @@ import { resolveLimitResponse, resolveTransientFailure, type ThrottleState } fro
 import { isInfraError } from './errorClassification.js';
 import { approvedLocalModelEndpoint, prepareApprovedLocalModelRequest } from '../support/approvedEgress.js';
 
-// 로컬 프로바이더 기본 URL 후보 (우선순위 순)
+// Default base URL candidates for local providers (in priority order)
 const DEFAULT_ENDPOINTS = [
   'http://localhost:11434',  // Ollama
   'http://localhost:1234',   // LMStudio
@@ -57,7 +57,7 @@ export class LocalModelAdapter implements CliAdapter {
     enforcesHumanSurfaceReadOnly: true,
   };
 
-  // 활성 서버 URL (isAvailable에서 감지, run에서 사용)
+  // Active server URL (detected in isAvailable, used in run)
   private activeUrl: string | null = null;
   private configuredUrl: string | null = null;
   private readonly endpoints: string[];
@@ -77,7 +77,7 @@ export class LocalModelAdapter implements CliAdapter {
     this.maxTokens = options.maxTokens;
   }
 
-  /** config.yaml에서 baseUrl을 주입받을 때 사용 */
+  /** Used when baseUrl is injected from config.yaml */
   setBaseUrl(url: string): void {
     this.configuredUrl = url;
   }
@@ -106,12 +106,12 @@ export class LocalModelAdapter implements CliAdapter {
     return false;
   }
 
-  /** 현재 활성 서버 URL 반환 (디버깅용) */
+  /** Return the currently active server URL (for debugging) */
   getActiveUrl(): string | null {
     return this.activeUrl;
   }
 
-  /** 사용 가능한 모델 목록 조회 */
+  /** List the available models */
   async listModels(): Promise<string[]> {
     if (!this.activeUrl) {
       const available = await this.isAvailable();
@@ -162,10 +162,10 @@ export class LocalModelAdapter implements CliAdapter {
     const model = options.model ?? await this.getDefaultModel();
     const baseUrl = this.activeUrl!;
 
-    // 도구 지원 여부 감지 (모델에 따라 다를 수 있음)
+    // Detect tool support (may vary by model)
     const supportsTools = await this.checkToolSupport(baseUrl, model);
 
-    // 에이전틱 루프로 실행
+    // Run as an agentic loop
     const callApi = this.createApiCaller(baseUrl, model, options.onToken, options.signal);
 
     // MCP tools: caller-provided, else self-source from the registry. (INT-1951)
@@ -246,11 +246,11 @@ export class LocalModelAdapter implements CliAdapter {
   }
 
   /**
-   * 모델의 tool_use 지원 여부 확인
-   * Ollama는 일부 모델만 지원 (gemma3, llama3.1+, mistral 등)
+   * Check whether the model supports tool_use
+   * Ollama supports it only for some models (gemma3, llama3.1+, mistral, etc.)
    */
   private async checkToolSupport(baseUrl: string, model: string): Promise<boolean> {
-    // 알려진 tool_use 지원 모델 패턴
+    // Known model patterns that support tool_use
     const toolCapablePatterns = [
       /^llama3\.[1-9]/,     // llama3.1+
       /^gemma/,             // gemma 계열
@@ -266,7 +266,7 @@ export class LocalModelAdapter implements CliAdapter {
 
     if (knownCapable) return true;
 
-    // 알 수 없는 모델 → 1회 probe 시도
+    // Unknown model -> try a single probe
     try {
       const request = prepareApprovedLocalModelRequest(baseUrl, {
         model,
@@ -280,7 +280,7 @@ export class LocalModelAdapter implements CliAdapter {
         body: request.body,
         signal: AbortSignal.timeout(5000),
       });
-      // 200이면 tool 지원, 에러면 미지원
+      // 200 means tools are supported, an error means unsupported
       return res.ok;
     } catch {
       return false;
@@ -288,7 +288,7 @@ export class LocalModelAdapter implements CliAdapter {
   }
 
   /**
-   * 로컬 API 호출 함수 생성 (에이전틱 루프에 주입)
+   * Create the local API call function (injected into the agentic loop)
    */
   private createApiCaller(baseUrl: string, model: string, onToken?: (delta: string) => void, signal?: AbortSignal) {
     return async (messages: ChatMessage[], tools: ToolDefinition[]) => {
