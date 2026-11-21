@@ -13,6 +13,8 @@
 //
 // 실행:
 //   OPENROUTER_PROVIDER_ONLY=atlas-cloud npx tsx benchmarks/providerConcurrency.ts
+//   (atlas-cloud pin = a sponsor balance that can run dry: a 402 means the pool is empty;
+//    dropping the pin bills the real OpenRouter account. See RUBRIC.md "Credits".)
 //   npx tsx benchmarks/providerConcurrency.ts --model z-ai/glm-5.2 --levels 1,4,8,16
 // ============================================
 

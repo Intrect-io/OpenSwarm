@@ -2,21 +2,33 @@
 // ============================================
 // OpenSwarm - Model Selection Benchmark
 // Created: 2026-06-09
-// Purpose: 코딩 태스크에 대해 worker 모델별 품질·비용을 측정해 파레토 경계를 찾는다.
-//          VEGA benchmarks/model_select.py 이식: 점수 = pass_rate → 실비용 → turn 수.
-//          자동 교체 안 함 — 랭킹만 출력, 사람이 config 반영(통제력 유지).
+// Purpose: Measure worker model quality and cost on coding tasks and find the
+//          Pareto frontier. Port of VEGA benchmarks/model_select.py:
+//          score = pass_rate, then real cost, then turn count.
+//          Never swaps models automatically: it prints a ranking and a person
+//          applies it to config (the operator stays in control).
+// Dependencies: src/agents/worker.ts (live OpenRouter runs), benchmarks/modelSelectScoring.ts
+// Test Status: tests/modelSelect.scoring.test.ts (parseArgs, import guard; scoring helpers)
 //
-// 실행:
+// Usage:
 //   npx tsx benchmarks/modelSelect.ts --repeat 3
 //   (OPENROUTER_API_KEY required — auto-loaded from the repo .env)
 //   npx tsx benchmarks/modelSelect.ts --model openai/gpt-5 --model qwen/qwen3-coder
 //   npx tsx benchmarks/modelSelect.ts --task L0-fix-multiply --repeat 5
+//   npx tsx benchmarks/modelSelect.ts --model deepseek/deepseek-v4-flash --model z-ai/glm-5.3 \
+//     --primary deepseek/deepseek-v4-flash --task L5-lru-cache --repeat 2   # ESCALATION FINDING
+//
+// Credits: with OPENROUTER_PROVIDER_ONLY=atlas-cloud the calls draw on a sponsor
+// balance that can run out. A 402 "insufficient balance" means the sponsor pool
+// is dry, not that the model failed: the run aborts with no ranking. Dropping
+// the pin bills the real OpenRouter account. See benchmarks/RUBRIC.md "Credits".
 // ============================================
 
 import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { runWorker } from '../src/agents/worker.js';
@@ -24,49 +36,27 @@ import { setDefaultAdapter } from '../src/adapters/index.js';
 import { initLocale } from '../src/locale/index.js';
 import { loadEnvFile } from '../src/core/envFile.js';
 import { CODING_TASKS, type BenchTask } from './tasks/codingTasks.js';
+import {
+  classifyInfraFailure, fmtUsd, runSweep, summarizeRun, type RunResult,
+} from './modelSelectScoring.js';
 
 const exec = promisify(execFile);
 
-// ---- 후보 모델 풀 ----
-// non-frontier 오픈 모델 중심 (gpt 계열은 별도 측정에서 비교됨).
-// baseline = gemini-2.5-flash (직전 라운드 100% pass 우승자).
-const DEFAULT_CANDIDATES = [
-  'google/gemini-2.5-flash',          // baseline (직전 우승)
-  'deepseek/deepseek-v4-pro',         // deepseek 플래그십
-  'deepseek/deepseek-v4-flash',       // deepseek 경량
-  'minimax/minimax-m3',               // MiniMax 최신
-  'z-ai/glm-5',                       // GLM 최신
-  'z-ai/glm-4.7-flash',               // GLM 초저가
-  'moonshotai/kimi-k2-thinking',      // Kimi 코딩 강자
-  'qwen/qwen3-coder-30b-a3b-instruct',// qwen 코딩 경량
+// ---- Candidate model pool ----
+// Mostly non-frontier open models (the gpt family is compared in a separate run).
+// baseline = gemini-2.5-flash (100% pass winner of the previous round).
+export const DEFAULT_CANDIDATES = [
+  'google/gemini-2.5-flash',          // baseline (previous winner)
+  'deepseek/deepseek-v4-pro',         // deepseek flagship
+  'deepseek/deepseek-v4-flash',       // deepseek lightweight
+  'minimax/minimax-m3',               // latest MiniMax
+  'z-ai/glm-5',                       // latest GLM
+  'z-ai/glm-4.7-flash',               // ultra-cheap GLM
+  'moonshotai/kimi-k2-thinking',      // strong Kimi coder
+  'qwen/qwen3-coder-30b-a3b-instruct',// lightweight qwen coder
 ];
 
-interface RunResult {
-  model: string;
-  taskId: string;
-  rep: number;
-  passed: boolean;
-  reason: string;
-  toolCalls: number;
-  apiCalls: number;
-  promptTokens: number;
-  completionTokens: number;
-  costUsd: number;
-  durationMs: number;
-}
-
-interface ModelAgg {
-  model: string;
-  runs: number;
-  passes: number;
-  passRate: number;
-  avgCostUsd: number;
-  costPerPass: number;       // 성공당 비용 (핵심 효율 지표)
-  avgToolCalls: number;
-  avgDurationMs: number;
-}
-
-// ---- OpenRouter 가격 카탈로그 ----
+// ---- OpenRouter price catalog ----
 async function fetchPrices(apiKey: string): Promise<Map<string, { in: number; out: number }>> {
   const res = await fetch('https://openrouter.ai/api/v1/models', {
     headers: { Authorization: `Bearer ${apiKey}` },
@@ -106,9 +96,12 @@ async function runOne(
   const dir = await setupRepo(task);
   const logs: string[] = [];
   const t0 = Date.now();
+  let thrown: string | undefined;
+  let workerError: string | undefined;
+  let workerSummary: string | undefined;
 
   try {
-    await runWorker({
+    const res = await runWorker({
       taskTitle: task.title,
       taskDescription: task.description,
       projectPath: dir,
@@ -118,13 +111,26 @@ async function runOne(
       maxTurns: 20,
       onLog: (l) => logs.push(l),
     });
+    // runWorker returns most adapter errors (a 401 included) instead of
+    // throwing, and logs them only to console.error, so the returned result is
+    // where an infrastructure failure usually shows up. Its error is trusted
+    // only on the catch path; the classifier checks the summary for that.
+    workerError = res.error;
+    workerSummary = res.summary;
   } catch (err) {
-    logs.push(`FATAL: ${err instanceof Error ? err.message : String(err)}`);
+    thrown = err instanceof Error ? err.message : String(err);
+    logs.push(`FATAL: ${thrown}`);
   }
+  const infraError = classifyInfraFailure({
+    error: thrown,
+    workerError,
+    summary: workerSummary,
+    logs,
+  }) ?? undefined;
 
   const durationMs = Date.now() - t0;
 
-  // 채점: repo 상태를 read 함수로 넘김
+  // Grading: hand the repo state to the task's read function.
   const read = (rel: string): string | null => {
     try {
       return readFileSync(join(dir, rel), 'utf-8');
@@ -134,13 +140,13 @@ async function runOne(
   };
   const verdict = task.check(read, dir);
 
-  // 로그에서 메트릭 추출
+  // Metrics from the log lines.
   const toolCalls = logs.filter((l) => l.includes('🔧')).length;
   const apiCalls = logs.filter((l) => l.includes('API call #')).length;
   const tokenLine = logs.find((l) => /\d+ tokens/.test(l)) ?? '';
   const totalTokens = Number(tokenLine.match(/(\d+) tokens/)?.[1] ?? 0);
-  // prompt/completion 분리는 어댑터가 합산만 주므로 근사: 입력 80% / 출력 20% 가정.
-  // (정밀 측정이 필요하면 어댑터가 usage 분리 반환하도록 확장)
+  // The adapter reports only a token total, so approximate an 80% prompt /
+  // 20% completion split (extend the adapter to return split usage for precision).
   const promptTokens = Math.round(totalTokens * 0.8);
   const completionTokens = totalTokens - promptTokens;
 
@@ -153,139 +159,78 @@ async function runOne(
     model, taskId: task.id, rep,
     passed: verdict.passed, reason: verdict.reason,
     toolCalls, apiCalls, promptTokens, completionTokens, costUsd, durationMs,
+    ...(infraError ? { infraError } : {}),
   };
 }
 
-function aggregate(results: RunResult[]): ModelAgg[] {
-  const byModel = new Map<string, RunResult[]>();
-  for (const r of results) {
-    if (!byModel.has(r.model)) byModel.set(r.model, []);
-    byModel.get(r.model)!.push(r);
-  }
-
-  const aggs: ModelAgg[] = [];
-  for (const [model, rs] of byModel) {
-    const passes = rs.filter((r) => r.passed).length;
-    const passRate = passes / rs.length;
-    const avgCostUsd = rs.reduce((s, r) => s + r.costUsd, 0) / rs.length;
-    const totalCost = rs.reduce((s, r) => s + r.costUsd, 0);
-    aggs.push({
-      model,
-      runs: rs.length,
-      passes,
-      passRate,
-      avgCostUsd,
-      costPerPass: passes > 0 ? totalCost / passes : Infinity,
-      avgToolCalls: rs.reduce((s, r) => s + r.toolCalls, 0) / rs.length,
-      avgDurationMs: rs.reduce((s, r) => s + r.durationMs, 0) / rs.length,
-    });
-  }
-
-  // VEGA 랭킹: pass_rate 내림차순 → costPerPass 오름차순 → toolCalls 오름차순
-  aggs.sort((a, b) =>
-    b.passRate - a.passRate ||
-    a.costPerPass - b.costPerPass ||
-    a.avgToolCalls - b.avgToolCalls);
-  return aggs;
+// ---- CLI ----
+export interface ModelSelectArgs {
+  models: string[];
+  tasks: BenchTask[];
+  repeat: number;
+  baseline: string;
+  primary?: string;
 }
 
-function fmtUsd(n: number): string {
-  if (!isFinite(n)) return '∞';
-  if (n < 0.001) return `$${(n * 1000).toFixed(3)}m`; // milli-dollar
-  return `$${n.toFixed(4)}`;
-}
-
-/** taskId → level 매핑 (RUBRIC.md의 난이도 사다리) */
-function levelOf(taskId: string): string {
-  const m = taskId.match(/^(L\d)/);
-  return m ? m[1] : '?';
-}
+const VALUE_FLAGS = new Set(['--model', '--task', '--repeat', '--baseline', '--primary']);
 
 /**
- * 모델 × 레벨 pass-rate 표. RUBRIC.md의 핵심 — "어느 난이도에서 모델이 갈리는가".
- * 경량 모델은 보통 L0~L4를 통과하다 L5~L6에서 무너진다(변별 지점).
+ * Parse the CLI flags, failing closed: an unknown task id, a repeat that is not
+ * a positive integer, a flag with no value, or a --primary outside the model
+ * list throws instead of silently running a different (or empty) sweep.
  */
-function levelTable(results: RunResult[]): string {
-  const levels = ['L0', 'L1', 'L2', 'L3', 'L4', 'L5'];
-  const models = [...new Set(results.map((r) => r.model))];
-  const cell = new Map<string, { p: number; n: number }>();
-  for (const r of results) {
-    const k = `${r.model}|${levelOf(r.taskId)}`;
-    const c = cell.get(k) ?? { p: 0, n: 0 };
-    c.n++; if (r.passed) c.p++;
-    cell.set(k, c);
-  }
-  const lines: string[] = [];
-  lines.push('\n========== LEVEL × MODEL pass-rate (RUBRIC discrimination) ==========');
-  lines.push(`${'model'.padEnd(34)} ${levels.map((l) => l.padStart(5)).join(' ')}`);
-  for (const model of models) {
-    const cells = levels.map((l) => {
-      const c = cell.get(`${model}|${l}`);
-      return c && c.n ? `${Math.round((c.p / c.n) * 100)}%`.padStart(5) : '  -  ';
-    });
-    lines.push(`${model.padEnd(34)} ${cells.join(' ')}`);
-  }
-  lines.push('(L6 = 실전 SWE-bench, 별도 채점 — benchmarks/sweBench.ts + RUBRIC.md)');
-  return lines.join('\n');
-}
-
-function report(aggs: ModelAgg[], baseline: string, results: RunResult[]): string {
-  const lines: string[] = [];
-  lines.push(levelTable(results));
-  lines.push('\n========== MODEL RANKING (pass_rate → $/pass → tool calls) ==========');
-  lines.push('rank  model                       pass    $/pass     avg$     tools  dur');
-  aggs.forEach((a, i) => {
-    const tag = a.model === baseline ? ' (baseline)' : '';
-    lines.push(
-      `${String(i + 1).padEnd(4)}  ${a.model.padEnd(26)}  ` +
-      `${(a.passRate * 100).toFixed(0).padStart(3)}%  ` +
-      `${fmtUsd(a.costPerPass).padStart(8)}  ` +
-      `${fmtUsd(a.avgCostUsd).padStart(8)}  ` +
-      `${a.avgToolCalls.toFixed(1).padStart(5)}  ` +
-      `${(a.avgDurationMs / 1000).toFixed(0)}s${tag}`,
-    );
-  });
-
-  // 파레토 경계: baseline과 동일 pass_rate를 유지하는 가장 싼 모델
-  const base = aggs.find((a) => a.model === baseline);
-  if (base) {
-    const asGoodCheaper = aggs.filter(
-      (a) => a.model !== baseline && a.passRate >= base.passRate && a.costPerPass < base.costPerPass,
-    );
-    lines.push('\n========== PARETO FINDING ==========');
-    lines.push(`baseline: ${baseline} — pass ${(base.passRate * 100).toFixed(0)}%, $/pass ${fmtUsd(base.costPerPass)}`);
-    if (asGoodCheaper.length > 0) {
-      const best = asGoodCheaper[0];
-      const savings = ((1 - best.costPerPass / base.costPerPass) * 100).toFixed(0);
-      lines.push(`✅ ${best.model} matches quality (${(best.passRate * 100).toFixed(0)}%) at ${savings}% lower $/pass`);
-      lines.push(`   → safe to route here; keep ${baseline} as escalate target.`);
-    } else {
-      lines.push(`⚠️ No cheaper model matched ${baseline}'s pass rate. Keep frontier or add more repeats.`);
-    }
-  }
-  return lines.join('\n');
-}
-
-// ---- CLI ----
-function parseArgs(argv: string[]) {
+export function parseArgs(argv: readonly string[]): ModelSelectArgs {
   const models: string[] = [];
   const taskIds: string[] = [];
   let repeat = 3;
   let baseline = 'google/gemini-2.5-flash';
+  let primary: string | undefined;
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--model') models.push(argv[++i]);
-    else if (argv[i] === '--task') taskIds.push(argv[++i]);
-    else if (argv[i] === '--repeat') repeat = Number(argv[++i]);
-    else if (argv[i] === '--baseline') baseline = argv[++i];
+    const flag = argv[i];
+    if (!VALUE_FLAGS.has(flag)) {
+      // An unknown token (a typo, or the --flag=value form) would otherwise be
+      // dropped and the bench would fall back to the full paid default sweep.
+      throw new Error(`modelSelect: unknown argument "${flag}"`);
+    }
+    const value = argv[i + 1];
+    if (value === undefined || value === '' || value.startsWith('--')) {
+      throw new Error(`modelSelect: ${flag} needs a value`);
+    }
+    i++;
+    if (flag === '--model') models.push(value);
+    else if (flag === '--task') taskIds.push(value);
+    else if (flag === '--baseline') baseline = value;
+    else if (flag === '--primary') primary = value;
+    else if (flag === '--repeat') {
+      if (!/^[1-9]\d*$/.test(value)) {
+        throw new Error(`modelSelect: --repeat must be a positive integer, got "${value}"`);
+      }
+      repeat = Number(value);
+    }
   }
+
+  const known = new Set(CODING_TASKS.map((t) => t.id));
+  const unknown = taskIds.filter((id) => !known.has(id));
+  if (unknown.length > 0) {
+    throw new Error(`modelSelect: unknown task id(s): ${unknown.join(', ')}`);
+  }
+
+  const effectiveModels = models.length ? models : [...DEFAULT_CANDIDATES];
+  if (primary !== undefined && !effectiveModels.includes(primary)) {
+    throw new Error(`modelSelect: --primary ${primary} is not in the model list (${effectiveModels.join(', ')})`);
+  }
+
   return {
-    models: models.length ? models : DEFAULT_CANDIDATES,
+    models: effectiveModels,
     tasks: taskIds.length ? CODING_TASKS.filter((t) => taskIds.includes(t.id)) : CODING_TASKS,
-    repeat, baseline,
+    repeat, baseline, primary,
   };
 }
 
-async function main() {
+async function main(): Promise<void> {
+  // Validate the flags before anything touches the network or the .env.
+  const { models, tasks, repeat, baseline, primary } = parseArgs(process.argv.slice(2));
+
   loadEnvFile();
   initLocale('en');
   setDefaultAdapter('openrouter');
@@ -296,40 +241,54 @@ async function main() {
     process.exit(1);
   }
 
-  const { models, tasks, repeat, baseline } = parseArgs(process.argv.slice(2));
-  console.log(`[bench] models=${models.length} tasks=${tasks.length} repeat=${repeat}`);
+  console.log(`[bench] models=${models.length} tasks=${tasks.length} repeat=${repeat}${primary ? ` primary=${primary}` : ''}`);
   console.log(`[bench] total runs = ${models.length * tasks.length * repeat}`);
 
   const prices = await fetchPrices(apiKey);
 
-  // 모델별 병렬 실행 — 각 모델은 독립 임시 repo를 쓰므로 충돌 없음.
-  // 한 모델 내에서는 태스크×반복을 직렬로 돌려 단일 모델의 rate limit을 피한다.
-  // gpt-5 같은 느린 모델이 빠른 모델을 막지 않아 전체 wall-clock이 크게 준다.
-  const perModel = await Promise.all(
-    models.map(async (model) => {
-      const out: RunResult[] = [];
-      for (const task of tasks) {
-        for (let rep = 1; rep <= repeat; rep++) {
-          const r = await runOne(task, model, rep, prices);
-          out.push(r);
-          const mark = r.passed ? '✅' : '❌';
-          console.log(`  ${mark} ${model.padEnd(24)} ${task.id.padEnd(24)} rep${rep}  ${fmtUsd(r.costUsd)} ${r.toolCalls}tc ${(r.durationMs / 1000).toFixed(0)}s  ${r.reason}`);
-        }
-      }
-      return out;
-    }),
-  );
-  const results: RunResult[] = perModel.flat();
+  // Models run in parallel; each uses its own temp repo, so they never collide.
+  // Within one model the task x repeat runs are serial to stay under that
+  // model's rate limit. The first infrastructure failure stops every model.
+  const results = await runSweep(models, tasks, repeat,
+    (task, model, rep) => runOne(task, model, rep, prices),
+    (r) => {
+      const mark = r.infraError ? '⛔' : r.passed ? '✅' : '❌';
+      const why = r.infraError ? `INFRA: ${r.infraError}` : r.reason;
+      console.log(`  ${mark} ${r.model.padEnd(24)} ${r.taskId.padEnd(24)} rep${r.rep}  ${fmtUsd(r.costUsd)} ${r.toolCalls}tc ${(r.durationMs / 1000).toFixed(0)}s  ${why}`);
+    });
 
-  const aggs = aggregate(results);
-  console.log(report(aggs, baseline, results));
+  const summary = summarizeRun(results, baseline, primary);
+  if (!summary.ok) {
+    // No ranking, and results/latest.json keeps the last valid run.
+    console.error(summary.text);
+    process.exit(2);
+  }
+  console.log(summary.text);
 
-  // 결과 저장 (타임스탬프는 인자로 안 받으므로 결과 파일명은 고정 — 덮어씀)
-  const outDir = join(dirname(new URL(import.meta.url).pathname), 'results');
+  // Fixed file name: each run overwrites latest.json.
+  const outDir = join(dirname(fileURLToPath(import.meta.url)), 'results');
   if (!existsSync(outDir)) await mkdir(outDir, { recursive: true });
   const outPath = join(outDir, 'latest.json');
-  await writeFile(outPath, JSON.stringify({ results, aggs, baseline }, null, 2));
+  await writeFile(outPath, JSON.stringify({ results, aggs: summary.aggs, baseline, primary }, null, 2));
   console.log(`\n[bench] raw results → ${outPath}`);
 }
 
-main().catch((e) => { console.error('FATAL:', e); process.exit(1); });
+/**
+ * True when `moduleUrl` is the script node/tsx was asked to run. Both sides go
+ * through realpath so a symlinked checkout or a relative argv[1] still matches.
+ */
+export function isDirectRun(moduleUrl: string, argv1: string | undefined): boolean {
+  if (!argv1) return false;
+  const real = (p: string): string => {
+    try { return realpathSync(p); } catch { return p; }
+  };
+  try {
+    return real(resolve(argv1)) === real(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun(import.meta.url, process.argv[1])) {
+  main().catch((e) => { console.error('FATAL:', e instanceof Error ? e.message : e); process.exit(1); });
+}

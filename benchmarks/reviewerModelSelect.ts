@@ -21,6 +21,8 @@
 //   npx tsx benchmarks/reviewerModelSelect.ts --repeat 2 \
 //     --model deepseek/deepseek-v4-pro --model z-ai/glm-5.2
 //   OPENROUTER_PROVIDER_ONLY=atlas-cloud npx tsx benchmarks/reviewerModelSelect.ts
+//   (atlas-cloud pin = a sponsor balance that can run dry: a 402 means the pool is empty;
+//    dropping the pin bills the real OpenRouter account. See RUBRIC.md "Credits".)
 //   (OPENROUTER_API_KEY required — auto-loaded from the repo .env)
 // ============================================
 

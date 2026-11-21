@@ -123,6 +123,9 @@ const integrationBoundaryCoverageExcludes = [
   // pipeline runs (git, gh, a live adapter) in parent/child processes. Its
   // grading and evidence helpers are tested in tests/pipelineEval.*.test.ts.
   'benchmarks/pipelineEval.ts',
+  // Model-selection bench entry (AGT-4186): drives live OpenRouter worker runs.
+  // Its scoring is in benchmarks/modelSelectScoring.ts, tested in tests/modelSelect.*.test.ts.
+  'benchmarks/modelSelect.ts',
 
   // Ink TUI boundaries — alt-screen entry, network SSE, and effect hooks
   // (real TTY / sockets); the pure parser+reducer carry the tested logic. EPIC INT-1813.
