@@ -14,7 +14,6 @@ import {
   clearRejection,
   getRejectionCount,
   isRejectionLimitReached,
-  canRetryNow,
   setRetryTime,
   clearRetryTime,
   formatRetryTime,
@@ -29,8 +28,7 @@ import {
   type TaskState,
   type ProjectInfo,
 } from './runnerState.js';
-import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngine, classifyStuck, composeDispatchScope, pathIsUnderAny } from '../orchestration/decisionEngine.js';
-import { getCoordinationStore } from '../coordination/coordinationStore.js';
+import { taskEventKey, DecisionEngine, DecisionResult, TaskItem, getDecisionEngine, composeDispatchScope, pathIsUnderAny } from '../orchestration/decisionEngine.js';
 import { resolveOrchestratorConfig } from '../coordination/orchestratorConfig.js';
 import { OrchestratorSupervisor } from '../coordination/orchestratorSupervisor.js';
 import { repositoryCell } from '../coordination/repositoryCell.js';
@@ -39,14 +37,11 @@ import { runningProjectSessions } from '../coordination/projectRuntime.js';
 import { drainCoordinationThreadOutbox } from '../coordination/coordinationThreadOutbox.js';
 import {
   normalizeOperatorQuestionCorrelations,
-  OPERATOR_PARK_REASON,
   OPERATOR_QUESTION_PARK_REASON,
-  shouldReadmitEarly,
 } from '../coordination/operatorAnswers.js';
 // ExecutorResult used via execution.reportExecutionResult
 import { checkWorkAllowed } from '../support/timeWindow.js';
 import { shouldEarlyStuckForInfeasibility } from '../support/feasibilityDetector.js';
-import { citedPathsAreEphemeral } from '../support/worktreeEphemeral.js';
 import { resolveOwningProject, resolveProjectGoal } from '../support/projectGoal.js';
 import { recordTaskOutcome } from '../memory/repoKnowledge.js';
 import { updateProjectAfterTask } from '../linear/projectUpdater.js';
@@ -58,7 +53,11 @@ import { stageTimeoutMs } from '../agents/stageTimeouts.js';
 import { dispatchBudget, recordDispatchClaims } from './dispatchRamp.js';
 import { pipelineExecutionBoundary } from '../agents/stageExecutionBoundary.js';
 import * as execution from './runnerExecution.js';
-import { DRAFT_SCOPE_KEY_VERSION, draftFingerprint, pruneDraftCache, readDraftCache, writeDraftCache } from './draftCache.js';
+import * as taskFilter from './runnerTaskFilter.js';
+import type { TaskFilterHost } from './runnerTaskFilter.js';
+import * as candidateAdmission from './runnerCandidateAdmission.js';
+import type { CachedDraftScope, CandidateAdmissionHost } from './runnerCandidateAdmission.js';
+import { pruneDraftCache } from './draftCache.js';
 import { pruneSessionLogs } from '../support/sessionLog.js';
 import { pruneScratchpads } from '../support/scratchpad.js';
 import { pruneSnapshots } from '../support/worktreeSnapshot.js';
@@ -66,13 +65,9 @@ import { reportToDiscord, fetchLinearTasks, getTaskSource } from './runnerExecut
 import { runLedgerRetrospective } from './ledgerRetrospective.js';
 import { t } from '../locale/index.js';
 import { SANDBOX_OUTCOME_UNKNOWN_PARK_REASON } from '../sandboxExecutor/protocol.js';
-import { INFRA_CIRCUIT_PARK_REASON } from './infraFailureCircuit.js';
-import { listHeldIssueIds } from './execHold.js';
-import { inputFingerprint, mayRedispatch } from './dispatchFingerprint.js';
 import { HostDiskGate, dispatchWritePaths, isHostResourceError } from '../support/hostHealth.js';
 import { reclaimWorktreesUnderDiskPressure } from './diskPressureReclaim.js';
-import { VERIFIED_WORKER_BLOCKER_PARK_REASON } from '../agents/pairPipelineTypes.js';
-import { decideExplicitReadmission, OPERATOR_QUESTION_PARK_MARKER } from './explicitDispatchReadmission.js';
+import { decideExplicitReadmission } from './explicitDispatchReadmission.js';
 import { broadcastEvent, type SwarmStats } from '../core/eventHub.js';
 import { writeProviderOverride } from '../core/providerOverride.js';
 import { getTaskState, reconcileDependencyBlockers, updateTaskLinearState } from '../taskState/store.js';
@@ -87,7 +82,6 @@ import {
   setSandboxOutcomePark,
   stuckPullRequestSection,
 } from './runnerParking.js';
-import { RECOVERY_ADVISOR_PARK_REASON } from './loopRecoveryTypes.js';
 import { findDuplicateIssuePRs } from '../support/ghPullRequests.js';
 import { draftPullRequestCause } from './draftPullRequestCause.js';
 import { reconcileMissingWorktrees } from './missingWorktreeReconciler.js';
@@ -100,12 +94,6 @@ import { scanRepository } from '../registry/entityScanner.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { checkAllMonitors, getActiveMonitors } from './longRunningMonitor.js';
-import {
-  describeScopeConflict,
-  detectFileConflicts,
-  resolveTaskFileScope,
-  type ScopeConflictReason,
-} from '../orchestration/conflictDetector.js';
 import { resolveAdapterDefaultModel } from '../agents/stageModelResolver.js';
 import type { AutonomousConfig, RunnerState } from './runnerTypes.js';
 export { pickPipelineFailureDetail } from './runnerState.js';
@@ -123,7 +111,6 @@ import {
 import { resolvePerIssueAttemptsPerDay } from './runLedgerCost.js';
 import {
   DurableRunCoordinator,
-  RETRY_RAMP_FROM_ATTEMPT,
   runRecordToTask,
   type ExecutionDurabilityHooks,
   type RepositoryAdmissionPolicy,
@@ -139,9 +126,7 @@ import {
 import { reconcileTrackerTerminalRuns } from './trackerTerminalReconciler.js';
 import { planStalledInProgress } from './stalledInProgress.js';
 import { DEFAULT_AGENT_SKIP, formatSkipSummary, partitionHumanOwned } from './agentEligibility.js';
-import { cachedDraftReusable, currentDraftActivity, draftActivityStamp, holdBeforeClaim, recordDraftOutcome, type IssueActivity } from './preClaimHold.js';
 import { exclusionCheck, exclusionLabelsForProject, formatReadinessSummary, projectSkipLabelsHook } from './readinessGate.js'; import { definitionOfReadyHooks, partitionByDefinitionOfReady } from './definitionOfReady.js';
-import { isScopeDeclined } from '../agents/draftScope.js';
 import { planMergedPublicationChecks, decideMergedPublication } from './mergedPublications.js';
 import { completeParentIfChildrenDone as completeParentLocally } from '../taskState/store.js'; import { transitionWithReason } from './trackerTransition.js'; import { releaseDependentsInTracker } from './dependentRelease.js';
 import { ACTIVE_LEASE_STATES } from './runLedgerTypes.js';
@@ -167,23 +152,12 @@ export {
 } from './runnerAdmissionPolicy.js';
 import {
   decisionSelectionBudget,
-  describeConflictCause,
   effectiveProjectConcurrency,
-  failClosedConflictFallback,
-  taskLabel,
   worktreeFanoutEnabled,
   type RunnableCandidate,
 } from './runnerAdmissionPolicy.js';
 
 let runnerInstance: AutonomousRunner | null = null;
-
-type CachedDraftScope = {
-  fingerprint: string;
-  fileScope: string[];
-  draft: NonNullable<TaskItem['preAdmissionDraft']>;
-  description?: string;
-  executionCommentsLoaded?: boolean; activity?: string; // issue activity for a declined draft (AGT-4784)
-};
 
 // The completion/cancellation effect payload contract (and its delivery) lives
 // in trackerEffects.ts, shared with the `openswarm work` CLI so the marker
@@ -328,92 +302,46 @@ export class AutonomousRunner {
   // (AGT-4305)
   private consecutiveInfraErrorCounts = new Map<string, number>();
 
-  /**
-   * Bring a durably backed-off run forward because its answer landed.
-   *
-   * Both halves are required: the ledger refuses to claim a `RETRY_AT` row whose
-   * time has not come, so letting the task past the heartbeat filter without
-   * promoting it would select it and then fail to claim it, every cycle.
-   *
-   * The promotion re-checks the park itself, so what `answerArrivedFor` reads is
-   * only a filter — a second daemon can end the parked attempt in between, and
-   * the failure that replaces it must keep its own backoff.
-   */
-  private readmitAnsweredRun(issueId: string): boolean {
-    if (!this.answerArrivedFor(issueId)) return false;
-    if (!this.durableRuns.readmitParkedRun(issueId, OPERATOR_PARK_REASON)) return false;
-    clearRetryTime(issueId, this.failedTaskRetryTimes);
-    this.consecutiveInfraErrorCounts.delete(issueId);
-    return true;
-  }
+  // Operator-answer readmission (readmitAnsweredRun, parkedOnOperator,
+  // resumeAnsweredQuestionPark, answerArrivedFor) and the heartbeat's
+  // already-processed filter live in runnerTaskFilter.ts (AGT-4867). These
+  // delegators keep the runner's names, which tests call and reassign; the
+  // moved code calls back through the host, so a reassignment is honoured.
+  private readmitAnsweredRun(issueId: string): boolean { return taskFilter.readmitAnsweredRun(this.taskFilterHost(), issueId); }
+  private parkedOnOperator(issueId: string): boolean { return taskFilter.parkedOnOperator(this.taskFilterHost(), issueId); }
+  private resumeAnsweredQuestionPark(issueId: string): boolean { return taskFilter.resumeAnsweredQuestionPark(this.taskFilterHost(), issueId); }
+  private answerArrivedFor(issueId: string): boolean { return taskFilter.answerArrivedFor(this.taskFilterHost(), issueId); }
+  private filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[] { return taskFilter.filterAlreadyProcessed(this.taskFilterHost(), tasks); }
 
-  /**
-   * Whether a task parked on the operator now has its answer.
-   *
-   * Scoped by task id — the Linear issue id, unique per task — so an answer meant
-   * for one agent can never spring another that happens to share a display name
-   * (the guard added in AGT-4030 is upheld, not bypassed).
-   *
-   * The park is read off the run's own ledger row rather than a flag kept beside
-   * it, so it expires with the attempt that caused it: a task that waited out its
-   * backoff and then failed for its own reasons carries that failure's code here,
-   * and an answer from a park it has left cannot pull it forward.
-   */
-  /**
-   * Whether the task is stopped waiting on the operator, read from whichever
-   * store is authoritative for it — the same split the selection filter makes.
-   *
-   * With the ledger in charge the park is the run's own error code, so it expires
-   * with the attempt that caused it. Elsewhere no such code is written (`shadow`
-   * noops its transitions, `off` has no ledger at all), so a task-state signal
-   * stands in — retired by the filter when the task is admitted, to give it the
-   * same lifetime rather than one nobody maintains.
-   */
-  private parkedOnOperator(issueId: string): boolean {
-    const durableRun = this.durableRuns.getRun(issueId);
-    if (this.durableRuns.isPrimary && durableRun) {
-      return durableRun.lastErrorCode === OPERATOR_PARK_REASON;
-    }
-    return getTaskState(issueId)?.execution?.blockedReason === OPERATOR_PARK_REASON;
-  }
-
-  /**
-   * Resume a NEEDS_HUMAN ask_human park whose exact-correlation questions are all answered.
-   *
-   * The board read comes first and is only a filter — the ledger's contract re-reads the trace and
-   * decides — so a heartbeat over many parked runs does not open a write transaction for each.
-   */
-  private resumeAnsweredQuestionPark(issueId: string): boolean {
-    try {
-      if (!getCoordinationStore().allQuestionsAnswered(issueId)) return false;
-      const resumed = this.durableRuns.resumeNeedsHumanForQuestions(issueId);
-      if (!resumed) return false;
-      if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
-      return true;
-    } catch { // cxt-ignore: error_swallow — an unreadable board must not stall the heartbeat
-      return false;
-    }
-  }
-
-  private answerArrivedFor(issueId: string): boolean {
-    try {
-      return shouldReadmitEarly({
-        parkedOnOperator: this.parkedOnOperator(issueId),
-        allQuestionsAnswered: getCoordinationStore().allQuestionsAnswered(issueId),
-      });
-    } catch { // cxt-ignore: error_swallow — an unreadable board must not stall the heartbeat
-      return false;
-    }
+  private taskFilterHostCache: TaskFilterHost | undefined;
+  /** Built once; every member reads the runner at call time (see TaskFilterHost). */
+  private taskFilterHost(): TaskFilterHost {
+    if (this.taskFilterHostCache) return this.taskFilterHostCache;
+    const runner = () => this;
+    this.taskFilterHostCache = {
+      get scheduler() { return runner().scheduler; },
+      get durableRuns() { return runner().durableRuns; },
+      get completedTaskIds() { return runner().completedTaskIds; },
+      get failedTaskCounts() { return runner().failedTaskCounts; },
+      get failedTaskRetryTimes() { return runner().failedTaskRetryTimes; },
+      get consecutiveInfraErrorCounts() { return runner().consecutiveInfraErrorCounts; },
+      get unresolvableIssueIds() { return runner().unresolvableIssueIds; },
+      maxRetryCount: AutonomousRunner.MAX_RETRY_COUNT,
+      answerArrivedFor: (issueId) => this.answerArrivedFor(issueId),
+      readmitAnsweredRun: (issueId) => this.readmitAnsweredRun(issueId),
+      resumeAnsweredQuestionPark: (issueId) => this.resumeAnsweredQuestionPark(issueId),
+      parkedOnOperator: (issueId) => this.parkedOnOperator(issueId),
+      scheduleNextHeartbeat: () => this.scheduleNextHeartbeat(),
+      saveTaskState: () => this.saveTaskState(),
+      syslog: (line) => this.syslog(line),
+    };
+    return this.taskFilterHostCache;
   }
   // Last failure feedback per issue — re-injected into the next attempt's worker
   // prompt so re-picked tasks don't restart blind and repeat the same mistake
   // the reviewer already called out (INT-2474). Persisted; cleared on success.
   private lastFailureDetails = new Map<string, LastFailureEntry>();
   private static readonly MAX_RETRY_COUNT = 4; // Increased from 2 to allow more retries with backoff
-  // Consecutive infra_error attempts (same issue, no intervening non-infra
-  // outcome) allowed to bypass backoff via idle-fill before the real 1h
-  // backoff is enforced instead. (AGT-4305)
-  private static readonly MAX_CONSECUTIVE_INFRA_IDLE_FILL = 3;
 
   // Rate-limit hold: epoch ms until which all task execution is paused.
   // Set when any adapter returns a 429 / usage_limit_reached response (INT-1906).
@@ -1130,394 +1058,6 @@ export class AutonomousRunner {
     void operation
       .catch((error) => console.error(`[Scheduler] ${label} handler failed:`, error))
       .finally(() => this.schedulerHandlers.delete(operation));
-  }
-
-  private filterAlreadyProcessed(tasks: TaskItem[]): TaskItem[] {
-    let recovered = 0;
-    let stuckSkipped = 0;
-    let backoffSkipped = 0;
-    let answered = 0;
-    let noProject = 0;
-    let unresolvable = 0;
-    const toUnstick: string[] = [];
-    // AGT-4257 idle_fill lifts parked and backed-off rows so free slots do not
-    // sit empty. Bounded by this heartbeat's free slot count: a saturated pool
-    // must not churn its parks (AGT-4155 reached attempt 20 that way), and one
-    // free slot must not un-park every row at once.
-    let idleFillBudget = this.scheduler.hasAvailableSlot() ? this.scheduler.getAvailableSlots() : 0;
-    // `exec --issue` hands a run to an external orchestrator (Claude Code, omp,
-    // a script) that waits on `exec await` for the elevation. idle_fill would
-    // otherwise lift the park it is waiting on and re-run the task (AGT-4257's
-    // own loop, reached again through AGT-4155/AGT-4306). Read once per pass,
-    // like the budget above, so the gate costs one query per heartbeat.
-    const heldExecRuns = listHeldIssueIds();
-    const filtered = tasks.filter(task => {
-      const id = task.issueId || task.id;
-      const isStuck = task.labels?.includes(STUCK_LABEL) ?? false;
-      // Held by an external orchestrator: every idle_fill branch below is
-      // skipped, so a park reaches the `exec await` that is watching for it.
-      const execHeld = heldExecRuns.has(id);
-      let durableRun = this.durableRuns.getRun(id);
-      // A park or backoff that nobody has touched is not lifted by a free slot:
-      // retrying an unchanged issue after an infra_error or an operator park
-      // changes nothing (AGT-4787 — 18 dispatches of one issue in 14 hours). The
-      // input is title + description; tracker comments are not on a listed task,
-      // so an answer given only as a comment waits for an explicit dispatch.
-      const issueInput = inputFingerprint({ title: task.title, description: task.description });
-      const inputUnchanged = !!durableRun && !mayRedispatch(id, issueInput);
-      // Set once this task has spent idle budget, so a later branch in this
-      // same pass (the stuck-label recovery) neither charges it twice nor
-      // skips a row whose park idle_fill has already erased.
-      let idleLifted = false;
-
-      if (
-        this.durableRuns.isPrimary
-        && durableRun
-        && (
-          durableRun.state === 'DONE'
-          || durableRun.state === 'DECOMPOSED'
-          || durableRun.state === 'CANCELLED'
-        )
-      ) {
-        // 'Todo' (or an explicit dispatch) is the operator reopening a finished
-        // run — never gated. 'Backlog' is idle fill under AGT-4257 and spends
-        // budget. 'In Progress' and 'In Review' are excluded on purpose, the
-        // same rule durableRunCoordinator.observeTask states for this exact
-        // transition: In Progress may be owned by a human or another daemon,
-        // and In Review is a published PR waiting on the merge gate. Reopening
-        // either re-decomposes or re-publishes work that already exists.
-        const operatorReopened = task.linearState === 'Todo' || task.explicitDispatch === true;
-        const idleReopen = !operatorReopened && !execHeld && task.linearState === 'Backlog' && idleFillBudget > 0;
-        if ((operatorReopened || idleReopen) && this.durableRuns.markReady(id)) {
-          if (idleReopen) {
-            idleFillBudget--;
-            idleLifted = true;
-          }
-          durableRun = this.durableRuns.getRun(id);
-        }
-      }
-
-      if (this.durableRuns.isPrimary && durableRun?.state === 'NEEDS_HUMAN') {
-        const isOperatorQuestionPark = durableRun.lastErrorCode === OPERATOR_QUESTION_PARK_REASON
-          || durableRun.lastErrorCode === RECOVERY_ADVISOR_PARK_REASON
-          || durableRun.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON
-          || (durableRun.lastErrorMessage?.startsWith(OPERATOR_QUESTION_PARK_MARKER) ?? false);
-        // AGT-4256: a guard/publication park that only named ephemeral paths
-        // (.test_venv, pytest-local) is not a human decision. Resume even when
-        // Linear is still In Progress so the next heartbeat can pick the work.
-        // Checked before idle_fill so a false park never spends idle budget.
-        if (!execHeld && !isOperatorQuestionPark && citedPathsAreEphemeral(durableRun.lastErrorMessage ?? '')) {
-          const resumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'unspecified');
-          if (resumed) {
-            console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (ephemeral-only guard park)`);
-            durableRun = this.durableRuns.getRun(id);
-            if (resumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
-          }
-        }
-        // An answered ask_human question resumes on its own contract, not on a free slot. The
-        // ledger refuses every other trigger for this park (`resumeNeedsHuman`), and nothing in the
-        // daemon called the contract (`exec answer` aside), so the idle_fill below was what
-        // delivered an operator's answer — by accident, since it lifts an unanswered park too. Once
-        // idle_fill stands down for an issue nobody edited (AGT-4787), an answer would otherwise
-        // wait for an edit nobody needs to make.
-        if (!execHeld && durableRun?.lastErrorCode === OPERATOR_QUESTION_PARK_REASON
-            && this.resumeAnsweredQuestionPark(id)) {
-          console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (the operator answered)`);
-          answered++;
-          durableRun = this.durableRuns.getRun(id) ?? durableRun;
-        }
-        // The same-fingerprint infra circuit parks a run so that an operator
-        // changes something before it runs again; a free slot changes nothing.
-        // Resuming it by idle fill re-runs a known-broken environment every
-        // heartbeat (AGT-4306). Only an explicit dispatch (board/work API)
-        // lifts that park — the resume paths that carry an operator's hand.
-        const isInfraCircuitPark = durableRun?.lastErrorCode === INFRA_CIRCUIT_PARK_REASON
-          // A blocker the reviewer confirmed is a claim about the task text; a
-          // free slot re-runs the same text into the same confirmed claim
-          // (AGT-4535). Only an explicit dispatch lifts it; Todo alone does not.
-          || durableRun?.lastErrorCode === VERIFIED_WORKER_BLOCKER_PARK_REASON
-          || durableRun?.lastErrorCode === RECOVERY_ADVISOR_PARK_REASON
-          || durableRun?.lastErrorCode === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON;
-        // Nor does a free slot change a verdict that has already come back
-        // twice; see idleFillWouldRepeatVerdict.
-        if (durableRun?.state === 'NEEDS_HUMAN' && idleFillBudget > 0 && !isInfraCircuitPark && !execHeld && !inputUnchanged
-            && !this.durableRuns.idleFillWouldRepeatVerdict(id)) {
-          const idleResumed = this.durableRuns.resumeNeedsHuman(id, Date.now(), 'idle_fill');
-          if (idleResumed) {
-            idleFillBudget--;
-            idleLifted = true;
-            console.log(`[Scheduler] ${task.issueIdentifier ?? id} resumed from NEEDS_HUMAN (idle_fill, ${idleFillBudget} free slot(s) left)`);
-            const lifted = this.durableRuns.getRun(id);
-            if (lifted) durableRun = lifted;
-            if (idleResumed === 'SYNC_PENDING') this.scheduleNextHeartbeat();
-          }
-        }
-        // The park survives this pass — say why, once, so the daemon log and the
-        // `exec await` the orchestrator is holding agree on what is happening.
-        if (execHeld && durableRun?.state === 'NEEDS_HUMAN') {
-          console.log(`[Scheduler] ${task.issueIdentifier ?? id} held by exec elevation — awaiting the external orchestrator`);
-        }
-      }
-
-      if (this.durableRuns.isPrimary && durableRun) {
-        // AGT-4257: a parked/backoff row is still work. Lift it so claimRun
-        // can take the slot instead of the heartbeat returning skip — one row
-        // per free slot. An elapsed RETRY_AT needs no lift and passes below
-        // without spending budget. WAITING_EXTERNAL is a run whose published
-        // effect is still pending, not a park: lifting it re-runs the task on
-        // top of its own in-flight publish.
-        //
-        // A RETRY_AT row can be parked there for infra_error same as any other
-        // reason, and this is the durable-ledger counterpart of the legacy
-        // idle-fill bypass gated below by `consecutiveInfraErrorCounts` — without
-        // it here too, an issue whose durable row already exists (true for
-        // anything that has ever failed once) never reaches that legacy gate at
-        // all, since `legacyIsAuthority` is false whenever this block ran and
-        // left a durable run in place. (AGT-4305 — this is the branch AX-1272
-        // was actually looping through in production.)
-        // Only throttle a RETRY_AT that is CURRENTLY backed off for infra_error —
-        // `consecutiveInfraErrorCounts` does not reset on a later, unrelated
-        // rejection/failure retry for the same issue (by design; see the field
-        // comment), so without the lastErrorCode check a stale infra streak
-        // would keep throttling idle-fill for a RETRY_AT caused by an ordinary
-        // task-level rejection long after the infra episode ended.
-        const infraStreak = durableRun.lastErrorCode === 'infra_error'
-          ? this.consecutiveInfraErrorCounts.get(id) ?? 0
-          : 0;
-        // A supersession backoff is not a slot going to waste: the run was
-        // refused because an open PR still owns its files, and that PR does not
-        // close because a slot is free. Lifting it re-runs the drafter against
-        // the same PR every heartbeat — AX-1481 reached attempt #415 that way,
-        // 25 s apart, on 2026-09-17 (AGT-4036). The exponential supersession
-        // backoff (retryAtFor) is the recheck cadence; idle fill leaves it alone.
-        const idleLiftable = (
-          durableRun.state === 'RETRY_AT'
-          && (durableRun.retryAt ?? 0) > Date.now()
-          && infraStreak < AutonomousRunner.MAX_CONSECUTIVE_INFRA_IDLE_FILL
-          && durableRun.lastErrorCode !== 'superseded'
-          // A run held by an external orchestrator is re-dispatched by `exec
-          // answer`, not by a free slot: lifting its backoff here would start a
-          // second attempt while the orchestrator still owns the decision.
-          && !execHeld
-          && !inputUnchanged
-          // A run that has failed three times is backed off on purpose (AGT-4673).
-          // Lifting it here whenever a slot frees put the highest-priority failing
-          // run ahead of 36 READY tasks, so the backoff never held (AGT-4675).
-          && durableRun.attemptNo < RETRY_RAMP_FROM_ATTEMPT
-          && !this.durableRuns.idleFillWouldRepeatVerdict(id)
-        )
-          || durableRun.state === 'NEEDS_SPEC'
-          || durableRun.state === 'NEEDS_ENV';
-        if (idleLiftable && idleFillBudget > 0 && this.durableRuns.markReady(id)) {
-          idleFillBudget--;
-          idleLifted = true;
-          const lifted = this.durableRuns.getRun(id);
-          if (lifted) durableRun = lifted;
-        }
-        if (!durableRun) return false;
-        if (['DONE', 'DECOMPOSED', 'CANCELLED', 'NEEDS_HUMAN'].includes(durableRun.state)) return false;
-        if (['CLAIMED', 'EXECUTING', 'VERIFYING', 'PUBLISHING', 'SYNC_PENDING', 'NEEDS_RECONCILE'].includes(durableRun.state)) return false;
-        if (durableRun.state === 'RETRY_AT' && (durableRun.retryAt ?? 0) > Date.now()) {
-          // Unless the only thing it was waiting for has arrived. A task parked
-          // on `ask_human` sits here, and this backoff is also its resume path,
-          // so left alone it makes the operator's reply land up to two hours
-          // after they sent it. `markReady` is what actually unblocks it: the
-          // ledger refuses to claim a RETRY_AT row whose time has not come, so
-          // passing this filter alone would change nothing.
-          if (!this.readmitAnsweredRun(id)) {
-            backoffSkipped++;
-            return false;
-          }
-          durableRun = this.durableRuns.getRun(id);
-          answered++;
-        }
-      }
-
-      // No Linear project → can't be routed to a repo. Drop here (quietly, once per
-      // heartbeat) instead of letting a whole batch of project-less Todos reach the
-      // per-task selector and spam "No repo mapped to ... undefined" every cycle.
-      if (!task.linearProject?.id) {
-        noProject++;
-        return false;
-      }
-
-      // Project resolved to no local repo on a previous heartbeat → don't re-pick
-      // it (it would starve runnable tasks behind it). (INT-1875)
-      if (this.unresolvableIssueIds.has(id)) {
-        unresolvable++;
-        return false;
-      }
-
-      const legacyIsAuthority = !this.durableRuns.isPrimary || !durableRun;
-
-      if (legacyIsAuthority
-          && getTaskState(id)?.execution?.blockedReason === SANDBOX_OUTCOME_UNKNOWN_PARK_REASON) {
-        if (task.explicitDispatch !== true) return false;
-        setSandboxOutcomePark(id, false);
-      }
-
-      // Check rejection limit first. Once an issue has a durable row, the
-      // imported ledger state replaces legacy JSON counters as authority.
-      if (legacyIsAuthority && isRejectionLimitReached(id)) {
-        return false; // Skip tasks that hit max rejection limit
-      }
-
-      // Stuck handling (INT-1908): a permanently-blocked issue is parked in Backlog
-      // with the `swarm:stuck` label and must NOT be retried automatically. The
-      // recovery branch only fires when the user pulls the issue back to an active
-      // state — the previous code re-selected it every heartbeat because blocking
-      // left it in Todo (a recoverable state), which the recovery branch then
-      // mistook for deliberate user intervention.
-      const hasFailureHistory = legacyIsAuthority
-        && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT);
-      const stuckDecision = classifyStuck({ isStuck, linearState: task.linearState, hasFailureHistory });
-      if (stuckDecision === 'recover') {
-        this.completedTaskIds.delete(id);
-        this.failedTaskCounts.delete(id);
-        clearRejection(id); // Clear rejection count on recovery
-        clearRetryTime(id, this.failedTaskRetryTimes); // Clear retry backoff time
-        this.consecutiveInfraErrorCounts.delete(id);
-        if (isStuck) toUnstick.push(id); // strip the stuck label so it is not re-skipped
-        recovered++;
-        return true;
-      }
-      if (stuckDecision === 'skip-stuck') {
-        // AGT-4257: a stuck label must not idle an enabled pool. Linear still
-        // showing the card means the work is wanted — but only a free slot
-        // justifies re-running an issue whose retries are exhausted.
-        if (!idleLifted) {
-          if (idleFillBudget <= 0) {
-            stuckSkipped++;
-            return false;
-          }
-          idleFillBudget--;
-        }
-        this.completedTaskIds.delete(id);
-        this.failedTaskCounts.delete(id);
-        clearRejection(id);
-        clearRetryTime(id, this.failedTaskRetryTimes);
-        this.consecutiveInfraErrorCounts.delete(id);
-        if (isStuck) toUnstick.push(id);
-        recovered++;
-        return true;
-      }
-
-      // AGT-4257 (ledger-off): a locally completed or retry-exhausted issue whose
-      // card sits in a parked state is idle fill, on the same budget as the
-      // ledger lifts. (An active card — Todo / In Progress / In Review — never
-      // reaches here: classifyStuck already returned 'recover' for it above.)
-      if (legacyIsAuthority
-          && (this.completedTaskIds.has(id) || (this.failedTaskCounts.get(id) ?? 0) >= AutonomousRunner.MAX_RETRY_COUNT)) {
-        if (idleFillBudget <= 0) return false;
-        idleFillBudget--;
-        this.completedTaskIds.delete(id);
-        this.failedTaskCounts.delete(id);
-        recovered++;
-        return true;
-      }
-
-      // External-claim guard (INT-1979 dup): an issue set to 'In Progress' that THIS
-      // daemon never claimed is owned by a human or another agent — picking it up
-      // would re-decompose work someone is already doing (that spawned duplicate
-      // INT-1980 sub-issues + a redundant PR). markTaskInProgress writes
-      // execution.status='in_progress' when WE claim, so our own in-flight work
-      // (incl. resumption after a restart) still passes; a bare Linear 'In Progress'
-      // with no local claim record is skipped. An explicit dispatch is the
-      // operator handing it over and passes.
-      //
-      // Under the ledger, state alone cannot answer "is this ours": observeTask
-      // registers every fetched card as READY and cacheTrackerObservation writes
-      // DONE/CANCELLED straight from tracker state, both without a claim. Two
-      // signals do:
-      //   - attemptNo >= 1: claimRun is the only writer of that counter.
-      //   - the legacy in_progress marker, which markTaskInProgress writes when
-      //     WE claim. It is also what migrateLegacyRunState read to import an
-      //     in-flight card at cutover, so it keeps that row — imported at
-      //     attempt 0 — from deadlocking behind a counter only claimRun grows.
-      if (task.linearState === 'In Progress' && task.explicitDispatch !== true) {
-        const locallyClaimed = getTaskState(id)?.execution?.status === 'in_progress';
-        if (this.durableRuns.isPrimary) {
-          if (!durableRun || (durableRun.attemptNo === 0 && !locallyClaimed)) return false;
-        } else if (!locallyClaimed) {
-          return false;
-        }
-      }
-
-      if (legacyIsAuthority) {
-        // Check if task is in exponential backoff period — unless the only thing
-        // it was waiting for has arrived. The backoff is also the resume path for
-        // an `ask_human` park, so left alone it makes the operator's reply land
-        // up to two hours after they sent it.
-        if (!canRetryNow(id, this.failedTaskRetryTimes)) {
-          const infraStreak = this.consecutiveInfraErrorCounts.get(id) ?? 0;
-          if (this.answerArrivedFor(id)) {
-            clearRetryTime(id, this.failedTaskRetryTimes);
-            this.consecutiveInfraErrorCounts.delete(id);
-            answered++;
-          } else if (idleFillBudget > 0 && infraStreak < AutonomousRunner.MAX_CONSECUTIVE_INFRA_IDLE_FILL) {
-            // AGT-4257: free slots chew the backoff instead of sitting idle — but
-            // not when the same issue has died to infra_error (timeout/CLI
-            // failure, not a task failure) several times running with an idle
-            // fill each time. Retrying instantly with an unchanged payload just
-            // re-hits the same wall (AX-1272, 2026-09-10: same reviewer 360s
-            // timeout, 9 of ~13 attempts over 4h+, ~90s apart every time because
-            // this was the only candidate to fill idle slots with). Past the
-            // threshold, honor the real 1h backoff so a transient provider issue
-            // gets time to actually clear instead of being hammered. (AGT-4305)
-            idleFillBudget--;
-            clearRetryTime(id, this.failedTaskRetryTimes);
-            recovered++;
-          } else {
-            backoffSkipped++;
-            return false; // Skip tasks still in backoff period
-          }
-        }
-        // Admitted, so the park is spent — retire it here and it expires with the
-        // attempt that caused it, the way the ledger's error code does. Left set,
-        // an answer from a park the task has long since left would pull it
-        // forward past every later backoff.
-        if (getTaskState(id)?.execution?.blockedReason === OPERATOR_PARK_REASON) {
-          setOperatorPark(id, false);
-        }
-      }
-
-      return true;
-    });
-    // Strip the stuck label from issues the user pulled back (fire-and-forget — a
-    // failed unstick just means the next heartbeat tries again).
-    for (const id of toUnstick) {
-      getTaskSource()?.unstick(id).catch(err =>
-        console.warn(`[AutonomousRunner] Failed to clear stuck label for ${id}:`, err));
-    }
-    if (stuckSkipped > 0) {
-      // Name Todo because it is the one action that works in every mode. Under
-      // the durable ledger (isPrimary) retry exhaustion also parks the run in
-      // NEEDS_HUMAN and this filter returns on that state above, before the
-      // label check below — so there, removing the label does nothing and
-      // 'In Progress' cannot help either, being a state the pipeline writes
-      // itself when it claims a task (AGT-4155). The legacy non-primary path
-      // skips that gate and still recovers a labelled issue from any of
-      // classifyStuck's RECOVERABLE_STATES. Todo recovers on both. The recovery
-      // branch strips the label itself, so the operator only moves the card.
-      this.syslog(`🛑 Skipped ${stuckSkipped} stuck issue(s) (retries exhausted — move to Todo to retry)`);
-    }
-    if (recovered > 0) {
-      this.saveTaskState();
-      this.syslog(`♻ Recovered ${recovered} Todo issues from completed/failed/rejected list`);
-    }
-    if (backoffSkipped > 0) {
-      this.syslog(`⏰ Skipped ${backoffSkipped} tasks in exponential backoff period`);
-    }
-    if (answered > 0) {
-      this.syslog(`🙋 Re-admitted ${answered} task(s) early — the operator answered`);
-    }
-    if (noProject > 0) {
-      this.syslog(`— Skipped ${noProject} issue(s) with no Linear project (assign a project in Linear to enable)`);
-    }
-    if (unresolvable > 0) {
-      this.syslog(`— Skipped ${unresolvable} issue(s) whose Linear project maps to no local repo (fix the project or add the repo)`);
-    }
-    return filtered;
   }
 
   /**
@@ -3022,242 +2562,41 @@ export class AutonomousRunner {
     if (!this.stopping) await this.runAvailableTasks();
   }
 
-  private async resolveRunnableCandidates(decisionTasks: Array<{ task: TaskItem }>): Promise<RunnableCandidate[]> {
-    const candidates: { task: TaskItem; projectPath: string }[] = [];
-    for (const { task } of decisionTasks) {
-      if (this.stopping) return candidates;
-      if (this.scheduler.isTaskQueued(task.id) || this.scheduler.isTaskRunning(task.id)) {
-        this.syslog(`  Skip (already queued/running): ${task.issueIdentifier || task.id.slice(0, 8)} ${task.title}`);
-        continue;
-      }
-
-      const projectPath = await this.resolveProjectPath(task);
-      if (!projectPath) {
-        this.syslog(`✗ Cannot resolve project path for "${task.linearProject?.name || task.title}" — skipping`);
-        // Record so it isn't re-picked every heartbeat (starvation). (INT-1875)
-        this.unresolvableIssueIds.add(task.issueId || task.id);
-        continue;
-      }
-
-      if (task.linearProject?.name) {
-        this.projectPathCache.set(task.linearProject.name, projectPath);
-      }
-
-      if (this.scheduler.isProjectBusy(projectPath)) {
-        this.syslog(`  Project busy: ${projectPath}`);
-        continue;
-      }
-
-      if (this.shouldFilterByEnabled() && !this.isProjectEnabled(projectPath)) {
-        this.syslog(`  Project not enabled: ${projectPath}`);
-        continue;
-      }
-
-      candidates.push({ task, projectPath });
-    }
-
-    return candidates;
+  // Candidate admission (resolveRunnableCandidates, holdDeclinedBeforeClaim,
+  // detectSafeCandidateIds) lives in runnerCandidateAdmission.ts (AGT-4867). These
+  // delegators keep the runner's names, which tests call and reassign; the moved
+  // code calls back through the host, so a reassignment is honoured.
+  private resolveRunnableCandidates(decisionTasks: Array<{ task: TaskItem }>): Promise<RunnableCandidate[]> {
+    return candidateAdmission.resolveRunnableCandidates(this.candidateAdmissionHost(), decisionTasks);
+  }
+  private holdDeclinedBeforeClaim(group: RunnableCandidate[], draftFailed: ReadonlySet<string>): Promise<RunnableCandidate[]> {
+    return candidateAdmission.holdDeclinedBeforeClaim(this.candidateAdmissionHost(), group, draftFailed);
+  }
+  private detectSafeCandidateIds(candidates: RunnableCandidate[]): Promise<Set<string>> {
+    return candidateAdmission.detectSafeCandidateIds(this.candidateAdmissionHost(), candidates);
   }
 
-  /**
-   * Hold, before any claim, every candidate whose draft declined it (`human_action_only`,
-   * `decision_pending`, ...) or could not be made, for every project (AGT-4784): see preClaimHold.ts.
-   */
-  private async holdDeclinedBeforeClaim(group: RunnableCandidate[], draftFailed: ReadonlySet<string>): Promise<RunnableCandidate[]> {
-    const source = getTaskSource();
-    return holdBeforeClaim(group, draftFailed, {
-      log: (line) => this.syslog(line), label: taskLabel,
-      comment: source?.kind === 'linear' ? (issueId, body, marker) => source.addComment(issueId, body, marker) : undefined,
-    });
-  }
-
-  private async detectSafeCandidateIds(candidates: RunnableCandidate[]): Promise<Set<string>> {
-    // Group candidates by canonical repository identity for conflict detection.
-    // A symlink/relative-path alias must not split one repository into two groups
-    // and bypass same-repository conflict serialization.
-    const byProject = new Map<string, { task: TaskItem; projectPath: string }[]>();
-    for (const c of candidates) {
-      const canonicalPath = normalizeProjectPath(c.projectPath);
-      const group = byProject.get(canonicalPath) || [];
-      group.push(c);
-      byProject.set(canonicalPath, group);
-    }
-
-    // Detect file conflicts per project using Knowledge Graph
-    const safeTasks = new Set<string>(); // task IDs safe to enqueue
-    for (const [projPath, group] of byProject) {
-      // What survives the pre-claim hold. The fail-closed fallback below must pick from this, not
-      // from `group`, or an analysis failure would admit the very issue the hold just refused.
-      let claimable: RunnableCandidate[] = group;
-      const draftFailed = new Set<string>(); // drafts that threw or got no answer this heartbeat (AGT-4784)
-      const source = getTaskSource(); const comments = source?.getExecutionComments?.bind(source);
-      try {
-        await Promise.all(group.map(async c => {
-          const cacheKey = `${projPath}\0${c.task.id}`;
-          // Title, description, goal and prompt version only: trackerUpdatedAt bumps on the daemon's own
-          // writes and drove one unchanged issue to 40 re-drafts (AGT-4300). A declined draft is the one
-          // exception — it also carries the issue activity (cachedDraftReusable) so an answer given as a
-          // comment releases the held issue (AGT-4784).
-          const fingerprint = draftFingerprint(c.task.title, c.task.description, resolveProjectGoal(this.config.projectAgents, projPath), DRAFT_SCOPE_KEY_VERSION);
-          let read: Promise<IssueActivity | undefined> | undefined; const activity = () => (read ??= currentDraftActivity(c.task, comments));
-          const wanted = (c.task.fileScope?.length ?? 0) === 0;
-          const apply = (entry: {
-            fileScope: string[]; draft: NonNullable<TaskItem['preAdmissionDraft']>;
-            description?: string; executionCommentsLoaded?: boolean;
-          }): void => {
-            // A cached decline names no files: the scope stays unknown instead of becoming an
-            // empty "drafted" one. (AGT-4784)
-            if (entry.fileScope.length > 0) {
-              c.task.fileScope = [...entry.fileScope];
-              c.task.fileScopeSource = 'drafted';
-            }
-            c.task.preAdmissionDraft = { ...entry.draft, relevantFiles: [...entry.fileScope] };
-            c.task.description = entry.description;
-            c.task.executionCommentsLoaded = entry.executionCommentsLoaded;
-          };
-
-          const cached = this.preAdmissionScopeCache.get(cacheKey);
-          const persist = (stamp: string) => { const durable = readDraftCache<NonNullable<TaskItem['preAdmissionDraft']>>(c.task.id, fingerprint); if (durable) writeDraftCache(c.task.id, { ...durable, activity: stamp }); };
-          if (wanted && cached?.fingerprint === fingerprint && await cachedDraftReusable(cached, activity, persist)) {
-            apply(cached);
-            return;
-          }
-          // The in-memory map is a hot path in front of the durable row, not
-          // the record itself. It holds 256 entries against ~275 active runs
-          // and does not survive a restart, while RETRY_AT backoff is counted
-          // in hours — so on its own it missed on nearly every retry and the
-          // draft was recomputed at ~$0.0043 a call. (AGT-4286)
-          if (wanted) {
-            const durable = readDraftCache<NonNullable<TaskItem['preAdmissionDraft']>>(
-              c.task.id, fingerprint,
-            );
-            if (durable && await cachedDraftReusable(durable, activity, persist)) {
-              apply(durable);
-              this.preAdmissionScopeCache.set(cacheKey, {
-                fingerprint, fileScope: [...durable.fileScope], draft: durable.draft,
-                description: durable.description, activity: durable.activity,
-                executionCommentsLoaded: durable.executionCommentsLoaded,
-              });
-              return;
-            }
-          }
-          await resolveTaskFileScope(c.task, projPath, {
-            draftTask: () => recordDraftOutcome(draftFailed, c.task.id, () => execution.runPreAdmissionDraft(this.getExecCtx(), c.task, projPath)),
-            generatedOutputRules: this.config.projectAgents?.find(
-              pa => projPath.includes(pa.projectPath.replace('~', '')),
-            )?.generatedOutputRules,
-          });
-          // A confident decline is cached like a drafted scope: it is as expensive to recompute, and
-          // the pre-claim hold reads it on every heartbeat, so a held issue must cost no model call
-          // after the first. It is never a 'drafted' scope — it names no files. (AGT-4784)
-          const declinedDraft = !!c.task.preAdmissionDraft && isScopeDeclined(c.task.preAdmissionDraft.scope);
-          if ((c.task.fileScopeSource === 'drafted' || declinedDraft) && c.task.preAdmissionDraft) {
-            const entry = {
-              fingerprint, fileScope: [...(c.task.fileScope ?? [])], draft: c.task.preAdmissionDraft,
-              description: c.task.description,
-              executionCommentsLoaded: c.task.executionCommentsLoaded,
-              activity: declinedDraft ? await activity().then((a) => (a ? draftActivityStamp(a) : undefined)) : undefined,
-            };
-            this.preAdmissionScopeCache.delete(cacheKey);
-            this.preAdmissionScopeCache.set(cacheKey, entry);
-            if (this.preAdmissionScopeCache.size > 256) {
-              this.preAdmissionScopeCache.delete(this.preAdmissionScopeCache.keys().next().value!);
-            }
-            writeDraftCache(c.task.id, entry);
-          }
-        }));
-
-        // The drafts above are the first look at what an issue asks for, and they are
-        // available before anything is claimed. A confident "a person has to do or decide
-        // this" verdict stops the claim here instead of after a worker has started. (AGT-4784)
-        claimable = await this.holdDeclinedBeforeClaim(group, draftFailed);
-
-        // A later heartbeat must compare new candidates with workers that are
-        // already editing another worktree. Candidate-vs-candidate detection
-        // alone leaves a race window across heartbeat cycles.
-        const active = this.scheduler.getRunningTasks()
-          .filter(running => normalizeProjectPath(running.projectPath) === projPath);
-        // Read the SAME policy the durable admission gate reads
-        // (admitsConflictScope, runLedgerScope.ts). While this gate ignored it,
-        // `unknownScopeAdmission: admit` was live on vela yet one running task
-        // still deferred every other candidate — 11 of 12 slots idle with 126
-        // executable tasks waiting (AGT-4233).
-        const admission = this.config.unknownScopeAdmission ?? 'admit';
-        const runnable = claimable.filter(candidate => {
-          let blockedBy: { label: string; reason: ScopeConflictReason } | undefined;
-          for (const running of active) {
-            const reason = describeScopeConflict(
-              candidate.task.fileScope,
-              running.task.fileScope,
-              admission,
-            );
-            if (reason) {
-              blockedBy = { label: taskLabel(running.task), reason };
-              break;
-            }
-          }
-          if (blockedBy) {
-            this.syslog(
-              `Conflict with active worktree (${describeConflictCause(blockedBy.reason, blockedBy.label)})`
-              + ` — deferring: ${taskLabel(candidate.task)} ${candidate.task.title}`,
-            );
-          }
-          return !blockedBy;
-        });
-        if (runnable.length === 0) continue;
-
-        const debtKey = (task: TaskItem) => `${projPath}\0${task.id}`;
-        for (const candidate of runnable) {
-          if ((candidate.task.fileScope?.length ?? 0) > 0) this.unknownScopeDebt.delete(debtKey(candidate.task));
-        }
-        const debtTask = active.length === 0
-          ? runnable.find(candidate =>
-            (candidate.task.fileScope?.length ?? 0) === 0
-            && this.unknownScopeDebt.has(debtKey(candidate.task)))
-          : undefined;
-        const runnableTasks = runnable.map(c => c.task);
-        const result = debtTask
-          ? await detectFileConflicts(runnableTasks, projPath, {
-            preferUnknownExclusive: true,
-            preferredUnknownTaskId: debtTask.task.id,
-            unknownScopeAdmission: admission,
-          })
-          : await detectFileConflicts(runnableTasks, projPath, {
-            unknownScopeAdmission: admission,
-          });
-
-        for (const t of result.safe) {
-          safeTasks.add(t.id);
-          if ((t.fileScope?.length ?? 0) === 0) this.unknownScopeDebt.delete(debtKey(t));
-        }
-        for (const candidate of runnable) {
-          if ((candidate.task.fileScope?.length ?? 0) === 0 && !safeTasks.has(candidate.task.id)) {
-            this.unknownScopeDebt.add(debtKey(candidate.task));
-          }
-        }
-
-        for (const cg of result.conflictGroups) {
-          const ids = cg.tasks.map(t => t.issueIdentifier || t.id.slice(0, 8)).join(', ');
-          this.syslog(`Conflict group: [${ids}] shared: ${cg.sharedModules.join(', ')}`);
-          // Log of the conflict group's deferred tasks
-          for (const t of cg.tasks) {
-            if (!safeTasks.has(t.id)) {
-              this.syslog(`Conflict detected — deferring: ${t.issueIdentifier || t.id.slice(0, 8)} ${t.title}`);
-            }
-          }
-        }
-      } catch (err) {
-        // A failed analysis means concurrent-edit safety was not proven. Let only one
-        // task per repository through to serialize them, and defer the rest to the next heartbeat.
-        console.warn(`[AutonomousRunner] Conflict detection failed for ${projPath}:`, err);
-        for (const id of failClosedConflictFallback(claimable)) safeTasks.add(id);
-        for (const deferred of claimable.slice(1)) {
-          this.syslog(`Conflict analysis unavailable — serializing: ${deferred.task.issueIdentifier || deferred.task.id.slice(0, 8)} ${deferred.task.title}`);
-        }
-      }
-    }
-
-    return safeTasks;
+  private candidateAdmissionHostCache: CandidateAdmissionHost | undefined;
+  /** Built once; every member reads the runner at call time (see CandidateAdmissionHost). */
+  private candidateAdmissionHost(): CandidateAdmissionHost {
+    if (this.candidateAdmissionHostCache) return this.candidateAdmissionHostCache;
+    const runner = () => this;
+    this.candidateAdmissionHostCache = {
+      get stopping() { return runner().stopping; },
+      get config() { return runner().config; },
+      get scheduler() { return runner().scheduler; },
+      get unresolvableIssueIds() { return runner().unresolvableIssueIds; },
+      get projectPathCache() { return runner().projectPathCache; },
+      get preAdmissionScopeCache() { return runner().preAdmissionScopeCache; },
+      get unknownScopeDebt() { return runner().unknownScopeDebt; },
+      syslog: (line) => this.syslog(line),
+      resolveProjectPath: (task) => this.resolveProjectPath(task),
+      shouldFilterByEnabled: () => this.shouldFilterByEnabled(),
+      isProjectEnabled: (resolvedPath) => this.isProjectEnabled(resolvedPath),
+      holdDeclinedBeforeClaim: (group, draftFailed) => this.holdDeclinedBeforeClaim(group, draftFailed),
+      getExecCtx: () => this.getExecCtx(),
+    };
+    return this.candidateAdmissionHostCache;
   }
 
   /**
